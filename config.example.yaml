@@ -1,0 +1,49 @@
+# DeepAgent template configuration.
+# Copy to config.yaml and edit for your environment:
+#   cp config.example.yaml config.yaml
+#
+# Override path with DEEP_AGENT_CONFIG=/path/to/config.yaml
+
+llm:
+  # Active profile id from models below. Flat llm.model/api_key/base_url still works.
+  default: qwen-plus
+  models:
+    qwen-plus:
+      model: qwen3.5-plus
+      input:
+        - text
+        - image
+      api_key: sk-local
+      base_url: http://localhost:8000/v1
+    qwen3.6-flash:
+      model: qwen3.6-flash
+      input:
+        - text
+        - image
+      api_key: sk-local
+      base_url: http://localhost:8000/v1
+
+sandbox:
+  # Host directory mapped to /workspace. "." = the directory you start the TUI from (cwd).
+  workspace: .
+  bwrap_path: bwrap
+  # Allow dangerous host execution when bubblewrap is unavailable.
+  allow_unsandboxed: false
+  timeout_seconds: 120
+  max_output_bytes: 100000
+  # Host env var names explicitly exposed to Agent commands.
+  env_allowlist: []
+  # Fixed env vars injected into the sandbox (not read from the host).
+  env_set: {}
+  # Relative workspace paths mounted read-only for both file tools and execute.
+  protected_workspace_paths:
+    - skills
+  # Extra mounts: [{source: /host/path, destination: /sandbox/path}, ...]
+  extra_read_only_mounts: []
+  extra_read_write_mounts: []
+
+paths:
+  # SQLite session DB. null → ~/.deep-agent/sessions/<workspace-hash>.sqlite3
+  state_path: null
+  # Keybindings directory. null → ~/.deep-agent
+  config_dir: null

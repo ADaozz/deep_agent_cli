@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Start the Deep Agent TUI. Current working directory becomes /workspace.
+#
+# Usage (from any project):
+#   /path/to/templates/deep-agent/bin/deep-agent
+#   # or after: export PATH="$PATH:/path/to/templates/deep-agent/bin"
+#   deep-agent
+#
+# Optional:
+#   DEEP_AGENT_CONFIG=/path/to/config.yaml deep-agent
+
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+PYTHON="${ROOT}/.venv/bin/python"
+CLI="${ROOT}/examples/run_cli.py"
+DEFAULT_CONFIG="${ROOT}/config.yaml"
+
+if [[ ! -x "${PYTHON}" ]]; then
+  echo "Missing venv at ${ROOT}/.venv — run:" >&2
+  echo "  cd ${ROOT} && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  exit 1
+fi
+
+if [[ ! -f "${CLI}" ]]; then
+  echo "Missing ${CLI}" >&2
+  exit 1
+fi
+
+if [[ -z "${DEEP_AGENT_CONFIG:-}" ]]; then
+  if [[ -f "${DEFAULT_CONFIG}" ]]; then
+    export DEEP_AGENT_CONFIG="${DEFAULT_CONFIG}"
+  elif [[ -f "${ROOT}/config.example.yaml" ]]; then
+    export DEEP_AGENT_CONFIG="${ROOT}/config.example.yaml"
+  fi
+fi
+
+# Do not route the local LLM / TUI through shell SOCKS/HTTP proxies.
+unset ALL_PROXY all_proxy HTTP_PROXY HTTPS_PROXY http_proxy https_proxy \
+  SOCKS_PROXY socks_proxy SOCKS5_PROXY socks5_proxy 2>/dev/null || true
+
+# Keep caller's cwd as sandbox workspace (config workspace: .).
+exec "${PYTHON}" "${CLI}" "$@"
