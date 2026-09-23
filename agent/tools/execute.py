@@ -40,8 +40,8 @@ def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
         name="execute",
         description=(
             "Run a shell command inside the sandbox workspace (/workspace). "
-            "Defaults to no network. Set network=true only when the command must "
-            "reach the internet; under permission ask that requires human approval. "
+            "Defaults to no network. Under permission ask every execute needs "
+            "approval. Set network=true only when the command must reach the internet. "
             "Prefer ls/read_file/glob/grep/write_file for filesystem work."
         ),
     )

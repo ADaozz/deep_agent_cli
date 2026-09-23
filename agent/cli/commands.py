@@ -32,7 +32,7 @@ def command_table() -> tuple[Command, ...]:
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),
         Command(
             "permission",
-            "Tool approval: ask (require approval) or allow (auto-approve, HIGH RISK)",
+            "Tool approval: ask (every execute) or allow (SANDBOXED auto-approve, HIGH RISK)",
             _permission,
         ),
         Command("compact", "Compact context", unavailable_reason="the current runner has no compaction API"),

@@ -89,3 +89,16 @@ def test_gateway_extra_body_envelope_and_plain_chatopenai_stay_scoped() -> None:
         "extra_body": {"enable_thinking": True}
     }
     assert QwenChatOpenAI._generate is ChatOpenAI._generate
+
+
+def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_differ() -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+
+    qwen = build_chat_model(ModelProfile("qwen", "qwen3.5-plus"))
+    compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", provider="openai-compatible"))
+    assert isinstance(qwen, ChatOpenAI)
+    assert type(compatible) is ChatOpenAI
+    assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
+    assert "messages" in compatible._get_request_payload([HumanMessage(content="hello")])
+    assert compatible.use_responses_api is False

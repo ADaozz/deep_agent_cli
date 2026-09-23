@@ -53,8 +53,44 @@ def normalize_qwen_responses_event(event: Any) -> Any:
     return event if event_type is None else ResponsesEventProxy(event, event_type)
 
 
+def materialize_attachment_refs(input_: Any, store: AttachmentStore | None) -> Any:
+    """Return request-local messages with image bytes; leave checkpoint messages unchanged."""
+    if not isinstance(input_, (list, tuple)):
+        return input_
+    messages: list[Any] = []
+    changed = False
+    for message in input_:
+        refs = refs_from_message(message) if isinstance(message, HumanMessage) else ()
+        if not refs:
+            messages.append(message)
+            continue
+        if store is None:
+            raise RuntimeError("Image attachment storage is not configured for this model")
+        blocks: list[dict[str, Any]] = []
+        content = message.content
+        if isinstance(content, str):
+            if content:
+                blocks.append(create_text_block(content))
+        elif isinstance(content, list):
+            blocks.extend(content)
+        for ref in refs:
+            attachment = store.read(ref)
+            blocks.append(create_image_block(
+                base64=base64.b64encode(attachment.data).decode("ascii"),
+                mime_type=attachment.mime_type,
+            ))
+        additional = dict(message.additional_kwargs)
+        additional.pop(ATTACHMENT_META_KEY, None)
+        messages.append(message.model_copy(update={
+            "content": blocks,
+            "additional_kwargs": additional,
+        }))
+        changed = True
+    return messages if changed else input_
+
+
 class QwenChatOpenAI(ChatOpenAI):
-    """Responses-only Qwen adapter, compatible with langchain-openai 1.6.x."""
+    """Qwen Responses adapter with ChatOpenAI-compatible fallback routing."""
 
     _attachment_store: AttachmentStore | None = PrivateAttr(default=None)
     materializes_attachment_refs: ClassVar[bool] = True
@@ -112,38 +148,7 @@ class QwenChatOpenAI(ChatOpenAI):
         return payload
 
     def _materialize_attachments(self, input_: Any) -> Any:
-        if not isinstance(input_, (list, tuple)):
-            return input_
-        messages: list[Any] = []
-        changed = False
-        for message in input_:
-            refs = refs_from_message(message) if isinstance(message, HumanMessage) else ()
-            if not refs:
-                messages.append(message)
-                continue
-            if self._attachment_store is None:
-                raise RuntimeError("Image attachment storage is not configured for this model")
-            blocks: list[dict[str, Any]] = []
-            content = message.content
-            if isinstance(content, str):
-                if content:
-                    blocks.append(create_text_block(content))
-            elif isinstance(content, list):
-                blocks.extend(content)
-            for ref in refs:
-                attachment = self._attachment_store.read(ref)
-                blocks.append(create_image_block(
-                    base64=base64.b64encode(attachment.data).decode("ascii"),
-                    mime_type=attachment.mime_type,
-                ))
-            additional = dict(message.additional_kwargs)
-            additional.pop(ATTACHMENT_META_KEY, None)
-            messages.append(message.model_copy(update={
-                "content": blocks,
-                "additional_kwargs": additional,
-            }))
-            changed = True
-        return messages if changed else input_
+        return materialize_attachment_refs(input_, self._attachment_store)
 
     async def _astream_responses(
         self,
@@ -242,12 +247,27 @@ def build_chat_model(
     *,
     streaming: bool = True,
     attachment_store: AttachmentStore | None = None,
-) -> QwenChatOpenAI:
+) -> ChatOpenAI:
     """Build the template chat client from a ModelProfile."""
-    return chat_openai(
-        model=profile.model,
-        api_key=profile.api_key,
-        base_url=profile.base_url,
-        streaming=streaming,
-        attachment_store=attachment_store,
-    )
+    if profile.provider == "qwen-responses":
+        return chat_openai(
+            model=profile.model,
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+            streaming=streaming,
+            attachment_store=attachment_store,
+        )
+    if profile.provider == "openai-compatible":
+        import httpx
+
+        return ChatOpenAI(
+            model=profile.model,
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+            streaming=streaming,
+            use_responses_api=False,
+            http_socket_options=(),
+            http_client=httpx.Client(trust_env=False),
+            http_async_client=httpx.AsyncClient(trust_env=False),
+        )
+    raise ValueError(f"Unsupported model provider: {profile.provider}")

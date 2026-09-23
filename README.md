@@ -21,8 +21,8 @@
 ## Features
 
 - **工作区工具** — `ls` / `read` / `write` / `edit` / `glob` / `grep` / `delete`，路径与 `execute` 都落在 `/workspace`
-- **沙箱执行** — 默认无网络；只有调用声明 `network=true` 且策略批准后，这一次才联网
-- **权限模式** — `ask` 审批副作用与联网；`allow` 自动放行（高风险，需输入 `ALLOW`）
+- **沙箱执行** — 默认无网络；`execute(network=true)` 经审批后，这一次才联网
+- **权限模式** — `ask` 审批全部 `execute` 与副作用工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
 - **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
 - **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
@@ -112,7 +112,7 @@ python examples/run_cli.py
 /resume a1b2   按 id 前缀恢复
 /model         打开模型选择器
 /model qwen3   按 id 前缀切换
-/permission ask|allow
+/permission ask|allow   # allow 仅 SANDBOXED；UNSANDBOXED / CUSTOM 只有 ask
 /image clipboard | <path> | clear
 /pause         在下一个模型安全点暂停
 /compact       占位：自动压缩已启用，没有手动立即压缩入口
@@ -124,6 +124,7 @@ python examples/run_cli.py
 | 操作 | 按键 |
 |------|------|
 | 提交；运行中注入 steering | `Enter` |
+| 命令候选 | 输入 `/` 后用方向键选择，`Tab` / `Enter` 填入，再按 `Enter` 执行 |
 | 换行 | `Ctrl+J` |
 | 排到本轮结束后再问 | `Alt+Enter` |
 | 取消并还原未应用内容 | `Esc` |
@@ -179,7 +180,7 @@ create_deep_agent()  LangGraph 图（不 Fork 上游）
 |----|------|
 | `agent/cli/` | 终端交互。换 UI 不改 Runtime |
 | `agent/runner.py` | 一次 run 的生命周期：invoke / resume / steer / cancel |
-| `agent/factory.py` | 装配模型、工具、中间件、沙箱 backend |
+| `agent/factory.py` | `AgentSpec` 静态装配和 `create_deep_agent()` 构图 |
 | `agent/sandbox.py` | Bubblewrap 策略与降级 |
 
 更细的中间件顺序、挂载策略和 Qwen 事件适配在源码注释里，不在 README 展开。
@@ -211,6 +212,7 @@ config.example.yaml
 |--------|------|------|
 | `llm.default` | 首个 profile | 启动时的模型 |
 | `llm.models.<id>.model` | — | OpenAI 兼容模型名 |
+| `llm.models.<id>.provider` | `qwen-responses` | `qwen-responses` 或 `openai-compatible` |
 | `llm.models.<id>.base_url` | `http://localhost:8000/v1` | 推理端点 |
 | `llm.models.<id>.input` | `[text]` | 图片模型写成 `[text, image]` |
 | `sandbox.workspace` | `.` | 映射到 `/workspace`；`.` = 启动时的 cwd |
@@ -222,7 +224,11 @@ config.example.yaml
 
 按键覆盖：`~/.deep-agent/keybindings.json`。
 
-沙箱默认只挂当前工作区，`skills/` 只读，宿主家目录不可见。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 下宿主网络始终可达，但仍走 `/permission`。
+`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 使用普通 `ChatOpenAI`，固定走 Chat Completions。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
+
+每次构图都会按默认身份、长期 instructions、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮停止原因。`/resume` 用这些元数据恢复设置，再从 checkpoint 恢复上下文。取消或失败后恢复不会自动重跑工具。
+
+沙箱默认只挂当前工作区，`skills/` 只读，宿主家目录不可见。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 
 ## Development
 
@@ -243,7 +249,7 @@ python examples/stream_smoke.py
 - [x] 按工作区持久化 session
 - [x] 工作区文件工具
 - [x] Bubblewrap 沙箱（默认无网）
-- [x] 权限 ask / allow
+- [x] 权限 ask / 仅沙箱 allow
 - [x] 流式思考与回答
 - [x] 多模型切换
 - [x] 图片附件

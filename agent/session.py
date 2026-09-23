@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 import hashlib
 import os
 from pathlib import Path
@@ -26,13 +27,26 @@ SessionStatus = Literal[
     "running", "completed", "waiting", "cancelled", "failed", "interrupted",
 ]
 
+
+class StopReason(StrEnum):
+    PENDING = "pending"
+    STOP = "stop"
+    LENGTH = "length"
+    TOOL_USE = "tool_use"
+    ERROR = "error"
+    ABORTED = "aborted"
+    DEFERRED = "deferred"
+
 _CATALOG_DDL = """
 CREATE TABLE IF NOT EXISTS session_catalog (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    model_id TEXT,
+    permission_mode TEXT,
+    last_run_status TEXT
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
     ON session_catalog (updated_at DESC);
@@ -46,6 +60,9 @@ class SessionInfo:
     created_at: datetime
     updated_at: datetime
     status: SessionStatus
+    model_id: str | None = None
+    permission_mode: str | None = None
+    last_run_status: StopReason = StopReason.PENDING
 
 
 @dataclass
@@ -97,6 +114,10 @@ class SessionStore:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.executescript(_CATALOG_DDL)
+        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
+        for name in ("model_id", "permission_mode", "last_run_status"):
+            if name not in existing_columns:
+                self._conn.execute(f"ALTER TABLE session_catalog ADD COLUMN {name} TEXT")
         self._conn.commit()
         if self.path.exists():
             try:
@@ -146,7 +167,10 @@ class SessionStore:
             release_runtime_lease=release_runtime_lease,
         )
 
-    def create_session(self, *, title: str = "", session_id: str | None = None) -> SessionInfo:
+    def create_session(
+        self, *, title: str = "", session_id: str | None = None,
+        model_id: str | None = None, permission_mode: str = "ask",
+    ) -> SessionInfo:
         now = _utc_now()
         info = SessionInfo(
             id=session_id or str(uuid4()),
@@ -154,12 +178,16 @@ class SessionStore:
             created_at=now,
             updated_at=now,
             status="running",
+            model_id=model_id,
+            permission_mode=permission_mode,
         )
-        self._conn.execute(
-            "INSERT INTO session_catalog (id, title, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?)",
-            (info.id, info.title, info.created_at.isoformat(), info.updated_at.isoformat(), info.status),
-        )
-        self._conn.commit()
+        with self.checkpointer.lock:
+            self._conn.execute(
+                "INSERT INTO session_catalog (id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (info.id, info.title, info.created_at.isoformat(), info.updated_at.isoformat(), info.status,
+                 info.model_id, info.permission_mode, info.last_run_status.value),
+            )
+            self._conn.commit()
         return info
 
     def touch(
@@ -168,52 +196,45 @@ class SessionStore:
         *,
         status: SessionStatus | None = None,
         title: str | None = None,
+        model_id: str | None = None,
+        permission_mode: str | None = None,
+        last_run_status: StopReason | None = None,
     ) -> None:
         now = _utc_now().isoformat()
-        row = self._conn.execute(
-            "SELECT title, status FROM session_catalog WHERE id = ?", (session_id,),
-        ).fetchone()
-        if row is None:
-            return
-        new_title = title if title is not None else row[0]
-        new_status = status if status is not None else row[1]
-        self._conn.execute(
-            "UPDATE session_catalog SET title = ?, updated_at = ?, status = ? WHERE id = ?",
-            (new_title, now, new_status, session_id),
-        )
-        self._conn.commit()
+        with self.checkpointer.lock:
+            row = self._conn.execute(
+                "SELECT title, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?", (session_id,),
+            ).fetchone()
+            if row is None:
+                return
+            new_title = title if title is not None else row[0]
+            new_status = status if status is not None else row[1]
+            self._conn.execute(
+                "UPDATE session_catalog SET title = ?, updated_at = ?, status = ?, model_id = ?, permission_mode = ?, last_run_status = ? WHERE id = ?",
+                (new_title, now, new_status, model_id if model_id is not None else row[2],
+                 permission_mode if permission_mode is not None else row[3],
+                 last_run_status.value if last_run_status is not None else row[4], session_id),
+            )
+            self._conn.commit()
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
-        rows = self._conn.execute(
-            "SELECT id, title, created_at, updated_at, status "
-            "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            SessionInfo(
-                id=row[0],
-                title=row[1],
-                created_at=_parse_dt(row[2]),
-                updated_at=_parse_dt(row[3]),
-                status=row[4],  # type: ignore[arg-type]
-            )
-            for row in rows
-        ]
+        with self.checkpointer.lock:
+            rows = self._conn.execute(
+                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status "
+                "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_session_info(row) for row in rows]
 
     def get(self, session_id: str) -> SessionInfo | None:
-        row = self._conn.execute(
-            "SELECT id, title, created_at, updated_at, status FROM session_catalog WHERE id = ?",
-            (session_id,),
-        ).fetchone()
+        with self.checkpointer.lock:
+            row = self._conn.execute(
+                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?",
+                (session_id,),
+            ).fetchone()
         if row is None:
             return None
-        return SessionInfo(
-            id=row[0],
-            title=row[1],
-            created_at=_parse_dt(row[2]),
-            updated_at=_parse_dt(row[3]),
-            status=row[4],  # type: ignore[arg-type]
-        )
+        return _session_info(row)
 
     def resolve_prefix(self, prefix: str) -> SessionInfo | None:
         prefix = prefix.strip()
@@ -222,20 +243,26 @@ class SessionStore:
         exact = self.get(prefix)
         if exact is not None:
             return exact
-        rows = self._conn.execute(
-            "SELECT id, title, created_at, updated_at, status FROM session_catalog WHERE id LIKE ?",
-            (f"{prefix}%",),
-        ).fetchall()
+        with self.checkpointer.lock:
+            rows = self._conn.execute(
+                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id LIKE ?",
+                (f"{prefix}%",),
+            ).fetchall()
         if len(rows) != 1:
             return None
-        row = rows[0]
-        return SessionInfo(
-            id=row[0],
-            title=row[1],
-            created_at=_parse_dt(row[2]),
-            updated_at=_parse_dt(row[3]),
-            status=row[4],  # type: ignore[arg-type]
-        )
+        return _session_info(rows[0])
+
+
+def _session_info(row: Any) -> SessionInfo:
+    raw_reason = row[7] or StopReason.PENDING.value
+    try:
+        reason = StopReason(raw_reason)
+    except ValueError:
+        reason = StopReason.PENDING
+    return SessionInfo(
+        id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
+        status=row[4], model_id=row[5], permission_mode=row[6], last_run_status=reason,
+    )
 
 
 def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]:

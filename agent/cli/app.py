@@ -50,6 +50,8 @@ from agent.cli.state import CliState
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
+    allow_mode_available,
+    allow_mode_unavailable_reason,
     parse_permission_mode,
     permission_mode_label,
 )
@@ -59,22 +61,45 @@ from agent.runner import AgentRunner, RunEvent, RunResult
 class SlashCompleter(Completer):
     def __init__(self, commands: tuple[Command, ...]) -> None:
         self.commands = commands
+        self.accepted_text: str | None = None
+
+    @staticmethod
+    def _rank(name: str, query: str) -> tuple[int, int, int] | None:
+        if name == query:
+            return (0, 0, len(name))
+        if name.startswith(query):
+            return (1, 0, len(name))
+        offset = 0
+        gaps = 0
+        for char in query:
+            found = name.find(char, offset)
+            if found < 0:
+                return None
+            gaps += found - offset
+            offset = found + 1
+        return (2, gaps, len(name))
 
     def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
         before = document.text_before_cursor
         if "\n" in before or not before.startswith("/") or " " in before:
             return
+        if before == self.accepted_text:
+            return
         prefix = before[1:].lower()
-        for command in self.commands:
-            if command.name.startswith(prefix):
-                description = command.description
-                if command.unavailable_reason:
-                    description += " (unavailable)"
-                yield Completion(
-                    f"/{command.name}",
-                    start_position=-len(before),
-                    display_meta=description,
-                )
+        candidates = []
+        for index, command in enumerate(self.commands):
+            rank = self._rank(command.name.lower(), prefix)
+            if rank is not None:
+                candidates.append((rank, index, command))
+        for _, _, command in sorted(candidates):
+            description = command.description
+            if command.unavailable_reason:
+                description += " (unavailable)"
+            yield Completion(
+                f"/{command.name}",
+                start_position=-len(before),
+                display_meta=description,
+            )
 
 
 class CliApplication:
@@ -105,10 +130,11 @@ class CliApplication:
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
 
+        self.slash_completer = SlashCompleter(self.commands)
         self.buffer = Buffer(
             multiline=True,
             history=InMemoryHistory(),
-            completer=SlashCompleter(self.commands),
+            completer=self.slash_completer,
             complete_while_typing=True,
         )
         self.transcript_control = SelectableFormattedTextControl(
@@ -197,6 +223,9 @@ class CliApplication:
                 "selection": "bg:#3b5c73 #ffffff",
                 "scrollbar.background": "#202020",
                 "scrollbar.button": "#666666",
+                "completion-menu": "bg:#15191d #d0d0d0",
+                "completion-menu.completion.current": "bg:#3b5c73 #ffffff",
+                "completion-menu.meta.completion.current": "bg:#3b5c73 #ffffff",
             }),
             input=input,
             output=output,
@@ -269,11 +298,13 @@ class CliApplication:
             return
         info = store.get(self.runner.thread_id)
         status = info.status if info else "unknown"
+        stop_reason = info.last_run_status.value if info else "unknown"
         title = info.title if info else ""
         self.state.add_system(
             f"Session: {self.runner.thread_id}\n"
             f"Title: {title}\n"
             f"Status: {status}\n"
+            f"Last run: {stop_reason}\n"
             f"{model_line}"
             f"Checkpointer: sqlite\n"
             f"Persistent store: {self.runner.state_path}"
@@ -309,7 +340,7 @@ class CliApplication:
                 options = [
                     {
                         "value": item.id,
-                        "label": f"{item.id[:8]} · {item.status} · {item.title[:40]}",
+                        "label": f"{item.id[:8]} · {item.last_run_status.value} · {item.title[:40]}",
                     }
                     for item in sessions
                 ]
@@ -403,8 +434,9 @@ class CliApplication:
         if raw:
             mode = parse_permission_mode(raw)
             if mode is None:
+                hint = "ask or allow" if self._allow_available() else "ask"
                 self.state.add_system(
-                    "Unknown permission mode. Use /permission ask or /permission allow",
+                    f"Unknown permission mode. Use /permission {hint}",
                     error=True,
                 )
                 return
@@ -414,15 +446,22 @@ class CliApplication:
         options = [
             {
                 "value": PermissionMode.ASK.value,
-                "label": "ask · require approval for side-effect tools"
+                "label": "ask · require approval for every execute and side-effect tool"
                 + (" · current" if current is PermissionMode.ASK else ""),
             },
-            {
-                "value": PermissionMode.ALLOW.value,
-                "label": "allow · auto-approve all tools (HIGH RISK)"
-                + (" · current" if current is PermissionMode.ALLOW else ""),
-            },
         ]
+        if self._allow_available():
+            options.append({
+                "value": PermissionMode.ALLOW.value,
+                "label": "allow · auto-approve all tools (SANDBOXED, HIGH RISK)"
+                + (" · current" if current is PermissionMode.ALLOW else ""),
+            })
+        if len(options) == 1:
+            self.state.add_system(
+                "Permission mode is locked to ask because ALLOW requires SANDBOXED execution.",
+            )
+            self.set_status("Permission: ask")
+            return
         self.interaction = InteractionController(
             kind="permission",
             title="Permission mode",
@@ -439,7 +478,16 @@ class CliApplication:
         self.set_status("Select permission mode · Enter confirm · Esc cancel")
         self.application.invalidate()
 
+    def _allow_available(self) -> bool:
+        return allow_mode_available(self.runner.prepared.execution_mode)
+
     async def _apply_permission_mode(self, mode: PermissionMode) -> None:
+        if mode is PermissionMode.ALLOW and not self._allow_available():
+            self.state.add_system(
+                allow_mode_unavailable_reason(self.runner.prepared.execution_mode),
+                error=True,
+            )
+            return
         if mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW:
             self._begin_allow_permission_confirm()
             return
@@ -525,7 +573,11 @@ class CliApplication:
         self.state.load_transcript(snapshot.transcript)
         self.transcript_control.clear_selection()
         self.interaction = None
-        self.state.add_system(f"Resumed session {snapshot.info.id} ({snapshot.info.status})")
+        self.state.add_system(
+            f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
+        )
+        for notice in snapshot.notices:
+            self.state.add_system(notice)
         if snapshot.interrupt_kind == "waiting_confirmation":
             self.interaction = InteractionController.approval(snapshot.pending_tool_calls)
             self.state.status = "Waiting for input"
@@ -651,7 +703,23 @@ class CliApplication:
 
         @bind("submit")
         def submit(event) -> None:  # type: ignore[no-untyped-def]
+            if self._accept_command_completion(event.current_buffer):
+                return
             self._submit_buffer("steer")
+
+        completion_active = Condition(lambda: self.interaction is None and self.buffer.complete_state is not None)
+
+        @kb.add("up", filter=completion_active)
+        def completion_up(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.complete_previous()
+
+        @kb.add("down", filter=completion_active)
+        def completion_down(event) -> None:  # type: ignore[no-untyped-def]
+            event.current_buffer.complete_next()
+
+        @kb.add("tab", filter=completion_active)
+        def completion_tab(event) -> None:  # type: ignore[no-untyped-def]
+            self._accept_command_completion(event.current_buffer)
 
         @bind("newline")
         def newline(event) -> None:  # type: ignore[no-untyped-def]
@@ -797,7 +865,18 @@ class CliApplication:
 
         return kb
 
+    def _accept_command_completion(self, buffer: Buffer) -> bool:
+        state = buffer.complete_state
+        if self.interaction is not None or state is None or not state.completions:
+            return False
+        completion = state.current_completion or state.completions[0]
+        buffer.apply_completion(completion)
+        self.slash_completer.accepted_text = buffer.document.text_before_cursor
+        self.application.invalidate()
+        return True
+
     def _submit_buffer(self, queue_mode: str) -> None:
+        self.slash_completer.accepted_text = None
         text = self.buffer.text.strip()
         if self.interaction is not None:
             was_text = self.interaction.accepts_text
@@ -1092,6 +1171,12 @@ class CliApplication:
             mode = parse_permission_mode(mode_raw)
             if mode is None:
                 self.state.add_system("No permission mode selected", error=True)
+                return
+            if mode is PermissionMode.ALLOW and not allow_mode_available(self.runner.prepared.execution_mode):
+                self.state.add_system(
+                    allow_mode_unavailable_reason(self.runner.prepared.execution_mode),
+                    error=True,
+                )
                 return
             if mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW:
                 self._begin_allow_permission_confirm()

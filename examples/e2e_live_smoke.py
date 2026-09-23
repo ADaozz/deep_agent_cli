@@ -25,7 +25,7 @@ from prompt_toolkit.output import DummyOutput  # noqa: E402
 
 from agent.cli.app import CliApplication  # noqa: E402
 from agent.config import Settings  # noqa: E402
-from agent.permission import PermissionMode  # noqa: E402
+from agent.permission import PermissionMode, allow_mode_available  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
@@ -133,19 +133,25 @@ async def run_slash_suite(app: CliApplication, runner: AgentRunner, report: Repo
     report.add("/permission ask", runner.permission_mode() is PermissionMode.ASK)
 
     await _cmd(app, "/permission allow")
-    if app.interaction and app.interaction.kind == "permission_confirm":
-        app.interaction.accept("nope")
-        app._finish_interaction()
-    report.add("/permission allow wrong token", runner.permission_mode() is PermissionMode.ASK)
+    if allow_mode_available(runner.prepared.execution_mode):
+        if app.interaction and app.interaction.kind == "permission_confirm":
+            app.interaction.accept("nope")
+            app._finish_interaction()
+        report.add("/permission allow wrong token", runner.permission_mode() is PermissionMode.ASK)
 
-    await _cmd(app, "/permission allow")
-    if app.interaction and app.interaction.kind == "permission_confirm":
-        app.interaction.accept("ALLOW")
-        app._finish_interaction()
-    report.add("/permission allow ALLOW", runner.permission_mode() is PermissionMode.ALLOW)
+        await _cmd(app, "/permission allow")
+        if app.interaction and app.interaction.kind == "permission_confirm":
+            app.interaction.accept("ALLOW")
+            app._finish_interaction()
+        report.add("/permission allow ALLOW", runner.permission_mode() is PermissionMode.ALLOW)
 
-    await _cmd(app, "/permission ask")
-    report.add("/permission back to ask", runner.permission_mode() is PermissionMode.ASK)
+        await _cmd(app, "/permission ask")
+        report.add("/permission back to ask", runner.permission_mode() is PermissionMode.ASK)
+    else:
+        report.add(
+            "/permission allow rejected",
+            runner.permission_mode() is PermissionMode.ASK and app.interaction is None,
+        )
 
     await _cmd(app, "/compact")
     compact_text = _system_blob(app)
@@ -252,20 +258,28 @@ def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report) -
             detail=f"status={resumed.status} out={resumed.output!r}"[:200],
         )
 
-    runner.set_permission_mode(PermissionMode.ALLOW)
-    allow_net = _invoke_with_retry(
-        runner, NETWORK_PROMPT, expect_status="completed", label="allow network execute", report=report, retries=1,
-    )
-    if allow_net:
-        report.add(
-            "allow network no interrupt",
-            allow_net.status == "completed",
-            detail=f"out={allow_net.output!r}"[:160],
+    if allow_mode_available(runner.prepared.execution_mode):
+        runner.set_permission_mode(PermissionMode.ALLOW)
+        allow_net = _invoke_with_retry(
+            runner, NETWORK_PROMPT, expect_status="completed", label="allow network execute", report=report, retries=1,
         )
+        if allow_net:
+            report.add(
+                "allow network no interrupt",
+                allow_net.status == "completed",
+                detail=f"out={allow_net.output!r}"[:160],
+            )
+    else:
+        try:
+            runner.set_permission_mode(PermissionMode.ALLOW)
+            report.add("allow rejected when not sandboxed", False, detail="ALLOW unexpectedly accepted")
+        except ValueError as exc:
+            report.add("allow rejected when not sandboxed", "SANDBOXED" in str(exc))
 
 
 def run_coding_suite(runner: AgentRunner, workspace: Path, report: Report) -> None:
-    runner.set_permission_mode(PermissionMode.ALLOW)
+    if allow_mode_available(runner.prepared.execution_mode):
+        runner.set_permission_mode(PermissionMode.ALLOW)
     # Clean prior artifacts
     for name in ("hello_lib.py", "test_hello_lib.py"):
         path = workspace / name

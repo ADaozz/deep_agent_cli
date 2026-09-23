@@ -14,15 +14,17 @@ from prompt_toolkit.output import DummyOutput
 from agent.cli.app import CliApplication
 from agent.cli.interactions import InteractionController
 from agent.config import SandboxConfig
+from agent.factory import create_agent
 from agent.network import network_requested
 from agent.permission import (
     ASK_INTERRUPT_ON,
     PermissionMode,
+    allow_mode_available,
     interrupt_on_for_mode,
     parse_permission_mode,
 )
 from agent.runner import AgentRunner
-from agent.sandbox import select_backend
+from agent.sandbox import ExecutionMode, SandboxUnavailableError, select_backend
 from tests.conftest import scripted_model
 
 
@@ -38,9 +40,15 @@ def test_interrupt_on_for_modes() -> None:
     ask = interrupt_on_for_mode(PermissionMode.ASK)
     assert ask is not None
     assert "send_email" in ask
-    assert "execute" in ask
-    assert ask["execute"]["when"] is ASK_INTERRUPT_ON["execute"]["when"]
+    assert ask["execute"] == {"allowed_decisions": ["approve", "reject"]}
+    assert "when" not in ask["execute"]
     assert interrupt_on_for_mode(PermissionMode.ALLOW) == {}
+
+
+def test_allow_only_for_sandboxed() -> None:
+    assert allow_mode_available(ExecutionMode.SANDBOXED)
+    assert not allow_mode_available(ExecutionMode.UNSANDBOXED)
+    assert not allow_mode_available(ExecutionMode.CUSTOM)
 
 
 def test_network_requested_truthy() -> None:
@@ -58,26 +66,7 @@ def test_runner_defaults_to_ask() -> None:
     )
     assert runner.permission_mode() is PermissionMode.ASK
     assert runner.prepared.interrupt_on == ASK_INTERRUPT_ON
-
-
-def test_allow_mode_skips_tool_confirmation() -> None:
-    runner = AgentRunner(
-        model=scripted_model([
-            AIMessage(content="", tool_calls=[{
-                "id": "call-mail",
-                "name": "send_email",
-                "args": {"to": "a@b.com", "subject": "hi", "body": "hello"},
-            }]),
-            AIMessage(content="sent"),
-        ]),
-        backend=StateBackend(),
-        thread_id="perm-allow-run",
-    )
-    runner.set_permission_mode(PermissionMode.ALLOW)
-    assert runner.prepared.interrupt_on == {}
-    result = runner.invoke("send mail")
-    assert result.status == "completed"
-    assert result.output == "sent"
+    assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
 
 
 def test_set_permission_mode_rejected_while_busy() -> None:
@@ -91,7 +80,21 @@ def test_set_permission_mode_rejected_while_busy() -> None:
         runner.set_permission_mode(PermissionMode.ALLOW)
 
 
-def _unsandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
+def _execute_messages(call_id: str, *, network: bool = False, final: str = "done") -> list[AIMessage]:
+    args: dict = {"command": "printf net" if network else "printf ok"}
+    if network:
+        args["network"] = True
+    return [
+        AIMessage(content="", tool_calls=[{
+            "id": call_id,
+            "name": "execute",
+            "args": args,
+        }]),
+        AIMessage(content=final),
+    ]
+
+
+def _custom_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
     config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap", allow_unsandboxed=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -104,62 +107,139 @@ def _unsandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> Ag
     )
 
 
-def test_ask_execute_without_network_runs(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(
-        tmp_path,
-        [
-            AIMessage(content="", tool_calls=[{
-                "id": "ex1",
-                "name": "execute",
-                "args": {"command": "printf ok"},
-            }]),
-            AIMessage(content="done"),
-        ],
-        thread_id="exec-no-net",
+def _unsandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
+    config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap", allow_unsandboxed=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        runner = AgentRunner(
+            model=scripted_model(messages),
+            sandbox_config=config,
+            thread_id=thread_id,
+        )
+    assert runner.prepared.execution_mode is ExecutionMode.UNSANDBOXED
+    return runner
+
+
+def _sandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
+    config = SandboxConfig(workspace=tmp_path)
+    try:
+        selected = select_backend(config)
+    except SandboxUnavailableError:
+        pytest.skip("bubblewrap sandbox unavailable")
+    if selected.mode is not ExecutionMode.SANDBOXED:
+        pytest.skip("bubblewrap sandbox unavailable")
+    runner = AgentRunner(
+        model=scripted_model(messages),
+        sandbox_config=config,
+        thread_id=thread_id,
     )
-    result = runner.invoke("run")
-    assert result.status == "completed"
-    assert result.output == "done"
+    assert runner.prepared.execution_mode is ExecutionMode.SANDBOXED
+    return runner
 
 
-def test_ask_execute_with_network_interrupts_then_approve(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(
-        tmp_path,
-        [
-            AIMessage(content="", tool_calls=[{
-                "id": "ex-net",
-                "name": "execute",
-                "args": {"command": "printf net", "network": True},
-            }]),
-            AIMessage(content="online"),
-        ],
-        thread_id="exec-net-ask",
+def test_sandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(tmp_path, _execute_messages("ex-sb-ask"), thread_id="sb-ask-off")
+    waiting = runner.invoke("run")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "execute"
+    assert not network_requested(waiting.pending_tool_calls[0].get("args") or {})
+    resumed = runner.resume({"type": "approve", "toolCallId": "ex-sb-ask"})
+    assert resumed.status == "completed"
+
+
+def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(
+        tmp_path, _execute_messages("ex-sb-net", network=True, final="online"), thread_id="sb-ask-net",
     )
     waiting = runner.invoke("need net")
     assert waiting.status == "waiting_confirmation"
-    assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-net"})
+    call = waiting.pending_tool_calls[0]
+    assert call["name"] == "execute"
+    assert network_requested(call.get("args") or {})
+    ui = InteractionController.approval([call])
+    assert "NETWORK" in ui.question
+    resumed = runner.resume({"type": "approve", "toolCallId": "ex-sb-net"})
     assert resumed.status == "completed"
     assert resumed.output == "online"
 
 
-def test_allow_execute_with_network_skips_interrupt(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(
-        tmp_path,
-        [
-            AIMessage(content="", tool_calls=[{
-                "id": "ex-allow",
-                "name": "execute",
-                "args": {"command": "printf net", "network": True},
-            }]),
-            AIMessage(content="online"),
-        ],
-        thread_id="exec-net-allow",
+def test_sandboxed_allow_execute_without_network_runs(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(tmp_path, _execute_messages("ex-sb-allow"), thread_id="sb-allow-off")
+    runner.set_permission_mode(PermissionMode.ALLOW)
+    result = runner.invoke("run")
+    assert result.status == "completed"
+
+
+def test_sandboxed_allow_execute_with_network_runs(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(
+        tmp_path, _execute_messages("ex-sb-allow-net", network=True, final="online"), thread_id="sb-allow-net",
     )
     runner.set_permission_mode(PermissionMode.ALLOW)
     result = runner.invoke("need net")
     assert result.status == "completed"
     assert result.output == "online"
+
+
+def test_unsandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
+    runner = _unsandboxed_runner(tmp_path, _execute_messages("ex-un-ask"), thread_id="un-ask-off")
+    waiting = runner.invoke("run")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "execute"
+    resumed = runner.resume({"type": "approve", "toolCallId": "ex-un-ask"})
+    assert resumed.status == "completed"
+
+
+def test_unsandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
+    runner = _unsandboxed_runner(
+        tmp_path, _execute_messages("ex-un-net", network=True, final="online"), thread_id="un-ask-net",
+    )
+    waiting = runner.invoke("need net")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "execute"
+    resumed = runner.resume({"type": "approve", "toolCallId": "ex-un-net"})
+    assert resumed.status == "completed"
+    assert resumed.output == "online"
+
+
+def test_unsandboxed_rejects_allow(tmp_path: Path) -> None:
+    runner = _unsandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="un-allow")
+    with pytest.raises(ValueError, match="SANDBOXED"):
+        runner.set_permission_mode(PermissionMode.ALLOW)
+    assert runner.permission_mode() is PermissionMode.ASK
+
+
+def test_custom_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
+    runner = _custom_runner(tmp_path, _execute_messages("ex-cu-ask"), thread_id="cu-ask-off")
+    assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
+    waiting = runner.invoke("run")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "execute"
+    resumed = runner.resume({"type": "approve", "toolCallId": "ex-cu-ask"})
+    assert resumed.status == "completed"
+
+
+def test_custom_rejects_allow_by_default(tmp_path: Path) -> None:
+    runner = _custom_runner(tmp_path, [AIMessage(content="ok")], thread_id="cu-allow")
+    assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
+    with pytest.raises(ValueError, match="SANDBOXED"):
+        runner.set_permission_mode(PermissionMode.ALLOW)
+    assert runner.permission_mode() is PermissionMode.ASK
+
+
+def test_external_allow_prepared_rejected_without_rebuild() -> None:
+    prepared = create_agent(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(),
+        interrupt_on={},
+        skills=[],
+    )
+    assert prepared.execution_mode is ExecutionMode.CUSTOM
+    graph_id = id(prepared.graph)
+    interrupt_on = prepared.interrupt_on
+    with pytest.raises(ValueError, match="SANDBOXED"):
+        AgentRunner(prepared=prepared, thread_id="ext-allow")
+    assert id(prepared.graph) == graph_id
+    assert prepared.interrupt_on is interrupt_on
 
 
 def test_approval_ui_mentions_declared_network() -> None:
@@ -181,7 +261,6 @@ def test_cli_permission_ask_direct() -> None:
         backend=StateBackend(),
         thread_id="cli-perm-ask",
     )
-    runner.set_permission_mode(PermissionMode.ALLOW)
 
     async def scenario() -> None:
         with create_pipe_input() as pipe:
@@ -193,12 +272,43 @@ def test_cli_permission_ask_direct() -> None:
     asyncio.run(scenario())
 
 
-def test_cli_permission_allow_requires_typed_confirm() -> None:
+def test_cli_permission_allow_rejected_when_not_sandboxed() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="ok")]),
         backend=StateBackend(),
-        thread_id="cli-perm-allow",
+        thread_id="cli-perm-custom",
     )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.select_permission("allow")
+            assert app.runner.permission_mode() is PermissionMode.ASK
+            assert app.interaction is None
+            assert any("SANDBOXED" in getattr(block, "content", "") for block in app.state.blocks)
+
+    asyncio.run(scenario())
+
+
+def test_cli_permission_selector_locked_when_not_sandboxed() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(),
+        thread_id="cli-perm-locked",
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.select_permission("")
+            assert app.interaction is None
+            assert any("locked to ask" in getattr(block, "content", "") for block in app.state.blocks)
+
+    asyncio.run(scenario())
+
+
+def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="cli-perm-allow")
 
     async def scenario() -> None:
         with create_pipe_input() as pipe:
@@ -216,12 +326,8 @@ def test_cli_permission_allow_requires_typed_confirm() -> None:
     asyncio.run(scenario())
 
 
-def test_cli_permission_allow_reject_wrong_token() -> None:
-    runner = AgentRunner(
-        model=scripted_model([AIMessage(content="ok")]),
-        backend=StateBackend(),
-        thread_id="cli-perm-wrong",
-    )
+def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:
+    runner = _sandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="cli-perm-wrong")
 
     async def scenario() -> None:
         with create_pipe_input() as pipe:

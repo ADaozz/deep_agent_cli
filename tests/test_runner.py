@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage
 from deepagents.backends import StateBackend
 
 from agent.factory import create_agent
+from agent.permission import ASK_INTERRUPT_ON
 from agent.runner import AgentRunner
 from tests.conftest import graph_tool_names, scripted_model
 
@@ -11,8 +12,8 @@ from tests.conftest import graph_tool_names, scripted_model
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == ["lookup_docs", "send_email"]
-    assert prepared.interrupt_on == {"send_email": {"allowed_decisions": ["approve", "reject"]}}
-    assert "Deep Agent" in prepared.system_prompt
+    assert prepared.interrupt_on == ASK_INTERRUPT_ON
+    assert "Coding Agent CLI" in prepared.system_prompt
     names = graph_tool_names(prepared.graph)
     assert "handoff_to_human" in names
     assert "request_human_input" in names

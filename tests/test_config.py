@@ -4,8 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from langchain_openai import ChatOpenAI
 
 from agent.config import Settings, resolve_config_path
+from agent.llm import QwenChatOpenAI, build_chat_model
 
 
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,6 +139,21 @@ def test_model_input_capabilities(tmp_path: Path) -> None:
     profile = Settings.load(path).active_profile
     assert profile.input == ("text", "image")
     assert profile.supports_input("image")
+
+
+def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "llm:\n  models:\n    compatible:\n      model: local\n      provider: openai-compatible\n",
+        encoding="utf-8",
+    )
+    model = build_chat_model(Settings.load(path).active_profile)
+    assert type(model) is ChatOpenAI
+    assert model.use_responses_api is False
+    path.write_text("llm:\n  provider: unknown\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="provider"):
+        Settings.load(path)
+    assert isinstance(build_chat_model(Settings().active_profile), QwenChatOpenAI)
 
 
 @pytest.mark.parametrize("value,match", [

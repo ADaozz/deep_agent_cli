@@ -10,6 +10,7 @@ llm:
   models:
     qwen-plus:
       model: qwen3.5-plus
+      provider: qwen-responses
       input:
         - text
         - image

@@ -11,8 +11,8 @@ from agent.network import network_requested, reset_execute_network, set_execute_
 class NetworkGateMiddleware(AgentMiddleware):
     """Set per-invoke network ContextVar from execute(network=...) args.
 
-    Under ask, HITL only interrupts when network is declared; after approve the
-    same args reach this middleware. Under allow, declared network is auto-honored.
+    Under ask, HITL interrupts every execute; after approve the same args reach
+    this middleware. Under sandboxed allow, declared network is auto-honored.
     Undeclared execute always runs with network=False (physical --unshare-net).
     """
 

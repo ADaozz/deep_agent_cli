@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphDrained
 from langgraph.types import Command
 
@@ -25,18 +26,22 @@ from agent.attachments import (
     ImageAttachmentRef,
     refs_to_dicts,
 )
-from agent.config import InputKind, ModelProfile, SandboxConfig, Settings
+from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, settings as default_settings
 from agent.control import RunController
-from agent.factory import PreparedAgent, create_agent, state_file
+from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.llm import build_chat_model
+from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.permission import (
     PermissionMode,
-    interrupt_on_for_mode,
+    allow_mode_available,
+    allow_mode_unavailable_reason,
     parse_permission_mode,
+    permission_mode_from_interrupt_on,
 )
 from agent.session import (
     SessionInfo,
     SessionStore,
+    StopReason,
     TranscriptBlock,
     messages_to_transcript,
     workspace_state_path,
@@ -80,6 +85,7 @@ class SessionSnapshot:
     interrupt_kind: str = ""
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -110,6 +116,7 @@ class AgentRunner:
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
         self._permission_mode = PermissionMode.ASK
+        self._resume_notice = ""
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -130,42 +137,41 @@ class AgentRunner:
             saver = self.session_store.checkpointer
         self._checkpointer = saver
 
-        initial_model = model
-        self._current_model_id = "default"
-        if settings is not None:
-            profile = settings.get_profile(model_id) if model_id else settings.active_profile
-            self._current_model_id = profile.id
-            if initial_model is None:
-                initial_model = build_chat_model(profile, attachment_store=self.attachment_store)
-
-        self.prepared = prepared or create_agent(
-            model=initial_model,
-            checkpointer=saver,
-            backend=backend,
-            sandbox_config=self._sandbox_config,
-            settings=settings,
-            should_pause=lambda: self._pause_requested,
-            run_controller=self.control,
-            interrupt_on=interrupt_on_for_mode(self._permission_mode),
+        cfg = settings or default_settings
+        profile = cfg.get_profile(model_id) if model_id else cfg.active_profile
+        self._current_model_id = profile.id
+        initial_model = model or (prepared.model if prepared is not None else build_chat_model(
+            profile, attachment_store=self.attachment_store,
+        ))
+        self._spec = prepared.spec if prepared is not None else AgentSpec(
+            backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
+        )
+        self.prepared = prepared or build_agent(
+            self._spec, initial_model, self._permission_mode, saver,
+            self.control, lambda: self._pause_requested,
         )
         self._chat_model = initial_model
-        self._backend = backend if backend is not None else self.prepared.backend
         if prepared is not None:
-            # Preserve whatever HITL map the caller already compiled.
-            self._permission_mode = (
-                PermissionMode.ALLOW if not prepared.interrupt_on else PermissionMode.ASK
-            )
+            inferred = permission_mode_from_interrupt_on(prepared.interrupt_on)
+            if inferred is PermissionMode.ALLOW and not allow_mode_available(prepared.execution_mode):
+                raise ValueError(allow_mode_unavailable_reason(prepared.execution_mode))
+            self._permission_mode = inferred
 
         if thread_id is None:
             if self.session_store is not None:
-                info = self.session_store.create_session()
+                info = self.session_store.create_session(
+                    model_id=self._current_model_id, permission_mode=self._permission_mode.value,
+                )
                 self.thread_id = info.id
             else:
                 self.thread_id = f"cli-{uuid4()}"
         else:
             self.thread_id = thread_id
             if self.session_store is not None and self.session_store.get(thread_id) is None:
-                self.session_store.create_session(session_id=thread_id)
+                self.session_store.create_session(
+                    session_id=thread_id, model_id=self._current_model_id,
+                    permission_mode=self._permission_mode.value,
+                )
 
         self.state_path = (
             self.session_store.path if self.session_store is not None
@@ -201,6 +207,8 @@ class AgentRunner:
             profile, attachment_store=self.attachment_store,
         ))
         self._current_model_id = profile.id
+        if self.session_store is not None:
+            self.session_store.touch(self.thread_id, model_id=profile.id)
         return profile
 
     def permission_mode(self) -> PermissionMode:
@@ -216,6 +224,8 @@ class AgentRunner:
             mode = parsed
         if mode is self._permission_mode:
             return mode
+        if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
+            raise ValueError(allow_mode_unavailable_reason(self.prepared.execution_mode))
         model = self._chat_model
         if self.settings is not None:
             model = build_chat_model(
@@ -224,6 +234,8 @@ class AgentRunner:
             )
         self._rebuild_prepared(model=model, permission_mode=mode)
         self._permission_mode = mode
+        if self.session_store is not None:
+            self.session_store.touch(self.thread_id, permission_mode=mode.value)
         return mode
 
     def _rebuild_prepared(
@@ -239,17 +251,9 @@ class AgentRunner:
                 self.settings.get_profile(self._current_model_id),
                 attachment_store=self.attachment_store,
             )
-        self.prepared = create_agent(
-            model=chat,
-            checkpointer=self._checkpointer,
-            backend=self._backend,
-            sandbox_config=self._sandbox_config,
-            settings=self.settings,
-            should_pause=lambda: self._pause_requested,
-            run_controller=self.control,
-            system_prompt=self.prepared.system_prompt,
-            interrupt_on=interrupt_on_for_mode(mode),
-            files=self.prepared.files,
+        self.prepared = build_agent(
+            self._spec, chat, mode, self._checkpointer,
+            self.control, lambda: self._pause_requested,
         )
         self._chat_model = chat
 
@@ -259,6 +263,8 @@ class AgentRunner:
     def request_cancel(self) -> None:
         """Request hard cancel for execute / cancellable tools and drain the graph."""
         self.control.cancel()
+        if self._busy:
+            self._touch_status("cancelled", StopReason.ABORTED)
 
     def steer(self, text: str) -> None:
         self.control.steer(text)
@@ -296,13 +302,58 @@ class AgentRunner:
         )
 
     def switch_session(self, session_id: str) -> SessionSnapshot:
-        snapshot = self.load_session(session_id)
+        if self._busy:
+            raise RuntimeError("Cannot switch sessions while a run is in progress")
+        info = self.session_store.resolve_prefix(session_id) if self.session_store is not None else None
+        if info is None:
+            raise KeyError(f"Unknown session: {session_id}")
+        previous = (self._chat_model, self._current_model_id, self._permission_mode)
+        notices = self._restore_thread_settings(info)
+        try:
+            snapshot = self.load_session(info.id)
+        except Exception:
+            old_model, old_id, old_mode = previous
+            self._rebuild_prepared(model=old_model, permission_mode=old_mode)
+            self._current_model_id = old_id
+            self._permission_mode = old_mode
+            raise
         if snapshot is None:
             raise KeyError(f"Unknown session: {session_id}")
         self.thread_id = snapshot.info.id
+        self.session_store.touch(
+            info.id, model_id=self._current_model_id, permission_mode=self._permission_mode.value,
+        )
+        snapshot.info = self.session_store.get(info.id) or snapshot.info
+        snapshot.notices.extend(notices)
+        self._resume_notice = (
+            "上一轮执行未正常完成。请根据 checkpoint 和当前 workspace 状态继续，"
+            "不要假设未确认完成的副作用已经成功或失败。先检查相关文件、git 状态和必要的测试。"
+            if info.last_run_status in {StopReason.ABORTED, StopReason.ERROR} else ""
+        )
         return snapshot
 
+    def _restore_thread_settings(self, info: SessionInfo) -> list[str]:
+        notices: list[str] = []
+        profile = self.settings.active_profile if self.settings is not None else None
+        if self.settings is not None and info.model_id:
+            try:
+                profile = self.settings.get_profile(info.model_id)
+            except KeyError:
+                notices.append(f"Saved model {info.model_id} is unavailable; using {profile.id}.")
+        mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
+        if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
+            mode = PermissionMode.ASK
+            notices.append("Saved allow permission is unavailable here; using ask.")
+        if profile is not None and profile.id != self._current_model_id:
+            self._rebuild_prepared(model=build_chat_model(profile, attachment_store=self.attachment_store), permission_mode=mode)
+            self._current_model_id = profile.id
+        elif mode is not self._permission_mode:
+            self._rebuild_prepared(permission_mode=mode)
+        self._permission_mode = mode
+        return notices
+
     def new_session(self, *, title: str = "") -> SessionInfo:
+        self._resume_notice = ""
         if self.session_store is None:
             self.thread_id = f"cli-{uuid4()}"
             now = datetime.now(timezone.utc)
@@ -312,8 +363,13 @@ class AgentRunner:
                 created_at=now,
                 updated_at=now,
                 status="running",
+                model_id=self._current_model_id,
+                permission_mode=self._permission_mode.value,
             )
-        info = self.session_store.create_session(title=title)
+        info = self.session_store.create_session(
+            title=title, model_id=self._current_model_id,
+            permission_mode=self._permission_mode.value,
+        )
         self.thread_id = info.id
         return info
 
@@ -329,7 +385,7 @@ class AgentRunner:
             raise ValueError("The current model does not declare image input support")
         if len(images) > MAX_IMAGES_PER_MESSAGE:
             raise ValueError(f"A message can contain at most {MAX_IMAGES_PER_MESSAGE} images")
-        if images and not getattr(self._chat_model, "materializes_attachment_refs", False):
+        if images and not self._can_materialize_attachments():
             raise RuntimeError(
                 "The current custom model does not implement Deep-Agent image attachment resolution"
             )
@@ -354,21 +410,27 @@ class AgentRunner:
             raise ValueError("The current model does not declare image input support")
         if len(refs) > MAX_IMAGES_PER_MESSAGE:
             raise ValueError(f"A message can contain at most {MAX_IMAGES_PER_MESSAGE} images")
-        if refs and not getattr(self._chat_model, "materializes_attachment_refs", False):
+        if refs and not self._can_materialize_attachments():
             raise RuntimeError(
                 "The current custom model does not implement Deep-Agent image attachment resolution"
             )
         additional = {ATTACHMENT_META_KEY: refs_to_dicts(refs)} if refs else {}
+        notice = self._resume_notice
+        prompt = f"{notice}\n\n{text}" if notice else text
         graph_input: dict[str, Any] = {
-            "messages": [HumanMessage(content=text, additional_kwargs=additional)],
+            "messages": [HumanMessage(content=prompt, additional_kwargs=additional)],
         }
-        files = self.prepared.files_for_state()
-        if files:
-            graph_input["files"] = {path: state_file(content) for path, content in files.items()}
+        self._resume_notice = ""
         if self.session_store is not None:
             title = text.strip().splitlines()[0][:80] if text.strip() else None
-            self.session_store.touch(self.thread_id, status="running", title=title)
+            self.session_store.touch(self.thread_id, status="running", title=title,
+                                     last_run_status=StopReason.PENDING)
         return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
+
+    def _can_materialize_attachments(self) -> bool:
+        return isinstance(self._chat_model, ChatOpenAI) or bool(
+            getattr(self._chat_model, "materializes_attachment_refs", False)
+        )
 
     def store_image(self, image: ImageAttachment) -> ImageAttachmentRef:
         if not self.supports_input("image"):
@@ -402,7 +464,7 @@ class AgentRunner:
         )
         graph_input = self._resume_command(decision, kind, pending, payload)
         if self.session_store is not None:
-            self.session_store.touch(self.thread_id, status="running")
+            self.session_store.touch(self.thread_id, status="running", last_run_status=StopReason.PENDING)
         return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
 
     def current_interrupt(self) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
@@ -458,6 +520,7 @@ class AgentRunner:
         run_control = self.control.begin_run()
         set_run_controller(self.control)
         set_output_emitter(self._emit_tool_output)
+        attachment_token = set_attachment_store(self.attachment_store)
         self._busy = True
         _emit(event_handler, RunEvent(type="run_started"))
 
@@ -484,6 +547,7 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
+            reset_attachment_store(attachment_token)
             self._event_handler = None
 
     def _stream_once(
@@ -513,20 +577,20 @@ class AgentRunner:
                         human_input = payload
         except GraphDrained:
             _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status("cancelled")
+            self._touch_status("cancelled", StopReason.ABORTED)
             return RunResult(status="cancelled")
         except Exception as exc:  # noqa: BLE001
             if self.control.cancel_requested:
                 _emit(event_handler, RunEvent(type="run_cancelled"))
-                self._touch_status("cancelled")
+                self._touch_status("cancelled", StopReason.ABORTED)
                 return RunResult(status="cancelled")
             _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
-            self._touch_status("failed")
+            self._touch_status("failed", StopReason.ERROR)
             return RunResult(status="failed", error=str(exc))
 
         if self.control.cancel_requested and not interrupted:
             _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status("cancelled")
+            self._touch_status("cancelled", StopReason.ABORTED)
             return RunResult(status="cancelled")
 
         if interrupted:
@@ -534,7 +598,7 @@ class AgentRunner:
             mapped = "interrupted" if interrupted == "paused" else status
             if interrupted in {"waiting_human", "waiting_confirmation"}:
                 mapped = "waiting"
-            self._touch_status(mapped if mapped in {"waiting", "interrupted"} else "waiting")
+            self._touch_status(mapped if mapped in {"waiting", "interrupted"} else "waiting", StopReason.DEFERRED)
             result = RunResult(
                 status=interrupted,
                 pending_tool_calls=pending,
@@ -548,8 +612,25 @@ class AgentRunner:
             # Caller may start a supplemental invocation before completing.
             return RunResult(status="completed", output=output)
         _emit(event_handler, RunEvent(type="run_completed", content=output))
-        self._touch_status("completed")
+        self._touch_status("completed", self._final_stop_reason())
         return RunResult(status="completed", output=output)
+
+    def _final_stop_reason(self) -> StopReason:
+        try:
+            messages = (self.prepared.graph.get_state(self._thread_config()).values or {}).get("messages", [])
+        except Exception:  # noqa: BLE001
+            return StopReason.STOP
+        for message in reversed(messages):
+            if not isinstance(message, AIMessage):
+                continue
+            metadata = getattr(message, "response_metadata", None) or {}
+            reason = metadata.get("finish_reason") or metadata.get("stop_reason")
+            if reason == "length":
+                return StopReason.LENGTH
+            if reason in {"tool_use", "tool_calls"}:
+                return StopReason.TOOL_USE
+            break
+        return StopReason.STOP
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
@@ -566,9 +647,9 @@ class AgentRunner:
             result=payload,
         ))
 
-    def _touch_status(self, status: str) -> None:
+    def _touch_status(self, status: str, reason: StopReason) -> None:
         if self.session_store is not None:
-            self.session_store.touch(self.thread_id, status=status)  # type: ignore[arg-type]
+            self.session_store.touch(self.thread_id, status=status, last_run_status=reason)  # type: ignore[arg-type]
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
         if handler is None:

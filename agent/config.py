@@ -35,6 +35,7 @@ class ModelProfile:
     api_key: str = "sk-local"
     base_url: str = "http://localhost:8000/v1"
     input: tuple["InputKind", ...] = ("text",)
+    provider: Literal["qwen-responses", "openai-compatible"] = "qwen-responses"
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -312,6 +313,7 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
             api_key=str(llm.get("api_key") or "sk-local"),
             base_url=str(llm.get("base_url") or "http://localhost:8000/v1"),
             input=_model_inputs(llm.get("input"), field_name="llm.input"),
+            provider=_model_provider(llm.get("provider"), field_name="llm.provider"),
         )
         return (profile,), "default"
     if not isinstance(models_raw, Mapping) or not models_raw:
@@ -332,6 +334,7 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
             api_key=str(item.get("api_key") or llm.get("api_key") or "sk-local"),
             base_url=str(item.get("base_url") or llm.get("base_url") or "http://localhost:8000/v1"),
             input=_model_inputs(item.get("input"), field_name=f"llm.models.{pid}.input"),
+            provider=_model_provider(item.get("provider", llm.get("provider")), field_name=f"llm.models.{pid}.provider"),
         ))
     default_id = str(llm.get("default") or profiles[0].id).strip()
     if not any(item.id == default_id for item in profiles):
@@ -356,6 +359,13 @@ def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:
     if "text" not in result:
         raise ValueError(f"{field_name} must include text")
     return result  # type: ignore[return-value]
+
+
+def _model_provider(value: Any, *, field_name: str) -> Literal["qwen-responses", "openai-compatible"]:
+    provider = str(value or "qwen-responses").strip()
+    if provider not in {"qwen-responses", "openai-compatible"}:
+        raise ValueError(f"{field_name} must be qwen-responses or openai-compatible")
+    return provider  # type: ignore[return-value]
 
 
 def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> SandboxConfig:
