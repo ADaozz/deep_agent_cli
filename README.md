@@ -17,35 +17,6 @@
 - **Runtime 与 TUI 分离** — 终端只是一层皮，同一套 `AgentRunner` 可以接到 SSE 或自己的 UI
 - **不 Fork Deep Agents** — 装配入口只有 `create_deep_agent()`
 
-## Demo
-
-```console
-$ cd ~/projects/my-app
-$ deep-agent
-
- workspace=/home/you/projects/my-app
-
- ~/projects/my-app
- idle · SANDBOXED · perm:ask · a1b2c3d4                    qwen3.5-plus
-
- > 找出认证过期的处理逻辑，并补一个失败测试
-
- ● read_file   src/auth/session.py
- ● grep        expires_at|idle_timeout
- ● execute     pytest tests/test_session.py -q
-   需要批准 execute(network=true) 吗？  [reject] / approve
-
- Session 过期判断用了本地时钟，跨时区会提前失效。
- 已在 tests/test_session.py 加上回归用例。
-
- /status
- workspace  ~/projects/my-app
- sandbox    SANDBOXED
- permission ask
- session    a1b2c3d4  ~/.deep-agent/sessions/….sqlite3
-```
-
-启动后 cwd 就是沙箱里的 `/workspace`。底栏两行：路径、运行状态、沙箱、权限、session，右下角是当前模型。
 
 ## Features
 
