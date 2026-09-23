@@ -36,11 +36,11 @@ Block = MessageBlock | ToolBlock
 @dataclass
 class CliState:
     blocks: list[Block] = field(default_factory=list)
+    todos: list[dict[str, str]] = field(default_factory=list)
     running: bool = False
     status: str = "Ready"
     thinking_collapsed: bool = False
     tools_expanded: bool = False
-    queued: list[tuple[str, str]] = field(default_factory=list)
     active_assistant: int | None = None
     pending_user_ids: dict[str, str] = field(default_factory=dict)
     attachments: list[ImageAttachmentRef] = field(default_factory=list)
@@ -67,6 +67,7 @@ class CliState:
 
     def clear(self) -> None:
         self.blocks.clear()
+        self.todos.clear()
         self.active_assistant = None
         self.pending_user_ids.clear()
 
@@ -98,6 +99,8 @@ class CliState:
             self.active_assistant = None
         elif event.type == "assistant_started":
             self.active_assistant = None
+        elif event.type == "todos_updated" and isinstance(event.result, list):
+            self.todos = [dict(item) for item in event.result if isinstance(item, dict)]
         elif event.type in {"thinking_delta", "assistant_delta"}:
             block = self._assistant_block()
             if event.type == "thinking_delta":

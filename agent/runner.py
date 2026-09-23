@@ -16,7 +16,7 @@ from langgraph.errors import GraphDrained
 from langgraph.types import Command
 
 from deepagents.backends.protocol import BackendProtocol
-from agent.cancel import set_output_emitter, set_run_controller
+from agent.cancel import set_output_emitter
 from agent.attachments import (
     ATTACHMENT_META_KEY,
     MAX_IMAGES_PER_MESSAGE,
@@ -31,10 +31,12 @@ from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.llm import build_chat_model
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
+from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
 from agent.permission import (
     PermissionMode,
     allow_mode_available,
     allow_mode_unavailable_reason,
+    interrupt_on_for_mode,
     parse_permission_mode,
     permission_mode_from_interrupt_on,
 )
@@ -82,6 +84,7 @@ class RunResult:
 class SessionSnapshot:
     info: SessionInfo
     transcript: list[TranscriptBlock]
+    todos: list[dict[str, str]] = field(default_factory=list)
     interrupt_kind: str = ""
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -106,17 +109,20 @@ class AgentRunner:
         settings: Settings | None = None,
         model_id: str | None = None,
     ) -> None:
-        self._pause_requested = False
-        self.control = RunController(on_control_event=self._on_control_event)
+        if prepared is not None and (backend is not None or sandbox_config is not None):
+            raise ValueError("prepared already defines the backend and sandbox configuration")
+        self.control = prepared.run_controller if prepared is not None and prepared.run_controller is not None else RunController()
+        self.control.set_event_handler(self._on_control_event)
         self.on_delta = on_delta
         self.on_event = on_event
         self._event_handler: RunEventHandler | None = None
         self._seen_tool_calls: set[str] = set()
+        self._todo_call_ids: set[str] = set()
         self.settings = settings
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
         self._permission_mode = PermissionMode.ASK
-        self._resume_notice = ""
+        self._resume_context: RecoveryContext | None = None
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -133,9 +139,12 @@ class AgentRunner:
             self.attachment_store = AttachmentStore(Path(self._attachment_tempdir.name))
 
         saver = checkpointer
+        if saver is not None and self.session_store is not None and saver is not self.session_store.checkpointer:
+            raise ValueError("checkpointer must be the session store checkpointer")
         if saver is None and self.session_store is not None:
             saver = self.session_store.checkpointer
-        self._checkpointer = saver
+        if saver is None and prepared is not None:
+            saver = prepared.checkpointer
 
         cfg = settings or default_settings
         profile = cfg.get_profile(model_id) if model_id else cfg.active_profile
@@ -144,18 +153,25 @@ class AgentRunner:
             profile, attachment_store=self.attachment_store,
         ))
         self._spec = prepared.spec if prepared is not None else AgentSpec(
+            instructions=cfg.agent_instructions,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
         )
-        self.prepared = prepared or build_agent(
-            self._spec, initial_model, self._permission_mode, saver,
-            self.control, lambda: self._pause_requested,
-        )
-        self._chat_model = initial_model
+        self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
+        self._custom_interrupt_on = None
+        if prepared is not None and prepared.interrupt_on and prepared.interrupt_on != interrupt_on_for_mode(PermissionMode.ASK):
+            self._custom_interrupt_on = dict(prepared.interrupt_on)
         if prepared is not None:
             inferred = permission_mode_from_interrupt_on(prepared.interrupt_on)
             if inferred is PermissionMode.ALLOW and not allow_mode_available(prepared.execution_mode):
                 raise ValueError(allow_mode_unavailable_reason(prepared.execution_mode))
             self._permission_mode = inferred
+        self.prepared = prepared if prepared is not None and saver is prepared.checkpointer and initial_model is prepared.model else build_agent(
+            self._spec, initial_model, self._permission_mode, saver,
+            self.control, self._pause_condition,
+            interrupt_on_override=prepared.interrupt_on if prepared is not None else None,
+        )
+        self._checkpointer = self.prepared.checkpointer
+        self._chat_model = initial_model
 
         if thread_id is None:
             if self.session_store is not None:
@@ -233,6 +249,7 @@ class AgentRunner:
                 attachment_store=self.attachment_store,
             )
         self._rebuild_prepared(model=model, permission_mode=mode)
+        self._custom_interrupt_on = None
         self._permission_mode = mode
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, permission_mode=mode.value)
@@ -253,18 +270,19 @@ class AgentRunner:
             )
         self.prepared = build_agent(
             self._spec, chat, mode, self._checkpointer,
-            self.control, lambda: self._pause_requested,
+            self.control, self._pause_condition,
+            interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
         )
         self._chat_model = chat
 
     def request_pause(self) -> None:
-        self._pause_requested = True
+        self.control.request_pause()
 
     def request_cancel(self) -> None:
         """Request hard cancel for execute / cancellable tools and drain the graph."""
         self.control.cancel()
         if self._busy:
-            self._touch_status("cancelled", StopReason.ABORTED)
+            self._touch_status(StopReason.ABORTED)
 
     def steer(self, text: str) -> None:
         self.control.steer(text)
@@ -296,6 +314,7 @@ class AgentRunner:
         return SessionSnapshot(
             info=info,
             transcript=messages_to_transcript(messages),
+            todos=list((state.values or {}).get("todos", []) or []),
             interrupt_kind=kind,
             human_input=payload if kind == "waiting_human" else {},
             pending_tool_calls=pending,
@@ -320,15 +339,22 @@ class AgentRunner:
         if snapshot is None:
             raise KeyError(f"Unknown session: {session_id}")
         self.thread_id = snapshot.info.id
+        self.control.clear_pause()
+        self.control.set_defer_steering(bool(snapshot.interrupt_kind))
         self.session_store.touch(
             info.id, model_id=self._current_model_id, permission_mode=self._permission_mode.value,
         )
         snapshot.info = self.session_store.get(info.id) or snapshot.info
         snapshot.notices.extend(notices)
-        self._resume_notice = (
-            "上一轮执行未正常完成。请根据 checkpoint 和当前 workspace 状态继续，"
-            "不要假设未确认完成的副作用已经成功或失败。先检查相关文件、git 状态和必要的测试。"
-            if info.last_run_status in {StopReason.ABORTED, StopReason.ERROR} else ""
+        has_checkpoint = self.session_store.checkpointer.get_tuple(
+            {"configurable": {"thread_id": info.id}}
+        ) is not None
+        needs_recovery = info.last_run_status in {StopReason.ABORTED, StopReason.ERROR} or (
+            info.last_run_status is StopReason.PENDING and has_checkpoint
+        )
+        self._resume_context = (
+            RecoveryContext.for_stop_reason(info.last_run_status)
+            if needs_recovery and not snapshot.interrupt_kind else None
         )
         return snapshot
 
@@ -353,7 +379,9 @@ class AgentRunner:
         return notices
 
     def new_session(self, *, title: str = "") -> SessionInfo:
-        self._resume_notice = ""
+        self._resume_context = None
+        self.control.clear_pause()
+        self.control.set_defer_steering(False)
         if self.session_store is None:
             self.thread_id = f"cli-{uuid4()}"
             now = datetime.now(timezone.utc)
@@ -415,15 +443,14 @@ class AgentRunner:
                 "The current custom model does not implement Deep-Agent image attachment resolution"
             )
         additional = {ATTACHMENT_META_KEY: refs_to_dicts(refs)} if refs else {}
-        notice = self._resume_notice
-        prompt = f"{notice}\n\n{text}" if notice else text
         graph_input: dict[str, Any] = {
-            "messages": [HumanMessage(content=prompt, additional_kwargs=additional)],
+            "messages": [HumanMessage(content=text, additional_kwargs=additional)],
         }
-        self._resume_notice = ""
+        if self._resume_context is not None:
+            self._resume_context.armed = True
         if self.session_store is not None:
             title = text.strip().splitlines()[0][:80] if text.strip() else None
-            self.session_store.touch(self.thread_id, status="running", title=title,
+            self.session_store.touch(self.thread_id, title=title,
                                      last_run_status=StopReason.PENDING)
         return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
 
@@ -463,8 +490,9 @@ class AgentRunner:
             self.prepared.graph, self._thread_config(),
         )
         graph_input = self._resume_command(decision, kind, pending, payload)
+        self.control.set_defer_steering(False)
         if self.session_store is not None:
-            self.session_store.touch(self.thread_id, status="running", last_run_status=StopReason.PENDING)
+            self.session_store.touch(self.thread_id, last_run_status=StopReason.PENDING)
         return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
 
     def current_interrupt(self) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
@@ -517,37 +545,47 @@ class AgentRunner:
         self._event_handler = event_handler
         config = self._run_config(on_delta, on_event)
         self._seen_tool_calls.clear()
+        self._todo_call_ids.clear()
         run_control = self.control.begin_run()
-        set_run_controller(self.control)
         set_output_emitter(self._emit_tool_output)
         attachment_token = set_attachment_store(self.attachment_store)
+        recovery_token = set_recovery_context(self._resume_context)
         self._busy = True
         _emit(event_handler, RunEvent(type="run_started"))
 
+        result: RunResult | None = None
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
-            # Late steering that arrived after the final after_agent check stays in-run.
-            while (
-                result.status == "completed"
-                and self.control.has_pending_steering()
-                and not self.control.cancel_requested
-            ):
+            # Consume queued input at the same run boundary for every client.
+            while result.status == "completed" and not self.control.cancel_requested:
                 text = self.control.pop_steering()
+                if text is None:
+                    text = self.control.pop_follow_up()
                 if text is None:
                     break
                 run_control = self.control.begin_run()
+                self._seen_tool_calls.clear()
+                self._todo_call_ids.clear()
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)]},
                     config,
                     run_control,
                     event_handler,
                 )
+            if result.status == "completed":
+                _emit(event_handler, RunEvent(type="run_completed", content=result.output))
+                self._touch_status(StopReason.STOP)
             return result
         finally:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
             reset_attachment_store(attachment_token)
+            reset_recovery_context(recovery_token)
+            if (result is not None and result.status == "completed") or (
+                self._resume_context is not None and self._resume_context.text is None
+            ):
+                self._resume_context = None
             self._event_handler = None
 
     def _stream_once(
@@ -560,10 +598,21 @@ class AgentRunner:
         interrupted = ""
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}
+        previous_todos = _todos_in_state(
+            self.prepared.graph.get_state(self._thread_config()).values or {}
+        )
         try:
             for chunk in self.prepared.graph.stream(
-                graph_input, config, stream_mode="updates", control=run_control,
+                graph_input, config, stream_mode=["updates", "values"], control=run_control,
             ):
+                mode, payload = chunk
+                if mode == "values":
+                    todos = _todos_in_state(payload)
+                    if todos is not None and todos != previous_todos:
+                        _emit(event_handler, RunEvent(type="todos_updated", result=todos))
+                        previous_todos = todos
+                    continue
+                chunk = payload
                 self._emit_update_events(chunk, event_handler)
                 if not isinstance(chunk, dict):
                     continue
@@ -577,28 +626,25 @@ class AgentRunner:
                         human_input = payload
         except GraphDrained:
             _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status("cancelled", StopReason.ABORTED)
+            self._touch_status(StopReason.ABORTED)
             return RunResult(status="cancelled")
         except Exception as exc:  # noqa: BLE001
             if self.control.cancel_requested:
                 _emit(event_handler, RunEvent(type="run_cancelled"))
-                self._touch_status("cancelled", StopReason.ABORTED)
+                self._touch_status(StopReason.ABORTED)
                 return RunResult(status="cancelled")
             _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
-            self._touch_status("failed", StopReason.ERROR)
+            self._touch_status(StopReason.ERROR)
             return RunResult(status="failed", error=str(exc))
 
         if self.control.cancel_requested and not interrupted:
             _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status("cancelled", StopReason.ABORTED)
+            self._touch_status(StopReason.ABORTED)
             return RunResult(status="cancelled")
 
         if interrupted:
-            status = "waiting" if interrupted.startswith("waiting") else interrupted
-            mapped = "interrupted" if interrupted == "paused" else status
-            if interrupted in {"waiting_human", "waiting_confirmation"}:
-                mapped = "waiting"
-            self._touch_status(mapped if mapped in {"waiting", "interrupted"} else "waiting", StopReason.DEFERRED)
+            self.control.set_defer_steering(True)
+            self._touch_status(StopReason.DEFERRED)
             result = RunResult(
                 status=interrupted,
                 pending_tool_calls=pending,
@@ -608,29 +654,7 @@ class AgentRunner:
             return result
 
         output = _final_output(self.prepared.graph, self._thread_config())
-        if self.control.has_pending_steering():
-            # Caller may start a supplemental invocation before completing.
-            return RunResult(status="completed", output=output)
-        _emit(event_handler, RunEvent(type="run_completed", content=output))
-        self._touch_status("completed", self._final_stop_reason())
         return RunResult(status="completed", output=output)
-
-    def _final_stop_reason(self) -> StopReason:
-        try:
-            messages = (self.prepared.graph.get_state(self._thread_config()).values or {}).get("messages", [])
-        except Exception:  # noqa: BLE001
-            return StopReason.STOP
-        for message in reversed(messages):
-            if not isinstance(message, AIMessage):
-                continue
-            metadata = getattr(message, "response_metadata", None) or {}
-            reason = metadata.get("finish_reason") or metadata.get("stop_reason")
-            if reason == "length":
-                return StopReason.LENGTH
-            if reason in {"tool_use", "tool_calls"}:
-                return StopReason.TOOL_USE
-            break
-        return StopReason.STOP
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
@@ -647,9 +671,11 @@ class AgentRunner:
             result=payload,
         ))
 
-    def _touch_status(self, status: str, reason: StopReason) -> None:
+    def _touch_status(self, reason: StopReason) -> None:
         if self.session_store is not None:
-            self.session_store.touch(self.thread_id, status=status, last_run_status=reason)  # type: ignore[arg-type]
+            self.session_store.touch(self.thread_id, last_run_status=reason)
+        if reason in {StopReason.ABORTED, StopReason.ERROR}:
+            self._resume_context = RecoveryContext.for_stop_reason(reason)
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
         if handler is None:
@@ -659,6 +685,9 @@ class AgentRunner:
                 message_id = str(getattr(message, "id", "") or "")
                 for call in message.tool_calls or []:
                     tool_call_id = str(call.get("id") or "")
+                    if call.get("name") == "write_todos":
+                        self._todo_call_ids.add(tool_call_id)
+                        continue
                     identity = tool_call_id or f"{call.get('name')}:{id(call)}"
                     if identity in self._seen_tool_calls:
                         continue
@@ -671,6 +700,10 @@ class AgentRunner:
                         arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     ))
             elif isinstance(message, ToolMessage):
+                if getattr(message, "name", None) == "write_todos" or str(
+                    getattr(message, "tool_call_id", "") or ""
+                ) in self._todo_call_ids:
+                    continue
                 content = _message_text(message)
                 status = str(getattr(message, "status", "") or "")
                 _emit(handler, RunEvent(
@@ -691,10 +724,10 @@ class AgentRunner:
         payload: dict[str, Any],
     ) -> Command:
         if isinstance(decision, bool):
-            self._pause_requested = False
+            self.control.clear_pause()
             return Command(resume=decision)
         if kind == "paused" or _decision_type(decision) in ("continue", "resume"):
-            self._pause_requested = False
+            self.control.clear_pause()
             return Command(resume=True)
         if kind == "waiting_human" or _decision_type(decision) in ("human_input", "input"):
             return Command(resume=_human_resume_value(decision, payload))
@@ -818,6 +851,13 @@ def _messages_in_update(value: Any) -> list[BaseMessage]:
         for item in value:
             found.extend(_messages_in_update(item))
     return found
+
+
+def _todos_in_state(value: Any) -> list[dict[str, str]] | None:
+    """Project middleware-owned todos from a LangGraph values snapshot."""
+    if isinstance(value, dict) and isinstance(value.get("todos"), list):
+        return [dict(item) for item in value["todos"] if isinstance(item, dict)]
+    return None
 
 
 def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:

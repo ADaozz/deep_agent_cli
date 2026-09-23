@@ -13,7 +13,7 @@ from deepagents import (
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents._models import get_model_identifier, get_model_provider
-from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware, ToolRetryMiddleware
+from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -23,13 +23,15 @@ from agent.control import RunController
 from agent.llm import build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
-from agent.middleware.network_gate import NetworkGateMiddleware
 from agent.middleware.pause import PauseGateMiddleware
+from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.retry import retry_on_transient
 from agent.middleware.steering import SteeringMiddleware
-from agent.permission import PermissionMode, interrupt_on_for_mode, permission_mode_from_interrupt_on
+from agent.permission import (
+    PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
+    permission_mode_from_interrupt_on,
+)
 from agent.sandbox import ExecutionMode, SANDBOX_ROOT, select_backend
-from agent.tools.examples import build_example_tools
 from agent.tools.execute import build_execute_tool
 from agent.tools.human_input import build_human_input_tools
 
@@ -58,6 +60,9 @@ class PreparedAgent:
     filesystem_tools: list[str] = field(default_factory=list)
     execution_mode: ExecutionMode = ExecutionMode.CUSTOM
     security_warning: str = ""
+    checkpointer: Any = None
+    run_controller: RunController | None = None
+    pause_condition: Callable[[], bool] = field(default=lambda: False)
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -78,6 +83,7 @@ def build_agent(
     checkpointer: Any | None,
     run_controller: RunController,
     should_pause: Callable[[], bool],
+    interrupt_on_override: dict[str, Any] | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = spec.sandbox or default_settings.sandbox
     if spec.backend is None:
@@ -89,28 +95,30 @@ def build_agent(
         fs_backend = spec.backend
         execution_mode = ExecutionMode.CUSTOM
         security_warning = ""
+    if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
+        raise ValueError(allow_mode_unavailable_reason(execution_mode))
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
-    tools = [*build_example_tools(), *build_human_input_tools(), *spec.tools]
-    hitl = interrupt_on_for_mode(permission) or {}
+    tools = [*build_human_input_tools(), *spec.tools]
+    hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     permissions = [] if supports_execute else _filesystem_permissions(sandbox_cfg, managed=spec.backend is None)
     if supports_execute:
         tools.append(build_execute_tool(fs_backend))
     skill_sources = list(spec.skills) if spec.skills is not None else _default_skill_sources(sandbox_cfg.workspace)
+    saver = checkpointer if checkpointer is not None else InMemorySaver()
     graph = create_deep_agent(
         model=model,
         tools=tools,
         system_prompt=prompt,
         middleware=[
-            PauseGateMiddleware(should_pause),
+            PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
+            RecoveryContextMiddleware(),
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),
-            NetworkGateMiddleware(),
             AttachmentMaterializationMiddleware(),
             ModelRetryMiddleware(max_retries=2, retry_on=retry_on_transient, on_failure="error"),
-            ToolRetryMiddleware(max_retries=2, retry_on=retry_on_transient, on_failure="continue"),
             TodoListMiddleware(),
             FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools, _permissions=permissions),  # type: ignore[arg-type]
         ],
@@ -118,7 +126,7 @@ def build_agent(
         permissions=permissions or None,
         backend=fs_backend,
         interrupt_on=hitl or None,
-        checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
+        checkpointer=saver,
         name="deep-agent-template",
     )
     return PreparedAgent(
@@ -132,6 +140,9 @@ def build_agent(
         filesystem_tools=filesystem_tools,
         execution_mode=execution_mode,
         security_warning=security_warning,
+        checkpointer=saver,
+        run_controller=run_controller,
+        pause_condition=should_pause,
     )
 
 
@@ -140,7 +151,7 @@ def create_agent(
     model: BaseChatModel | None = None,
     checkpointer: Any | None = None,
     should_pause: Callable[[], bool] | None = None,
-    system_prompt: str | None = None,
+    instructions: str | None = None,
     extra_tools: list[BaseTool] | None = None,
     interrupt_on: dict[str, Any] | None = None,
     skills: list[str] | None = None,
@@ -151,16 +162,24 @@ def create_agent(
 ) -> PreparedAgent:
     cfg = settings or default_settings
     spec = AgentSpec(
-        instructions=system_prompt,
+        instructions=instructions if instructions is not None else cfg.agent_instructions,
         tools=tuple(extra_tools or ()),
         skills=tuple(skills) if skills is not None else None,
         backend=backend,
         sandbox=sandbox_config or cfg.sandbox,
     )
     permission = permission_mode_from_interrupt_on(interrupt_on) if interrupt_on is not None else PermissionMode.ASK
+    effective_interrupt_on = interrupt_on
+    if interrupt_on:
+        defaults = interrupt_on_for_mode(PermissionMode.ASK) or {}
+        for name, rule in defaults.items():
+            if name in interrupt_on and interrupt_on[name] != rule:
+                raise ValueError(f"Cannot override the default approval rule for {name}")
+        effective_interrupt_on = {**defaults, **interrupt_on}
     return build_agent(
         spec, model or _default_model(cfg), permission, checkpointer,
         run_controller or RunController(), should_pause or (lambda: False),
+        interrupt_on_override=effective_interrupt_on,
     )
 
 
@@ -200,12 +219,11 @@ _NO_GP = HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(e
 
 
 def _disable_general_purpose_task(model: BaseChatModel) -> None:
-    register_harness_profile("openai", _NO_GP)
     provider = get_model_provider(model)
     identifier = get_model_identifier(model)
-    if provider:
+    if identifier:
+        key = identifier if ":" in identifier or not provider else f"{provider}:{identifier}"
+        register_harness_profile(key, _NO_GP)
+    elif provider:
+        # Models without an identifier cannot be targeted more narrowly upstream.
         register_harness_profile(provider, _NO_GP)
-        if identifier and ":" not in identifier:
-            register_harness_profile(f"{provider}:{identifier}", _NO_GP)
-    if identifier and ":" in identifier:
-        register_harness_profile(identifier, _NO_GP)

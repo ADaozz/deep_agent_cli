@@ -80,6 +80,43 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
     assert blocks[2]["text"] == "answer"
 
 
+def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
+    events = [
+        SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="a"),
+        SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="b"),
+        SimpleNamespace(type="response.output_text.delta", item_id="msg_1", output_index=1, content_index=0, delta="answer"),
+    ]
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def __iter__(self):
+            return iter(events)
+
+    class FakeResponses:
+        def create(self, **payload):
+            assert payload["stream"] is True
+            return FakeResponse()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    llm = QwenChatOpenAI(
+        model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
+        use_responses_api=True, output_version="responses/v1",
+    )
+    object.__setattr__(llm, "root_client", FakeClient())
+
+    blocks = [chunk.message.content[0] for chunk in llm._stream([HumanMessage(content="x")])]
+    assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
+    assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
+    assert blocks[2]["text"] == "answer"
+
+
 def test_gateway_extra_body_envelope_and_plain_chatopenai_stay_scoped() -> None:
     llm = QwenChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",

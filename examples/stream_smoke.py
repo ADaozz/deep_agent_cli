@@ -33,7 +33,7 @@ def main() -> int:
     runner = AgentRunner(
         prepared=create_agent(
             model=model,
-            system_prompt="只用一两句话直接回答，不要调用任何工具。",
+            instructions="只用一两句话直接回答，不要调用任何工具。",
             skills=[],
         ),
         thread_id="stream-smoke",

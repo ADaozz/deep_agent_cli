@@ -1,16 +1,10 @@
 # Semantic Human Interaction Schema — Agent declares what information it needs, not UI widgets.
 from __future__ import annotations
 
-import re
 from typing import Any
 
 FIELD_TYPES = ("text", "textarea", "single_select", "multi_select", "boolean")
 INTERACTION_TYPES = ("clarification", "decision", "confirmation", "review")
-_HEADING_BOLD = re.compile(r"^\*\*(\d+)[.、.)]\s*(.+?)\*\*\s*(.*)$")
-_HEADING_PLAIN = re.compile(r"^(?:#{1,3}\s*)?(\d+)[.、.)]\s+(.+)$")
-_BULLET = re.compile(r"^\s*[-*•]\s+(.+)$")
-_MD = re.compile(r"[*_`]+")
-
 
 def normalize_interaction_request(
     reason: str,
@@ -22,18 +16,12 @@ def normalize_interaction_request(
     fields: list | None = None,
     recommendation: dict | None = None,
     impact: list | None = None,
-    blocking: bool = True,
     interaction_id: str | None = None,
 ) -> dict[str, Any]:
     kind = (interaction_type or "clarification").strip().lower()
     if kind not in INTERACTION_TYPES:
         kind = "clarification"
     normalized_fields = _normalize_fields(fields, options, required_input)
-    if _unstructured_text_fields(normalized_fields):
-        extracted = fields_from_question(question)
-        if extracted:
-            normalized_fields = extracted
-            question = question_intro(question) or question
     payload: dict[str, Any] = {
         "type": "human_input",
         "interactionType": kind,
@@ -41,7 +29,7 @@ def normalize_interaction_request(
         "reason": reason or "",
         "question": question or "",
         "fields": normalized_fields,
-        "blocking": bool(blocking),
+        "blocking": True,
         "impact": [str(item) for item in impact] if isinstance(impact, list) else [],
     }
     if interaction_id:
@@ -80,82 +68,6 @@ def resume_values(answer: Any) -> dict[str, Any]:
     if answer is None:
         return {}
     return {"text": str(answer)}
-
-
-def fields_from_question(question: str) -> list[dict[str, Any]]:
-    sections: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    closing: list[str] = []
-    for raw in (question or "").replace("\r\n", "\n").split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        headed = _HEADING_BOLD.match(line) or _HEADING_PLAIN.match(line)
-        if headed:
-            current = {
-                "title": _strip_md(headed.group(2) or ""),
-                "hint": _strip_md(headed.group(3) if headed.lastindex and headed.lastindex >= 3 else ""),
-                "bullets": [],
-            }
-            sections.append(current)
-            continue
-        item = _BULLET.match(line)
-        if item and current is not None:
-            current["bullets"].append(_strip_md(item.group(1) or ""))
-            continue
-        if current is not None:
-            closing.append(_strip_md(line))
-    fields: list[dict[str, Any]] = []
-    for index, section in enumerate(sections, start=1):
-        bullets = [str(item) for item in section["bullets"]]
-        options = [item for item in bullets if not _is_other(item) and not _is_question_bullet(item)]
-        questions = [item for item in bullets if _is_question_bullet(item)]
-        field_id = f"q{index}"
-        label = str(section["title"] or f"问题 {index}")
-        hint = str(section.get("hint") or "")
-        if len(options) >= 2:
-            fields.append({
-                "id": field_id,
-                "type": _select_type(label, options),
-                "label": f"{label} {hint}".strip(),
-                "required": True,
-                "placeholder": "",
-                "options": [
-                    {"value": _slug(item, f"{field_id}_{n}"), "label": item, "description": ""}
-                    for n, item in enumerate(options, start=1)
-                ],
-            })
-        elif questions:
-            fields.append({
-                "id": field_id,
-                "type": "textarea",
-                "label": label,
-                "required": False,
-                "placeholder": " ".join(questions),
-                "options": [],
-            })
-    if any(field["type"] in {"single_select", "multi_select"} for field in fields):
-        fields.append({
-            "id": "comment",
-            "type": "textarea",
-            "label": "补充说明",
-            "required": False,
-            "placeholder": " ".join(closing) or "补充说明（可选）",
-            "options": [],
-        })
-    return fields
-
-
-def question_intro(question: str) -> str:
-    intro: list[str] = []
-    for raw in (question or "").replace("\r\n", "\n").split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        if _HEADING_BOLD.match(line) or _HEADING_PLAIN.match(line):
-            break
-        intro.append(_strip_md(line))
-    return "\n".join(intro)
 
 
 def _normalize_fields(fields: list | None, options: list | None, required_input: str) -> list[dict[str, Any]]:
@@ -244,31 +156,3 @@ def _legacy_options(fields: list[dict[str, Any]]) -> list[dict[str, str]]:
                 for option in field["options"]
             ]
     return []
-
-
-def _strip_md(value: str) -> str:
-    return _MD.sub("", value).strip()
-
-
-def _is_other(label: str) -> bool:
-    return bool(re.match(r"^(其他|其它|other)\b", label, re.I))
-
-
-def _is_question_bullet(label: str) -> bool:
-    return bool(re.search(r"[?？]\s*$", label) or re.match(r"^(是否|有没有|需要)", label))
-
-
-def _select_type(title: str, options: list[str]) -> str:
-    if re.search(r"场景|形式|部署|方式|还是|或者|单选", title):
-        return "single_select"
-    if re.search(r"功能|能力|范围|包含|哪些|多选", title):
-        return "multi_select"
-    if any(re.search(r"两者|都需要|以上都是", item) for item in options):
-        return "single_select"
-    return "multi_select" if len(options) >= 4 else "single_select"
-
-
-def _slug(label: str, fallback: str) -> str:
-    compact = re.sub(r"（.*?）|\(.*?\)", "", label)
-    compact = re.sub(r"[^\w]+", "_", compact, flags=re.UNICODE).strip("_")[:48]
-    return compact or fallback

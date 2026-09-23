@@ -4,25 +4,19 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 import threading
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
+from uuid import uuid4
 
 
 CancelCallback = Callable[[], None]
 
 
-class Cancellable(Protocol):
-    """Optional protocol: tools may expose a non-blocking cancel()."""
-
-    def cancel(self) -> None: ...
-
-
 @dataclass
 class ToolCancelContext:
-    run_token: str
     tool_name: str
     tool_call_id: str
     cancel_event: threading.Event
-    token: str = field(default_factory=lambda: str(id(object())))
+    token: str = field(default_factory=lambda: str(uuid4()))
     _callbacks: list[CancelCallback] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _process: Any = None
@@ -63,17 +57,9 @@ class ToolCancelContext:
                 pass
         if process is not None:
             _kill_process_group(process)
-        tool = getattr(self, "_tool", None)
-        cancel = getattr(tool, "cancel", None)
-        if callable(cancel):
-            try:
-                cancel()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 _CURRENT: ContextVar[ToolCancelContext | None] = ContextVar("deep_agent_cancel_ctx", default=None)
-_CONTROLLER: ContextVar[Any] = ContextVar("deep_agent_run_controller", default=None)
 _OUTPUT_EMITTER: ContextVar[Callable[[str, str, str], None] | None] = ContextVar(
     "deep_agent_tool_output_emitter", default=None,
 )
@@ -89,14 +75,6 @@ def clear_cancel_context() -> None:
 
 def get_cancel_context() -> ToolCancelContext | None:
     return _CURRENT.get()
-
-
-def set_run_controller(controller: Any) -> Token:
-    return _CONTROLLER.set(controller)
-
-
-def get_run_controller() -> Any:
-    return _CONTROLLER.get()
 
 
 def set_output_emitter(emitter: Callable[[str, str, str], None] | None) -> Token:

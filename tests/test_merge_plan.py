@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from deepagents.backends import StateBackend
 from langchain.agents.middleware.types import ModelRequest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.completion import CompleteEvent
@@ -26,11 +26,15 @@ from agent.factory import AgentSpec, build_agent, create_agent
 from agent.middleware.attachments import (
     AttachmentMaterializationMiddleware, reset_attachment_store, set_attachment_store,
 )
+from agent.middleware.recovery import (
+    RecoveryContext, RecoveryContextMiddleware, reset_recovery_context, set_recovery_context,
+)
 from agent.permission import PermissionMode
+from agent.tools.examples import build_example_tools
 from agent.runner import AgentRunner
 from agent.sandbox import ExecutionMode
 from agent.session import SessionStore, StopReason
-from tests.conftest import scripted_model
+from tests.conftest import ScriptedToolModel, scripted_model
 
 
 def _settings(workspace: Path) -> Settings:
@@ -51,7 +55,7 @@ def custom_lookup(query: str) -> str:
 
 
 def test_spec_rebuild_keeps_static_inputs_and_rereads_project_instructions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     (tmp_path / "AGENTS.md").write_text("规则一", encoding="utf-8")
     spec = AgentSpec(
@@ -72,12 +76,32 @@ def test_spec_rebuild_keeps_static_inputs_and_rereads_project_instructions(
     assert "custom_lookup" in runner.prepared.exposed_tool_names
     assert runner.prepared.spec is spec
     (tmp_path / "AGENTS.md").write_text("规则三", encoding="utf-8")
-    monkeypatch.setattr("agent.runner.allow_mode_available", lambda _mode: True)
-    runner.set_permission_mode("allow")
-    assert "custom_lookup" in runner.prepared.exposed_tool_names
-    assert "中文优先" in runner.prepared.system_prompt
-    assert "规则三" in runner.prepared.system_prompt
+    with pytest.raises(ValueError, match="SANDBOXED"):
+        runner.set_permission_mode("allow")
     assert runner.prepared.spec.skills == ()
+
+
+def test_configured_instructions_reach_runner_and_create_agent(tmp_path: Path) -> None:
+    settings = Settings(
+        llm_profiles=_settings(tmp_path).llm_profiles,
+        llm_default="alpha",
+        sandbox=SandboxConfig(workspace=tmp_path),
+        agent_instructions="配置说明",
+    )
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                         backend=StateBackend(), settings=settings)
+    assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
+    runner.switch_model("beta")
+    assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
+    prepared = create_agent(model=scripted_model([AIMessage(content="unused")]),
+                            backend=StateBackend(), settings=settings)
+    assert prepared.spec.instructions == "配置说明"
+    explicit = create_agent(model=scripted_model([AIMessage(content="unused")]),
+                            backend=StateBackend(), settings=settings, instructions="显式说明")
+    assert "显式说明" in explicit.system_prompt
+    assert "配置说明" not in explicit.system_prompt
+    with pytest.raises(TypeError, match="system_prompt"):
+        create_agent(system_prompt="旧参数")  # type: ignore[call-arg]
 
 
 def test_legacy_catalog_migrates_and_resume_restores_model(tmp_path: Path) -> None:
@@ -85,10 +109,12 @@ def test_legacy_catalog_migrates_and_resume_restores_model(tmp_path: Path) -> No
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL)")
     conn.execute("INSERT INTO session_catalog VALUES ('legacy', 'old', '2025-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00', 'completed')")
+    conn.execute("INSERT INTO session_catalog VALUES ('legacy-running', 'old', '2025-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00', 'running')")
     conn.commit()
     conn.close()
     store = SessionStore(db)
-    assert store.get("legacy").last_run_status is StopReason.PENDING
+    assert store.get("legacy").last_run_status is StopReason.STOP
+    assert store.get("legacy-running").last_run_status is StopReason.PENDING
     settings = _settings(tmp_path)
     runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
                          settings=settings, session_store=store)
@@ -102,6 +128,17 @@ def test_legacy_catalog_migrates_and_resume_restores_model(tmp_path: Path) -> No
     runner2.switch_session(thread)
     assert runner2.current_model().id == "beta"
     reopened.close()
+
+
+def test_prepared_runner_uses_session_checkpointer(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "prepared.sqlite3")
+    prepared = create_agent(model=scripted_model([AIMessage(content="saved")]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared, session_store=store)
+    assert runner.prepared.checkpointer is store.checkpointer
+    assert runner.invoke("persist").status == "completed"
+    assert store.checkpointer.get_tuple(runner._thread_config()) is not None
+    assert [block.content for block in runner.load_session(runner.thread_id).transcript if block.kind == "user"] == ["persist"]
+    store.close()
 
 
 def test_resume_permission_fallback_and_stop_status(tmp_path: Path) -> None:
@@ -118,8 +155,128 @@ def test_resume_permission_fallback_and_stop_status(tmp_path: Path) -> None:
     assert second.permission_mode() is PermissionMode.ASK
     assert store.get(thread).permission_mode == "ask"
     assert snapshot.info.last_run_status is StopReason.ABORTED
-    assert "上一轮" in second._resume_notice
+    assert second._resume_context is not None
+    assert "aborted" in second._resume_context.text
     assert any("unavailable" in notice for notice in snapshot.notices)
+    store.close()
+
+
+def test_recovery_middleware_keeps_request_and_checkpoint_messages_separate() -> None:
+    context = RecoveryContext.for_stop_reason(StopReason.ABORTED)
+    assert context is not None
+    context.armed = True
+    original_system = SystemMessage(content="original system")
+    user = HumanMessage(content="真实用户输入")
+    request = ModelRequest(model=scripted_model([AIMessage(content="unused")]),
+                           messages=[user], system_message=original_system)
+    seen = []
+    token = set_recovery_context(context)
+    try:
+        middleware = RecoveryContextMiddleware()
+        middleware.wrap_model_call(request, lambda item: seen.append(item) or item)
+        middleware.wrap_model_call(request, lambda item: seen.append(item) or item)
+    finally:
+        reset_recovery_context(token)
+    assert "Previous run status" in seen[0].system_message.content
+    assert seen[1].system_message is original_system
+    assert request.system_message is original_system
+    assert request.messages == [user]
+    assert context.text is None
+
+
+def test_recovery_context_survives_failed_model_call() -> None:
+    context = RecoveryContext.for_stop_reason(StopReason.ERROR)
+    assert context is not None
+    context.armed = True
+    request = ModelRequest(model=scripted_model([AIMessage(content="unused")]),
+                           messages=[HumanMessage(content="continue")],
+                           system_message=SystemMessage(content="base"))
+    token = set_recovery_context(context)
+    try:
+        with pytest.raises(RuntimeError, match="offline"):
+            RecoveryContextMiddleware().wrap_model_call(
+                request, lambda _: (_ for _ in ()).throw(RuntimeError("offline")),
+            )
+    finally:
+        reset_recovery_context(token)
+    assert context.text is not None
+
+
+@pytest.mark.parametrize("reason", [StopReason.PENDING, StopReason.ABORTED, StopReason.ERROR])
+def test_resume_recovery_is_one_shot_and_user_text_stays_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: StopReason,
+) -> None:
+    db = tmp_path / f"{reason.value}.sqlite3"
+    store = SessionStore(db)
+    first = AgentRunner(model=scripted_model([AIMessage(content="previous")]),
+                        backend=StateBackend(), session_store=store)
+    thread = first.thread_id
+    assert first.invoke("before").status == "completed"
+    store.touch(thread, last_run_status=reason)
+    store.close()
+
+    captured = []
+    original_generate = ScriptedToolModel._generate
+
+    def capture(self, messages, *args, **kwargs):
+        captured.append(messages)
+        return original_generate(self, messages, *args, **kwargs)
+
+    monkeypatch.setattr(ScriptedToolModel, "_generate", capture)
+    reopened = SessionStore(db)
+    prepared = create_agent(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "lookup-1", "name": "lookup_docs", "args": {"query": "x"}}]),
+        AIMessage(content="done"),
+    ]), backend=StateBackend(), extra_tools=build_example_tools())
+    second = AgentRunner(prepared=prepared, session_store=reopened)
+    snapshot = second.switch_session(thread)
+    assert snapshot.info.last_run_status is reason
+    assert captured == []  # /resume switches state without calling the model.
+    assert second._resume_context is not None
+    assert second.invoke("先检查，不要修改").status == "completed"
+    assert len(captured) == 2
+    assert "Previous run status" in str(captured[0][0].content)
+    assert "Previous run status" not in str(captured[1][0].content)
+    saved = second.load_session(thread)
+    assert [block.content for block in saved.transcript if block.kind == "user"] == [
+        "before", "先检查，不要修改",
+    ]
+    assert second._resume_context is None
+    reopened.close()
+
+
+def test_empty_pending_thread_and_deferred_run_do_not_arm_recovery(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "empty.sqlite3")
+    empty = store.create_session(session_id="empty")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                         backend=StateBackend(), session_store=store)
+    runner.switch_session(empty.id)
+    assert runner._resume_context is None
+    store.touch(empty.id, last_run_status=StopReason.ABORTED)
+    runner.switch_session(empty.id)
+    assert runner._resume_context is not None
+    store.close()
+
+
+def test_recovery_survives_pause_before_first_model_call(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "pause-recovery.sqlite3")
+    first = AgentRunner(model=scripted_model([AIMessage(content="before")]),
+                        backend=StateBackend(), session_store=store)
+    thread = first.thread_id
+    first.invoke("first")
+    store.touch(thread, last_run_status=StopReason.ABORTED)
+    second = AgentRunner(model=scripted_model([AIMessage(content="after")]),
+                         backend=StateBackend(), session_store=store)
+    second.switch_session(thread)
+    second.request_pause()
+    assert second.invoke("原始输入").status == "paused"
+    assert second._resume_context is not None
+    assert second._resume_context.text is not None
+    assert second.resume({"type": "continue"}).status == "completed"
+    assert second._resume_context is None
+    assert [block.content for block in second.load_session(thread).transcript if block.kind == "user"] == [
+        "first", "原始输入",
+    ]
     store.close()
 
 
@@ -158,11 +315,9 @@ def test_resume_missing_model_falls_back_and_updates_catalog(tmp_path: Path) -> 
     store.close()
 
 
-@pytest.mark.parametrize("finish_reason,expected", [
-    ("length", StopReason.LENGTH), ("tool_use", StopReason.TOOL_USE),
-])
-def test_explicit_model_stop_reason_is_catalogued(
-    tmp_path: Path, finish_reason: str, expected: StopReason,
+@pytest.mark.parametrize("finish_reason", ["length", "tool_use"])
+def test_model_finish_reason_stays_in_checkpoint_not_catalog(
+    tmp_path: Path, finish_reason: str,
 ) -> None:
     store = SessionStore(tmp_path / f"{finish_reason}.sqlite3")
     runner = AgentRunner(
@@ -170,7 +325,10 @@ def test_explicit_model_stop_reason_is_catalogued(
         backend=StateBackend(), session_store=store,
     )
     assert runner.invoke("answer").status == "completed"
-    assert store.get(runner.thread_id).last_run_status is expected
+    assert store.get(runner.thread_id).last_run_status is StopReason.STOP
+    state = runner.prepared.graph.get_state(runner._thread_config())
+    assert any(isinstance(message, AIMessage) and message.response_metadata.get("finish_reason") == finish_reason
+               for message in state.values.get("messages", []))
     store.close()
 
 
@@ -189,9 +347,10 @@ def test_restart_restores_checkpoint_interrupt(tmp_path: Path, kind: str) -> Non
     db = tmp_path / f"{kind}.sqlite3"
     store = SessionStore(db)
     response = AIMessage(content="", tool_calls=[{
-        "id": "mail-1", "name": "send_email", "args": {"to": "a@example.com", "subject": "s", "body": "b"},
+        "id": "write-1", "name": "write_file", "args": {"file_path": "/workspace/note.txt", "content": "b"},
     }]) if kind == "waiting_confirmation" else AIMessage(content="done")
-    runner = AgentRunner(model=scripted_model([response]), backend=StateBackend(), session_store=store)
+    prepared = create_agent(model=scripted_model([response]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared, session_store=store)
     if kind == "paused":
         runner.request_pause()
     thread = runner.thread_id
@@ -200,11 +359,13 @@ def test_restart_restores_checkpoint_interrupt(tmp_path: Path, kind: str) -> Non
     store.close()
 
     restored = SessionStore(db)
-    runner2 = AgentRunner(model=scripted_model([AIMessage(content="done")]),
-                          backend=StateBackend(), session_store=restored)
+    restored_prepared = create_agent(model=scripted_model([AIMessage(content="done")]),
+                                     backend=StateBackend())
+    runner2 = AgentRunner(prepared=restored_prepared, session_store=restored)
     snapshot = runner2.switch_session(thread)
     assert snapshot.interrupt_kind == kind
     assert snapshot.info.last_run_status is StopReason.DEFERRED
+    assert runner2._resume_context is None
     restored.close()
 
 

@@ -80,6 +80,7 @@ class Settings:
     state_path: Path | None = None
     config_dir: Path | None = None
     source_path: Path | None = None
+    agent_instructions: str | None = None
 
     @property
     def llm_model(self) -> str:
@@ -135,9 +136,13 @@ class Settings:
         raw = dict(data or {})
         root = (base_dir or Path.cwd()).expanduser().resolve()
         llm = _section(raw, "llm")
+        agent = _section(raw, "agent")
         paths = _section(raw, "paths")
         sandbox_raw = _section(raw, "sandbox")
         profiles, default_id = _llm_profiles_from_mapping(llm)
+        instructions = agent.get("instructions")
+        if instructions is not None and not isinstance(instructions, str):
+            raise ValueError("agent.instructions must be a string or null")
         return cls(
             llm_profiles=profiles,
             llm_default=default_id,
@@ -145,6 +150,7 @@ class Settings:
             state_path=_optional_path(paths.get("state_path"), base_dir=root),
             config_dir=_optional_path(paths.get("config_dir"), base_dir=root),
             source_path=source_path.resolve() if source_path is not None else None,
+            agent_instructions=instructions,
         )
 
     # Backward-compatible alias used by older call sites / docs.

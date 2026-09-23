@@ -553,9 +553,6 @@ class CliApplication:
         from agent.cli.state import MessageBlock
 
         restored_parts = self.runner.take_unapplied_messages()
-        if self.state.queued:
-            restored_parts.extend(text for text, _mode in self.state.queued)
-            self.state.queued.clear()
         self.state.blocks = [
             block for block in self.state.blocks
             if not (isinstance(block, MessageBlock) and block.pending)
@@ -571,6 +568,7 @@ class CliApplication:
 
     def _apply_session_snapshot(self, snapshot: Any) -> None:
         self.state.load_transcript(snapshot.transcript)
+        self.state.todos = list(snapshot.todos)
         self.transcript_control.clear_selection()
         self.interaction = None
         self.state.add_system(
@@ -646,7 +644,7 @@ class CliApplication:
 
     def _footer_text(self):  # type: ignore[no-untyped-def]
         pending = self.runner.control.pending_steering_count() + self.runner.control.pending_follow_up_count()
-        queue = f" · queued {pending}" if pending or self.state.queued else ""
+        queue = f" · queued {pending}" if pending else ""
         mode = self.runner.prepared.execution_mode.value
         perm = self.runner.permission_mode().value
         spinner = " ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 11] if self.state.running else ""
@@ -1086,19 +1084,14 @@ class CliApplication:
         self.state.apply(event)
         if follow:
             self._transcript_anchor = None
-        if event.type in {"run_completed", "run_cancelled", "run_failed"}:
-            self._maybe_start_queued()
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
         if result.status == "waiting_confirmation":
-            self.runner.control.set_defer_steering(True)
             self.interaction = InteractionController.approval(result.pending_tool_calls)
         elif result.status == "waiting_human":
-            self.runner.control.set_defer_steering(True)
             self.interaction = InteractionController.human(result.human_input)
         elif result.status == "paused":
-            self.runner.control.set_defer_steering(True)
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")
             self.interaction = InteractionController(
@@ -1110,17 +1103,7 @@ class CliApplication:
                     "options": [{"value": "stay", "label": "No"}, {"value": "continue", "label": "Yes"}],
                 }],
             )
-        self._maybe_start_queued()
         self.application.invalidate()
-
-    def _maybe_start_queued(self) -> None:
-        if self.interaction is not None or self.state.running:
-            return
-        text = self.runner.control.pop_follow_up()
-        if text is None and self.state.queued:
-            text, _mode = self.state.queued.pop(0)
-        if text:
-            self._start_run(text)
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
         interaction = self.interaction
@@ -1215,7 +1198,6 @@ class CliApplication:
             choice = interaction.values.get("continue")
             if not cancelled and choice == "continue":
                 self.interaction = None
-                self.runner.control.set_defer_steering(False)
                 self._start_run("", resume={"type": "continue"})
             else:
                 interaction.values.clear()
@@ -1226,7 +1208,6 @@ class CliApplication:
             return
         decision = interaction.decision(cancelled=cancelled)
         self.interaction = None
-        self.runner.control.set_defer_steering(False)
         self._start_run("", resume=decision)
 
 

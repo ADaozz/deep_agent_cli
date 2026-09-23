@@ -1,7 +1,7 @@
 """Qwen Responses compatibility without patching ``langchain-openai`` globally."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 import base64
 from typing import Any, ClassVar
 
@@ -115,6 +115,13 @@ class QwenChatOpenAI(ChatOpenAI):
     def set_attachment_store(self, store: AttachmentStore) -> None:
         self._attachment_store = store
 
+    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        # ChatOpenAI routes directly to BaseChatOpenAI._stream_responses.
+        if self._use_responses_api({**kwargs, **self.model_kwargs}):
+            yield from self._stream_responses(*args, **kwargs)
+        else:
+            yield from super()._stream(*args, **kwargs)
+
     async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
         # ChatOpenAI._astream directly calls BaseChatOpenAI._astream_responses,
         # so it would bypass an override of _astream_responses on this class.
@@ -149,6 +156,61 @@ class QwenChatOpenAI(ChatOpenAI):
 
     def _materialize_attachments(self, input_: Any) -> Any:
         return materialize_attachment_refs(input_, self._attachment_store)
+
+    def _stream_responses(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """LangChain's sync Responses loop with Qwen event normalization."""
+        self._ensure_sync_client_available()
+        kwargs["stream"] = True
+        payload = self._get_request_payload(messages, stop=stop, **kwargs)
+        headers: dict[str, Any] = {}
+        base_generation_info: dict[str, Any] = {}
+        try:
+            if self.include_response_headers or self._uses_gateway:
+                raw_context_manager = self.root_client.with_raw_response.responses.create(**payload)
+                context_manager = raw_context_manager.parse()
+                if self.include_response_headers:
+                    headers = {"headers": dict(raw_context_manager.headers)}
+                _lc_base._add_gateway_metadata(base_generation_info, raw_context_manager)
+            else:
+                context_manager = self.root_client.responses.create(**payload)
+
+            original_schema_obj = kwargs.get("response_format")
+            with context_manager as response:
+                is_first_chunk = True
+                current_index = current_output_index = current_sub_index = -1
+                has_reasoning = False
+                for raw_chunk in response:
+                    chunk = normalize_qwen_responses_event(raw_chunk)
+                    metadata = headers if is_first_chunk else {}
+                    current_index, current_output_index, current_sub_index, generation_chunk = (
+                        _lc_base._convert_responses_chunk_to_generation_chunk(
+                            chunk, current_index, current_output_index, current_sub_index,
+                            schema=original_schema_obj, metadata=metadata,
+                            has_reasoning=has_reasoning, output_version=self.output_version,
+                        )
+                    )
+                    if generation_chunk:
+                        if is_first_chunk and base_generation_info:
+                            generation_chunk.generation_info = {
+                                **base_generation_info,
+                                **(generation_chunk.generation_info or {}),
+                            }
+                        if run_manager:
+                            run_manager.on_llm_new_token(generation_chunk.text, chunk=generation_chunk)
+                        is_first_chunk = False
+                        if "reasoning" in generation_chunk.message.additional_kwargs:
+                            has_reasoning = True
+                        yield generation_chunk
+        except _lc_base.openai.BadRequestError as error:
+            _lc_base._handle_openai_bad_request(error)
+        except _lc_base.openai.APIError as error:
+            _lc_base._handle_openai_api_error(error)
 
     async def _astream_responses(
         self,

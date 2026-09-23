@@ -15,7 +15,6 @@ class PermissionMode(StrEnum):
 
 
 ASK_INTERRUPT_ON: dict[str, Any] = {
-    "send_email": {"allowed_decisions": ["approve", "reject"]},
     "execute": {"allowed_decisions": ["approve", "reject"]},
     "write_file": True,
     "edit_file": True,
@@ -25,7 +24,7 @@ ASK_INTERRUPT_ON: dict[str, Any] = {
 PERMISSION_ALLOW_WARNING = (
     "HIGH RISK: Permission mode ALLOW auto-approves every tool call and any "
     "capabilities it declares (including execute with network=true, file writes, "
-    "deletes, and send_email). There is no per-call confirmation. Only enable "
+    "and deletes). There is no per-call confirmation. Only enable "
     "this if the agent is running in a SANDBOXED backend."
 )
 

@@ -19,7 +19,7 @@ def _unsandboxed(tmp_path: Path, **kwargs) -> UnsandboxedShellBackend:
 def test_execute_streams_chunks_before_exit(tmp_path: Path) -> None:
     chunks: list[str] = []
     set_output_emitter(lambda _id, text, _stream: chunks.append(text))
-    ctx = ToolCancelContext(run_token="r", tool_name="execute", tool_call_id="t1", cancel_event=threading.Event())
+    ctx = ToolCancelContext(tool_name="execute", tool_call_id="t1", cancel_event=threading.Event())
     set_cancel_context(ctx)
     try:
         backend = _unsandboxed(tmp_path, max_output_bytes=100000)
@@ -105,3 +105,21 @@ def test_cancellable_tool_cancel_callback_invoked_once() -> None:
     controller.cancel()
     assert calls["n"] == 1
     controller.close_tool_context(ctx)
+
+
+def test_tool_cancel_middleware_calls_cancel_once() -> None:
+    from types import SimpleNamespace
+    from agent.middleware.cancel_tools import ToolCancelMiddleware
+
+    class Tool:
+        count = 0
+
+        def cancel(self) -> None:
+            self.count += 1
+
+    tool = Tool()
+    controller = RunController()
+    controller.begin_run()
+    request = SimpleNamespace(tool_call={"name": "example", "id": "example-1"}, tool=tool)
+    ToolCancelMiddleware(controller).wrap_tool_call(request, lambda _: controller.cancel())
+    assert tool.count == 1

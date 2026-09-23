@@ -1,17 +1,16 @@
 """Local execute tool with optional NETWORK capability declaration."""
 from __future__ import annotations
 
-from typing import Any
-
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
+from agent.network import reset_execute_network, set_execute_network
 
 
 def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
     """Shell execute bound to a sandbox backend.
 
-    ``network=True`` declares the NETWORK capability. Physical networking is
-    applied by NetworkGateMiddleware + BubblewrapBackend (not by this function).
+    ``network=True`` declares the NETWORK capability. BubblewrapBackend reads
+    the request-local setting when it starts the process.
     """
 
     def execute(
@@ -19,11 +18,14 @@ def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
         timeout: int | None = None,
         network: bool = False,
     ) -> str:
-        del network  # Declared for the model / HITL; enforced via ContextVar.
-        if timeout is not None:
-            response = backend.execute(command, timeout=timeout)
-        else:
-            response = backend.execute(command)
+        token = set_execute_network(network)
+        try:
+            if timeout is not None:
+                response = backend.execute(command, timeout=timeout)
+            else:
+                response = backend.execute(command)
+        finally:
+            reset_execute_network(token)
         output = response.output or ""
         if response.exit_code not in (0, None):
             suffix = f"\n\nExit code: {response.exit_code}"
@@ -45,9 +47,3 @@ def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
             "Prefer ls/read_file/glob/grep/write_file for filesystem work."
         ),
     )
-
-
-def execute_args(tool_call: dict[str, Any] | None) -> dict[str, Any]:
-    if not tool_call or not isinstance(tool_call.get("args"), dict):
-        return {}
-    return dict(tool_call["args"])

@@ -60,8 +60,6 @@ class InteractionController:
                 declared.append("NETWORK")
             elif name in {"write_file", "edit_file", "delete"}:
                 declared.append(name.upper())
-            elif name == "send_email":
-                declared.append("EXTERNAL_SIDE_EFFECT")
         caps = ", ".join(dict.fromkeys(declared)) if declared else "declared capabilities"
         summary = "\n".join(lines)
         return cls(

@@ -23,7 +23,6 @@ class ToolCancelMiddleware(AgentMiddleware):
         ctx = self._controller.open_tool_context(tool_name=tool_name, tool_call_id=tool_call_id)
         tool = getattr(request, "tool", None)
         if tool is not None:
-            ctx._tool = tool  # noqa: SLF001 — optional Cancellable binding
             cancel = getattr(tool, "cancel", None)
             if callable(cancel):
                 ctx.register_callback(cancel)

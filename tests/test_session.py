@@ -5,9 +5,11 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
+from langgraph.checkpoint.memory import InMemorySaver
+import pytest
 
 from agent.runner import AgentRunner
-from agent.session import SessionStore, messages_to_transcript, workspace_state_path
+from agent.session import SessionStore, StopReason, messages_to_transcript, workspace_state_path
 from tests.conftest import scripted_model
 
 
@@ -24,7 +26,7 @@ def test_session_catalog_sorted_and_prefix_resolve(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions.sqlite3")
     first = store.create_session(title="alpha")
     second = store.create_session(title="beta")
-    store.touch(first.id, status="completed")
+    store.touch(first.id, last_run_status=StopReason.STOP)
     listed = store.list_sessions()
     assert [item.id for item in listed] == [first.id, second.id]
     assert store.resolve_prefix(first.id[:8]).id == first.id
@@ -32,6 +34,17 @@ def test_session_catalog_sorted_and_prefix_resolve(tmp_path: Path) -> None:
     store.create_session(session_id=first.id[:4] + "ffff")
     # Ambiguous shared prefix should not resolve.
     assert store.resolve_prefix(first.id[:4]) is None
+
+
+def test_runner_rejects_a_second_checkpointer_for_persistent_session(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="session store checkpointer"):
+            AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                        backend=StateBackend(), session_store=store,
+                        checkpointer=InMemorySaver())
+    finally:
+        store.close()
 
 
 def test_session_survives_process_restart(tmp_path: Path) -> None:
@@ -47,7 +60,7 @@ def test_session_survives_process_restart(tmp_path: Path) -> None:
     result = runner.invoke("hi")
     assert result.status == "completed"
     assert result.output == "hello from session"
-    store.touch(session_id, status="completed")
+    store.touch(session_id, last_run_status=StopReason.STOP)
     store.close()
 
     store2 = SessionStore(db)

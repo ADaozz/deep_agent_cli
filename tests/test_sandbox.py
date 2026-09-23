@@ -138,7 +138,7 @@ def test_protected_workspace_paths_are_read_only_for_file_backend(tmp_path: Path
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_sandbox_backend_adds_execute_as_thirteenth_tool(tmp_path: Path) -> None:
+def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
     config = replace(config_for(tmp_path), bwrap_path="/bin/true", protected_workspace_paths=())
     selected = select_backend(config, check=False)
     assert isinstance(selected.backend, SandboxBackendProtocol)
@@ -150,8 +150,6 @@ def test_sandbox_backend_adds_execute_as_thirteenth_tool(tmp_path: Path) -> None
     )
     names = graph_tool_names(prepared.graph)
     assert names == {
-        "lookup_docs",
-        "send_email",
         "handoff_to_human",
         "request_human_input",
         "ls",
@@ -164,7 +162,7 @@ def test_sandbox_backend_adds_execute_as_thirteenth_tool(tmp_path: Path) -> None
         "execute",
         "write_todos",
     }
-    assert len(names) == 13
+    assert len(names) == 11
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 

@@ -15,7 +15,11 @@ from agent.cli.app import CliApplication
 from agent.cli.interactions import InteractionController
 from agent.config import SandboxConfig
 from agent.factory import create_agent
+from agent.tools.examples import build_example_tools
 from agent.network import network_requested
+from agent.network import get_execute_network
+from agent.tools.execute import build_execute_tool
+from deepagents.backends.protocol import ExecuteResponse
 from agent.permission import (
     ASK_INTERRUPT_ON,
     PermissionMode,
@@ -39,7 +43,7 @@ def test_parse_permission_aliases() -> None:
 def test_interrupt_on_for_modes() -> None:
     ask = interrupt_on_for_mode(PermissionMode.ASK)
     assert ask is not None
-    assert "send_email" in ask
+    assert "send_email" not in ask
     assert ask["execute"] == {"allowed_decisions": ["approve", "reject"]}
     assert "when" not in ask["execute"]
     assert interrupt_on_for_mode(PermissionMode.ALLOW) == {}
@@ -58,6 +62,21 @@ def test_network_requested_truthy() -> None:
     assert not network_requested({})
 
 
+def test_execute_network_setting_is_scoped_to_one_call() -> None:
+    seen: list[bool] = []
+
+    class Backend:
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            seen.append(get_execute_network())
+            return ExecuteResponse(command, 0, False)
+
+    execute = build_execute_tool(Backend())  # type: ignore[arg-type]
+    assert execute.invoke({"command": "first", "network": True}) == "first"
+    assert execute.invoke({"command": "second"}) == "second"
+    assert seen == [True, False]
+    assert not get_execute_network()
+
+
 def test_runner_defaults_to_ask() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="ok")]),
@@ -67,6 +86,21 @@ def test_runner_defaults_to_ask() -> None:
     assert runner.permission_mode() is PermissionMode.ASK
     assert runner.prepared.interrupt_on == ASK_INTERRUPT_ON
     assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
+
+
+def test_custom_interrupt_mapping_is_applied() -> None:
+    prepared = create_agent(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "lookup-1", "name": "lookup_docs", "args": {"query": "x"}}]),
+            AIMessage(content="done"),
+        ]), backend=StateBackend(), extra_tools=build_example_tools(),
+        interrupt_on={"lookup_docs": True},
+    )
+    runner = AgentRunner(prepared=prepared)
+    assert prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+    waiting = runner.invoke("look up")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "lookup_docs"
 
 
 def test_set_permission_mode_rejected_while_busy() -> None:
@@ -226,20 +260,16 @@ def test_custom_rejects_allow_by_default(tmp_path: Path) -> None:
     assert runner.permission_mode() is PermissionMode.ASK
 
 
-def test_external_allow_prepared_rejected_without_rebuild() -> None:
-    prepared = create_agent(
-        model=scripted_model([AIMessage(content="ok")]),
-        backend=StateBackend(),
-        interrupt_on={},
-        skills=[],
-    )
-    assert prepared.execution_mode is ExecutionMode.CUSTOM
-    graph_id = id(prepared.graph)
-    interrupt_on = prepared.interrupt_on
+def test_custom_backend_rejects_allow_before_graph_is_exposed() -> None:
     with pytest.raises(ValueError, match="SANDBOXED"):
-        AgentRunner(prepared=prepared, thread_id="ext-allow")
-    assert id(prepared.graph) == graph_id
-    assert prepared.interrupt_on is interrupt_on
+        create_agent(model=scripted_model([AIMessage(content="ok")]),
+                     backend=StateBackend(), interrupt_on={}, skills=[])
+
+
+def test_custom_approval_cannot_disable_builtin_approval() -> None:
+    with pytest.raises(ValueError, match="write_file"):
+        create_agent(model=scripted_model([AIMessage(content="ok")]),
+                     backend=StateBackend(), interrupt_on={"write_file": False})
 
 
 def test_approval_ui_mentions_declared_network() -> None:

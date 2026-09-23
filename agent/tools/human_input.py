@@ -38,7 +38,6 @@ def _build_tool(name: str, description: str) -> BaseTool:
         fields: list | None = None,
         recommendation: dict | None = None,
         impact: list | None = None,
-        blocking: bool = True,
     ) -> str:
         payload = normalize_interaction_request(
             reason=reason,
@@ -50,7 +49,6 @@ def _build_tool(name: str, description: str) -> BaseTool:
             fields=fields,
             recommendation=recommendation,
             impact=impact,
-            blocking=blocking,
             interaction_id=str(uuid4()),
         )
         answer = interrupt(payload)

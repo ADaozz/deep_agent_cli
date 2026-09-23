@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -13,19 +13,22 @@ from agent.cli.state import CliState, MessageBlock, ToolBlock
 from agent.config import Settings
 from agent.config import ModelProfile
 from agent.runner import AgentRunner, RunEvent
+from agent.session import SessionStore
+from agent.tools.examples import build_example_tools
+from agent.factory import create_agent
 from tests.conftest import scripted_model
 
 
 def test_runner_emits_tool_lifecycle_without_changing_result() -> None:
     events: list[RunEvent] = []
-    runner = AgentRunner(
-        model=scripted_model([
+    prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[{
                 "id": "call-docs", "name": "lookup_docs", "args": {"query": "middleware"},
             }]),
             AIMessage(content="done"),
-        ]),
-        backend=StateBackend(),
+        ]), backend=StateBackend(), extra_tools=build_example_tools())
+    runner = AgentRunner(
+        prepared=prepared,
         thread_id="cli-events",
     )
     result = runner.invoke("look it up", on_event=events.append)
@@ -38,6 +41,66 @@ def test_runner_emits_tool_lifecycle_without_changing_result() -> None:
     assert "assistant_completed" in event_types
     tool_start = next(event for event in events if event.type == "tool_started")
     assert tool_start.tool_call_id == "call-docs"
+
+
+def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path) -> None:
+    store = SessionStore(tmp_path / "plan.sqlite3")
+    first_plan = [
+        {"content": "Inspect files", "status": "in_progress"},
+        {"content": "Run tests", "status": "pending"},
+    ]
+    updated_plan = [
+        {"content": "Inspect files", "status": "completed"},
+        {"content": "Run tests", "status": "in_progress"},
+    ]
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "todo-1", "name": "write_todos", "args": {"todos": first_plan}}]),
+        AIMessage(content="", tool_calls=[{"id": "todo-2", "name": "write_todos", "args": {"todos": updated_plan}}]),
+        AIMessage(content="working"),
+    ]), backend=StateBackend(), session_store=store)
+    events: list[RunEvent] = []
+    assert runner.invoke("plan the work", on_event=events.append).status == "completed"
+    assert [event.result for event in events if event.type == "todos_updated"] == [first_plan, updated_plan]
+    assert all(event.name != "write_todos" for event in events if event.type.startswith("tool_"))
+    live_state = CliState()
+    for event in events:
+        live_state.apply(event)
+    assert live_state.todos == updated_plan
+    snapshot = runner.load_session(runner.thread_id)
+    assert snapshot is not None
+    assert snapshot.todos == updated_plan
+    assert all(block.name != "write_todos" for block in snapshot.transcript if block.kind == "tool")
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app._apply_session_snapshot(snapshot)
+        rendered = render_transcript(app.state, 80)
+        assert rendered.count("Plan") == 1
+        assert "✓ Inspect files" in rendered
+        assert "● Run tests" in rendered
+        assert "○ Run tests" not in rendered
+    thread = runner.thread_id
+    store.close()
+    reopened = SessionStore(tmp_path / "plan.sqlite3")
+    resumed = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                          backend=StateBackend(), session_store=reopened)
+    assert resumed.switch_session(thread).todos == updated_plan
+    reopened.close()
+
+
+def test_plan_ignores_tool_calls_and_update_envelopes() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+    events: list[RunEvent] = []
+    plan = [{"content": "Inspect files", "status": "in_progress"}]
+    runner._emit_update_events({
+        "model": {"messages": [AIMessage(content="", tool_calls=[{
+            "id": "todo-1", "name": "write_todos", "args": {"todos": plan},
+        }])]},
+    }, events.append)
+    runner._emit_update_events({
+        "tools": {"messages": [ToolMessage(content="ok", tool_call_id="todo-1", name="write_todos")]},
+    }, events.append)
+    runner._emit_update_events({"tools": {"todos": plan}}, events.append)
+    assert not events
 
 
 def test_cli_state_updates_streaming_block_in_place() -> None:
@@ -100,7 +163,7 @@ def test_human_interaction_collects_select_and_text_fields() -> None:
 
 
 def test_approval_defaults_to_reject_and_escape_is_safe() -> None:
-    controller = InteractionController.approval([{"name": "send_email", "args": {"to": "a@b.com"}}])
+    controller = InteractionController.approval([{"name": "write_file", "args": {"file_path": "/workspace/note.txt"}}])
     assert controller.accept() is True
     assert controller.decision()["type"] == "reject"
     assert controller.decision(cancelled=True)["type"] == "reject"

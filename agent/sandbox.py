@@ -564,11 +564,3 @@ def _kill_process_group_pid(pid: int | None) -> None:
         os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
-
-
-def _truncate_output(output: str, limit: int) -> tuple[str, bool]:
-    encoded = output.encode("utf-8")
-    if len(encoded) <= limit:
-        return output, False
-    shortened = encoded[:limit].decode("utf-8", errors="ignore")
-    return f"{shortened}\n\n... Output truncated at {limit} bytes.", True

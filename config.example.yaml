@@ -4,6 +4,12 @@
 #
 # Override path with DEEP_AGENT_CONFIG=/path/to/config.yaml
 
+agent:
+  # Long-term user instructions appended after the built-in identity.
+  # instructions: |
+  #   优先使用中文回答。
+  instructions: null
+
 llm:
   # Active profile id from models below. Flat llm.model/api_key/base_url still works.
   default: qwen-plus

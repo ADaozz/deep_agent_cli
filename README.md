@@ -2,7 +2,7 @@
 
 一个面向本地开发环境的 AI Coding Agent。
 
-在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、流式输出思考与回答，并按工作区记住会话。默认命令无网；写文件、删文件、发邮件、声明联网时会先问你。
+在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批。自定义副作用工具需要显式配置审批规则。
 
 ![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/os-Linux%20%2F%20WSL2-FCC624?logo=linux&logoColor=black)
@@ -22,14 +22,16 @@
 
 - **工作区工具** — `ls` / `read` / `write` / `edit` / `glob` / `grep` / `delete`，路径与 `execute` 都落在 `/workspace`
 - **沙箱执行** — 默认无网络；`execute(network=true)` 经审批后，这一次才联网
-- **权限模式** — `ask` 审批全部 `execute` 与副作用工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
+- **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
 - **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
 - **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
+- **后续任务** — `Alt+Enter` 排入 Runtime 队列，当前任务完成后由 `AgentRunner` 接续执行
 - **多模型** — YAML profile + `/model` / `Ctrl+P`；切换重建 graph，会话保留
 - **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
 - **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
 - **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
+- **任务规划** — `write_todos` 使用上游 TodoListMiddleware 更新 LangGraph 的 `todos` state；TUI 从 `values` 状态流替换当前计划，从 checkpoint 恢复计划，不保留历史版本的工具块
 - **Skills** — 读取工作区 `skills/*/SKILL.md`
 
 `/compact` 显示 unavailable，只表示没有「立刻手动压缩」接口。自动压缩已经在跑，不要再叠一层 `SummarizationMiddleware`，否则会压两次。
@@ -146,6 +148,8 @@ result = runner.invoke("列出 /workspace 下的文件")
 
 `on_event` 不含 ANSI 和终端宽度，HTTP / SSE 可以复用同一条 Runtime。
 
+默认工具包括文件、沙箱命令、人工输入和 `write_todos`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用。
+
 传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
 
 当前 Qwen profile 没有 `max_input_tokens`，走 Deep Agents 的保守默认：约 170,000 tokens 触发、保留最近 6 条消息、旧工具参数在约 20 条消息时预裁剪。被挤掉的对话会写到 backend 上的会话历史文件，而不是直接丢掉。
@@ -165,8 +169,8 @@ AgentRunner          流式、中断、恢复、session、附件
 create_deep_agent()  LangGraph 图（不 Fork 上游）
    │
    ├── Model         OpenAI 兼容 / Qwen Responses
-   ├── Tools         文件、execute、HITL、示例业务工具
-   ├── Middleware    暂停、转向、取消、联网门、重试
+   ├── Tools         文件、execute、人工输入、write_todos
+   ├── Middleware    暂停、转向、取消、模型重试
    │                 + Deep Agents 默认栈（含自动摘要）
    └── Storage       SQLite checkpoint + session catalog
           │
@@ -210,6 +214,7 @@ config.example.yaml
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
+| `agent.instructions` | `null` | 追加到默认身份之后的长期说明；支持 YAML 多行文本 |
 | `llm.default` | 首个 profile | 启动时的模型 |
 | `llm.models.<id>.model` | — | OpenAI 兼容模型名 |
 | `llm.models.<id>.provider` | `qwen-responses` | `qwen-responses` 或 `openai-compatible` |
@@ -226,7 +231,9 @@ config.example.yaml
 
 `qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 使用普通 `ChatOpenAI`，固定走 Chat Completions。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
 
-每次构图都会按默认身份、长期 instructions、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮停止原因。`/resume` 用这些元数据恢复设置，再从 checkpoint 恢复上下文。取消或失败后恢复不会自动重跑工具。
+每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
+
+LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行状态。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。
 
 沙箱默认只挂当前工作区，`skills/` 只读，宿主家目录不可见。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 

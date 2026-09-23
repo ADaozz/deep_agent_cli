@@ -24,6 +24,8 @@ def render_transcript(
 ) -> str:
     renderables: list[Any] = []
     renderables.extend(_header())
+    if state.todos:
+        renderables.append(_todos(state.todos))
     for block in state.blocks:
         if isinstance(block, MessageBlock):
             renderables.extend(_message(block, state.thinking_collapsed))
@@ -74,6 +76,18 @@ def _header() -> list[Any]:
     items: list[Any] = [title, hints]
     items.extend([Rule(style="#303030"), Text("")])
     return items
+
+
+def _todos(todos: list[dict[str, str]]) -> Any:
+    lines: list[Text] = [Text("Plan", style="bold bright_cyan")]
+    for item in todos:
+        status = item.get("status")
+        symbol, style = {
+            "completed": ("✓", "green"),
+            "in_progress": ("●", "yellow"),
+        }.get(status, ("○", "dim"))
+        lines.append(Text.assemble((f"{symbol} ", style), (str(item.get("content") or ""), style)))
+    return Padding(Group(*lines), (0, 1, 1, 1), style="on #1e2a30")
 
 
 def _tool(block: ToolBlock, expanded: bool) -> Any:

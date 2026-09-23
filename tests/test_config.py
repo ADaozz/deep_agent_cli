@@ -23,6 +23,9 @@ def test_load_config_yaml(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         """
+agent:
+  instructions: |
+    优先使用中文回答。
 llm:
   model: demo-model
   api_key: secret
@@ -53,6 +56,7 @@ paths:
 
     settings = Settings.load(path)
     assert settings.llm_default == "default"
+    assert settings.agent_instructions == "优先使用中文回答。\n"
     assert settings.llm_model == "demo-model"
     assert settings.llm_api_key == "secret"
     assert settings.llm_base_url == "http://example.test/v1"
@@ -79,6 +83,13 @@ def test_deep_agent_config_env_override(tmp_path: Path, monkeypatch: pytest.Monk
     settings = Settings.load(base_dir=tmp_path / "other")
     assert settings.llm_model == "from-env"
     assert resolve_config_path(base_dir=tmp_path / "other") == path.resolve()
+
+
+def test_agent_instructions_rejects_non_text(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent:\n  instructions: [not, text]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="agent.instructions"):
+        Settings.load(path)
 
 
 def test_workspace_dot_follows_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

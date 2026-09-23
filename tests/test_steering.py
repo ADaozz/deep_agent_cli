@@ -7,6 +7,8 @@ from deepagents.backends import StateBackend
 from agent.control import RunController
 from agent.middleware.steering import SteeringMiddleware
 from agent.runner import AgentRunner
+from agent.factory import create_agent
+from agent.tools.examples import build_example_tools
 from tests.conftest import scripted_model
 
 
@@ -29,14 +31,14 @@ def test_steering_middleware_consumes_one_message_per_boundary() -> None:
 
 def test_steer_during_tools_lands_after_tool_messages() -> None:
     events: list[str] = []
-    runner = AgentRunner(
-        model=scripted_model([
+    prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[{
                 "id": "call-1", "name": "lookup_docs", "args": {"query": "x"},
             }]),
             AIMessage(content="after tools"),
-        ]),
-        backend=StateBackend(),
+        ]), backend=StateBackend(), extra_tools=build_example_tools())
+    runner = AgentRunner(
+        prepared=prepared,
         thread_id="steer-tools",
     )
 
@@ -70,6 +72,21 @@ def test_follow_up_not_consumed_as_steering() -> None:
     controller.follow_up("later")
     assert controller.pop_steering() is None
     assert controller.pop_follow_up() == "later"
+
+
+def test_runner_consumes_follow_up_without_tui() -> None:
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="first reply"), AIMessage(content="second reply"),
+    ]), backend=StateBackend())
+    runner.follow_up("second task")
+    result = runner.invoke("first task")
+    assert result.status == "completed"
+    assert result.output == "second reply"
+    assert runner.control.pending_follow_up_count() == 0
+    messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+    assert [message.content for message in messages if isinstance(message, HumanMessage)] == [
+        "first task", "second task",
+    ]
 
 
 def test_defer_steering_during_interaction() -> None:

@@ -45,6 +45,19 @@ def test_switch_model_keeps_thread_and_rebuilds_graph() -> None:
     assert runner.current_model().model == "model-b"
 
 
+def test_switch_model_keeps_in_memory_checkpoint() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="remembered")]),
+        backend=StateBackend(), settings=_settings_two_models(),
+    )
+    assert runner.invoke("keep this").status == "completed"
+    saver = runner.prepared.checkpointer
+    runner.switch_model("beta")
+    assert runner.prepared.checkpointer is saver
+    state = runner.prepared.graph.get_state(runner._thread_config())
+    assert [message.content for message in state.values["messages"]][-2:] == ["keep this", "remembered"]
+
+
 def test_switch_model_rejected_while_busy() -> None:
     settings = _settings_two_models()
     runner = AgentRunner(

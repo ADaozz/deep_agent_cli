@@ -24,15 +24,13 @@ from agent.attachments import (
 )
 
 SessionStatus = Literal[
-    "running", "completed", "waiting", "cancelled", "failed", "interrupted",
+    "running", "completed", "waiting", "cancelled", "failed",
 ]
 
 
 class StopReason(StrEnum):
     PENDING = "pending"
     STOP = "stop"
-    LENGTH = "length"
-    TOOL_USE = "tool_use"
     ERROR = "error"
     ABORTED = "aborted"
     DEFERRED = "deferred"
@@ -194,7 +192,6 @@ class SessionStore:
         self,
         session_id: str,
         *,
-        status: SessionStatus | None = None,
         title: str | None = None,
         model_id: str | None = None,
         permission_mode: str | None = None,
@@ -208,7 +205,7 @@ class SessionStore:
             if row is None:
                 return
             new_title = title if title is not None else row[0]
-            new_status = status if status is not None else row[1]
+            new_status = _status_for_reason(last_run_status) if last_run_status is not None else row[1]
             self._conn.execute(
                 "UPDATE session_catalog SET title = ?, updated_at = ?, status = ?, model_id = ?, permission_mode = ?, last_run_status = ? WHERE id = ?",
                 (new_title, now, new_status, model_id if model_id is not None else row[2],
@@ -254,20 +251,41 @@ class SessionStore:
 
 
 def _session_info(row: Any) -> SessionInfo:
-    raw_reason = row[7] or StopReason.PENDING.value
+    legacy_reasons = {
+        "completed": StopReason.STOP,
+        "cancelled": StopReason.ABORTED,
+        "failed": StopReason.ERROR,
+        "waiting": StopReason.DEFERRED,
+        "interrupted": StopReason.DEFERRED,
+        "length": StopReason.STOP,
+        "tool_use": StopReason.STOP,
+    }
+    raw_reason = row[7] or row[4]
+    raw_reason = legacy_reasons.get(raw_reason, raw_reason)
     try:
         reason = StopReason(raw_reason)
     except ValueError:
         reason = StopReason.PENDING
     return SessionInfo(
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
-        status=row[4], model_id=row[5], permission_mode=row[6], last_run_status=reason,
+        status=_status_for_reason(reason), model_id=row[5], permission_mode=row[6], last_run_status=reason,
     )
+
+
+def _status_for_reason(reason: StopReason) -> SessionStatus:
+    return {
+        StopReason.PENDING: "running",
+        StopReason.STOP: "completed",
+        StopReason.ERROR: "failed",
+        StopReason.ABORTED: "cancelled",
+        StopReason.DEFERRED: "waiting",
+    }[reason]
 
 
 def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
+    todo_call_ids: set[str] = set()
     for message in messages:
         if isinstance(message, HumanMessage):
             blocks.append(TranscriptBlock(
@@ -281,6 +299,9 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
+                if call.get("name") == "write_todos":
+                    todo_call_ids.add(str(call.get("id") or ""))
+                    continue
                 blocks.append(TranscriptBlock(
                     kind="tool",
                     tool_call_id=str(call.get("id") or ""),
@@ -291,6 +312,8 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
         elif isinstance(message, ToolMessage):
             content = _message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
+            if getattr(message, "name", None) == "write_todos" or tool_call_id in todo_call_ids:
+                continue
             status = str(getattr(message, "status", "") or "")
             is_error = status == "error" or content.lower().startswith("error")
             updated = False

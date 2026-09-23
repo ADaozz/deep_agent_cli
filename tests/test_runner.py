@@ -1,9 +1,11 @@
 import json
 
 from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
 
 from agent.factory import create_agent
+from agent.tools.examples import build_example_tools
 from agent.permission import ASK_INTERRUPT_ON
 from agent.runner import AgentRunner
 from tests.conftest import graph_tool_names, scripted_model
@@ -11,28 +13,28 @@ from tests.conftest import graph_tool_names, scripted_model
 
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
-    assert prepared.exposed_tool_names == ["lookup_docs", "send_email"]
+    assert prepared.exposed_tool_names == []
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
     assert "Coding Agent CLI" in prepared.system_prompt
     names = graph_tool_names(prepared.graph)
     assert "handoff_to_human" in names
     assert "request_human_input" in names
-    assert "lookup_docs" in names
-    assert "send_email" in names
+    assert "lookup_docs" not in names
+    assert "send_email" not in names
     assert "write_todos" in names
     assert "execute" not in names
-    assert len(names) == 12
+    assert len(names) == 10
 
 
 def test_allow_tool_runs_locally() -> None:
-    runner = AgentRunner(
-        model=scripted_model([
+    prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[{
                 "id": "call-1", "name": "lookup_docs", "args": {"query": "middleware"},
             }]),
             AIMessage(content="中间件栈已说明。"),
-        ]),
-        backend=StateBackend(),
+        ]), backend=StateBackend(), extra_tools=build_example_tools())
+    runner = AgentRunner(
+        prepared=prepared,
         thread_id="allow",
     )
     result = runner.invoke("查 middleware")
@@ -41,25 +43,25 @@ def test_allow_tool_runs_locally() -> None:
 
 
 def test_confirm_tool_interrupts_then_resumes() -> None:
-    runner = AgentRunner(
-        model=scripted_model([
+    prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[{
-                "id": "call-mail",
-                "name": "send_email",
-                "args": {"to": "a@b.com", "subject": "hi", "body": "hello"},
+                "id": "call-write",
+                "name": "write_file",
+                "args": {"file_path": "/workspace/note.txt", "content": "hello"},
             }]),
-            AIMessage(content="邮件已发送。"),
-        ]),
-        backend=StateBackend(),
+            AIMessage(content="写入完成。"),
+        ]), backend=StateBackend())
+    runner = AgentRunner(
+        prepared=prepared,
         thread_id="confirm",
     )
-    waiting = runner.invoke("发一封邮件")
+    waiting = runner.invoke("写入 note.txt")
     assert waiting.status == "waiting_confirmation"
-    assert waiting.pending_tool_calls[0]["name"] == "send_email"
-    assert waiting.pending_tool_calls[0]["toolCallId"] == "call-mail"
-    resumed = runner.resume({"type": "approve", "toolCallId": "call-mail"})
+    assert waiting.pending_tool_calls[0]["name"] == "write_file"
+    assert waiting.pending_tool_calls[0]["toolCallId"] == "call-write"
+    resumed = runner.resume({"type": "approve", "toolCallId": "call-write"})
     assert resumed.status == "completed"
-    assert resumed.output == "邮件已发送。"
+    assert resumed.output == "写入完成。"
 
 
 def test_handoff_to_human_interrupts_then_resumes() -> None:
@@ -139,3 +141,53 @@ def test_pause_interrupts_at_safe_point_then_continues() -> None:
     resumed = runner.resume({"type": "continue"})
     assert resumed.status == "completed"
     assert resumed.output == "暂停后继续完成。"
+
+
+def test_prepared_runner_uses_its_pause_control() -> None:
+    prepared = create_agent(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared)
+    assert runner.control is prepared.run_controller
+    runner.request_pause()
+    assert runner.invoke("start").status == "paused"
+    assert runner.resume({"type": "continue"}).output == "done"
+
+
+def test_tool_error_does_not_repeat_a_possible_side_effect() -> None:
+    attempts = 0
+
+    def update_record() -> str:
+        """Update a record once."""
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("response lost after update")
+
+    prepared = create_agent(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "update-1", "name": "update_record", "args": {}}]),
+            AIMessage(content="I cannot verify the update"),
+        ]),
+        backend=StateBackend(),
+        extra_tools=[StructuredTool.from_function(update_record)],
+    )
+    result = AgentRunner(prepared=prepared).invoke("update")
+    assert result.status == "failed"
+    assert "response lost" in result.error
+    assert attempts == 1
+
+
+def test_failed_run_arms_recovery_for_the_same_runner() -> None:
+    def fail_once() -> str:
+        """Simulate a failed tool."""
+        raise TimeoutError("unknown outcome")
+
+    prepared = create_agent(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "fail-1", "name": "fail_once", "args": {}}]),
+            AIMessage(content="continued"),
+        ]), backend=StateBackend(), extra_tools=[StructuredTool.from_function(fail_once)],
+    )
+    runner = AgentRunner(prepared=prepared)
+    assert runner.invoke("first").status == "failed"
+    assert runner._resume_context is not None
+    assert runner.invoke("inspect the state").output == "continued"
+    assert runner._resume_context is None

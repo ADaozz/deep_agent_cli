@@ -29,9 +29,9 @@ class RunController:
         self._steering: deque[QueuedMessage] = deque()
         self._follow_ups: deque[QueuedMessage] = deque()
         self._cancel_requested = False
+        self._pause_requested = False
         self._cancel_event = threading.Event()
         self._run_control: RunControl | None = None
-        self._run_token: str = ""
         self._active_tools: dict[str, ToolCancelContext] = {}
         self._defer_steering = False
         self._on_control_event = on_control_event
@@ -40,7 +40,6 @@ class RunController:
         with self._lock:
             self._cancel_requested = False
             self._cancel_event.clear()
-            self._run_token = str(uuid4())
             self._run_control = RunControl()
             self._active_tools.clear()
             return self._run_control
@@ -48,7 +47,6 @@ class RunController:
     def end_run(self) -> None:
         with self._lock:
             self._run_control = None
-            self._run_token = ""
             self._active_tools.clear()
 
     @property
@@ -57,13 +55,25 @@ class RunController:
             return self._run_control
 
     @property
-    def run_token(self) -> str:
-        with self._lock:
-            return self._run_token
-
-    @property
     def cancel_requested(self) -> bool:
         return self._cancel_event.is_set()
+
+    @property
+    def pause_requested(self) -> bool:
+        with self._lock:
+            return self._pause_requested
+
+    def request_pause(self) -> None:
+        with self._lock:
+            self._pause_requested = True
+
+    def clear_pause(self) -> None:
+        with self._lock:
+            self._pause_requested = False
+
+    def set_event_handler(self, handler: EventEmitter | None) -> None:
+        with self._lock:
+            self._on_control_event = handler
 
     def set_defer_steering(self, value: bool) -> None:
         with self._lock:
@@ -94,10 +104,6 @@ class RunController:
         self._emit("steering_applied", {"content": message.text, "id": message.id})
         return message.text
 
-    def has_pending_steering(self) -> bool:
-        with self._lock:
-            return bool(self._steering) and not self._defer_steering
-
     def pending_steering_count(self) -> int:
         with self._lock:
             return len(self._steering)
@@ -124,6 +130,7 @@ class RunController:
         with self._lock:
             self._cancel_requested = True
             self._cancel_event.set()
+            self._pause_requested = False
             control = self._run_control
             tools = list(self._active_tools.values())
         self._emit("run_cancelling", {})
@@ -142,7 +149,6 @@ class RunController:
 
     def open_tool_context(self, *, tool_name: str, tool_call_id: str) -> ToolCancelContext:
         ctx = ToolCancelContext(
-            run_token=self.run_token,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             cancel_event=self._cancel_event,

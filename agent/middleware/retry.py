@@ -1,6 +1,4 @@
-# Technical retry: reuse LangChain ModelRetryMiddleware / ToolRetryMiddleware
-# for transient errors (timeout / 503). A user-triggered "run again" is a
-# checkpoint resume, not this middleware.
+# Retry transient model transport errors. Tool calls are never retried here.
 from langchain.agents.middleware.model_retry import default_retry_on
 
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
