@@ -22,6 +22,7 @@ from agent.attachments import (
     find_attachment_storage_keys,
     refs_from_message,
 )
+from agent.stream import message_text, reasoning_text, visible_text
 
 SessionStatus = Literal[
     "running", "completed", "waiting", "cancelled", "failed",
@@ -41,10 +42,9 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     title TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    status TEXT NOT NULL,
     model_id TEXT,
     permission_mode TEXT,
-    last_run_status TEXT
+    last_run_status TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
     ON session_catalog (updated_at DESC);
@@ -112,11 +112,7 @@ class SessionStore:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.executescript(_CATALOG_DDL)
-        existing_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
-        for name in ("model_id", "permission_mode", "last_run_status"):
-            if name not in existing_columns:
-                self._conn.execute(f"ALTER TABLE session_catalog ADD COLUMN {name} TEXT")
-        self._conn.commit()
+        self._migrate_catalog()
         if self.path.exists():
             try:
                 os.chmod(self.path, 0o600)
@@ -143,6 +139,48 @@ class SessionStore:
     def close(self) -> None:
         self.attachment_store.close()
         self._conn.close()
+
+    def _migrate_catalog(self) -> None:
+        # Hold a write reservation while checking the schema so concurrent
+        # processes cannot both decide to migrate the same workspace database.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
+            if "status" not in columns:
+                self._conn.commit()
+                return
+            model = "model_id" if "model_id" in columns else "NULL"
+            permission = "permission_mode" if "permission_mode" in columns else "NULL"
+            last = "last_run_status" if "last_run_status" in columns else "NULL"
+            reason = (
+                f"CASE WHEN {last} IN ('pending', 'stop', 'error', 'aborted', 'deferred') THEN {last} "
+                "WHEN status = 'completed' OR status IN ('length', 'tool_use') THEN 'stop' "
+                "WHEN status = 'cancelled' THEN 'aborted' "
+                "WHEN status = 'failed' THEN 'error' "
+                "WHEN status IN ('waiting', 'interrupted') THEN 'deferred' "
+                "ELSE 'pending' END"
+            )
+            self._conn.execute(
+                "CREATE TABLE session_catalog_new ("
+                "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL, model_id TEXT, permission_mode TEXT, "
+                "last_run_status TEXT NOT NULL)"
+            )
+            self._conn.execute(
+                "INSERT INTO session_catalog_new "
+                "(id, title, created_at, updated_at, model_id, permission_mode, last_run_status) "
+                f"SELECT id, title, created_at, updated_at, {model}, {permission}, {reason} "
+                "FROM session_catalog"
+            )
+            self._conn.execute("DROP TABLE session_catalog")
+            self._conn.execute("ALTER TABLE session_catalog_new RENAME TO session_catalog")
+            self._conn.execute(
+                "CREATE INDEX session_catalog_updated_idx ON session_catalog (updated_at DESC)"
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def attachment_storage_keys(self) -> set[str]:
         """Return references from every retained checkpoint and pending write."""
@@ -181,8 +219,8 @@ class SessionStore:
         )
         with self.checkpointer.lock:
             self._conn.execute(
-                "INSERT INTO session_catalog (id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (info.id, info.title, info.created_at.isoformat(), info.updated_at.isoformat(), info.status,
+                "INSERT INTO session_catalog (id, title, created_at, updated_at, model_id, permission_mode, last_run_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (info.id, info.title, info.created_at.isoformat(), info.updated_at.isoformat(),
                  info.model_id, info.permission_mode, info.last_run_status.value),
             )
             self._conn.commit()
@@ -200,24 +238,23 @@ class SessionStore:
         now = _utc_now().isoformat()
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT title, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?", (session_id,),
+                "SELECT title, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?", (session_id,),
             ).fetchone()
             if row is None:
                 return
             new_title = title if title is not None else row[0]
-            new_status = _status_for_reason(last_run_status) if last_run_status is not None else row[1]
             self._conn.execute(
-                "UPDATE session_catalog SET title = ?, updated_at = ?, status = ?, model_id = ?, permission_mode = ?, last_run_status = ? WHERE id = ?",
-                (new_title, now, new_status, model_id if model_id is not None else row[2],
-                 permission_mode if permission_mode is not None else row[3],
-                 last_run_status.value if last_run_status is not None else row[4], session_id),
+                "UPDATE session_catalog SET title = ?, updated_at = ?, model_id = ?, permission_mode = ?, last_run_status = ? WHERE id = ?",
+                (new_title, now, model_id if model_id is not None else row[1],
+                 permission_mode if permission_mode is not None else row[2],
+                 last_run_status.value if last_run_status is not None else row[3], session_id),
             )
             self._conn.commit()
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status "
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status "
                 "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -226,7 +263,7 @@ class SessionStore:
     def get(self, session_id: str) -> SessionInfo | None:
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -242,7 +279,7 @@ class SessionStore:
             return exact
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, status, model_id, permission_mode, last_run_status FROM session_catalog WHERE id LIKE ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status FROM session_catalog WHERE id LIKE ?",
                 (f"{prefix}%",),
             ).fetchall()
         if len(rows) != 1:
@@ -251,24 +288,13 @@ class SessionStore:
 
 
 def _session_info(row: Any) -> SessionInfo:
-    legacy_reasons = {
-        "completed": StopReason.STOP,
-        "cancelled": StopReason.ABORTED,
-        "failed": StopReason.ERROR,
-        "waiting": StopReason.DEFERRED,
-        "interrupted": StopReason.DEFERRED,
-        "length": StopReason.STOP,
-        "tool_use": StopReason.STOP,
-    }
-    raw_reason = row[7] or row[4]
-    raw_reason = legacy_reasons.get(raw_reason, raw_reason)
     try:
-        reason = StopReason(raw_reason)
+        reason = StopReason(row[6])
     except ValueError:
         reason = StopReason.PENDING
     return SessionInfo(
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
-        status=_status_for_reason(reason), model_id=row[5], permission_mode=row[6], last_run_status=reason,
+        status=_status_for_reason(reason), model_id=row[4], permission_mode=row[5], last_run_status=reason,
     )
 
 
@@ -290,12 +316,12 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
         if isinstance(message, HumanMessage):
             blocks.append(TranscriptBlock(
                 kind="user",
-                content=_message_text(message),
+                content=message_text(message),
                 attachments=refs_from_message(message),
             ))
         elif isinstance(message, AIMessage):
-            thinking = _reasoning_text(message)
-            text = _visible_text(message)
+            thinking = reasoning_text(message)
+            text = visible_text(message)
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
@@ -310,7 +336,7 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     status="running",
                 ))
         elif isinstance(message, ToolMessage):
-            content = _message_text(message)
+            content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             if getattr(message, "name", None) == "write_todos" or tool_call_id in todo_call_ids:
                 continue
@@ -334,47 +360,3 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     status="error" if is_error else "completed",
                 ))
     return blocks
-
-
-def _message_text(message: BaseMessage) -> str:
-    text = getattr(message, "text", None)
-    if isinstance(text, str) and text:
-        return text
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-        elif isinstance(block, str):
-            parts.append(block)
-    return "".join(parts)
-
-
-def _reasoning_text(message: AIMessage) -> str:
-    additional = getattr(message, "additional_kwargs", None) or {}
-    reasoning = additional.get("reasoning_content") or additional.get("reasoning")
-    if isinstance(reasoning, str):
-        return reasoning
-    content = getattr(message, "content", "")
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") in {"reasoning", "thinking"}:
-                parts.append(str(block.get("text") or block.get("reasoning") or ""))
-        return "".join(parts)
-    return ""
-
-
-def _visible_text(message: AIMessage) -> str:
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-        elif isinstance(block, str):
-            parts.append(block)
-    return "".join(parts)

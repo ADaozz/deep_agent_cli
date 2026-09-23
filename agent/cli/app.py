@@ -47,6 +47,7 @@ from agent.cli.interactions import InteractionController
 from agent.cli.rendering import render_interaction, render_transcript
 from agent.cli.selection import SelectableFormattedTextControl
 from agent.cli.state import CliState
+from agent.config import require_keybindings_outside_workspace
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -114,6 +115,10 @@ class CliApplication:
         output: Any = None,
     ) -> None:
         self.runner = runner
+        if config_dir is not None:
+            sandbox = runner.settings.sandbox if runner.settings is not None else runner._sandbox_config
+            workspace = sandbox.workspace if sandbox is not None else Path.cwd()
+            require_keybindings_outside_workspace(config_dir, workspace)
         _register_terminal_sequences()
         self.state = CliState()
         self.commands = command_table()
@@ -300,9 +305,13 @@ class CliApplication:
         status = info.status if info else "unknown"
         stop_reason = info.last_run_status.value if info else "unknown"
         title = info.title if info else ""
+        created_at = info.created_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
+        updated_at = info.updated_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         self.state.add_system(
             f"Session: {self.runner.thread_id}\n"
             f"Title: {title}\n"
+            f"Created: {created_at}\n"
+            f"Updated: {updated_at}\n"
             f"Status: {status}\n"
             f"Last run: {stop_reason}\n"
             f"{model_line}"
@@ -314,7 +323,12 @@ class CliApplication:
         if self.state.running:
             self.set_status("Cancel the active run before starting a new session")
             return
-        info = self.runner.new_session()
+        self._restore_queued_to_editor(self.buffer)
+        try:
+            info = self.runner.new_session()
+        except RuntimeError as exc:
+            self.state.add_system(str(exc), error=True)
+            return
         self.state.clear()
         self.state.attachments.clear()
         self.transcript_control.clear_selection()
@@ -331,6 +345,7 @@ class CliApplication:
             return
         try:
             if arg.strip():
+                self._restore_queued_to_editor(self.buffer)
                 snapshot = self.runner.switch_session(arg.strip())
             else:
                 sessions = self.runner.list_sessions(limit=20)
@@ -341,6 +356,7 @@ class CliApplication:
                     {
                         "value": item.id,
                         "label": f"{item.id[:8]} · {item.last_run_status.value} · {item.title[:40]}",
+                        "right_label": item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
                     }
                     for item in sessions
                 ]
@@ -380,7 +396,7 @@ class CliApplication:
         profiles = self.runner.list_models()
         if not profiles:
             self.state.add_system(
-                "/model is unavailable: configure llm.models in config.yaml",
+                "/model is unavailable: configure llm.models in the agent config",
                 error=True,
             )
             return
@@ -529,7 +545,7 @@ class CliApplication:
         profiles = self.runner.list_models()
         if len(profiles) < 2:
             if not profiles:
-                self.set_status("No models configured in config.yaml")
+                self.set_status("No models configured in the agent config")
             else:
                 current = self.runner.current_model()
                 label = current.model if current else profiles[0].model
@@ -947,9 +963,13 @@ class CliApplication:
                 if result.status == "failed" and image_refs:
                     self.state.attachments[:] = image_refs
             else:
-                result = await self._run_blocking(
-                    self.runner.resume, resume, on_event=self._on_event_thread,
-                )
+                try:
+                    result = await self._run_blocking(
+                        self.runner.resume, resume, on_event=self._on_event_thread,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._apply_event(RunEvent(type="run_failed", content=str(exc)))
+                    return
             self._handle_result(result)
 
         self._run_task = asyncio.create_task(work())
@@ -1120,6 +1140,7 @@ class CliApplication:
                 self.state.add_system("No session selected", error=True)
                 return
             try:
+                self._restore_queued_to_editor(self.buffer)
                 snapshot = self.runner.switch_session(session_id)
             except (KeyError, RuntimeError) as exc:
                 self.state.add_system(str(exc), error=True)

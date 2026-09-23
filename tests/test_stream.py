@@ -1,7 +1,8 @@
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 
-from agent.stream import StreamDeltaCallback, append_buf, reasoning_text, visible_text
+from agent.stream import StreamDeltaCallback, reasoning_text, visible_text
+from agent.session import messages_to_transcript
 
 
 def test_reasoning_from_kwargs_and_think_tags() -> None:
@@ -23,9 +24,25 @@ def test_reasoning_from_content_blocks() -> None:
     assert visible_text(message) == "需要补充信息。"
 
 
-def test_append_buf() -> None:
-    assert append_buf("hel", "hello") == "hello"
-    assert append_buf("hello", " world") == "hello world"
+def test_restored_assistant_uses_the_live_content_parser() -> None:
+    for message in (
+        AIMessage(content="<think>先想</think>答案"),
+        AIMessage(content=[
+            {"type": "reasoning", "summary": [{"text": "先想"}]},
+            {"type": "text", "text": "答案"},
+        ]),
+    ):
+        restored = messages_to_transcript([message])[0]
+        assert (restored.content, restored.thinking) == ("答案", "先想")
+
+
+def test_stream_preserves_whitespace_and_repeated_chunks() -> None:
+    events: list[tuple[str, str]] = []
+    callback = StreamDeltaCallback(lambda kind, text: events.append((kind, text)))
+    callback.on_llm_start({})
+    for part in ("ha", "ha", " ", "def f():", "\n", "    ", "return 1"):
+        callback.on_llm_new_token(part, chunk=AIMessageChunk(content=part))
+    assert events[-1] == ("assistant", "haha def f():\n    return 1")
 
 
 def test_stream_delta_callback_reads_generation_chunk_reasoning() -> None:
@@ -49,7 +66,7 @@ def test_stream_delta_callback_splits_think_and_answer() -> None:
     )
     callback.on_llm_new_token(
         "",
-        chunk=AIMessageChunk(content="<think>先想清楚</think>再回答。"),
+        chunk=AIMessageChunk(content="清楚</think>再回答。"),
     )
     callback.on_llm_new_token(
         "",

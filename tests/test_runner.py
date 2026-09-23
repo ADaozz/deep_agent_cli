@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
@@ -7,7 +8,7 @@ from deepagents.backends import StateBackend
 from agent.factory import create_agent
 from agent.tools.examples import build_example_tools
 from agent.permission import ASK_INTERRUPT_ON
-from agent.runner import AgentRunner
+from agent.runner import AgentRunner, _hitl_resume_value
 from tests.conftest import graph_tool_names, scripted_model
 
 
@@ -24,6 +25,18 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
     assert "write_todos" in names
     assert "execute" not in names
     assert len(names) == 10
+
+
+def test_stale_approval_target_cannot_approve_other_calls() -> None:
+    pending = [{"toolCallId": "a"}, {"toolCallId": "b"}]
+    with pytest.raises(ValueError, match="no longer pending"):
+        _hitl_resume_value({"type": "approve", "toolCallId": "stale"}, pending)
+    assert _hitl_resume_value({"type": "approve", "toolCallId": "a"}, pending) == {
+        "decisions": [
+            {"type": "approve"},
+            {"type": "reject", "message": "另一个并发的待确认调用未包含在本次人工决策中，按拒绝处理"},
+        ]
+    }
 
 
 def test_allow_tool_runs_locally() -> None:

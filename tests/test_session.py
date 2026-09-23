@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
+import subprocess
+import sys
 
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
 
+from agent.factory import create_agent
 from agent.runner import AgentRunner
 from agent.session import SessionStore, StopReason, messages_to_transcript, workspace_state_path
 from tests.conftest import scripted_model
@@ -34,6 +38,32 @@ def test_session_catalog_sorted_and_prefix_resolve(tmp_path: Path) -> None:
     store.create_session(session_id=first.id[:4] + "ffff")
     # Ambiguous shared prefix should not resolve.
     assert store.resolve_prefix(first.id[:4]) is None
+
+
+def test_legacy_catalog_migrates_once_and_derives_status(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL, "
+        "model_id TEXT, permission_mode TEXT, last_run_status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO session_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("old", "work", "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
+         "running", "model-a", "ask", "deferred"),
+    )
+    conn.commit()
+    conn.close()
+
+    for _ in range(2):
+        store = SessionStore(db)
+        info = store.get("old")
+        assert info is not None
+        assert (info.status, info.last_run_status, info.model_id) == ("waiting", StopReason.DEFERRED, "model-a")
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(session_catalog)")}
+        assert "status" not in columns
+        store.close()
 
 
 def test_runner_rejects_a_second_checkpointer_for_persistent_session(tmp_path: Path) -> None:
@@ -80,6 +110,41 @@ def test_session_survives_process_restart(tmp_path: Path) -> None:
         block.kind == "assistant" and block.content == "hello from session"
         for block in snapshot.transcript
     )
+
+
+def test_approval_interrupt_survives_actual_process_exit(tmp_path: Path) -> None:
+    db = tmp_path / "approval.sqlite3"
+    script = """
+from pathlib import Path
+from deepagents.backends import StateBackend
+from langchain_core.messages import AIMessage
+from agent.factory import create_agent
+from agent.runner import AgentRunner
+from agent.session import SessionStore
+from tests.conftest import scripted_model
+import sys
+store = SessionStore(Path(sys.argv[1]))
+prepared = create_agent(model=scripted_model([AIMessage(content='', tool_calls=[
+    {'id': 'write-1', 'name': 'write_file', 'args': {'file_path': '/workspace/note.txt', 'content': 'x'}}
+])]), backend=StateBackend())
+runner = AgentRunner(prepared=prepared, session_store=store)
+assert runner.invoke('write a note').status == 'waiting_confirmation'
+print(runner.thread_id, flush=True)
+store.close()
+"""
+    finished = subprocess.run(
+        [sys.executable, "-c", script, str(db)],
+        capture_output=True, text=True, check=True,
+    )
+    thread = finished.stdout.strip().splitlines()[-1]
+    store = SessionStore(db)
+    prepared = create_agent(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared, session_store=store)
+    snapshot = runner.switch_session(thread)
+    assert snapshot.interrupt_kind == "waiting_confirmation"
+    assert snapshot.pending_tool_calls[0]["toolCallId"] == "write-1"
+    assert runner.resume({"type": "reject", "toolCallId": "write-1"}).status == "completed"
+    store.close()
 
 
 def test_corrupt_session_load_raises_without_breaking_catalog(tmp_path: Path) -> None:

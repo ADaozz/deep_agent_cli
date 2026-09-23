@@ -2,14 +2,12 @@
 # ChatOpenAI(..., streaming=True) emits AIMessageChunk; this splits think vs visible text.
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessageChunk, BaseMessage
 
-THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 DeltaHandler = Callable[[str, str], None]
 
 
@@ -29,16 +27,43 @@ def message_text(message: BaseMessage) -> str:
     return "".join(parts)
 
 
+def _split_think(text: str) -> tuple[str, str]:
+    """Split complete or streaming think tags without exposing partial tags."""
+    visible: list[str] = []
+    reasoning: list[str] = []
+    lower = text.lower()
+    cursor = 0
+    while (start := lower.find("<think>", cursor)) >= 0:
+        visible.append(_without_partial_tag(text[cursor:start]))
+        end = lower.find("</think>", start + len("<think>"))
+        if end < 0:
+            reasoning.append(_without_partial_tag(text[start + len("<think>"):]))
+            return "".join(visible), "".join(reasoning)
+        reasoning.append(text[start + len("<think>"):end])
+        cursor = end + len("</think>")
+    visible.append(_without_partial_tag(text[cursor:]))
+    return "".join(visible), "".join(reasoning)
+
+
+def _without_partial_tag(text: str) -> str:
+    marker = text.rfind("<")
+    if marker >= 0 and any(
+        tag.startswith(text[marker:].lower()) for tag in ("<think>", "</think>")
+    ):
+        return text[:marker]
+    return text
+
+
 def reasoning_text(message: BaseMessage) -> str:
     extra = getattr(message, "additional_kwargs", None) or {}
     for key in ("reasoning_content", "reasoning", "thinking", "reasoning_summary"):
         value = extra.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value:
             return value
     meta = getattr(message, "response_metadata", None) or {}
     for key in ("reasoning_content", "reasoning", "thinking"):
         value = meta.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value:
             return value
     content = message.content
     parts: list[str] = []
@@ -55,31 +80,13 @@ def reasoning_text(message: BaseMessage) -> str:
                 elif item:
                     parts.append(str(item))
         parts.append(str(block.get("text") or block.get("reasoning") or block.get("reasoning_content") or ""))
-    parts.extend(item.strip() for item in THINK_BLOCK.findall(message_text(message)) if item.strip())
-    return "".join(parts).strip()
+    if parts:
+        return "".join(parts)
+    return _split_think(message_text(message))[1]
 
 
 def visible_text(message: BaseMessage) -> str:
-    text = message_text(message)
-    if not text:
-        return ""
-    visible = THINK_BLOCK.sub("", text)
-    open_tag = re.search(r"<think>", visible, re.IGNORECASE)
-    if open_tag:
-        visible = visible[:open_tag.start()]
-    return visible.strip()
-
-
-def append_buf(current: str, delta: str) -> str:
-    if not delta:
-        return current
-    if not current:
-        return delta
-    if delta.startswith(current):
-        return delta
-    if current.startswith(delta):
-        return current
-    return current + delta
+    return _split_think(message_text(message))[0]
 
 
 def _chunk_message(chunk: Any) -> BaseMessage | None:
@@ -111,34 +118,36 @@ class StreamDeltaCallback(BaseCallbackHandler):
         self._on_end = on_end
         self._assistant = ""
         self._reasoning = ""
+        self._message: AIMessageChunk | None = None
+        self._raw_text = ""
 
     def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
         self._assistant = ""
         self._reasoning = ""
+        self._message = None
+        self._raw_text = ""
         if self._on_start:
             self._on_start()
 
     def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
         message = _chunk_message(chunk)
-        if message is not None:
-            reasoning = reasoning_text(message)
-            if reasoning:
-                self._reasoning = append_buf(self._reasoning, reasoning)
-                self._on_delta("reasoning", self._reasoning)
-                if self._on_reasoning:
-                    self._on_reasoning(self._reasoning)
-            visible = visible_text(message)
-            if visible:
-                self._assistant = append_buf(self._assistant, visible)
-                self._on_delta("assistant", self._assistant)
-                if self._on_assistant:
-                    self._on_assistant(self._assistant)
-            return
-        if token:
-            self._assistant = append_buf(self._assistant, token)
-            self._on_delta("assistant", self._assistant)
+        if isinstance(message, AIMessageChunk):
+            self._message = message if self._message is None else self._message + message
+            visible = visible_text(self._message)
+            reasoning = reasoning_text(self._message)
+        else:
+            self._raw_text += token
+            visible, reasoning = _split_think(self._raw_text)
+        if reasoning != self._reasoning:
+            self._reasoning = reasoning
+            self._on_delta("reasoning", reasoning)
+            if self._on_reasoning:
+                self._on_reasoning(reasoning)
+        if visible != self._assistant:
+            self._assistant = visible
+            self._on_delta("assistant", visible)
             if self._on_assistant:
-                self._on_assistant(self._assistant)
+                self._on_assistant(visible)
 
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
         if self._on_end:

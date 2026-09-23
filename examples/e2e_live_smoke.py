@@ -3,8 +3,9 @@
 
 Usage:
   cd templates/deep-agent
-  DEEP_AGENT_CONFIG=.e2e-workspace/config.yaml \\
-    .venv/bin/python examples/e2e_live_smoke.py
+  .venv/bin/python examples/e2e_live_smoke.py
+
+Configuration is loaded from ~/.deep-agent/config.yaml (or DEEP_AGENT_CONFIG).
 """
 from __future__ import annotations
 
@@ -23,8 +24,8 @@ if str(ROOT) not in sys.path:
 from prompt_toolkit.input.defaults import create_pipe_input  # noqa: E402
 from prompt_toolkit.output import DummyOutput  # noqa: E402
 
-from agent.cli.app import CliApplication  # noqa: E402
-from agent.config import Settings  # noqa: E402
+from agent.cli.app import CliApplication, default_config_dir  # noqa: E402
+from agent.config import Settings, require_keybindings_outside_workspace  # noqa: E402
 from agent.permission import PermissionMode, allow_mode_available  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
@@ -317,14 +318,8 @@ def run_coding_suite(runner: AgentRunner, workspace: Path, report: Report) -> No
 
 async def async_main() -> int:
     e2e_root = (ROOT / ".e2e-workspace").resolve()
-    config_env = os.environ.get("DEEP_AGENT_CONFIG")
-    if not config_env:
-        default = e2e_root / "config.yaml"
-        if not default.is_file():
-            print("Set DEEP_AGENT_CONFIG or create .e2e-workspace/config.yaml", file=sys.stderr)
-            return 2
-        os.environ["DEEP_AGENT_CONFIG"] = str(default)
-
+    if config_env := os.environ.get("DEEP_AGENT_CONFIG"):
+        os.environ["DEEP_AGENT_CONFIG"] = str(Path(config_env).expanduser().resolve())
     # workspace: . follows cwd — pin to the isolated e2e tree.
     os.chdir(e2e_root)
     settings = Settings.load()
@@ -334,6 +329,8 @@ async def async_main() -> int:
     if workspace != e2e_root:
         print(f"expected workspace={e2e_root}", file=sys.stderr)
         return 2
+    config_dir = settings.config_dir or default_config_dir()
+    require_keybindings_outside_workspace(config_dir, workspace)
 
     report = Report()
     try:
@@ -347,7 +344,7 @@ async def async_main() -> int:
         return 2
 
     with create_pipe_input() as pipe:
-        app = CliApplication(runner, config_dir=settings.config_dir or workspace, input=pipe, output=DummyOutput())
+        app = CliApplication(runner, config_dir=config_dir, input=pipe, output=DummyOutput())
         await run_slash_suite(app, runner, report)
 
     # Fresh runner thread for tool suites so slash /new noise does not confuse state.

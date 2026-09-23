@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from itertools import count
 import threading
 from typing import Any, Callable
 from uuid import uuid4
@@ -18,6 +19,7 @@ EventEmitter = Callable[[str, dict[str, Any]], None]
 class QueuedMessage:
     text: str
     mode: str  # "steer" | "followUp"
+    order: int
     id: str = field(default_factory=lambda: str(uuid4()))
 
 
@@ -28,6 +30,7 @@ class RunController:
         self._lock = threading.RLock()
         self._steering: deque[QueuedMessage] = deque()
         self._follow_ups: deque[QueuedMessage] = deque()
+        self._queue_order = count()
         self._cancel_requested = False
         self._pause_requested = False
         self._cancel_event = threading.Event()
@@ -80,15 +83,15 @@ class RunController:
             self._defer_steering = value
 
     def steer(self, text: str) -> QueuedMessage:
-        message = QueuedMessage(text=text, mode="steer")
         with self._lock:
+            message = QueuedMessage(text=text, mode="steer", order=next(self._queue_order))
             self._steering.append(message)
         self._emit("steering_queued", {"content": text, "mode": "steer", "id": message.id})
         return message
 
     def follow_up(self, text: str) -> QueuedMessage:
-        message = QueuedMessage(text=text, mode="followUp")
         with self._lock:
+            message = QueuedMessage(text=text, mode="followUp", order=next(self._queue_order))
             self._follow_ups.append(message)
         self._emit("steering_queued", {"content": text, "mode": "followUp", "id": message.id})
         return message
@@ -121,7 +124,7 @@ class RunController:
     def take_unapplied(self) -> list[QueuedMessage]:
         """Alt+Up: reclaim steering/follow-up that has not entered a checkpoint yet."""
         with self._lock:
-            messages = list(self._steering) + list(self._follow_ups)
+            messages = sorted((*self._steering, *self._follow_ups), key=lambda item: item.order)
             self._steering.clear()
             self._follow_ups.clear()
             return messages

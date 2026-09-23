@@ -1,8 +1,8 @@
 # DeepAgent template configuration.
-# Copy to config.yaml and edit for your environment:
-#   cp config.example.yaml config.yaml
+# Copy outside the agent workspace and edit for your environment:
+#   mkdir -p ~/.deep-agent && install -m 600 config.example.yaml ~/.deep-agent/config.yaml
 #
-# Override path with DEEP_AGENT_CONFIG=/path/to/config.yaml
+# Override path with DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
 
 agent:
   # Long-term user instructions appended after the built-in identity.

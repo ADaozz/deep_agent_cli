@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from langchain_openai import ChatOpenAI
 
-from agent.config import Settings, resolve_config_path
+from agent.config import Settings, require_keybindings_outside_workspace, resolve_config_path
 from agent.llm import QwenChatOpenAI, build_chat_model
 
 
@@ -17,6 +17,88 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.llm_model == "qwen3.5-plus"
     assert settings.sandbox.allow_unsandboxed is False
     assert settings.state_path is None
+
+
+def test_default_config_is_in_home_and_project_config_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    config_dir = home / ".deep-agent"
+    config_dir.mkdir(parents=True)
+    home_config = config_dir / "config.yaml"
+    home_config.write_text("llm:\n  model: from-home\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "config.yaml").write_text("llm:\n  model: from-project\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
+    monkeypatch.chdir(project)
+
+    settings = Settings.load()
+    assert settings.llm_model == "from-home"
+    assert settings.source_path == home_config.resolve()
+    home_config.unlink()
+    assert Settings.load().source_path is None
+    assert Settings.load().llm_model == "qwen3.5-plus"
+
+
+def test_runtime_config_paths_must_be_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    local_config = workspace / "config.yaml"
+    local_config.write_text(f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="config file must be outside workspace"):
+        Settings.load(local_config)
+
+    external = tmp_path / "config.yaml"
+    external.write_text(
+        f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {workspace / 'keys'}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="keybindings directory must be outside workspace"):
+        Settings.load(external)
+    with pytest.raises(ValueError, match="keybindings directory must be outside workspace"):
+        require_keybindings_outside_workspace(workspace / "keys", workspace)
+    require_keybindings_outside_workspace(tmp_path / "keys", workspace)
+
+
+def test_keybindings_symlink_into_workspace_is_rejected(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    keybindings = workspace / "keybindings.json"
+    keybindings.write_text("{}\n", encoding="utf-8")
+    external_dir = tmp_path / "keys"
+    external_dir.mkdir()
+    (external_dir / "keybindings.json").symlink_to(keybindings)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {external_dir}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="keybindings file must be outside workspace"):
+        Settings.load(config)
+
+
+def test_config_symlink_into_workspace_is_rejected(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    local_config = workspace / "config.yaml"
+    local_config.write_text(f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
+    external_link = tmp_path / "config.yaml"
+    external_link.symlink_to(local_config)
+    with pytest.raises(ValueError, match="config file must be outside workspace"):
+        Settings.load(external_link)
+
+
+def test_home_as_workspace_rejects_home_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_dir = tmp_path / ".deep-agent"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="config file must be outside workspace"):
+        Settings.load()
 
 
 def test_load_config_yaml(tmp_path: Path) -> None:

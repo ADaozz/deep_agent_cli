@@ -17,6 +17,18 @@
 - **Runtime 与 TUI 分离** — 终端只是一层皮，同一套 `AgentRunner` 可以接到 SSE 或自己的 UI
 - **不 Fork Deep Agents** — 装配入口只有 `create_deep_agent()`
 
+## 核心理念
+
+`deep_agent_cli` 的目标是做一个**简单、可控、可恢复的本地 Coding Agent**，而不是一个构建 Agent 的框架。
+
+- **少造抽象**：优先复用 Deep Agents / LangGraph 已有能力。
+- **单一状态源**：项目文件归文件系统，会话上下文与计划归 checkpoint，避免重复状态。
+- **安全边界明确**：Bubblewrap 限制能力范围，Permission 控制用户授权，两者互不混淆。
+- **恢复不等于继续**：`/resume` 只恢复状态，不自动执行未完成任务。
+- **默认安全，显式扩权**：workspace 外资源、网络及高风险操作必须由用户明确开放。
+- **按真实需求演进**：没有实际问题，就不提前构建复杂机制。
+
+> 保持它是一个 Agent，而不是一个构建 Agent 的框架。
 
 ## Features
 
@@ -55,12 +67,13 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp config.example.yaml config.yaml
+mkdir -p ~/.deep-agent
+test -e ~/.deep-agent/config.yaml || install -m 600 config.example.yaml ~/.deep-agent/config.yaml
 ```
 
 ### Configure
 
-编辑 `config.yaml`，至少改 API Key 和端点：
+编辑 `~/.deep-agent/config.yaml`，至少改 API Key 和端点：
 
 ```yaml
 llm:
@@ -81,7 +94,7 @@ llm:
 也可以不改文件，启动时指定：
 
 ```bash
-export DEEP_AGENT_CONFIG=/path/to/config.yaml
+export DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
 ```
 
 ### Run
@@ -108,9 +121,9 @@ python examples/run_cli.py
 ```text
 /help          命令与快捷键
 /status        工作区、沙箱、权限、session
-/session       当前线程与 SQLite 路径
+/session       当前线程、创建/更新时间与 SQLite 路径
 /new           开一条新线程
-/resume        列出并恢复本工作区最近会话
+/resume        按最近更新时间列出并恢复本工作区会话
 /resume a1b2   按 id 前缀恢复
 /model         打开模型选择器
 /model qwen3   按 id 前缀切换
@@ -148,7 +161,7 @@ result = runner.invoke("列出 /workspace 下的文件")
 
 `on_event` 不含 ANSI 和终端宽度，HTTP / SSE 可以复用同一条 Runtime。
 
-默认工具包括文件、沙箱命令、人工输入和 `write_todos`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用。
+默认工具包括文件、沙箱命令、人工输入和 `write_todos`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用；模型传输错误由 OpenAI SDK 最多重试两次。
 
 传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
 
@@ -170,7 +183,7 @@ create_deep_agent()  LangGraph 图（不 Fork 上游）
    │
    ├── Model         OpenAI 兼容 / Qwen Responses
    ├── Tools         文件、execute、人工输入、write_todos
-   ├── Middleware    暂停、转向、取消、模型重试
+   ├── Middleware    暂停、转向、取消
    │                 + Deep Agents 默认栈（含自动摘要）
    └── Storage       SQLite checkpoint + session catalog
           │
@@ -210,7 +223,9 @@ config.example.yaml
 
 ## Configuration
 
-加载顺序：显式路径 → `DEEP_AGENT_CONFIG` → 当前目录 / 项目根的 `config.yaml` → `config.example.yaml` → 内置默认值。
+加载顺序：显式路径 → `DEEP_AGENT_CONFIG` → `~/.deep-agent/config.yaml` → 内置默认值。项目内的配置文件不会自动加载，仓库里的 `config.example.yaml` 仅供复制。
+
+主配置和按键配置必须位于 workspace 外；如果将 home 目录作为 workspace，启动时会拒绝位于 `~/.deep-agent` 的配置。已有项目内的 `config.yaml` 可一次性迁到 `~/.deep-agent/config.yaml`，确认内容后删除旧文件。配置中的相对路径（除 `sandbox.workspace: .`）仍相对于配置文件所在目录解析，迁移时需检查这些路径。
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
@@ -233,7 +248,7 @@ config.example.yaml
 
 每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
 
-LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行状态。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。
+LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
 
 沙箱默认只挂当前工作区，`skills/` 只读，宿主家目录不可见。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 

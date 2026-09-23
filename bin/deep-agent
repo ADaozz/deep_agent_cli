@@ -7,7 +7,7 @@
 #   deep-agent
 #
 # Optional:
-#   DEEP_AGENT_CONFIG=/path/to/config.yaml deep-agent
+#   DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml deep-agent
 
 set -euo pipefail
 
@@ -15,7 +15,6 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 PYTHON="${ROOT}/.venv/bin/python"
 CLI="${ROOT}/examples/run_cli.py"
-DEFAULT_CONFIG="${ROOT}/config.yaml"
 
 if [[ ! -x "${PYTHON}" ]]; then
   echo "Missing venv at ${ROOT}/.venv — run:" >&2
@@ -26,14 +25,6 @@ fi
 if [[ ! -f "${CLI}" ]]; then
   echo "Missing ${CLI}" >&2
   exit 1
-fi
-
-if [[ -z "${DEEP_AGENT_CONFIG:-}" ]]; then
-  if [[ -f "${DEFAULT_CONFIG}" ]]; then
-    export DEEP_AGENT_CONFIG="${DEFAULT_CONFIG}"
-  elif [[ -f "${ROOT}/config.example.yaml" ]]; then
-    export DEEP_AGENT_CONFIG="${ROOT}/config.example.yaml"
-  fi
 fi
 
 # Do not route the local LLM / TUI through shell SOCKS/HTTP proxies.

@@ -249,7 +249,6 @@ class AgentRunner:
                 attachment_store=self.attachment_store,
             )
         self._rebuild_prepared(model=model, permission_mode=mode)
-        self._custom_interrupt_on = None
         self._permission_mode = mode
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, permission_mode=mode.value)
@@ -326,6 +325,8 @@ class AgentRunner:
         info = self.session_store.resolve_prefix(session_id) if self.session_store is not None else None
         if info is None:
             raise KeyError(f"Unknown session: {session_id}")
+        if info.id != self.thread_id:
+            self._require_empty_input_queue()
         previous = (self._chat_model, self._current_model_id, self._permission_mode)
         notices = self._restore_thread_settings(info)
         try:
@@ -379,6 +380,9 @@ class AgentRunner:
         return notices
 
     def new_session(self, *, title: str = "") -> SessionInfo:
+        if self._busy:
+            raise RuntimeError("Cannot start a new session while a run is in progress")
+        self._require_empty_input_queue()
         self._resume_context = None
         self.control.clear_pause()
         self.control.set_defer_steering(False)
@@ -400,6 +404,10 @@ class AgentRunner:
         )
         self.thread_id = info.id
         return info
+
+    def _require_empty_input_queue(self) -> None:
+        if self.control.pending_steering_count() or self.control.pending_follow_up_count():
+            raise RuntimeError("Unapplied input belongs to the current session; reclaim it before switching")
 
     def invoke(
         self,
@@ -914,7 +922,9 @@ def _hitl_resume_value(
     if decision_type == "reject" and payload.get("message"):
         item["message"] = str(payload["message"])
     pending_ids = [str(call.get("toolCallId", "")) for call in pending]
-    if len(pending_ids) <= 1 or not target or target not in pending_ids:
+    if target and target not in pending_ids:
+        raise ValueError(f"Tool call is no longer pending approval: {target}")
+    if len(pending_ids) <= 1 or not target:
         return {"decisions": [dict(item) for _ in range(max(len(pending_ids), 1))]}
     return {"decisions": [
         dict(item) if tool_call_id == target

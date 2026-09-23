@@ -28,7 +28,7 @@ def main() -> int:
         label = "思考" if kind == "reasoning" else "回答"
         print(f"[{label} +{extra_len} chars] {text[-80:]!r}", flush=True)
 
-    settings = Settings.load(base_dir=ROOT)
+    settings = Settings.load()
     model = build_chat_model(settings.active_profile)
     runner = AgentRunner(
         prepared=create_agent(

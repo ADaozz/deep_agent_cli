@@ -5,6 +5,7 @@ from typing import Any
 
 from rich.console import Group
 from rich.markdown import Markdown
+from rich.table import Table
 from rich.text import Text
 
 
@@ -153,7 +154,15 @@ class InteractionController:
             mark = "[x]" if option.get("value") in selected else "[ ]" if field.get("type") == "multi_select" else ""
             description = option.get("description") or ""
             style = "bold cyan" if idx == self.option_index else ""
-            parts.append(Text(f"{pointer} {mark} {option.get('label')}  {description}".rstrip(), style=style))
+            label = f"{pointer} {mark} {option.get('label')}  {description}".rstrip()
+            if right_label := option.get("right_label"):
+                row = Table.grid(expand=True, padding=(0, 1))
+                row.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+                row.add_column(width=len(str(right_label)), justify="right", no_wrap=True)
+                row.add_row(Text(label, style=style), Text(str(right_label), style=style))
+                parts.append(row)
+            else:
+                parts.append(Text(label, style=style))
         if self.error:
             parts.append(Text(self.error, style="red"))
         hint = (

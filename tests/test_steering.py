@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
+import pytest
 
 from agent.control import RunController
 from agent.middleware.steering import SteeringMiddleware
@@ -100,9 +101,22 @@ def test_defer_steering_during_interaction() -> None:
 
 def test_alt_up_takes_unapplied_only() -> None:
     controller = RunController()
-    controller.steer("a")
     controller.follow_up("b")
+    controller.steer("a")
     taken = controller.take_unapplied()
-    assert [item.text for item in taken] == ["a", "b"]
+    assert [item.text for item in taken] == ["b", "a"]
     assert controller.pending_steering_count() == 0
     assert controller.pending_follow_up_count() == 0
+
+
+def test_new_session_requires_reclaiming_unapplied_input() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    old_thread = runner.thread_id
+    runner.follow_up("old instruction")
+    with pytest.raises(RuntimeError, match="Unapplied input"):
+        runner.new_session()
+    assert runner.thread_id == old_thread
+    assert runner.take_unapplied_messages() == ["old instruction"]
+    runner.new_session()
+    assert runner.thread_id != old_thread
+    assert runner.control.pending_follow_up_count() == 0

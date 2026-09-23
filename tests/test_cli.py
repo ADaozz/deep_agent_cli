@@ -4,11 +4,13 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 import asyncio
+import re
+import pytest
 
 from agent.cli.interactions import InteractionController
 from agent.cli.clipboard import ClipboardImage
 from agent.cli.app import CliApplication
-from agent.cli.rendering import render_transcript
+from agent.cli.rendering import render_interaction, render_transcript
 from agent.cli.state import CliState, MessageBlock, ToolBlock
 from agent.config import Settings
 from agent.config import ModelProfile
@@ -17,6 +19,65 @@ from agent.session import SessionStore
 from agent.tools.examples import build_example_tools
 from agent.factory import create_agent
 from tests.conftest import scripted_model
+
+
+def test_cli_rejects_keybindings_inside_workspace(tmp_path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    settings = Settings.from_mapping({"sandbox": {"workspace": str(workspace)}})
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend(), settings=settings)
+    with pytest.raises(ValueError, match="keybindings directory must be outside workspace"):
+        CliApplication(runner, config_dir=workspace, output=DummyOutput())
+
+
+def test_session_command_shows_created_and_updated_timestamps(tmp_path) -> None:
+    store = SessionStore(tmp_path / "session-info.sqlite3")
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+    info = store.get(runner.thread_id)
+    assert info is not None
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.show_session()
+        output = app.state.blocks[-1].content
+    assert f"Created: {info.created_at.astimezone().isoformat(sep=' ', timespec='seconds')}" in output
+    assert f"Updated: {info.updated_at.astimezone().isoformat(sep=' ', timespec='seconds')}" in output
+    store.close()
+
+
+def test_resume_menu_shows_last_updated_timestamp(tmp_path) -> None:
+    store = SessionStore(tmp_path / "resume-menu.sqlite3")
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+    runner.new_session()
+    sessions = runner.list_sessions()
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.resume_session()
+            assert app.interaction is not None
+            options = app.interaction.fields[0]["options"]
+            for width in (50, 100):
+                rendered = re.sub(r"\x1b\[[0-9;]*m", "", render_interaction(app.interaction, width))
+                positions = []
+                for info in sessions:
+                    option = next(option for option in options if option["value"] == info.id)
+                    timestamp = info.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    assert option["right_label"] == timestamp
+                    line = next(line for line in rendered.splitlines() if info.id[:8] in line)
+                    assert line.endswith(timestamp)
+                    positions.append(line.index(timestamp))
+                assert len(set(positions)) == 1
+
+    asyncio.run(scenario())
+    store.close()
 
 
 def test_runner_emits_tool_lifecycle_without_changing_result() -> None:
@@ -275,6 +336,40 @@ def test_cli_resume_prefix_switches_session(tmp_path) -> None:
             )
 
     asyncio.run(scenario())
+
+
+def test_cli_returns_queued_input_on_new_and_resume(tmp_path) -> None:
+    store = SessionStore(tmp_path / "queued.sqlite3")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="saved")]),
+                         backend=StateBackend(), session_store=store)
+    original = runner.thread_id
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            runner.follow_up("first draft")
+            app.new_session()
+            assert runner.thread_id != original
+            assert "first draft" in app.buffer.text
+            assert runner.control.pending_follow_up_count() == 0
+
+            runner.steer("second draft")
+            await app.resume_session(original[:8])
+            assert runner.thread_id == original
+            assert "second draft" in app.buffer.text
+
+            runner.follow_up("third draft")
+            await app.resume_session()
+            assert app.interaction is not None
+            target = next(item.id for item in runner.list_sessions() if item.id != original)
+            app.interaction.values["session"] = target
+            app._finish_interaction()
+            assert runner.thread_id == target
+            assert "third draft" in app.buffer.text
+            assert runner.control.pending_follow_up_count() == 0
+
+    asyncio.run(scenario())
+    store.close()
 
 
 def test_exact_single_image_path_paste_becomes_attachment(tmp_path) -> None:

@@ -17,7 +17,7 @@ from rich.panel import Panel  # noqa: E402
 
 from agent.cli import CliApplication  # noqa: E402
 from agent.cli.app import default_config_dir  # noqa: E402
-from agent.config import Settings  # noqa: E402
+from agent.config import Settings, require_keybindings_outside_workspace  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError, UNSANDBOXED_WARNING  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
@@ -40,7 +40,7 @@ def create_runner(settings: Settings) -> AgentRunner:
         if not sys.stdin.isatty():
             raise SystemExit(
                 "Non-interactive startup refused UNSANDBOXED fallback. Install bwrap or set "
-                "sandbox.allow_unsandboxed: true in config.yaml。"
+                "sandbox.allow_unsandboxed: true in ~/.deep-agent/config.yaml。"
             ) from exc
         _confirm_unsandboxed(str(exc))
         runner = AgentRunner(
@@ -72,13 +72,14 @@ def _confirm_unsandboxed(error: str) -> None:
 
 
 def main() -> None:
-    # Prefer config from cwd, then the template package root. workspace: . → cwd.
+    # The default config lives outside the current project workspace.
     settings = Settings.load()
+    config_dir = settings.config_dir or default_config_dir()
+    require_keybindings_outside_workspace(config_dir, settings.sandbox.workspace)
     runner = create_runner(settings)
     if runner.prepared.execution_mode is ExecutionMode.UNSANDBOXED:
         Console(stderr=True).print(f"[bold red]UNSANDBOXED: {runner.prepared.security_warning}[/bold red]")
     Console(stderr=True).print(f"[dim]workspace={settings.sandbox.workspace}[/dim]")
-    config_dir = settings.config_dir or default_config_dir()
     CliApplication(runner, config_dir=config_dir).run()
 
 

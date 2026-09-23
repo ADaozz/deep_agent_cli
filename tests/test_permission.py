@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from deepagents.backends import StateBackend
@@ -28,7 +29,7 @@ from agent.permission import (
     parse_permission_mode,
 )
 from agent.runner import AgentRunner
-from agent.sandbox import ExecutionMode, SandboxUnavailableError, select_backend
+from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableError, select_backend
 from tests.conftest import scripted_model
 
 
@@ -101,6 +102,19 @@ def test_custom_interrupt_mapping_is_applied() -> None:
     waiting = runner.invoke("look up")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "lookup_docs"
+
+
+def test_custom_approval_survives_permission_round_trip() -> None:
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        prepared = create_agent(
+            model=scripted_model([AIMessage(content="done")]),
+            interrupt_on={"lookup_docs": True},
+        )
+        runner = AgentRunner(prepared=prepared)
+        runner.set_permission_mode("allow")
+        assert runner.prepared.interrupt_on == {}
+        runner.set_permission_mode("ask")
+        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
 
 
 def test_set_permission_mode_rejected_while_busy() -> None:

@@ -15,7 +15,7 @@ SAFE_INHERITED_ENV = (
     "TZ",
 )
 
-_DEFAULT_CONFIG_NAMES = ("config.yaml", "config.yml", "config.example.yaml", "config.example.yml")
+_DEFAULT_CONFIG_NAME = "config.yaml"
 
 
 @dataclass(frozen=True)
@@ -118,7 +118,7 @@ class Settings:
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, base_dir: Path | None = None) -> "Settings":
-        """Load settings from config.yaml (or defaults when no file is found)."""
+        """Load settings from a path, explicit base directory, or ~/.deep-agent/config.yaml."""
         resolved = resolve_config_path(path, base_dir=base_dir)
         if resolved is None:
             return cls()
@@ -143,7 +143,7 @@ class Settings:
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise ValueError("agent.instructions must be a string or null")
-        return cls(
+        result = cls(
             llm_profiles=profiles,
             llm_default=default_id,
             sandbox=_sandbox_from_mapping(sandbox_raw, base_dir=root),
@@ -152,6 +152,11 @@ class Settings:
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
         )
+        if result.source_path is not None:
+            require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
+        if result.config_dir is not None:
+            require_keybindings_outside_workspace(result.config_dir, result.sandbox.workspace)
+        return result
 
     # Backward-compatible alias used by older call sites / docs.
     @classmethod
@@ -175,23 +180,20 @@ def resolve_config_path(
         if not candidate.is_file():
             raise FileNotFoundError(f"DEEP_AGENT_CONFIG not found: {candidate}")
         return candidate.resolve()
-    search_roots: list[Path] = []
-    if base_dir is not None:
-        search_roots.append(base_dir.expanduser().resolve())
-    else:
-        search_roots.append(Path.cwd().resolve())
-        # Prefer the package/template root when running from examples/.
-        search_roots.append(Path(__file__).resolve().parents[1])
-    seen: set[Path] = set()
-    for root in search_roots:
-        if root in seen:
-            continue
-        seen.add(root)
-        for name in _DEFAULT_CONFIG_NAMES:
-            candidate = root / name
-            if candidate.is_file():
-                return candidate.resolve()
-    return None
+    root = base_dir.expanduser().resolve() if base_dir is not None else Path.home() / ".deep-agent"
+    candidate = root / _DEFAULT_CONFIG_NAME
+    return candidate.resolve() if candidate.is_file() else None
+
+
+def require_outside_workspace(path: Path, workspace: Path, *, label: str) -> None:
+    """Keep runtime configuration outside the agent's writable workspace."""
+    if path.expanduser().resolve().is_relative_to(workspace.expanduser().resolve()):
+        raise ValueError(f"{label} must be outside workspace: {path}")
+
+
+def require_keybindings_outside_workspace(config_dir: Path, workspace: Path) -> None:
+    require_outside_workspace(config_dir, workspace, label="keybindings directory")
+    require_outside_workspace(config_dir / "keybindings.json", workspace, label="keybindings file")
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

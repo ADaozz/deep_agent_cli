@@ -13,7 +13,7 @@ from deepagents import (
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents._models import get_model_identifier, get_model_provider
-from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -25,7 +25,6 @@ from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
-from agent.middleware.retry import retry_on_transient
 from agent.middleware.steering import SteeringMiddleware
 from agent.permission import (
     PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
@@ -118,7 +117,6 @@ def build_agent(
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),
             AttachmentMaterializationMiddleware(),
-            ModelRetryMiddleware(max_retries=2, retry_on=retry_on_transient, on_failure="error"),
             TodoListMiddleware(),
             FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools, _permissions=permissions),  # type: ignore[arg-type]
         ],
