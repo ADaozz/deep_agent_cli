@@ -28,10 +28,11 @@
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
 - **多模型** — YAML profile + `/model` / `Ctrl+P`；切换重建 graph，会话保留
 - **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
+- **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
 - **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
 - **Skills** — 读取工作区 `skills/*/SKILL.md`
 
-`/compact` 目前会明确说 Runtime 没有压缩 API，不会假装压缩成功。
+`/compact` 显示 unavailable，只表示没有「立刻手动压缩」接口。自动压缩已经在跑，不要再叠一层 `SummarizationMiddleware`，否则会压两次。
 
 ## Quick Start
 
@@ -114,6 +115,7 @@ python examples/run_cli.py
 /permission ask|allow
 /image clipboard | <path> | clear
 /pause         在下一个模型安全点暂停
+/compact       占位：自动压缩已启用，没有手动立即压缩入口
 /quit
 ```
 
@@ -143,6 +145,10 @@ result = runner.invoke("列出 /workspace 下的文件")
 
 `on_event` 不含 ANSI 和终端宽度，HTTP / SSE 可以复用同一条 Runtime。
 
+传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
+
+当前 Qwen profile 没有 `max_input_tokens`，走 Deep Agents 的保守默认：约 170,000 tokens 触发、保留最近 6 条消息、旧工具参数在约 20 条消息时预裁剪。被挤掉的对话会写到 backend 上的会话历史文件，而不是直接丢掉。
+
 ## Architecture
 
 ```text
@@ -160,6 +166,7 @@ create_deep_agent()  LangGraph 图（不 Fork 上游）
    ├── Model         OpenAI 兼容 / Qwen Responses
    ├── Tools         文件、execute、HITL、示例业务工具
    ├── Middleware    暂停、转向、取消、联网门、重试
+   │                 + Deep Agents 默认栈（含自动摘要）
    └── Storage       SQLite checkpoint + session catalog
           │
           ▼
@@ -242,7 +249,8 @@ python examples/stream_smoke.py
 - [x] 图片附件
 - [x] 运行中 steering / 取消
 - [x] 语义化人工输入
-- [ ] 上下文压缩（`/compact` 已占位）
+- [x] 自动上下文压缩（Deep Agents 默认 `SummarizationMiddleware`）
+- [ ] 手动立即压缩（`/compact`）
 - [ ] 可安装的 Python 包
 - [ ] MCP
 
