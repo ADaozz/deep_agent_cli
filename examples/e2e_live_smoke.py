@@ -222,13 +222,13 @@ def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report) -
     if waiting and waiting.status == "waiting_confirmation":
         names = [c.get("name") for c in waiting.pending_tool_calls]
         report.add("ask write pending name", "write_file" in names, detail=str(names))
-        resumed = runner.resume({"type": "approve", "toolCallId": waiting.pending_tool_calls[0].get("toolCallId")})
+        resumed = runner.approve_tool(waiting.pending_tool_calls[0].get("toolCallId"))
         # May still need more tool rounds; drain approvals up to 5 times.
         for _ in range(5):
             if resumed.status != "waiting_confirmation":
                 break
             call = resumed.pending_tool_calls[0]
-            resumed = runner.resume({"type": "approve", "toolCallId": call.get("toolCallId")})
+            resumed = runner.approve_tool(call.get("toolCallId"))
         path = workspace / "e2e_ask_write.txt"
         report.add(
             "ask write_file approve",
@@ -247,12 +247,12 @@ def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report) -
             call.get("name") == "execute" and bool(args.get("network")),
             detail=str(args)[:120],
         )
-        resumed = runner.resume({"type": "approve", "toolCallId": call.get("toolCallId")})
+        resumed = runner.approve_tool(call.get("toolCallId"))
         for _ in range(5):
             if resumed.status != "waiting_confirmation":
                 break
             nxt = resumed.pending_tool_calls[0]
-            resumed = runner.resume({"type": "approve", "toolCallId": nxt.get("toolCallId")})
+            resumed = runner.approve_tool(nxt.get("toolCallId"))
         report.add(
             "ask network approve completed",
             resumed.status == "completed",

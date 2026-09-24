@@ -16,7 +16,13 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     settings = Settings.load(base_dir=tmp_path)
     assert settings.llm_model == "qwen3.5-plus"
     assert settings.sandbox.allow_unsandboxed is False
+    assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
+
+
+def test_removed_protected_paths_fail_with_migration_message() -> None:
+    with pytest.raises(ValueError, match="move skills to"):
+        Settings.from_mapping({"sandbox": {"protected_workspace_paths": ["skills"]}})
 
 
 def test_default_config_is_in_home_and_project_config_is_ignored(
@@ -121,9 +127,6 @@ sandbox:
     - JAVA_HOME
   env_set:
     APP_ENV: test
-  protected_workspace_paths:
-    - skills
-    - vendor
   extra_read_only_mounts:
     - source: mounts/ro
       destination: /opt/ro
@@ -151,11 +154,19 @@ paths:
     assert settings.sandbox.max_output_bytes == 2048
     assert settings.sandbox.env_allowlist == ("JAVA_HOME",)
     assert settings.sandbox.env_set == {"APP_ENV": "test"}
-    assert settings.sandbox.protected_workspace_paths == ("skills", "vendor")
     assert settings.sandbox.extra_read_only_mounts[0].destination == "/opt/ro"
     assert settings.state_path == (tmp_path / "state" / "agent.sqlite3").resolve()
     assert settings.config_dir == (tmp_path / "conf").resolve()
     assert settings.source_path == path.resolve()
+
+
+def test_sandbox_timeout_is_optional_and_must_be_positive(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("sandbox:\n  timeout_seconds: null\n", encoding="utf-8")
+    assert Settings.load(config).sandbox.timeout_seconds is None
+    config.write_text("sandbox:\n  timeout_seconds: 0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="sandbox.timeout_seconds must be positive"):
+        Settings.load(config)
 
 
 def test_deep_agent_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,6 +245,47 @@ def test_model_input_capabilities(tmp_path: Path) -> None:
     assert profile.supports_input("image")
 
 
+def test_context_window_accepts_counts_and_shorthand(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+llm:
+  default: exact
+  context_window: 32k
+  models:
+    exact:
+      model: qwen3.5-plus
+      context_window: 1000000
+    shorthand:
+      model: qwen-turbo
+      context_window: 128k
+    fractional:
+      model: qwen-max
+      context_window: 1.5m
+    inherited:
+      model: qwen-flash
+""",
+        encoding="utf-8",
+    )
+    windows = {item.id: item.context_window for item in Settings.load(path).llm_profiles}
+    assert windows == {
+        "exact": 1_000_000,
+        "shorthand": 128_000,
+        "fractional": 1_500_000,
+        "inherited": 32_000,
+    }
+
+
+def test_context_window_rejects_nonsense(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "llm:\n  models:\n    broken:\n      model: qwen\n      context_window: huge\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="context_window"):
+        Settings.load(path)
+
+
 def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
@@ -247,6 +299,28 @@ def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -
     with pytest.raises(ValueError, match="provider"):
         Settings.load(path)
     assert isinstance(build_chat_model(Settings().active_profile), QwenChatOpenAI)
+
+
+def test_model_source_is_loaded_for_display(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "llm:\n  models:\n    plan:\n      model: qwen3.6-flash\n      source: Token Plan\n",
+        encoding="utf-8",
+    )
+    assert Settings.load(path).active_profile.source == "Token Plan"
+
+
+def test_stream_usage_can_be_enabled_per_provider(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "llm:\n  provider: openai-compatible\n  stream_usage: true\n"
+        "  models:\n    plan:\n      model: auto\n"
+        "    local:\n      model: qwen3.6-flash\n      stream_usage: false\n",
+        encoding="utf-8",
+    )
+    settings = Settings.load(path)
+    assert build_chat_model(settings.get_profile("plan")).stream_usage is True
+    assert build_chat_model(settings.get_profile("local")).stream_usage is False
 
 
 @pytest.mark.parametrize("value,match", [

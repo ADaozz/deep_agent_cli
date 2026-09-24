@@ -23,6 +23,8 @@ class InteractionController:
     option_index: int = 0
     values: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    tool_call_ids: list[str] = field(default_factory=list)
+    calls: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def human(cls, payload: dict[str, Any]) -> "InteractionController":
@@ -51,28 +53,41 @@ class InteractionController:
     def approval(cls, calls: list[dict[str, Any]]) -> "InteractionController":
         from agent.network import network_requested
 
-        lines: list[str] = []
         declared: list[str] = []
         for call in calls:
             name = str(call.get("name") or "tool")
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
-            lines.append(f"• {name} {json_summary(args)}")
             if name == "execute" and network_requested(args):
-                declared.append("NETWORK")
+                declared.append("HOST NETWORK (internet, localhost, LAN)")
             elif name in {"write_file", "edit_file", "delete"}:
                 declared.append(name.upper())
         caps = ", ".join(dict.fromkeys(declared)) if declared else "declared capabilities"
-        summary = "\n".join(lines)
         return cls(
             kind="approval",
             title="Approve tool call?",
-            question=(summary or "The agent requested a protected tool call.")
-            + f"\n\nApprove runs this call with its declared capabilities ({caps}).",
+            question=f"Approve runs this call with its declared capabilities ({caps}).",
             fields=[{
                 "id": "approved", "type": "single_select", "label": "Decision", "required": True,
                 "options": [
                     {"value": "reject", "label": "Reject", "description": "Deny this tool call"},
                     {"value": "approve", "label": "Run", "description": "Approve and execute"},
+                ],
+            }],
+            tool_call_ids=[str(call.get("toolCallId") or "") for call in calls if call.get("toolCallId")],
+            calls=list(calls),
+        )
+
+    @classmethod
+    def pause(cls) -> "InteractionController":
+        return cls(
+            kind="pause",
+            title="Paused",
+            question="Continue the agent run?",
+            fields=[{
+                "id": "continue", "type": "single_select", "label": "Decision", "required": True,
+                "options": [
+                    {"value": "stay", "label": "No", "description": ""},
+                    {"value": "continue", "label": "Yes", "description": ""},
                 ],
             }],
         )
@@ -127,18 +142,12 @@ class InteractionController:
             return False
         return True
 
-    def decision(self, *, cancelled: bool = False) -> dict[str, Any]:
-        if self.kind == "approval":
-            choice = "reject" if cancelled else str(self.values.get("approved") or "reject")
-            return {"type": choice, **({"message": "Cancelled by user"} if cancelled else {})}
-        values = {"cancelled": True} if cancelled else dict(self.values)
-        return {"type": "human_input", "interactionId": self.interaction_id, "values": values}
-
     def render(self) -> Group:
         parts: list[Any] = [Text(self.title, style="bold bright_cyan")]
         if self.reason:
             parts.append(Text(self.reason, style="dim"))
-        parts.append(Markdown(self.question))
+        if self.question:
+            parts.append(Text(self.question) if self.kind == "approval" else Markdown(self.question))
         if self.recommendation:
             value = self.recommendation.get("value") or ""
             why = self.recommendation.get("reason") or ""
@@ -166,21 +175,11 @@ class InteractionController:
         if self.error:
             parts.append(Text(self.error, style="red"))
         hint = (
-            "↑↓ select  Enter confirm  Esc cancel"
+            "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"
+            if self.kind in {"approval", "human", "pause"} and options
+            else "↑↓ select  Enter confirm  Esc cancel"
             if options
             else "Enter submit  Ctrl+J newline  Esc cancel"
         )
         parts.append(Text(hint, style="dim"))
         return Group(*parts)
-
-
-def json_summary(value: Any) -> str:
-    if not isinstance(value, dict):
-        return str(value)
-    parts = []
-    for key, item in value.items():
-        if isinstance(item, (str, int, float, bool)):
-            parts.append(f"{key}={item}")
-        if len(parts) == 2:
-            break
-    return " ".join(parts)

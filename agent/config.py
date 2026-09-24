@@ -18,6 +18,10 @@ SAFE_INHERITED_ENV = (
 _DEFAULT_CONFIG_NAME = "config.yaml"
 
 
+def default_skills_dir() -> Path:
+    return Path.home() / ".deep-agent" / "skills"
+
+
 @dataclass(frozen=True)
 class BindMount:
     """An explicit host-to-sandbox mount."""
@@ -36,6 +40,10 @@ class ModelProfile:
     base_url: str = "http://localhost:8000/v1"
     input: tuple["InputKind", ...] = ("text",)
     provider: Literal["qwen-responses", "openai-compatible"] = "qwen-responses"
+    # 0 = unknown, so the UI can hide the context meter instead of guessing.
+    context_window: int = 0
+    source: str = ""
+    stream_usage: bool = False
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -52,13 +60,12 @@ class SandboxConfig:
     workspace: Path = field(default_factory=Path.cwd)
     bwrap_path: str = "bwrap"
     allow_unsandboxed: bool = False
-    timeout_seconds: int = 120
+    timeout_seconds: int | None = None
     max_output_bytes: int = 100_000
     env_allowlist: tuple[str, ...] = ()
     env_set: dict[str, str] = field(default_factory=dict)
     extra_read_only_mounts: tuple[BindMount, ...] = ()
     extra_read_write_mounts: tuple[BindMount, ...] = ()
-    protected_workspace_paths: tuple[str, ...] = ("skills",)
 
 
 def _default_profiles() -> tuple[ModelProfile, ...]:
@@ -139,6 +146,11 @@ class Settings:
         agent = _section(raw, "agent")
         paths = _section(raw, "paths")
         sandbox_raw = _section(raw, "sandbox")
+        if "protected_workspace_paths" in sandbox_raw:
+            raise ValueError(
+                "sandbox.protected_workspace_paths was removed; move skills to "
+                "~/.deep-agent/skills and use explicit read-only mounts for other resources"
+            )
         profiles, default_id = _llm_profiles_from_mapping(llm)
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
@@ -322,6 +334,11 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
             base_url=str(llm.get("base_url") or "http://localhost:8000/v1"),
             input=_model_inputs(llm.get("input"), field_name="llm.input"),
             provider=_model_provider(llm.get("provider"), field_name="llm.provider"),
+            context_window=_model_context_window(
+                llm.get("context_window"), field_name="llm.context_window",
+            ),
+            source=str(llm.get("source") or "").strip(),
+            stream_usage=_model_stream_usage(llm.get("stream_usage"), field_name="llm.stream_usage"),
         )
         return (profile,), "default"
     if not isinstance(models_raw, Mapping) or not models_raw:
@@ -343,6 +360,15 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
             base_url=str(item.get("base_url") or llm.get("base_url") or "http://localhost:8000/v1"),
             input=_model_inputs(item.get("input"), field_name=f"llm.models.{pid}.input"),
             provider=_model_provider(item.get("provider", llm.get("provider")), field_name=f"llm.models.{pid}.provider"),
+            context_window=_model_context_window(
+                item.get("context_window", llm.get("context_window")),
+                field_name=f"llm.models.{pid}.context_window",
+            ),
+            source=str(item.get("source") or "").strip(),
+            stream_usage=_model_stream_usage(
+                item.get("stream_usage", llm.get("stream_usage")),
+                field_name=f"llm.models.{pid}.stream_usage",
+            ),
         ))
     default_id = str(llm.get("default") or profiles[0].id).strip()
     if not any(item.id == default_id for item in profiles):
@@ -376,21 +402,51 @@ def _model_provider(value: Any, *, field_name: str) -> Literal["qwen-responses",
     return provider  # type: ignore[return-value]
 
 
+def _model_stream_usage(value: Any, *, field_name: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be true or false")
+    return value
+
+
+def _model_context_window(value: Any, *, field_name: str) -> int:
+    """Accepts a plain token count, or a `128k` / `1.5m` shorthand. 0 means unknown."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        tokens = value
+    elif isinstance(value, str):
+        text = value.strip().lower().replace("_", "")
+        if not text:
+            return 0
+        multiplier = 1
+        if text.endswith("k"):
+            multiplier, text = 1_000, text[:-1]
+        elif text.endswith("m"):
+            multiplier, text = 1_000_000, text[:-1]
+        try:
+            tokens = int(float(text.strip()) * multiplier)
+        except ValueError:
+            raise ValueError(f"{field_name} must be a token count like 128000, 128k or 1m") from None
+    else:
+        raise ValueError(f"{field_name} must be a token count like 128000, 128k or 1m")
+    if tokens < 0:
+        raise ValueError(f"{field_name} must not be negative")
+    return tokens
+
+
 def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> SandboxConfig:
     workspace = _workspace_path(data.get("workspace"), base_dir=base_dir)
-    protected = data.get("protected_workspace_paths")
-    if protected is None:
-        protected_paths: tuple[str, ...] = ("skills",)
-    else:
-        protected_paths = _as_str_tuple(protected, field_name="sandbox.protected_workspace_paths")
     return SandboxConfig(
         workspace=workspace,
         bwrap_path=str(data.get("bwrap_path") or "bwrap"),
         allow_unsandboxed=_as_bool(
             data.get("allow_unsandboxed", False), field_name="sandbox.allow_unsandboxed",
         ),
-        timeout_seconds=_as_positive_int(
-            data.get("timeout_seconds"), field_name="sandbox.timeout_seconds", default=120,
+        timeout_seconds=(
+            _as_positive_int(data["timeout_seconds"], field_name="sandbox.timeout_seconds", default=0)
+            if data.get("timeout_seconds") is not None else None
         ),
         max_output_bytes=_as_positive_int(
             data.get("max_output_bytes"), field_name="sandbox.max_output_bytes", default=100_000,
@@ -407,8 +463,4 @@ def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Sandbox
             field_name="sandbox.extra_read_write_mounts",
             base_dir=base_dir,
         ),
-        protected_workspace_paths=protected_paths,
     )
-
-
-settings = Settings.load()

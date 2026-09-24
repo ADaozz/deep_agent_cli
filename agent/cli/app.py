@@ -17,12 +17,13 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import BufferControl, ConditionalContainer, Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import BufferControl, ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
@@ -38,16 +39,20 @@ from agent.cli.clipboard import (
     ClipboardImage,
     ClipboardText,
     ClipboardUnavailable,
-    copy_to_clipboard,
     windows_path_to_wsl,
 )
 from agent.cli.commands import Command, command_table
+from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
-from agent.cli.rendering import render_interaction, render_transcript
-from agent.cli.selection import SelectableFormattedTextControl
-from agent.cli.state import CliState
-from agent.config import require_keybindings_outside_workspace
+from agent.cli.rendering import (
+    MUTATION_TOOLS,
+    TranscriptRenderer,
+    render_interaction,
+    render_review,
+)
+from agent.cli.state import CliState, ToolBlock
+from agent.config import ModelProfile, require_keybindings_outside_workspace
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -56,7 +61,36 @@ from agent.permission import (
     parse_permission_mode,
     permission_mode_label,
 )
-from agent.runner import AgentRunner, RunEvent, RunResult
+from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
+
+# Path / status / workspace-git + context-usage.
+FOOTER_LINES = 3
+
+
+def format_context_window(window: int) -> str:
+    """1000000 -> "1.0m", 200000 -> "200k"."""
+    if window >= 1_000_000:
+        return f"{window / 1_000_000:.1f}m"
+    if window >= 1_000:
+        return f"{round(window / 1_000)}k"
+    return str(window)
+
+
+def format_context_usage(usage: dict[str, int], window: int) -> str:
+    """Right-hand footer label, empty when the profile declares no window."""
+    if window <= 0:
+        return ""
+    label = f"{format_context_window(window)} Context"
+    used = usage.get("total_tokens") or usage.get("input_tokens") or 0
+    if used <= 0:
+        return label
+    percent = min(100.0, used / window * 100)
+    return f"{label} · {percent:.1f}% used"
+
+
+def model_display_name(profile: ModelProfile) -> str:
+    """Include the configured source when two providers expose the same model."""
+    return f"{profile.model} · {profile.source}" if profile.source else profile.model
 
 
 class SlashCompleter(Completer):
@@ -93,14 +127,127 @@ class SlashCompleter(Completer):
             if rank is not None:
                 candidates.append((rank, index, command))
         for _, _, command in sorted(candidates):
-            description = command.description
-            if command.unavailable_reason:
-                description += " (unavailable)"
             yield Completion(
                 f"/{command.name}",
                 start_position=-len(before),
-                display_meta=description,
+                display_meta=command.description,
             )
+
+
+class _ScrollableTextControl(FormattedTextControl):
+    """Formatted text that consumes clicks and routes wheel events to the transcript."""
+
+    def __init__(self, *args: Any, on_scroll: Any = None, **kwargs: Any) -> None:
+        self._on_scroll = on_scroll
+        super().__init__(*args, **kwargs)
+
+    def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if self._on_scroll is not None:
+            if mouse_event.event_type is MouseEventType.SCROLL_UP:
+                self._on_scroll(-3)
+                return None
+            if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+                self._on_scroll(3)
+                return None
+        return None
+
+
+class _EditorScrollControl(BufferControl):
+    """Input box: wheel scrolls the transcript instead of the empty editor."""
+
+    def __init__(self, *args: Any, on_scroll: Any = None, **kwargs: Any) -> None:
+        self._on_scroll = on_scroll
+        super().__init__(*args, **kwargs)
+
+    def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if self._on_scroll is not None and mouse_event.event_type in {
+            MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN,
+        }:
+            self._on_scroll(-3 if mouse_event.event_type is MouseEventType.SCROLL_UP else 3)
+            return None
+        return super().mouse_handler(mouse_event)
+
+
+class _TranscriptWindow(Window):
+    """Transcript viewport whose scroll offset is authoritative, not cursor-derived.
+
+    prompt_toolkit's scrollers only ever move ``vertical_scroll`` far enough to keep
+    a cursor visible. Disguising the scroll anchor as a cursor therefore left the
+    viewport stuck: ``max(previous_scroll, ...)`` blocked downward movement and
+    ``min(..., get_max_vertical_scroll())`` blocked upward movement, so the
+    scrollbar barely responded in either direction. This window computes the offset
+    outright and skips the cursor-chasing arithmetic entirely.
+    """
+
+    def __init__(self, *args: Any, viewport: Any = None, **kwargs: Any) -> None:
+        self._viewport = viewport
+        self._scrollbar_drag: tuple[int, int] | None = None
+        self._scrollbar_ypos = 0
+        super().__init__(*args, **kwargs)
+
+    def _scroll(self, ui_content: Any, width: int, height: int) -> None:
+        self.horizontal_scroll = 0
+        self.vertical_scroll_2 = 0
+        anchor = self._viewport.transcript_anchor() if self._viewport is not None else None
+        maximum = max(0, ui_content.line_count - height)
+        self.vertical_scroll = maximum if anchor is None else min(maximum, max(0, anchor))
+
+    def write_to_screen(self, screen: Any, mouse_handlers: Any, write_position: Any, *args: Any, **kwargs: Any) -> Any:
+        self._scrollbar_ypos = write_position.ypos
+        super().write_to_screen(screen, mouse_handlers, write_position, *args, **kwargs)
+        if self._viewport is None:
+            return
+        margin_width = sum(self._get_margin_width(margin) for margin in self.right_margins)
+        if margin_width <= 0:
+            return
+        # prompt_toolkit registers body handlers only up to `width - margin`, so
+        # without this the scrollbar column swallows clicks and does nothing.
+        mouse_handlers.set_mouse_handler_for_range(
+            x_min=write_position.xpos + write_position.width - margin_width,
+            x_max=write_position.xpos + write_position.width,
+            y_min=write_position.ypos,
+            y_max=write_position.ypos + write_position.height,
+            handler=self._scrollbar_mouse_handler,
+        )
+
+    def _scrollbar_mouse_handler(self, mouse_event: Any) -> Any:
+        info = self.render_info
+        if info is None:
+            return NotImplemented
+        if mouse_event.event_type is MouseEventType.SCROLL_UP:
+            self._viewport.scroll_transcript(-3)
+        elif mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+            self._viewport.scroll_transcript(3)
+        elif mouse_event.event_type is MouseEventType.MOUSE_UP:
+            self._scrollbar_drag = None
+        elif mouse_event.event_type is MouseEventType.MOUSE_DOWN and mouse_event.button is MouseButton.LEFT:
+            rows = max(1, info.window_height)
+            maximum = max(0, info.content_height - rows)
+            y = min(rows - 1, max(0, mouse_event.position.y - self._scrollbar_ypos))
+            thumb_height = min(rows, max(1, int(rows * len(info.displayed_lines) / max(1, info.content_height)) + 1))
+            current_scroll = self._viewport.transcript_top()
+            thumb_top = int(rows * current_scroll / max(1, info.content_height))
+            if thumb_top <= y < thumb_top + thumb_height:
+                # Holding the existing thumb must not move the viewport.
+                self._scrollbar_drag = (y, current_scroll)
+            else:
+                # A track click jumps across the whole range, including both ends.
+                target = round(y / max(1, rows - 1) * maximum)
+                self._viewport.scroll_transcript_to(target)
+                self._scrollbar_drag = (y, target)
+        elif mouse_event.event_type is MouseEventType.MOUSE_MOVE and mouse_event.button is MouseButton.LEFT:
+            if self._scrollbar_drag is None:
+                return NotImplemented
+            rows = max(1, info.window_height)
+            maximum = max(0, info.content_height - rows)
+            thumb_height = min(rows, max(1, int(rows * len(info.displayed_lines) / max(1, info.content_height)) + 1))
+            travel = max(1, rows - thumb_height)
+            start_y, start_scroll = self._scrollbar_drag
+            y = min(rows - 1, max(0, mouse_event.position.y - self._scrollbar_ypos))
+            self._viewport.scroll_transcript_to(start_scroll + round((y - start_y) * maximum / travel))
+        else:
+            return NotImplemented
+        return None
 
 
 class CliApplication:
@@ -126,14 +273,21 @@ class CliApplication:
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
         self.keymap = Keymap.load(keymap_path)
         self.interaction: InteractionController | None = None
+        self._reviewing = False
         self.clipboard = ClipboardAdapter()
         self._io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deep-agent-io")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._run_task: asyncio.Task[None] | None = None
+        self._compacting = False
         self._last_ctrl_c = 0.0
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
+        self._resume_picker_on_start = False
+        self._renderer = TranscriptRenderer()
+        self._git = GitProbe(self._workspace())
+        self._git_summary = GitSummary()
+        self._git_task: asyncio.Task[None] | None = None
 
         self.slash_completer = SlashCompleter(self.commands)
         self.buffer = Buffer(
@@ -142,16 +296,25 @@ class CliApplication:
             completer=self.slash_completer,
             complete_while_typing=True,
         )
-        self.transcript_control = SelectableFormattedTextControl(
+        self.transcript_control = _ScrollableTextControl(
             text=self._transcript_text,
-            on_copy=self._copy_selected_text,
-            on_selection_start=self._begin_transcript_selection,
+            focusable=False,
+            show_cursor=False,
             get_cursor_position=self._transcript_cursor,
+            on_scroll=self.scroll_transcript,
         )
-        self.interaction_control = FormattedTextControl(text=self._interaction_text, focusable=False)
-        self.attachment_control = FormattedTextControl(text=self._attachment_text, focusable=False)
-        self.footer_control = FormattedTextControl(text=self._footer_text, focusable=False)
-        self.editor_control = BufferControl(buffer=self.buffer, focusable=True)
+        self.interaction_control = _ScrollableTextControl(
+            text=self._interaction_text, focusable=False, on_scroll=self.scroll_transcript,
+        )
+        self.attachment_control = _ScrollableTextControl(
+            text=self._attachment_text, focusable=False, on_scroll=self.scroll_transcript,
+        )
+        self.footer_control = _ScrollableTextControl(
+            text=self._footer_text, focusable=False, on_scroll=self.scroll_transcript,
+        )
+        self.editor_control = _EditorScrollControl(
+            buffer=self.buffer, focusable=True, on_scroll=self.scroll_transcript,
+        )
         self.bindings = self._create_bindings()
 
         interaction_visible = Condition(lambda: self.interaction is not None)
@@ -167,14 +330,28 @@ class CliApplication:
             maximum = max(3, min(10, rows // 3))
             return Dimension(min=1, preferred=min(lines, maximum), max=maximum)
 
+        def interaction_height() -> Any:
+            if self.interaction is None:
+                return Dimension(min=3)
+            text = render_interaction(self.interaction, self._width())
+            lines = text.count("\n") + 1 if text else 3
+            try:
+                rows = self.application.output.get_size().rows
+            except Exception:  # noqa: BLE001
+                rows = 30
+            maximum = max(8, rows - 8)
+            return Dimension(min=3, preferred=min(max(lines, 3), maximum), max=maximum)
+
+        self.transcript_window = _TranscriptWindow(
+            self.transcript_control,
+            wrap_lines=True,
+            height=Dimension(min=3, weight=1),
+            always_hide_cursor=True,
+            right_margins=[ScrollbarMargin(display_arrows=False)],
+            viewport=self,
+        )
         body = HSplit([
-            Window(
-                self.transcript_control,
-                wrap_lines=True,
-                height=Dimension(min=3, weight=1),
-                always_hide_cursor=True,
-                right_margins=[ScrollbarMargin(display_arrows=False)],
-            ),
+            self.transcript_window,
             Window(height=1, char="─", style="class:editor-border"),
             ConditionalContainer(
                 Window(
@@ -190,7 +367,7 @@ class CliApplication:
                 Window(
                     self.interaction_control,
                     wrap_lines=True,
-                    height=Dimension(min=3, preferred=10, max=16),
+                    height=interaction_height,
                     dont_extend_height=True,
                     always_hide_cursor=True,
                     style="class:interaction",
@@ -198,16 +375,29 @@ class CliApplication:
                 filter=interaction_visible,
             ),
             ConditionalContainer(
-                Window(
-                    self.editor_control,
-                    wrap_lines=True,
-                    height=editor_height,
-                    dont_extend_height=True,
-                ),
+                HSplit([
+                    Window(height=1, char=" ", style="class:editor"),
+                    VSplit([
+                        Window(FormattedTextControl("› "), width=2, style="class:editor"),
+                        Window(
+                            self.editor_control,
+                            wrap_lines=True,
+                            height=editor_height,
+                            dont_extend_height=True,
+                            style="class:editor",
+                        ),
+                    ]),
+                    Window(height=1, char=" ", style="class:editor"),
+                ]),
                 filter=editor_visible,
             ),
             Window(height=1, char="─", style="class:editor-border"),
-            Window(self.footer_control, height=2, style="class:footer", dont_extend_height=True),
+            Window(
+                self.footer_control,
+                height=lambda: FOOTER_LINES if self._git_summary.label() else FOOTER_LINES - 1,
+                style="class:footer",
+                dont_extend_height=True,
+            ),
         ])
         root = FloatContainer(
             content=body,
@@ -222,10 +412,10 @@ class CliApplication:
             mouse_support=True,
             style=Style.from_dict({
                 "editor-border": "#77a8bd",
+                "editor": "bg:#303030 #ffffff",
                 "footer": "#858585",
-                "interaction": "bg:#15191d #d0d0d0",
-                "attachments": "bg:#17242a #72d5e8",
-                "selection": "bg:#3b5c73 #ffffff",
+                "interaction": "#d0d0d0",
+                "attachments": "#72d5e8",
                 "scrollbar.background": "#202020",
                 "scrollbar.button": "#666666",
                 "completion-menu": "bg:#15191d #d0d0d0",
@@ -244,28 +434,67 @@ class CliApplication:
     def run(self) -> None:
         def capture_loop() -> None:
             self._loop = asyncio.get_running_loop()
+            self._start_git_watch()
+            if self._resume_picker_on_start:
+                self._loop.create_task(self.resume_session())
 
         self.application.run(pre_run=capture_loop)
 
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._start_git_watch()
+        if self._resume_picker_on_start:
+            await self.resume_session()
         await self.application.run_async()
+
+    def _start_git_watch(self) -> None:
+        if self._git_task is not None:
+            return
+        self._git_task = asyncio.get_running_loop().create_task(self._watch_git())
+
+    async def _watch_git(self) -> None:
+        """Keep the footer's git summary fresh without ever blocking a render pass."""
+        while True:
+            summary = await self._git.refresh()
+            if summary != self._git_summary:
+                self._git_summary = summary
+                self.application.invalidate()
+            await asyncio.sleep(REFRESH_SECONDS)
+
+    def continue_session_message(self) -> str | None:
+        if not self.runner.thread_has_content():
+            return None
+        model = self.runner.current_model()
+        model_name = model_display_name(model) if model is not None else "fixed model"
+        return (
+            "To continue this session, run:\n"
+            "\n"
+            f"  deep-agent resume {self.runner.thread_id}\n"
+            "\n"
+            f"Or run deep-agent resume and select. Model: {model_name}"
+        )
 
     def set_status(self, text: str) -> None:
         self.state.status = text
         self.application.invalidate()
 
+    def _switch_model(self, id_or_prefix: str) -> ModelProfile:
+        previous = self.runner.current_model()
+        profile = self.runner.switch_model(id_or_prefix)
+        if previous is None or previous.id != profile.id:
+            self.state.usage.clear()
+        return profile
+
     def show_help(self) -> None:
         commands = "\n".join(
             f"/{item.name:<9} {item.description}"
-            + (f" — unavailable: {item.unavailable_reason}" if item.unavailable_reason else "")
             for item in self.commands
         )
         self.state.add_system(
             "Keyboard\n"
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
-            "Ctrl+O tools · Ctrl+T thinking · drag transcript to copy · "
+            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · "
             "Ctrl+V/Alt+V paste image/text · "
             "Ctrl+C clear/exit · Ctrl+D exit\n\n"
             f"Commands\n{commands}"
@@ -277,7 +506,7 @@ class CliApplication:
         tool_count = len(prepared.exposed_tool_names) + len(prepared.filesystem_tools) + 3
         model = self.runner.current_model()
         model_line = (
-            f"Model: {model.model}\nInputs: {', '.join(model.input)}\n"
+            f"Model: {model_display_name(model)}\nInputs: {', '.join(model.input)}\n"
             if model is not None else "Model: (fixed)\n"
         )
         perm = permission_mode_label(self.runner.permission_mode())
@@ -292,7 +521,7 @@ class CliApplication:
         store = self.runner.session_store
         model = self.runner.current_model()
         model_line = (
-            f"Model: {model.model}\n" if model is not None else ""
+            f"Model: {model_display_name(model)}\n" if model is not None else ""
         )
         if store is None:
             self.state.add_system(
@@ -331,8 +560,10 @@ class CliApplication:
             return
         self.state.clear()
         self.state.attachments.clear()
-        self.transcript_control.clear_selection()
         self.interaction = None
+        self._reviewing = False
+        self._transcript_anchor = None
+        self._renderer.clear()
         self.state.add_system(f"Started session {info.id}")
         self.set_status("Ready")
 
@@ -348,9 +579,9 @@ class CliApplication:
                 self._restore_queued_to_editor(self.buffer)
                 snapshot = self.runner.switch_session(arg.strip())
             else:
-                sessions = self.runner.list_sessions(limit=20)
+                sessions = self._sessions_with_content(limit=50)
                 if not sessions:
-                    self.state.add_system("No saved sessions in this workspace.", error=True)
+                    self.state.add_system("No sessions with conversation content.", error=True)
                     return
                 options = [
                     {
@@ -383,6 +614,17 @@ class CliApplication:
             return
         self._apply_session_snapshot(snapshot)
 
+    def _sessions_with_content(self, *, limit: int = 50) -> list[Any]:
+        store = self.runner.session_store
+        if store is None:
+            return []
+        sessions = []
+        for info in self.runner.list_sessions(limit=limit):
+            if not self.runner.thread_has_content(info.id):
+                continue
+            sessions.append(info)
+        return sessions
+
     async def select_model(self, arg: str = "") -> None:
         if self.state.running:
             self.set_status("Cancel the active run before switching models")
@@ -402,16 +644,16 @@ class CliApplication:
             return
         try:
             if arg.strip():
-                profile = self.runner.switch_model(arg.strip())
-                self.state.add_system(f"Switched model to {profile.model}")
-                self.set_status(f"Model: {profile.model}")
+                profile = self._switch_model(arg.strip())
+                self.state.add_system(f"Switched model to {model_display_name(profile)}")
+                self.set_status(f"Model: {model_display_name(profile)}")
                 return
             current = self.runner.current_model()
             current_id = current.id if current else ""
             options = [
                 {
                     "value": item.id,
-                    "label": item.model
+                    "label": model_display_name(item)
                     + (" · current" if item.id == current_id else ""),
                 }
                 for item in profiles
@@ -438,6 +680,57 @@ class CliApplication:
             self.application.invalidate()
         except (KeyError, RuntimeError) as exc:
             self.state.add_system(str(exc), error=True)
+
+    async def compact_command(self, arg: str = "") -> None:
+        if arg.strip():
+            self.state.add_system("Usage: /compact", error=True)
+            return
+        if self.state.running or self.interaction is not None:
+            self.set_status("Finish the current run or interaction before compacting")
+            return
+        self._compacting = True
+        self.state.running = True
+        self.set_status("Compacting context…")
+        try:
+            result = await self._run_blocking(self.runner.compact_context)
+        except Exception as exc:  # noqa: BLE001
+            self.state.add_system(f"Context compaction failed: {exc}", error=True)
+            self.set_status("Compaction failed")
+            return
+        finally:
+            self._compacting = False
+            self.state.running = False
+            self.application.invalidate()
+        if result.status == "ineligible":
+            if result.percent is not None:
+                notice = (
+                    "Manual compaction is allowed at about 42.5% of the context window; "
+                    f"current usage: {result.percent:.1f}%."
+                )
+                if result.percent >= 42.5:
+                    notice += " Deep Agents has not accepted the latest model usage as eligible."
+                self.state.add_system(notice)
+            elif result.window_tokens > 0:
+                self.state.add_system(
+                    "Manual compaction is allowed at about 42.5% of the context window; "
+                    "current usage is unknown because the model has not reported token usage."
+                )
+            else:
+                self.state.add_system(
+                    "Manual compaction requires about 85,000 tokens with the current unknown "
+                    "context window; current usage percentage is unavailable. Configure context_window to show it."
+                )
+            self.set_status("Manual compaction unavailable")
+        elif result.status == "nothing_to_compact":
+            self.state.add_system("There are no older messages to compact yet.")
+            self.set_status("No older context to compact")
+        elif result.status == "compacted":
+            self.state.usage.clear()
+            self.state.add_system(result.message)
+            self.set_status("Context compacted")
+        else:
+            self.state.add_system(result.message or "Context compaction failed", error=True)
+            self.set_status("Compaction failed")
 
     async def select_permission(self, arg: str = "") -> None:
         if self.state.running:
@@ -548,7 +841,7 @@ class CliApplication:
                 self.set_status("No models configured in the agent config")
             else:
                 current = self.runner.current_model()
-                label = current.model if current else profiles[0].model
+                label = model_display_name(current or profiles[0])
                 self.set_status(f"Only one model configured: {label}")
             return
         current = self.runner.current_model()
@@ -556,12 +849,12 @@ class CliApplication:
         index = next((i for i, item in enumerate(profiles) if item.id == current_id), 0)
         nxt = profiles[(index + delta) % len(profiles)]
         try:
-            profile = self.runner.switch_model(nxt.id)
+            profile = self._switch_model(nxt.id)
         except (KeyError, RuntimeError) as exc:
             self.state.add_system(str(exc), error=True)
             return
-        self.state.add_system(f"Switched model to {profile.model}")
-        self.set_status(f"Model: {profile.model}")
+        self.state.add_system(f"Switched model to {model_display_name(profile)}")
+        self.set_status(f"Model: {model_display_name(profile)}")
         self.application.invalidate()
 
     def _restore_queued_to_editor(self, buffer: Any) -> list[str]:
@@ -585,43 +878,39 @@ class CliApplication:
     def _apply_session_snapshot(self, snapshot: Any) -> None:
         self.state.load_transcript(snapshot.transcript)
         self.state.todos = list(snapshot.todos)
-        self.transcript_control.clear_selection()
         self.interaction = None
+        self._reviewing = False
         self.state.add_system(
             f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
         )
         for notice in snapshot.notices:
             self.state.add_system(notice)
-        if snapshot.interrupt_kind == "waiting_confirmation":
-            self.interaction = InteractionController.approval(snapshot.pending_tool_calls)
-            self.state.status = "Waiting for input"
-        elif snapshot.interrupt_kind == "waiting_human":
-            self.interaction = InteractionController.human(snapshot.human_input)
-            self.state.status = "Waiting for input"
-        elif snapshot.interrupt_kind == "paused":
-            self.interaction = InteractionController(
-                kind="pause",
-                title="Paused",
-                question="Continue the agent run?",
-                fields=[{
-                    "id": "continue", "type": "single_select", "label": "Decision", "required": True,
-                    "options": [{"value": "stay", "label": "No"}, {"value": "continue", "label": "Yes"}],
-                }],
-            )
-            self.state.status = "Paused"
-        else:
+        if not self._reopen_pending_interaction(notify_missing=False):
             self.set_status("Ready")
+        self._transcript_anchor = None
+        self._renderer.clear()
+        self.state.usage = dict(self.runner.latest_usage())
         self.application.invalidate()
 
     def exit(self) -> None:
         if self.state.running:
             self.runner.request_cancel()
+        if self._git_task is not None:
+            self._git_task.cancel()
+            self._git_task = None
         self._io_executor.shutdown(wait=False, cancel_futures=True)
         self.application.exit()
 
     async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._io_executor, partial(func, *args, **kwargs))
+
+    def _workspace(self) -> Path:
+        sandbox = (
+            self.runner.settings.sandbox
+            if self.runner.settings is not None else self.runner._sandbox_config
+        )
+        return Path(sandbox.workspace) if sandbox is not None else Path.cwd()
 
     def _width(self) -> int:
         try:
@@ -632,21 +921,54 @@ class CliApplication:
 
     def _transcript_cursor(self) -> Point:
         last = max(0, self._transcript_line_count - 1)
-        if self._transcript_anchor is None:
-            return Point(x=0, y=last)
-        return Point(x=0, y=min(last, max(0, self._transcript_anchor)))
+        return Point(x=0, y=min(last, self.transcript_top()))
 
-    def _scroll_transcript(self, delta: int) -> None:
-        last = max(0, self._transcript_line_count - 1)
-        current = last if self._transcript_anchor is None else self._transcript_anchor
-        nxt = min(last, max(0, current + delta))
-        self._transcript_anchor = None if nxt >= last else nxt
+    def transcript_anchor(self) -> int | None:
+        """Top row to pin the viewport to, or None while following new output."""
+        return self._transcript_anchor
+
+    def transcript_rows(self) -> int:
+        """Total transcript rows as of the most recent paint."""
+        return self._transcript_line_count
+
+    def transcript_viewport_rows(self) -> int:
+        """Visible transcript rows; from the viewport once it has painted."""
+        info = self.transcript_window.render_info
+        if info is not None:
+            return max(1, info.window_height)
+        try:
+            rows = self.application.output.get_size().rows
+        except Exception:  # noqa: BLE001
+            rows = 24
+        return max(1, rows)
+
+    def transcript_max_scroll(self) -> int:
+        return max(0, self.transcript_rows() - self.transcript_viewport_rows())
+
+    def transcript_top(self) -> int:
+        """Row currently sitting at the top of the viewport."""
+        maximum = self.transcript_max_scroll()
+        if self._transcript_anchor is None:
+            return maximum
+        return min(maximum, max(0, self._transcript_anchor))
+
+    def scroll_transcript(self, delta: int) -> None:
+        self.scroll_transcript_to(self.transcript_top() + delta)
+
+    def scroll_transcript_to(self, row: int) -> None:
+        maximum = self.transcript_max_scroll()
+        nxt = min(maximum, max(0, row))
+        self._transcript_anchor = None if nxt >= maximum else nxt
         self.application.invalidate()
 
     def _transcript_text(self):  # type: ignore[no-untyped-def]
-        rendered = render_transcript(self.state, self._width())
-        self._transcript_line_count = rendered.count("\n") + 1
-        return to_formatted_text(ANSI(rendered))
+        if self._reviewing:
+            rendered = render_review(self._review_calls(), self._width())
+            self._transcript_line_count = rendered.count("\n") + 1
+            return to_formatted_text(ANSI(rendered))
+        fragments, lines = self._renderer.render(self.state, self._width())
+        self._transcript_line_count = lines
+        return fragments
 
     def _interaction_text(self):  # type: ignore[no-untyped-def]
         return to_formatted_text(ANSI(render_interaction(self.interaction, self._width())))
@@ -664,34 +986,20 @@ class CliApplication:
         mode = self.runner.prepared.execution_mode.value
         perm = self.runner.permission_mode().value
         spinner = " ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 11] if self.state.running else ""
-        workspace = self.runner.settings.sandbox.workspace if self.runner.settings is not None else Path.cwd()
-        first = _fit_footer_line(f" {workspace}", "", self._width())
+        width = self._width()
+        first = _fit_footer_line(f" {self._workspace()}", "", width)
         left = f" {spinner}{self.state.status}{queue} · {mode} · perm:{perm} · {self.runner.thread_id[:8]}"
         model = self.runner.current_model()
-        right = model.model if model is not None else "fixed model"
-        second = _fit_footer_line(left, right, self._width())
-        return FormattedText([("class:footer", f"{first}\n{second}")])
-
-    def _begin_transcript_selection(self) -> None:
-        if self._transcript_anchor is None:
-            self._transcript_anchor = max(0, self._transcript_line_count - 1)
-        self.application.invalidate()
-
-    def _copy_selected_text(self, value: str) -> None:
-        previous = self.state.status
-        try:
-            backend = copy_to_clipboard(value, output=self.application.output)
-            notice = f"Copied {len(value)} characters via {backend}"
-        except ClipboardError as exc:
-            notice = f"Copy failed: {exc}"
-        self.state.status = notice
-        self.application.invalidate()
-        if self._loop is not None:
-            def restore() -> None:
-                if self.state.status == notice:
-                    self.state.status = previous
-                    self.application.invalidate()
-            self._loop.call_later(2.0, restore)
+        right = model_display_name(model) if model is not None else "fixed model"
+        context = format_context_usage(self.state.usage, self.runner.context_window())
+        git = self._git_summary.label()
+        if not git:
+            right = f"{right} · {context}" if context else right
+            second = _fit_footer_line(left, right, width)
+            return FormattedText([("class:footer", f"{first}\n{second}")])
+        second = _fit_footer_line(left, right, width)
+        third = _fit_footer_line(f" {git}", context, width)
+        return FormattedText([("class:footer", f"{first}\n{second}\n{third}")])
 
     def _create_bindings(self) -> KeyBindings:
         kb = KeyBindings()
@@ -773,23 +1081,21 @@ class CliApplication:
             self.interaction.move(1)
             self.application.invalidate()
 
-        @kb.add("pageup", filter=~interaction_active)
+        @kb.add("pageup")
         def page_up(event) -> None:  # type: ignore[no-untyped-def]
-            self._scroll_transcript(-10)
+            self.scroll_transcript(-10)
 
-        @kb.add("pagedown", filter=~interaction_active)
+        @kb.add("pagedown")
         def page_down(event) -> None:  # type: ignore[no-untyped-def]
-            self._scroll_transcript(10)
+            self.scroll_transcript(10)
 
-        @kb.add("c-home", filter=~interaction_active)
+        @kb.add("c-home")
         def scroll_top(event) -> None:  # type: ignore[no-untyped-def]
-            self._transcript_anchor = 0
-            self.application.invalidate()
+            self.scroll_transcript_to(0)
 
-        @kb.add("c-end", filter=~interaction_active)
+        @kb.add("c-end")
         def scroll_bottom(event) -> None:  # type: ignore[no-untyped-def]
-            self._transcript_anchor = None
-            self.application.invalidate()
+            self.scroll_transcript_to(self.transcript_rows())
 
         @kb.add(" ", filter=interaction_active)
         def interaction_toggle(event) -> None:  # type: ignore[no-untyped-def]
@@ -818,8 +1124,12 @@ class CliApplication:
         def escape(event) -> None:  # type: ignore[no-untyped-def]
             if event.current_buffer.complete_state is not None:
                 event.current_buffer.cancel_completion()
+            elif self._reviewing:
+                self._close_review()
             elif self.interaction is not None:
                 self._finish_interaction(cancelled=True)
+            elif self._compacting:
+                self.set_status("Wait for compaction to finish")
             elif self.state.running:
                 restored = self._restore_queued_to_editor(event.current_buffer)
                 self.runner.request_cancel()
@@ -854,6 +1164,14 @@ class CliApplication:
         def tools_expand(event) -> None:  # type: ignore[no-untyped-def]
             self.state.tools_expanded = not self.state.tools_expanded
             self.set_status(f"Tool output: {'expanded' if self.state.tools_expanded else 'collapsed'}")
+
+        @bind("review_diff")
+        def review_diff(event) -> None:  # type: ignore[no-untyped-def]
+            self._toggle_review()
+
+        @bind("reopen_interaction")
+        def reopen_interaction(event) -> None:  # type: ignore[no-untyped-def]
+            self._reopen_pending_interaction()
 
         @bind("thinking_toggle")
         def thinking_toggle(event) -> None:  # type: ignore[no-untyped-def]
@@ -903,6 +1221,9 @@ class CliApplication:
             return
         if not text and not self.state.attachments:
             return
+        if self._compacting:
+            self.set_status("Wait for compaction to finish")
+            return
         if text.startswith("/") and "\n" not in text:
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
@@ -928,9 +1249,7 @@ class CliApplication:
         command = self.command_by_name.get(name)
         if command is None:
             self.state.add_system(f"Unknown command: /{name}", error=True)
-        elif command.unavailable_reason:
-            self.state.add_system(f"/{name} is unavailable: {command.unavailable_reason}", error=True)
-        elif command.handler:
+        else:
             await command.handler(self, arg.strip())
         self.application.invalidate()
 
@@ -938,17 +1257,17 @@ class CliApplication:
         self,
         text: str,
         *,
-        resume: dict | None = None,
+        resume_call: Any | None = None,
         image_refs: tuple[ImageAttachmentRef, ...] = (),
     ) -> None:
-        if resume is None:
+        if resume_call is None:
             self.state.add_user(text, attachments=image_refs)
             self.state.attachments.clear()
         self.state.running = True
         self.set_status("Working…  Esc to cancel")
 
         async def work() -> None:
-            if resume is None:
+            if resume_call is None:
                 try:
                     result = await self._run_blocking(
                         self.runner.invoke_with_attachment_refs,
@@ -964,9 +1283,7 @@ class CliApplication:
                     self.state.attachments[:] = image_refs
             else:
                 try:
-                    result = await self._run_blocking(
-                        self.runner.resume, resume, on_event=self._on_event_thread,
-                    )
+                    result = await self._run_blocking(resume_call)
                 except Exception as exc:  # noqa: BLE001
                     self._apply_event(RunEvent(type="run_failed", content=str(exc)))
                     return
@@ -1107,28 +1424,18 @@ class CliApplication:
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
-        if result.status == "waiting_confirmation":
-            self.interaction = InteractionController.approval(result.pending_tool_calls)
-        elif result.status == "waiting_human":
-            self.interaction = InteractionController.human(result.human_input)
-        elif result.status == "paused":
+        if result.status == "paused":
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")
-            self.interaction = InteractionController(
-                kind="pause",
-                title="Paused",
-                question="Continue the agent run?",
-                fields=[{
-                    "id": "continue", "type": "single_select", "label": "Decision", "required": True,
-                    "options": [{"value": "stay", "label": "No"}, {"value": "continue", "label": "Yes"}],
-                }],
-            )
+        if result.status in {"waiting_confirmation", "waiting_human", "paused"}:
+            self._reopen_pending_interaction()
         self.application.invalidate()
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
         interaction = self.interaction
         if interaction is None:
             return
+        self._reviewing = False
         if interaction.kind == "resume":
             if cancelled:
                 self.interaction = None
@@ -1158,12 +1465,12 @@ class CliApplication:
                 self.state.add_system("No model selected", error=True)
                 return
             try:
-                profile = self.runner.switch_model(model_id)
+                profile = self._switch_model(model_id)
             except (KeyError, RuntimeError) as exc:
                 self.state.add_system(str(exc), error=True)
                 return
-            self.state.add_system(f"Switched model to {profile.model}")
-            self.set_status(f"Model: {profile.model}")
+            self.state.add_system(f"Switched model to {model_display_name(profile)}")
+            self.set_status(f"Model: {model_display_name(profile)}")
             return
         if interaction.kind == "permission":
             if cancelled:
@@ -1215,21 +1522,111 @@ class CliApplication:
             self.state.add_system(f"Permission mode: {permission_mode_label(applied)}")
             self.set_status(f"Permission: {applied.value}")
             return
-        if interaction.kind == "pause":
-            choice = interaction.values.get("continue")
-            if not cancelled and choice == "continue":
-                self.interaction = None
-                self._start_run("", resume={"type": "continue"})
-            else:
-                interaction.values.clear()
-                interaction.option_index = 0
-                interaction.error = "The run remains paused; select Yes to continue."
-                self.interaction = interaction
-                self.set_status("Paused")
+        if cancelled and interaction.kind in {"pause", "approval", "human"}:
+            self._dismiss_pending_interrupt(interaction.kind)
             return
-        decision = interaction.decision(cancelled=cancelled)
+        if interaction.kind == "pause":
+            if interaction.values.get("continue") == "continue":
+                self.interaction = None
+                self._start_run("", resume_call=partial(
+                    self.runner.continue_run, on_event=self._on_event_thread,
+                ))
+                return
+            self._dismiss_pending_interrupt("pause")
+            return
+        if interaction.kind == "approval":
+            ids = [item for item in interaction.tool_call_ids if item]
+            approved = str(interaction.values.get("approved") or "") == "approve"
+            self.interaction = None
+            if approved and len(ids) == 1:
+                resume_call = partial(
+                    self.runner.approve_tool, ids[0], on_event=self._on_event_thread,
+                )
+            elif approved:
+                resume_call = partial(
+                    self.runner._decide_listed_tools, ids, approved=True,
+                    on_event=self._on_event_thread,
+                )
+            elif len(ids) == 1:
+                resume_call = partial(
+                    self.runner.reject_tool, ids[0], on_event=self._on_event_thread,
+                )
+            else:
+                resume_call = partial(
+                    self.runner._decide_listed_tools, ids, approved=False,
+                    on_event=self._on_event_thread,
+                )
+            self._start_run("", resume_call=resume_call)
+            return
+        values = dict(interaction.values)
         self.interaction = None
-        self._start_run("", resume=decision)
+        self._start_run("", resume_call=partial(
+            self.runner.submit_human_input, values, on_event=self._on_event_thread,
+        ))
+
+    def _dismiss_pending_interrupt(self, kind: str) -> None:
+        self.interaction = None
+        self._reviewing = False
+        label = {"approval": "Approval", "human": "Input", "pause": "Pause"}.get(kind, "Input")
+        self.state.add_system(f"{label} still pending · F2 to decide")
+        self.set_status("Ready")
+
+    def _reopen_pending_interaction(self, *, notify_missing: bool = True) -> bool:
+        try:
+            interrupt = self.runner.current_interrupt()
+        except UnknownInterruptError as exc:
+            self.state.add_system(str(exc), error=True)
+            self.set_status("Unknown interrupt")
+            return False
+        if interrupt is None:
+            if notify_missing:
+                self.state.add_system("No pending interaction")
+                self.set_status("No pending interaction")
+            return False
+        if interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
+            self.interaction = InteractionController.approval(list(interrupt.pending_tools))
+            self.set_status("Waiting for input")
+        elif interrupt.kind is InterruptKind.WAITING_HUMAN:
+            self.interaction = InteractionController.human(interrupt.payload)
+            self.set_status("Waiting for input")
+        elif interrupt.kind is InterruptKind.PAUSED:
+            self.interaction = InteractionController.pause()
+            self.set_status("Paused")
+        else:
+            self.state.add_system(f"Unsupported interrupt: {interrupt.kind}", error=True)
+            return False
+        self.application.invalidate()
+        return True
+
+    def _review_calls(self) -> list[tuple[str, dict[str, Any]]]:
+        if self.interaction is not None and self.interaction.kind == "approval":
+            found = [
+                (str(call.get("name") or "tool"), call.get("args") if isinstance(call.get("args"), dict) else {})
+                for call in self.interaction.calls
+                if str(call.get("name") or "") in MUTATION_TOOLS
+            ]
+            if found:
+                return found
+        for block in reversed(self.state.blocks):
+            if isinstance(block, ToolBlock) and block.name in MUTATION_TOOLS:
+                return [(block.name, block.arguments)]
+        return []
+
+    def _toggle_review(self) -> None:
+        if self._reviewing:
+            self._close_review()
+            return
+        if not self._review_calls():
+            self.set_status("No pending review")
+            return
+        self._reviewing = True
+        self._transcript_anchor = 0
+        self.set_status("Reviewing diff · Esc or Ctrl+R to close")
+
+    def _close_review(self) -> None:
+        self._reviewing = False
+        self._transcript_anchor = None
+        self.set_status("Waiting for input" if self.interaction is not None else "Ready")
 
 
 def default_config_dir() -> Path:

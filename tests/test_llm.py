@@ -1,7 +1,10 @@
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import langchain_openai.chat_models.base as lc_base
+import openai
+import pytest
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
@@ -60,21 +63,24 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
     class FakeResponses:
         async def create(self, **payload):
             assert payload["stream"] is True
-            return FakeResponse()
+            return SimpleNamespace(headers={"x-test": "async"}, parse=lambda: FakeResponse())
 
     class FakeClient:
         responses = FakeResponses()
+        with_raw_response = SimpleNamespace(responses=responses)
 
     llm = QwenChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
-        use_responses_api=True, output_version="responses/v1",
+        use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
     object.__setattr__(llm, "root_async_client", FakeClient())
 
     async def collect():
         return [item async for item in llm._astream([HumanMessage(content="x")])]
 
-    blocks = [chunk.message.content[0] for chunk in asyncio.run(collect())]
+    chunks = asyncio.run(collect())
+    blocks = [chunk.message.content[0] for chunk in chunks]
+    assert chunks[0].message.response_metadata["headers"]["x-test"] == "async"
     assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
     assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
     assert blocks[2]["text"] == "answer"
@@ -100,18 +106,21 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
     class FakeResponses:
         def create(self, **payload):
             assert payload["stream"] is True
-            return FakeResponse()
+            return SimpleNamespace(headers={"x-test": "sync"}, parse=lambda: FakeResponse())
 
     class FakeClient:
         responses = FakeResponses()
+        with_raw_response = SimpleNamespace(responses=responses)
 
     llm = QwenChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
-        use_responses_api=True, output_version="responses/v1",
+        use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
     object.__setattr__(llm, "root_client", FakeClient())
 
-    blocks = [chunk.message.content[0] for chunk in llm._stream([HumanMessage(content="x")])]
+    chunks = list(llm._stream([HumanMessage(content="x")]))
+    blocks = [chunk.message.content[0] for chunk in chunks]
+    assert chunks[0].message.response_metadata["headers"]["x-test"] == "sync"
     assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
     assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
     assert blocks[2]["text"] == "answer"
@@ -128,6 +137,25 @@ def test_gateway_extra_body_envelope_and_plain_chatopenai_stay_scoped() -> None:
     assert QwenChatOpenAI._generate is ChatOpenAI._generate
 
 
+def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
+    request = httpx.Request("POST", "http://localhost:8000/v1/responses")
+    response = httpx.Response(400, request=request)
+
+    class FakeResponses:
+        def create(self, **_payload):
+            raise openai.BadRequestError(
+                "context_length_exceeded", response=response, body={},
+            )
+
+    llm = QwenChatOpenAI(
+        model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
+        use_responses_api=True,
+    )
+    object.__setattr__(llm, "root_client", SimpleNamespace(responses=FakeResponses()))
+    with pytest.raises(lc_base.OpenAIContextOverflowError):
+        list(llm._stream([HumanMessage(content="x")]))
+
+
 def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_differ() -> None:
     from agent.config import ModelProfile
     from agent.llm import build_chat_model
@@ -139,3 +167,23 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
     assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
     assert "messages" in compatible._get_request_payload([HumanMessage(content="hello")])
     assert compatible.use_responses_api is False
+
+
+@pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])
+def test_configured_context_window_drives_deepagents_compaction(provider: str) -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    from deepagents.middleware.summarization import compute_summarization_defaults
+
+    configured = build_chat_model(ModelProfile(
+        "configured", "qwen3.5-plus", provider=provider, context_window=128_000,
+    ))
+    assert configured.profile is not None
+    assert configured.profile["max_input_tokens"] == 128_000
+    defaults = compute_summarization_defaults(configured)
+    assert defaults["trigger"] == ("fraction", 0.85)
+    assert round(configured.profile["max_input_tokens"] * defaults["trigger"][1]) == 108_800
+    assert defaults["keep"] == ("fraction", 0.10)
+
+    unknown = build_chat_model(ModelProfile("unknown", "qwen3.5-plus", provider=provider))
+    assert compute_summarization_defaults(unknown)["trigger"] == ("tokens", 170_000)

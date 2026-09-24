@@ -31,7 +31,6 @@ class RunController:
         self._steering: deque[QueuedMessage] = deque()
         self._follow_ups: deque[QueuedMessage] = deque()
         self._queue_order = count()
-        self._cancel_requested = False
         self._pause_requested = False
         self._cancel_event = threading.Event()
         self._run_control: RunControl | None = None
@@ -41,7 +40,6 @@ class RunController:
 
     def begin_run(self) -> RunControl:
         with self._lock:
-            self._cancel_requested = False
             self._cancel_event.clear()
             self._run_control = RunControl()
             self._active_tools.clear()
@@ -99,7 +97,7 @@ class RunController:
     def pop_steering(self) -> str | None:
         """Consume one steering message at a model-safe boundary (pi one-at-a-time)."""
         with self._lock:
-            if self._defer_steering or self._cancel_requested:
+            if self._defer_steering or self._cancel_event.is_set():
                 return None
             if not self._steering:
                 return None
@@ -131,7 +129,6 @@ class RunController:
 
     def cancel(self) -> None:
         with self._lock:
-            self._cancel_requested = True
             self._cancel_event.set()
             self._pause_requested = False
             control = self._run_control

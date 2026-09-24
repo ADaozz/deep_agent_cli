@@ -11,14 +11,18 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.summarization import (
+    SummarizationToolMiddleware,
+    create_summarization_tool_middleware,
+)
 from deepagents._models import get_model_identifier, get_model_provider
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
-from agent.config import SandboxConfig, Settings, settings as default_settings
+from agent.config import SandboxConfig, Settings
 from agent.control import RunController
 from agent.llm import build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
@@ -26,16 +30,23 @@ from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
+from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.permission import (
     PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
 )
-from agent.sandbox import ExecutionMode, SANDBOX_ROOT, select_backend
+from agent.sandbox import ExecutionMode, SKILLS_ROOT, WorkspaceCompositeBackend, select_backend
 from agent.tools.execute import build_execute_tool
 from agent.tools.human_input import build_human_input_tools
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"]
-DEFAULT_SYSTEM_PROMPT = "你是使用 {model_name} 的 Coding Agent CLI。"
+DEFAULT_SYSTEM_PROMPT = (
+    "你是使用 {model_name} 的 Coding Agent CLI。"
+    "完成用户请求后直接报告结果。"
+    "如果继续执行需要用户提供信息或从多个选项中做决定，调用 request_human_input 暂停等待回答。"
+    "如果你主动给用户列出多个后续操作供其选择，也必须调用 request_human_input，"
+    "用 fields 的 single_select 或 multi_select 表达选项；不要只在普通回复中写编号菜单。"
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class PreparedAgent:
     checkpointer: Any = None
     run_controller: RunController | None = None
     pause_condition: Callable[[], bool] = field(default=lambda: False)
+    compact_middleware: SummarizationToolMiddleware | None = None
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -84,7 +96,7 @@ def build_agent(
     should_pause: Callable[[], bool],
     interrupt_on_override: dict[str, Any] | None = None,
 ) -> PreparedAgent:
-    sandbox_cfg = spec.sandbox or default_settings.sandbox
+    sandbox_cfg = spec.sandbox or SandboxConfig()
     if spec.backend is None:
         selected = select_backend(sandbox_cfg)
         fs_backend = selected.backend
@@ -102,11 +114,13 @@ def build_agent(
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
-    permissions = [] if supports_execute else _filesystem_permissions(sandbox_cfg, managed=spec.backend is None)
     if supports_execute:
         tools.append(build_execute_tool(fs_backend))
-    skill_sources = list(spec.skills) if spec.skills is not None else _default_skill_sources(sandbox_cfg.workspace)
+    skill_sources = list(spec.skills) if spec.skills is not None else (
+        _default_skill_sources(fs_backend) if spec.backend is None else None
+    )
     saver = checkpointer if checkpointer is not None else InMemorySaver()
+    compact_middleware = create_summarization_tool_middleware(model, fs_backend)
     graph = create_deep_agent(
         model=model,
         tools=tools,
@@ -116,12 +130,13 @@ def build_agent(
             RecoveryContextMiddleware(),
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),
+            ToolArgHintMiddleware(),
             AttachmentMaterializationMiddleware(),
             TodoListMiddleware(),
-            FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools, _permissions=permissions),  # type: ignore[arg-type]
+            FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+            compact_middleware,
         ],
         skills=skill_sources,
-        permissions=permissions or None,
         backend=fs_backend,
         interrupt_on=hitl or None,
         checkpointer=saver,
@@ -134,13 +149,14 @@ def build_agent(
         spec=spec,
         interrupt_on=hitl,
         system_prompt=prompt,
-        exposed_tool_names=[tool.name for tool in tools if tool.name not in {"handoff_to_human", "request_human_input"}],
+        exposed_tool_names=[tool.name for tool in tools if tool.name != "request_human_input"],
         filesystem_tools=filesystem_tools,
         execution_mode=execution_mode,
         security_warning=security_warning,
         checkpointer=saver,
         run_controller=run_controller,
         pause_condition=should_pause,
+        compact_middleware=compact_middleware,
     )
 
 
@@ -158,7 +174,7 @@ def create_agent(
     sandbox_config: SandboxConfig | None = None,
     run_controller: RunController | None = None,
 ) -> PreparedAgent:
-    cfg = settings or default_settings
+    cfg = settings or Settings()
     spec = AgentSpec(
         instructions=instructions if instructions is not None else cfg.agent_instructions,
         tools=tuple(extra_tools or ()),
@@ -185,32 +201,10 @@ def _default_model(cfg: Settings) -> BaseChatModel:
     return build_chat_model(cfg.active_profile, streaming=True)
 
 
-def _default_skill_sources(workspace: Path) -> list[str] | None:
-    workspace_skills = workspace.expanduser().resolve() / "skills"
-    if not workspace_skills.is_dir():
-        return None
-    return [f"{SANDBOX_ROOT}/skills/"]
-
-
-def _filesystem_permissions(config: SandboxConfig, *, managed: bool) -> list[FilesystemPermission]:
-    permissions: list[FilesystemPermission] = []
-    for relative in config.protected_workspace_paths:
-        clean = relative.strip("/")
-        permissions.append(FilesystemPermission(
-            operations=["write"],
-            paths=[f"{SANDBOX_ROOT}/{clean}", f"{SANDBOX_ROOT}/{clean}/**"],
-            mode="deny",
-        ))
-    if managed:
-        permissions.extend([
-            FilesystemPermission(
-                operations=["read", "write"],
-                paths=[SANDBOX_ROOT, f"{SANDBOX_ROOT}/**"],
-                mode="allow",
-            ),
-            FilesystemPermission(operations=["read", "write"], paths=["/**"], mode="deny"),
-        ])
-    return permissions
+def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:
+    if isinstance(backend, WorkspaceCompositeBackend) and backend.skills_dir is not None:
+        return [f"{SKILLS_ROOT}/"]
+    return None
 
 
 _NO_GP = HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False))

@@ -6,7 +6,7 @@ import sqlite3
 import subprocess
 import sys
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
@@ -143,7 +143,7 @@ store.close()
     snapshot = runner.switch_session(thread)
     assert snapshot.interrupt_kind == "waiting_confirmation"
     assert snapshot.pending_tool_calls[0]["toolCallId"] == "write-1"
-    assert runner.resume({"type": "reject", "toolCallId": "write-1"}).status == "completed"
+    assert runner.reject_tool("write-1").status == "completed"
     store.close()
 
 
@@ -175,12 +175,56 @@ def test_messages_to_transcript_rebuilds_tools() -> None:
         AIMessage(content="", tool_calls=[{
             "id": "c1", "name": "execute", "args": {"command": "echo hi"},
         }]),
-        __import__("langchain_core.messages", fromlist=["ToolMessage"]).ToolMessage(
-            content="hi", tool_call_id="c1", name="execute",
-        ),
+        ToolMessage(content="hi", tool_call_id="c1", name="execute"),
         AIMessage(content="done"),
     ])
     kinds = [block.kind for block in blocks]
     assert kinds == ["user", "tool", "assistant"]
     assert blocks[1].content == "hi"
     assert blocks[1].status == "completed"
+
+
+def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
+    failed = messages_to_transcript([
+        ToolMessage(
+            content="failed\n\nExit code: 2",
+            tool_call_id="fail",
+            name="execute",
+            artifact={"exit_code": 2, "truncated": False, "termination_reason": None},
+        ),
+    ])
+    assert failed[0].is_error
+    assert failed[0].status == "error"
+
+    misleading = messages_to_transcript([
+        ToolMessage(
+            content="Exit code: 7\nCancelled by user.",
+            tool_call_id="ok",
+            name="execute",
+            artifact={"exit_code": 0, "truncated": False, "termination_reason": None},
+        ),
+    ])
+    assert not misleading[0].is_error
+    assert misleading[0].status == "completed"
+
+    cancelled = messages_to_transcript([
+        ToolMessage(
+            content="partial\n\nCancelled by user.",
+            tool_call_id="cancel",
+            name="execute",
+            artifact={"exit_code": 130, "truncated": False, "termination_reason": "cancelled"},
+        ),
+    ])
+    assert cancelled[0].is_error
+    assert cancelled[0].status == "error"
+
+    timed_out = messages_to_transcript([
+        ToolMessage(
+            content="partial\n\nError: Command timed out after 1 seconds.",
+            tool_call_id="timeout",
+            name="execute",
+            artifact={"exit_code": 124, "truncated": False, "termination_reason": "timeout"},
+        ),
+    ])
+    assert timed_out[0].is_error
+    assert timed_out[0].status == "error"

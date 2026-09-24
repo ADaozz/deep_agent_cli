@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from enum import StrEnum
+from functools import wraps
 from pathlib import Path
 import tempfile
+from threading import Lock
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -26,7 +29,7 @@ from agent.attachments import (
     ImageAttachmentRef,
     refs_to_dicts,
 )
-from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, settings as default_settings
+from agent.config import InputKind, ModelProfile, SandboxConfig, Settings
 from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.llm import build_chat_model
@@ -46,11 +49,24 @@ from agent.session import (
     StopReason,
     TranscriptBlock,
     messages_to_transcript,
+    tool_message_is_error,
     workspace_state_path,
 )
 from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
 
-HUMAN_TOOLS = frozenset({"request_human_input", "handoff_to_human"})
+HUMAN_TOOLS = frozenset({"request_human_input"})
+
+
+def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(method)
+    def guarded(self: AgentRunner, *args: Any, **kwargs: Any) -> Any:
+        if not self._operation_lock.acquire(blocking=False):
+            raise RuntimeError("Runner already has an active operation")
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._operation_lock.release()
+    return guarded
 
 
 @dataclass(frozen=True)
@@ -80,12 +96,41 @@ class RunResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class CompactResult:
+    status: str
+    used_tokens: int | None = None
+    window_tokens: int = 0
+    message: str = ""
+
+    @property
+    def percent(self) -> float | None:
+        return self.used_tokens / self.window_tokens * 100 if self.window_tokens > 0 and self.used_tokens is not None else None
+
+
+class InterruptKind(StrEnum):
+    PAUSED = "paused"
+    WAITING_HUMAN = "waiting_human"
+    WAITING_CONFIRMATION = "waiting_confirmation"
+
+
+class UnknownInterruptError(ValueError):
+    """Checkpoint or stream has an interrupt that is not a known protocol."""
+
+
+@dataclass(frozen=True)
+class InterruptState:
+    kind: InterruptKind
+    payload: dict[str, Any]
+    pending_tools: tuple[dict[str, Any], ...] = ()
+
+
 @dataclass
 class SessionSnapshot:
     info: SessionInfo
     transcript: list[TranscriptBlock]
     todos: list[dict[str, str]] = field(default_factory=list)
-    interrupt_kind: str = ""
+    interrupt_kind: InterruptKind | None = None
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
@@ -121,6 +166,7 @@ class AgentRunner:
         self.settings = settings
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
+        self._operation_lock = Lock()
         self._permission_mode = PermissionMode.ASK
         self._resume_context: RecoveryContext | None = None
 
@@ -146,7 +192,7 @@ class AgentRunner:
         if saver is None and prepared is not None:
             saver = prepared.checkpointer
 
-        cfg = settings or default_settings
+        cfg = settings or Settings()
         profile = cfg.get_profile(model_id) if model_id else cfg.active_profile
         self._current_model_id = profile.id
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
@@ -211,11 +257,87 @@ class AgentRunner:
         profile = self.current_model()
         return kind == "text" if profile is None else profile.supports_input(kind)
 
+    def context_window(self) -> int:
+        """Configured context window in tokens; 0 when the profile does not declare one."""
+        profile = self.current_model()
+        return 0 if profile is None else profile.context_window
+
+    def latest_usage(self) -> dict[str, int]:
+        """Token usage of the most recent model call still held in the checkpoint."""
+        try:
+            state = self.prepared.graph.get_state(self._thread_config())
+        except Exception:  # noqa: BLE001
+            return {}
+        return _usage_from_messages((state.values or {}).get("messages", []) or [])
+
+    @_exclusive_operation
+    def compact_context(self) -> CompactResult:
+        """Run Deep Agents' compact tool in the graph, then close its tool turn."""
+        self._require_empty_input_queue()
+        middleware = self.prepared.compact_middleware
+        if middleware is None:
+            raise RuntimeError("Manual compaction middleware is unavailable")
+        config = self._thread_config()
+        state = self.prepared.graph.get_state(config)
+        if getattr(state, "next", ()) or self.current_interrupt() is not None:
+            raise RuntimeError("Finish the pending interaction before compacting")
+        values = state.values or {}
+        messages = list(values.get("messages", []) or [])
+        effective = middleware._summarization._apply_event_to_messages(
+            messages, values.get("_summarization_event"),
+        )
+        usage = _usage_from_messages(effective)
+        used = usage.get("total_tokens") or usage.get("input_tokens")
+        window = self.context_window()
+        if not window and self.prepared.model is not None:
+            profile = self.prepared.model.profile
+            if isinstance(profile, dict) and isinstance(profile.get("max_input_tokens"), int):
+                window = profile["max_input_tokens"]
+        if not middleware._is_eligible_for_compaction(effective):
+            return CompactResult("ineligible", used, window)
+        if not middleware._summarization._determine_cutoff_index(effective):
+            return CompactResult("nothing_to_compact", used, window)
+
+        # The tool must execute inside LangGraph so StateBackend can archive old
+        # messages. A synthetic tool call enters the tools node; interrupting
+        # after that node avoids an unnecessary ordinary model response.
+        call_id = f"manual-compact-{uuid4()}"
+        last_ai = next((item for item in reversed(effective) if isinstance(item, AIMessage)), None)
+        metadata = dict(last_ai.response_metadata) if last_ai is not None else {}
+        self.prepared.graph.update_state(config, {"messages": [AIMessage(
+            content="",
+            tool_calls=[{"name": "compact_conversation", "args": {}, "id": call_id}],
+            usage_metadata=usage or None,
+            response_metadata=metadata,
+        )]}, as_node="model")
+        self.prepared.graph.invoke(None, config, interrupt_after=["tools"])
+        after = self.prepared.graph.get_state(config)
+        tool_result = next((
+            item for item in reversed((after.values or {}).get("messages", []) or [])
+            if isinstance(item, ToolMessage) and item.tool_call_id == call_id
+        ), None)
+        message = str(tool_result.content) if tool_result is not None else ""
+        status = "compacted" if message.startswith("Conversation compacted.") else "failed"
+        # Supply a terminal assistant turn, then let after-model hooks finish
+        # without entering the model node again.
+        self.prepared.graph.update_state(
+            config, {"messages": [AIMessage(
+                content="", additional_kwargs={"manual_compact_completed": True} if status == "compacted" else {},
+            )]}, as_node="model",
+        )
+        self.prepared.graph.invoke(None, config, interrupt_before=["model"])
+        if self.prepared.graph.get_state(config).next:
+            raise RuntimeError("Compaction left the agent with a pending graph step")
+        if tool_result is None:
+            raise RuntimeError("Compaction tool did not return a result")
+        if status == "compacted" and self.session_store is not None:
+            self.session_store.touch(self.thread_id, last_run_status=StopReason.STOP)
+        return CompactResult(status, used, window, message)
+
+    @_exclusive_operation
     def switch_model(self, id_or_prefix: str) -> ModelProfile:
         if self.settings is None:
             raise RuntimeError("Model switching requires Settings with llm.models")
-        if self._busy:
-            raise RuntimeError("Cannot switch model while a run is in progress")
         profile = self.settings.get_profile(id_or_prefix)
         if profile.id == self._current_model_id:
             return profile
@@ -230,9 +352,8 @@ class AgentRunner:
     def permission_mode(self) -> PermissionMode:
         return self._permission_mode
 
+    @_exclusive_operation
     def set_permission_mode(self, mode: PermissionMode | str) -> PermissionMode:
-        if self._busy:
-            raise RuntimeError("Cannot change permission mode while a run is in progress")
         if isinstance(mode, str):
             parsed = parse_permission_mode(mode)
             if parsed is None:
@@ -297,6 +418,19 @@ class AgentRunner:
             return []
         return self.session_store.list_sessions(limit=limit)
 
+    def thread_has_content(self, thread_id: str | None = None) -> bool:
+        tid = thread_id or self.thread_id
+        if self.session_store is not None:
+            return self.session_store.checkpointer.get_tuple(
+                {"configurable": {"thread_id": tid}}
+            ) is not None
+        try:
+            state = self.prepared.graph.get_state({"configurable": {"thread_id": tid}})
+        except Exception:  # noqa: BLE001
+            return False
+        messages = list((state.values or {}).get("messages", []) or [])
+        return any(bool(getattr(message, "content", None) or getattr(message, "tool_calls", None)) for message in messages)
+
     def load_session(self, session_id: str) -> SessionSnapshot | None:
         if self.session_store is None:
             return None
@@ -309,19 +443,18 @@ class AgentRunner:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to load session {info.id}: {exc}") from exc
         messages = list((state.values or {}).get("messages", []) or [])
-        kind, payload, pending = interrupt_kind_from_state(self.prepared.graph, config)
+        interrupt = interrupt_kind_from_state(self.prepared.graph, config)
         return SessionSnapshot(
             info=info,
             transcript=messages_to_transcript(messages),
             todos=list((state.values or {}).get("todos", []) or []),
-            interrupt_kind=kind,
-            human_input=payload if kind == "waiting_human" else {},
-            pending_tool_calls=pending,
+            interrupt_kind=interrupt.kind if interrupt is not None else None,
+            human_input=interrupt.payload if interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN else {},
+            pending_tool_calls=list(interrupt.pending_tools) if interrupt is not None else [],
         )
 
+    @_exclusive_operation
     def switch_session(self, session_id: str) -> SessionSnapshot:
-        if self._busy:
-            raise RuntimeError("Cannot switch sessions while a run is in progress")
         info = self.session_store.resolve_prefix(session_id) if self.session_store is not None else None
         if info is None:
             raise KeyError(f"Unknown session: {session_id}")
@@ -379,9 +512,8 @@ class AgentRunner:
         self._permission_mode = mode
         return notices
 
+    @_exclusive_operation
     def new_session(self, *, title: str = "") -> SessionInfo:
-        if self._busy:
-            raise RuntimeError("Cannot start a new session while a run is in progress")
         self._require_empty_input_queue()
         self._resume_context = None
         self.control.clear_pause()
@@ -409,6 +541,7 @@ class AgentRunner:
         if self.control.pending_steering_count() or self.control.pending_follow_up_count():
             raise RuntimeError("Unapplied input belongs to the current session; reclaim it before switching")
 
+    @_exclusive_operation
     def invoke(
         self,
         text: str,
@@ -426,14 +559,27 @@ class AgentRunner:
                 "The current custom model does not implement Deep-Agent image attachment resolution"
             )
         refs = tuple(self.attachment_store.put(image) for image in images)
-        return self.invoke_with_attachment_refs(
+        return self._invoke_with_attachment_refs(
             text,
             image_refs=refs,
             on_delta=on_delta,
             on_event=on_event,
         )
 
+    @_exclusive_operation
     def invoke_with_attachment_refs(
+        self,
+        text: str,
+        *,
+        image_refs: Sequence[ImageAttachmentRef] = (),
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        return self._invoke_with_attachment_refs(
+            text, image_refs=image_refs, on_delta=on_delta, on_event=on_event,
+        )
+
+    def _invoke_with_attachment_refs(
         self,
         text: str,
         *,
@@ -472,13 +618,12 @@ class AgentRunner:
             raise ValueError("The current model does not declare image input support")
         return self.attachment_store.put(image)
 
+    @_exclusive_operation
     def cleanup_attachments(
         self,
         *,
         protected: Sequence[ImageAttachmentRef] = (),
     ) -> AttachmentCleanupResult:
-        if self._busy:
-            raise RuntimeError("Cannot clean attachments while a run is in progress")
         if self.session_store is None:
             return self.attachment_store.cleanup(
                 set(), protected_storage_keys=(ref.storage_key for ref in protected),
@@ -487,23 +632,115 @@ class AgentRunner:
             protected=tuple(protected), release_runtime_lease=True,
         )
 
-    def resume(
+    @_exclusive_operation
+    def continue_run(
         self,
-        decision: dict[str, Any] | str | bool | None = None,
         *,
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
-        kind, payload, pending = interrupt_kind_from_state(
-            self.prepared.graph, self._thread_config(),
+        self._require_interrupt(InterruptKind.PAUSED, "continue_run")
+        self.control.clear_pause()
+        return self._resume(True, on_delta=on_delta, on_event=on_event)
+
+    @_exclusive_operation
+    def approve_tool(
+        self,
+        tool_call_id: str,
+        *,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "approve_tool")
+        return self._resume(
+            _tool_decisions(list(state.pending_tools), decision_type="approve", tool_call_ids=[tool_call_id]),
+            on_delta=on_delta,
+            on_event=on_event,
         )
-        graph_input = self._resume_command(decision, kind, pending, payload)
+
+    @_exclusive_operation
+    def reject_tool(
+        self,
+        tool_call_id: str,
+        message: str | None = None,
+        *,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "reject_tool")
+        return self._resume(
+            _tool_decisions(
+                list(state.pending_tools), decision_type="reject", tool_call_ids=[tool_call_id], message=message,
+            ),
+            on_delta=on_delta,
+            on_event=on_event,
+        )
+
+    @_exclusive_operation
+    def submit_human_input(
+        self,
+        values: dict[str, Any],
+        *,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        state = self._require_interrupt(InterruptKind.WAITING_HUMAN, "submit_human_input")
+        if _has_pending_legacy_handoff(self.prepared.graph, self._thread_config()):
+            raise RuntimeError(
+                "This session uses the removed handoff_to_human tool. "
+                "Start a new session and ask again with request_human_input."
+            )
+        if not isinstance(values, dict):
+            raise ValueError("Human input response must contain a values object")
+        envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
+        if state.payload.get("interactionId"):
+            envelope["interactionId"] = state.payload["interactionId"]
+        return self._resume(envelope, on_delta=on_delta, on_event=on_event)
+
+    @_exclusive_operation
+    def _decide_listed_tools(  # HITL adapter: one Command must carry the full decisions list.
+        self,
+        tool_call_ids: Sequence[str],
+        *,
+        approved: bool,
+        message: str | None = None,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        action = "approve_tool" if approved else "reject_tool"
+        state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, action)
+        return self._resume(
+            _tool_decisions(
+                list(state.pending_tools),
+                decision_type="approve" if approved else "reject",
+                tool_call_ids=tool_call_ids,
+                message=message,
+                others="same",
+            ),
+            on_delta=on_delta,
+            on_event=on_event,
+        )
+
+    def _require_interrupt(self, expected: InterruptKind, action: str) -> InterruptState:
+        state = self.current_interrupt()
+        if state is None or state.kind is not expected:
+            current = state.kind.value if state is not None else "none"
+            raise ValueError(f"{action} requires a {expected.value} interrupt, current is {current}")
+        return state
+
+    def _resume(
+        self,
+        value: Any,
+        *,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
         self.control.set_defer_steering(False)
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, last_run_status=StopReason.PENDING)
-        return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
+        return self._stream(Command(resume=value), on_delta=on_delta, on_event=on_event)
 
-    def current_interrupt(self) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+    def current_interrupt(self) -> InterruptState | None:
         return interrupt_kind_from_state(self.prepared.graph, self._thread_config())
 
     def _thread_config(self) -> dict[str, Any]:
@@ -627,11 +864,13 @@ class AgentRunner:
                 for node, update in chunk.items():
                     if node != "__interrupt__":
                         continue
-                    interrupted, payload, pending = classify_interrupt(
+                    interrupt = classify_interrupt(
                         update, self.prepared.graph, self._thread_config(),
                     )
-                    if interrupted == "waiting_human":
-                        human_input = payload
+                    interrupted = interrupt.kind.value
+                    pending = list(interrupt.pending_tools)
+                    if interrupt.kind is InterruptKind.WAITING_HUMAN:
+                        human_input = interrupt.payload
         except GraphDrained:
             _emit(event_handler, RunEvent(type="run_cancelled"))
             self._touch_status(StopReason.ABORTED)
@@ -691,6 +930,9 @@ class AgentRunner:
         for message in _messages_in_update(chunk):
             if isinstance(message, AIMessage):
                 message_id = str(getattr(message, "id", "") or "")
+                usage = _usage_metadata_dict(message)
+                if usage:
+                    _emit(handler, RunEvent(type="usage", result=usage))
                 for call in message.tool_calls or []:
                     tool_call_id = str(call.get("id") or "")
                     if call.get("name") == "write_todos":
@@ -708,39 +950,23 @@ class AgentRunner:
                         arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     ))
             elif isinstance(message, ToolMessage):
-                if getattr(message, "name", None) == "write_todos" or str(
+                tool_name = str(getattr(message, "name", "") or "tool")
+                if tool_name == "write_todos" or str(
                     getattr(message, "tool_call_id", "") or ""
                 ) in self._todo_call_ids:
                     continue
                 content = _message_text(message)
-                status = str(getattr(message, "status", "") or "")
+                artifact = getattr(message, "artifact", None)
+                execute_metadata = artifact if tool_name == "execute" and isinstance(artifact, dict) else None
+                is_error = tool_message_is_error(message)
                 _emit(handler, RunEvent(
                     type="tool_completed",
                     tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
-                    name=str(getattr(message, "name", "") or "tool"),
+                    name=tool_name,
                     content=content,
-                    result=getattr(message, "content", content),
-                    is_error=status == "error" or content.lower().startswith("error")
-                    or "cancelled by user" in content.lower(),
+                    result=execute_metadata if execute_metadata is not None else getattr(message, "content", content),
+                    is_error=is_error,
                 ))
-
-    def _resume_command(
-        self,
-        decision: dict[str, Any] | str | bool | None,
-        kind: str,
-        pending: list[dict[str, Any]],
-        payload: dict[str, Any],
-    ) -> Command:
-        if isinstance(decision, bool):
-            self.control.clear_pause()
-            return Command(resume=decision)
-        if kind == "paused" or _decision_type(decision) in ("continue", "resume"):
-            self.control.clear_pause()
-            return Command(resume=True)
-        if kind == "waiting_human" or _decision_type(decision) in ("human_input", "input"):
-            return Command(resume=_human_resume_value(decision, payload))
-        return Command(resume=_hitl_resume_value(decision, pending))
-
 
 def interrupt_payloads(interrupts: Any) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
@@ -791,32 +1017,58 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
     return pending
 
 
+def is_valid_hitl_interrupt(payload: Any) -> bool:
+    """True only for the locked LangChain HITLRequest schema (no type field)."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("type") not in (None, ""):
+        return False
+    requests = payload.get("action_requests")
+    configs = payload.get("review_configs")
+    if not isinstance(requests, list) or not requests:
+        return False
+    if not isinstance(configs, list) or not configs:
+        return False
+    for item in requests:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            return False
+        if not isinstance(item.get("args"), dict):
+            return False
+    for item in configs:
+        if not isinstance(item, dict) or not isinstance(item.get("action_name"), str):
+            return False
+        if not isinstance(item.get("allowed_decisions"), list):
+            return False
+    return True
+
+
 def classify_interrupt(
     interrupts: Any, graph: Any, config: dict[str, Any],
-) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+) -> InterruptState:
     payloads = interrupt_payloads(interrupts)
+    if not payloads:
+        raise UnknownInterruptError("Interrupt has no recognizable payload")
     for payload in payloads:
-        kind = str(payload.get("type", "")).lower()
+        kind = str(payload.get("type") or "").strip().lower()
         if kind == "human_input":
-            return "waiting_human", payload, []
+            return InterruptState(InterruptKind.WAITING_HUMAN, payload)
         if kind == "pause":
-            return "paused", payload, []
-    pending = resolve_pending_tool_calls(interrupts, graph, config)
-    if pending:
-        return "waiting_confirmation", {}, pending
-    if payloads:
-        return "waiting_human", payloads[0], []
-    return "waiting_confirmation", {}, []
+            return InterruptState(InterruptKind.PAUSED, payload)
+        if is_valid_hitl_interrupt(payload):
+            pending = resolve_pending_tool_calls(interrupts, graph, config)
+            return InterruptState(InterruptKind.WAITING_CONFIRMATION, payload, tuple(pending))
+        if kind:
+            raise UnknownInterruptError(f"Unsupported interrupt type: {kind!r}")
+    raise UnknownInterruptError(
+        f"Unsupported interrupt payload: {sorted(payloads[0].keys()) if payloads[0] else 'empty dict'}"
+    )
 
 
-def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
-    try:
-        state = graph.get_state(config)
-    except Exception:  # noqa: BLE001
-        return "", {}, []
+def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> InterruptState | None:
+    state = graph.get_state(config)
     interrupts = getattr(state, "interrupts", ()) or ()
     if not interrupts:
-        return "", {}, []
+        return None
     return classify_interrupt(interrupts, graph, config)
 
 
@@ -868,6 +1120,28 @@ def _todos_in_state(value: Any) -> list[dict[str, str]] | None:
     return None
 
 
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
+
+
+def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return {}
+    return {key: int(usage[key]) for key in _USAGE_KEYS if isinstance(usage.get(key), int)}
+
+
+def _usage_from_messages(messages: Any) -> dict[str, int]:
+    """Most recent reported usage, which is the size of the context the model saw."""
+    for message in reversed(list(messages or [])):
+        if isinstance(message, AIMessage):
+            if message.additional_kwargs.get("manual_compact_completed"):
+                return {}
+            usage = _usage_metadata_dict(message)
+            if usage:
+                return usage
+    return {}
+
+
 def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:
     if handler is not None:
         try:
@@ -877,57 +1151,41 @@ def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:
             pass
 
 
-def _decision_type(decision: dict[str, Any] | str | bool | None) -> str:
-    if isinstance(decision, dict):
-        return str(decision.get("type", "")).lower()
-    return ""
+def _has_pending_legacy_handoff(graph: Any, config: dict[str, Any]) -> bool:
+    state = graph.get_state(config)
+    if not getattr(state, "interrupts", ()):
+        return False
+    for message in reversed((state.values or {}).get("messages", []) or []):
+        if isinstance(message, AIMessage):
+            return any(call.get("name") == "handoff_to_human" for call in message.tool_calls or [])
+    return False
 
 
-def _human_resume_value(decision: dict[str, Any] | str | bool | None, payload: dict[str, Any]) -> Any:
-    if isinstance(decision, str):
-        return decision
-    if not isinstance(decision, dict):
-        return ""
-    values = decision.get("values")
-    if isinstance(values, dict) and values:
-        return dict(decision)
-    text = str(decision.get("text") or "")
-    option_id = str(decision.get("optionId") or decision.get("option_id") or "")
-    if option_id or decision.get("interactionId") or payload.get("interactionId"):
-        resume: dict[str, Any] = {}
-        if text.strip():
-            resume["text"] = text
-        if option_id:
-            resume["optionId"] = option_id
-        if decision.get("interactionId"):
-            resume["interactionId"] = decision["interactionId"]
-        leftover = {
-            key: value for key, value in decision.items()
-            if key not in {"type", "text", "optionId", "option_id", "interactionId", "values"}
-        }
-        resume.update(leftover)
-        return resume
-    return text
-
-
-def _hitl_resume_value(
-    decision: dict[str, Any] | str | bool | None, pending: list[dict[str, Any]],
+def _tool_decisions(
+    pending: list[dict[str, Any]],
+    *,
+    decision_type: str,
+    tool_call_ids: Sequence[str],
+    message: str | None = None,
+    others: str = "reject",
 ) -> dict[str, Any]:
-    payload = decision if isinstance(decision, dict) else {}
-    decision_type = str(payload.get("type", "approve")).lower()
     if decision_type not in ("approve", "reject"):
-        decision_type = "reject"
-    target = str(payload.get("toolCallId") or "")
-    item: dict[str, Any] = {"type": decision_type}
-    if decision_type == "reject" and payload.get("message"):
-        item["message"] = str(payload["message"])
+        raise ValueError("Tool decision must be approve or reject")
+    targets = [str(item) for item in tool_call_ids if str(item)]
+    if not targets:
+        raise ValueError("Tool call id is required")
     pending_ids = [str(call.get("toolCallId", "")) for call in pending]
-    if target and target not in pending_ids:
-        raise ValueError(f"Tool call is no longer pending approval: {target}")
-    if len(pending_ids) <= 1 or not target:
+    for target in targets:
+        if target not in pending_ids:
+            raise ValueError(f"Tool call is no longer pending approval: {target}")
+    item: dict[str, Any] = {"type": decision_type}
+    if decision_type == "reject" and message:
+        item["message"] = str(message)
+    chosen = set(targets) if others == "same" else {targets[0]}
+    if len(pending_ids) <= 1:
         return {"decisions": [dict(item) for _ in range(max(len(pending_ids), 1))]}
     return {"decisions": [
-        dict(item) if tool_call_id == target
+        dict(item) if tool_call_id in chosen
         else {"type": "reject", "message": "另一个并发的待确认调用未包含在本次人工决策中，按拒绝处理"}
         for tool_call_id in pending_ids
     ]}

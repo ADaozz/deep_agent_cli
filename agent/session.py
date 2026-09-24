@@ -308,6 +308,26 @@ def _status_for_reason(reason: StopReason) -> SessionStatus:
     }[reason]
 
 
+def tool_message_is_error(message: ToolMessage) -> bool:
+    """Match live tool_completed error classification, including execute artifacts."""
+    status = str(getattr(message, "status", "") or "")
+    content = message_text(message)
+    name = str(getattr(message, "name", "") or "")
+    artifact = getattr(message, "artifact", None)
+    if name == "execute" and isinstance(artifact, dict):
+        exit_code = artifact.get("exit_code")
+        return (
+            status == "error"
+            or artifact.get("termination_reason") is not None
+            or (isinstance(exit_code, int) and exit_code != 0)
+        )
+    return (
+        status == "error"
+        or content.lower().startswith("error")
+        or "cancelled by user" in content.lower()
+    )
+
+
 def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
@@ -340,8 +360,7 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             if getattr(message, "name", None) == "write_todos" or tool_call_id in todo_call_ids:
                 continue
-            status = str(getattr(message, "status", "") or "")
-            is_error = status == "error" or content.lower().startswith("error")
+            is_error = tool_message_is_error(message)
             updated = False
             for block in reversed(blocks):
                 if block.kind == "tool" and block.tool_call_id == tool_call_id:

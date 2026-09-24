@@ -17,6 +17,7 @@ from rich.panel import Panel  # noqa: E402
 
 from agent.cli import CliApplication  # noqa: E402
 from agent.cli.app import default_config_dir  # noqa: E402
+from agent.bootstrap import initialize_user_files  # noqa: E402
 from agent.config import Settings, require_keybindings_outside_workspace  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError, UNSANDBOXED_WARNING  # noqa: E402
@@ -71,8 +72,25 @@ def _confirm_unsandboxed(error: str) -> None:
         raise SystemExit("Startup cancelled.") from exc
 
 
-def main() -> None:
-    # The default config lives outside the current project workspace.
+def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:
+    if not argv:
+        return None, False
+    if argv[0] in {"-h", "--help"}:
+        raise SystemExit("Usage: deep-agent [resume [session-id]]")
+    if argv[0] != "resume":
+        raise SystemExit(f"Unknown command: {argv[0]}\nUsage: deep-agent [resume [session-id]]")
+    return (argv[1] if len(argv) > 1 else None), True
+
+
+def main(argv: list[str] | None = None) -> None:
+    created = initialize_user_files()
+    if created is not None:
+        Console(stderr=True).print(
+            f"Created {created} and ~/.deep-agent/skills/.\n"
+            "Edit the model endpoint and API key in the config, then run deep-agent again."
+        )
+        return
+    resume_id, open_picker = parse_startup_args(sys.argv[1:] if argv is None else argv)
     settings = Settings.load()
     config_dir = settings.config_dir or default_config_dir()
     require_keybindings_outside_workspace(config_dir, settings.sandbox.workspace)
@@ -80,7 +98,20 @@ def main() -> None:
     if runner.prepared.execution_mode is ExecutionMode.UNSANDBOXED:
         Console(stderr=True).print(f"[bold red]UNSANDBOXED: {runner.prepared.security_warning}[/bold red]")
     Console(stderr=True).print(f"[dim]workspace={settings.sandbox.workspace}[/dim]")
-    CliApplication(runner, config_dir=config_dir).run()
+    app = CliApplication(runner, config_dir=config_dir)
+    if resume_id:
+        try:
+            app._apply_session_snapshot(runner.switch_session(resume_id))
+        except (KeyError, RuntimeError) as exc:
+            raise SystemExit(str(exc)) from exc
+    elif open_picker:
+        app._resume_picker_on_start = True
+    try:
+        app.run()
+    finally:
+        message = app.continue_session_message()
+        if message:
+            Console().print(message)
 
 
 if __name__ == "__main__":

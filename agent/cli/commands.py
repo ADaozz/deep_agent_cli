@@ -14,8 +14,7 @@ CommandHandler = Callable[["CliApplication", str], Awaitable[None]]
 class Command:
     name: str
     description: str
-    handler: CommandHandler | None = None
-    unavailable_reason: str = ""
+    handler: CommandHandler
 
 
 def command_table() -> tuple[Command, ...]:
@@ -26,8 +25,9 @@ def command_table() -> tuple[Command, ...]:
         Command("pause", "Pause at the next model safe point", _pause),
         Command("new", "Start a new persistent session thread", _new),
         Command("session", "Show current session information", _session),
-        Command("resume", "Resume another session (/resume or /resume <id-prefix>)", _resume),
+        Command("resume", "List sessions with content (/resume or /resume <id-prefix>)", _resume),
         Command("model", "Select a model (/model or /model <id-prefix>)", _model),
+        Command("compact", "Summarize older conversation when context permits", _compact),
         Command("image", "Attach an image (/image <path|clipboard>, /image, /image clear)", _image),
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),
         Command(
@@ -35,7 +35,6 @@ def command_table() -> tuple[Command, ...]:
             "Tool approval: ask (every execute) or allow (SANDBOXED auto-approve, HIGH RISK)",
             _permission,
         ),
-        Command("compact", "Compact context", unavailable_reason="the current runner has no compaction API"),
         Command("quit", "Exit DeepAgent", _quit),
         Command("exit", "Exit DeepAgent", _quit),
     )
@@ -73,6 +72,10 @@ async def _resume(app: "CliApplication", arg: str) -> None:
 
 async def _model(app: "CliApplication", arg: str) -> None:
     await app.select_model(arg)
+
+
+async def _compact(app: "CliApplication", arg: str) -> None:
+    await app.compact_command(arg)
 
 
 async def _image(app: "CliApplication", arg: str) -> None:

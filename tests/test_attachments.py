@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Thread
 
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
@@ -103,6 +104,37 @@ def test_workspace_gc_keeps_checkpoint_refs_and_deletes_orphans(tmp_path: Path) 
     assert b"data:image" not in persisted
     assert PNG not in persisted
     session.close()
+
+
+def test_image_can_be_stored_during_active_run() -> None:
+    entered = Event()
+    release = Event()
+    settings = Settings(
+        llm_profiles=(ModelProfile("vision", "fake", input=("text", "image")),),
+        llm_default="vision",
+    )
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="done")]),
+        backend=StateBackend(), settings=settings,
+    )
+    results = []
+
+    def on_event(event) -> None:
+        if event.type == "run_started":
+            entered.set()
+            assert release.wait(5)
+
+    thread = Thread(target=lambda: results.append(runner.invoke("first", on_event=on_event)))
+    thread.start()
+    assert entered.wait(5)
+    try:
+        ref = runner.store_image(_image())
+        assert runner.attachment_store.read(ref).data == PNG
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert results[0].status == "completed"
 
 
 def test_startup_gc_removes_unreferenced_workspace_attachment(tmp_path: Path) -> None:

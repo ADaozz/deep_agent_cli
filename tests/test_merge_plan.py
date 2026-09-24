@@ -272,7 +272,7 @@ def test_recovery_survives_pause_before_first_model_call(tmp_path: Path) -> None
     assert second.invoke("原始输入").status == "paused"
     assert second._resume_context is not None
     assert second._resume_context.text is not None
-    assert second.resume({"type": "continue"}).status == "completed"
+    assert second.continue_run().status == "completed"
     assert second._resume_context is None
     assert [block.content for block in second.load_session(thread).transcript if block.kind == "user"] == [
         "first", "原始输入",

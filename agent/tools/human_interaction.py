@@ -1,16 +1,18 @@
 # Semantic Human Interaction Schema — Agent declares what information it needs, not UI widgets.
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, get_args
 
-FIELD_TYPES = ("text", "textarea", "single_select", "multi_select", "boolean")
-INTERACTION_TYPES = ("clarification", "decision", "confirmation", "review")
+FieldType = Literal["text", "textarea", "single_select", "multi_select", "boolean"]
+InteractionType = Literal["clarification", "decision", "confirmation", "review"]
+
+FIELD_TYPES: tuple[str, ...] = tuple(get_args(FieldType))
+INTERACTION_TYPES: tuple[str, ...] = tuple(get_args(InteractionType))
+
 
 def normalize_interaction_request(
     reason: str,
     question: str,
-    required_input: str = "",
-    options: list | None = None,
     interaction_type: str | None = None,
     title: str | None = None,
     fields: list | None = None,
@@ -21,7 +23,7 @@ def normalize_interaction_request(
     kind = (interaction_type or "clarification").strip().lower()
     if kind not in INTERACTION_TYPES:
         kind = "clarification"
-    normalized_fields = _normalize_fields(fields, options, required_input)
+    normalized_fields = _normalize_fields(fields)
     payload: dict[str, Any] = {
         "type": "human_input",
         "interactionType": kind,
@@ -39,78 +41,29 @@ def normalize_interaction_request(
             "value": str(recommendation.get("value") or ""),
             "reason": str(recommendation.get("reason") or ""),
         }
-    legacy_options = options if isinstance(options, list) else _legacy_options(normalized_fields)
-    if legacy_options:
-        payload["options"] = legacy_options
-    if required_input:
-        payload["required_input"] = required_input
     return payload
 
 
 def resume_values(answer: Any) -> dict[str, Any]:
-    if isinstance(answer, dict):
-        values = answer.get("values")
-        if isinstance(values, dict):
-            return dict(values)
-        if any(key in answer for key in ("text", "input", "message", "optionId", "option_id")):
-            result: dict[str, Any] = {}
-            if answer.get("optionId") or answer.get("option_id"):
-                result["choice"] = answer.get("optionId") or answer.get("option_id")
-            if answer.get("text") or answer.get("input") or answer.get("message"):
-                result["text"] = answer.get("text") or answer.get("input") or answer.get("message")
-            leftover = {
-                key: value for key, value in answer.items()
-                if key not in {"type", "text", "input", "message", "optionId", "option_id", "interactionId", "values"}
-            }
-            result.update(leftover)
-            return result
-        return dict(answer)
-    if answer is None:
-        return {}
-    return {"text": str(answer)}
+    if not isinstance(answer, dict) or answer.get("type") != "human_input":
+        raise ValueError("Human input response must have type human_input")
+    values = answer.get("values") if isinstance(answer, dict) else None
+    if not isinstance(values, dict):
+        raise ValueError("Human input response must contain a values object")
+    return dict(values)
 
 
-def _normalize_fields(fields: list | None, options: list | None, required_input: str) -> list[dict[str, Any]]:
+def _normalize_fields(fields: list | None) -> list[dict[str, Any]]:
     if isinstance(fields, list) and fields:
         return [_normalize_field(item, index) for index, item in enumerate(fields)]
-    result: list[dict[str, Any]] = []
-    legacy = _normalize_options(options)
-    if legacy:
-        result.append({
-            "id": "choice",
-            "type": "single_select",
-            "label": "请选择",
-            "required": True,
-            "placeholder": "",
-            "options": legacy,
-        })
-        result.append({
-            "id": "comment",
-            "type": "textarea",
-            "label": "补充说明",
-            "required": False,
-            "placeholder": required_input or "补充说明（可选）",
-            "options": [],
-        })
-        return result
-    result.append({
+    return [{
         "id": "text",
-        "type": "textarea" if required_input else "text",
+        "type": "text",
         "label": "回复",
         "required": True,
-        "placeholder": required_input or "输入回复…",
+        "placeholder": "输入回复…",
         "options": [],
-    })
-    return result
-
-
-def _unstructured_text_fields(fields: list[dict[str, Any]]) -> bool:
-    if not fields:
-        return True
-    return all(
-        field.get("type") in {"text", "textarea"} and not field.get("options")
-        for field in fields
-    )
+    }]
 
 
 def _normalize_field(item: Any, index: int) -> dict[str, Any]:
@@ -146,13 +99,3 @@ def _normalize_options(options: Any) -> list[dict[str, str]]:
             "description": str(item.get("description") or ""),
         })
     return result
-
-
-def _legacy_options(fields: list[dict[str, Any]]) -> list[dict[str, str]]:
-    for field in fields:
-        if field.get("type") == "single_select" and field.get("options"):
-            return [
-                {"id": option["value"], "label": option["label"], "description": option.get("description", "")}
-                for option in field["options"]
-            ]
-    return []

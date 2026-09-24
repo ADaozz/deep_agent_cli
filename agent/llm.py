@@ -269,11 +269,6 @@ class QwenChatOpenAI(ChatOpenAI):
             _lc_base._handle_openai_api_error(error)
 
 
-# Backwards-compatible template name. It now uses the Qwen Responses API when
-# configured by chat_openai(), rather than the legacy Chat Completions field.
-StreamingChatOpenAI = QwenChatOpenAI
-
-
 def chat_openai(
     *,
     model: str,
@@ -313,25 +308,32 @@ def build_chat_model(
 ) -> ChatOpenAI:
     """Build the template chat client from a ModelProfile."""
     if profile.provider == "qwen-responses":
-        return chat_openai(
+        model = chat_openai(
             model=profile.model,
             api_key=profile.api_key,
             base_url=profile.base_url,
             streaming=streaming,
             attachment_store=attachment_store,
         )
-    if profile.provider == "openai-compatible":
+    elif profile.provider == "openai-compatible":
         import httpx
 
-        return ChatOpenAI(
+        model = ChatOpenAI(
             model=profile.model,
             api_key=profile.api_key,
             base_url=profile.base_url,
             streaming=streaming,
+            stream_usage=profile.stream_usage,
             max_retries=2,
             use_responses_api=False,
             http_socket_options=(),
             http_client=httpx.Client(trust_env=False),
             http_async_client=httpx.AsyncClient(trust_env=False),
         )
-    raise ValueError(f"Unsupported model provider: {profile.provider}")
+    else:
+        raise ValueError(f"Unsupported model provider: {profile.provider}")
+    if profile.context_window > 0:
+        # deepagents reads this model profile to choose its 85% compaction
+        # threshold and to check the request's input budget.
+        model.profile = {**(model.profile or {}), "max_input_tokens": profile.context_window}
+    return model

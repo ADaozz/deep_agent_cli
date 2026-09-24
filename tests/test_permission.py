@@ -123,9 +123,9 @@ def test_set_permission_mode_rejected_while_busy() -> None:
         backend=StateBackend(),
         thread_id="perm-busy",
     )
-    runner._busy = True
-    with pytest.raises(RuntimeError, match="in progress"):
-        runner.set_permission_mode(PermissionMode.ALLOW)
+    with runner._operation_lock:
+        with pytest.raises(RuntimeError, match="active operation"):
+            runner.set_permission_mode(PermissionMode.ALLOW)
 
 
 def _execute_messages(call_id: str, *, network: bool = False, final: str = "done") -> list[AIMessage]:
@@ -191,7 +191,7 @@ def test_sandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> Non
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "execute"
     assert not network_requested(waiting.pending_tool_calls[0].get("args") or {})
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-sb-ask"})
+    resumed = runner.approve_tool("ex-sb-ask")
     assert resumed.status == "completed"
 
 
@@ -206,7 +206,7 @@ def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
     assert network_requested(call.get("args") or {})
     ui = InteractionController.approval([call])
     assert "NETWORK" in ui.question
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-sb-net"})
+    resumed = runner.approve_tool("ex-sb-net")
     assert resumed.status == "completed"
     assert resumed.output == "online"
 
@@ -233,7 +233,7 @@ def test_unsandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> N
     waiting = runner.invoke("run")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-un-ask"})
+    resumed = runner.approve_tool("ex-un-ask")
     assert resumed.status == "completed"
 
 
@@ -244,7 +244,7 @@ def test_unsandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None
     waiting = runner.invoke("need net")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-un-net"})
+    resumed = runner.approve_tool("ex-un-net")
     assert resumed.status == "completed"
     assert resumed.output == "online"
 
@@ -262,7 +262,7 @@ def test_custom_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
     waiting = runner.invoke("run")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.resume({"type": "approve", "toolCallId": "ex-cu-ask"})
+    resumed = runner.approve_tool("ex-cu-ask")
     assert resumed.status == "completed"
 
 

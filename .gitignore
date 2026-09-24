@@ -6,6 +6,8 @@ config.yaml
 config.yml
 .e2e-workspace/
 .attachments/
+.deep-agent/
+.qwen/
 *.pyc
 *.sqlite3
 *.sqlite3-journal

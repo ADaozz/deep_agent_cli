@@ -1,6 +1,5 @@
 # DeepAgent template configuration.
-# Copy outside the agent workspace and edit for your environment:
-#   mkdir -p ~/.deep-agent && install -m 600 config.example.yaml ~/.deep-agent/config.yaml
+# First CLI launch copies this template to ~/.deep-agent/config.yaml and exits.
 #
 # Override path with DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
 
@@ -20,6 +19,10 @@ llm:
       input:
         - text
         - image
+      # Model input-token window for automatic context compression and the footer meter.
+      # 0/omitted leaves DeepAgents' default compression rule and hides the meter.
+      # Accepts a plain count (1000000) or a shorthand (128k, 1m).
+      context_window: 1m
       api_key: sk-local
       base_url: http://localhost:8000/v1
     qwen3.6-flash:
@@ -27,6 +30,7 @@ llm:
       input:
         - text
         - image
+      context_window: 1m
       api_key: sk-local
       base_url: http://localhost:8000/v1
 
@@ -36,15 +40,13 @@ sandbox:
   bwrap_path: bwrap
   # Allow dangerous host execution when bubblewrap is unavailable.
   allow_unsandboxed: false
-  timeout_seconds: 120
+  # No time limit by default. Set a positive number to cap each command.
+  timeout_seconds: null
   max_output_bytes: 100000
   # Host env var names explicitly exposed to Agent commands.
   env_allowlist: []
   # Fixed env vars injected into the sandbox (not read from the host).
   env_set: {}
-  # Relative workspace paths mounted read-only for both file tools and execute.
-  protected_workspace_paths:
-    - skills
   # Extra mounts: [{source: /host/path, destination: /sandbox/path}, ...]
   extra_read_only_mounts: []
   extra_read_write_mounts: []
