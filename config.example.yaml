@@ -25,14 +25,45 @@ llm:
       context_window: 1m
       api_key: sk-local
       base_url: http://localhost:8000/v1
+      stream_usage: false
+      source: Local gateway
     qwen3.6-flash:
       model: qwen3.6-flash
+      provider: qwen-responses
       input:
         - text
         - image
       context_window: 1m
       api_key: sk-local
       base_url: http://localhost:8000/v1
+      stream_usage: false
+      source: Local gateway
+    # --- Aliyun Bailian Qwen Token Plan (compatible-mode endpoint) ---
+    # Shapes below mirror a working Token Plan config. Uncomment these profiles, the
+    # flat llm.* values at the end of this block, and `default: token-plan-auto`
+    # together. A profile that omits api_key/base_url/provider/stream_usage inherits
+    # the flat values, which is what lets many Token Plan models share one endpoint;
+    # the local profiles above set those keys explicitly, so they are unaffected.
+    # Any other Token Plan model takes the same four lines.
+    # token-plan-auto:
+    #   model: auto                 # routed by Token Plan
+    #   source: Token Plan          # label only: /model list, footer, /status
+    #   input: [text]
+    #   context_window: 1000000
+    # token-plan-qwen3.8-max:
+    #   model: qwen3.8-max
+    #   source: Token Plan
+    #   input: [text, image]
+    #   context_window: 1000000
+    # token-plan-qwen3.8-flash:
+    #   model: qwen3.8-flash
+    #   source: Token Plan
+    #   input: [text, image]
+    #   context_window: 1000000
+  # api_key: sk-your-token-plan-key
+  # base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  # provider: openai-compatible     # Chat Completions; this endpoint is not qwen-responses
+  # stream_usage: true              # off = streaming reports no usage, footer meter stays unknown
 
 sandbox:
   # Host directory mapped to /workspace. "." = the directory you start the TUI from (cwd).
