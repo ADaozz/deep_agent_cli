@@ -276,11 +276,13 @@ def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path)
         assert "● Run tests" in rendered
         assert "○ Run tests" not in rendered
     thread = runner.thread_id
+    runner.close()
     store.close()
     reopened = SessionStore(tmp_path / "plan.sqlite3")
     resumed = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
                           backend=StateBackend(), session_store=reopened)
     assert resumed.switch_session(thread).todos == updated_plan
+    resumed.close()
     reopened.close()
 
 

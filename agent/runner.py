@@ -1035,6 +1035,7 @@ class AgentRunner:
         try:
             for chunk in self.prepared.graph.stream(
                 graph_input, config, stream_mode=["updates", "values"], control=run_control,
+                durability="sync",
             ):
                 mode, payload = chunk
                 if mode == "values":
