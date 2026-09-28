@@ -9,6 +9,8 @@ from langchain_openai import ChatOpenAI
 from agent.config import Settings, require_keybindings_outside_workspace, resolve_config_path
 from agent.llm import QwenChatOpenAI, build_chat_model
 
+_MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
+
 
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
@@ -18,6 +20,20 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.sandbox.allow_unsandboxed is False
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
+    assert settings.ui_timezone == "Asia/Shanghai"
+
+
+def test_ui_timezone_can_be_configured_and_invalid_names_fail(tmp_path: Path) -> None:
+    settings = Settings.from_mapping({"ui": {"timezone": "Asia/Tokyo"}})
+    assert settings.ui_timezone == "Asia/Tokyo"
+    for value in ("Mars/Olympus", "", 42):
+        with pytest.raises(ValueError, match="ui.timezone"):
+            Settings.from_mapping({"ui": {"timezone": value}})
+
+    path = tmp_path / "config.yaml"
+    path.write_text(_MODEL_YAML + "ui:\n  timezone: Mars/Olympus\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ui.timezone"):
+        Settings.load(path)
 
 
 def test_removed_protected_paths_fail_with_migration_message() -> None:
@@ -32,10 +48,16 @@ def test_default_config_is_in_home_and_project_config_is_ignored(
     config_dir = home / ".deep-agent"
     config_dir.mkdir(parents=True)
     home_config = config_dir / "config.yaml"
-    home_config.write_text("llm:\n  model: from-home\n", encoding="utf-8")
+    home_config.write_text(
+        "llm:\n  default: local/home\n  models:\n    local:\n      models:\n        home:\n          model: from-home\n",
+        encoding="utf-8",
+    )
     project = tmp_path / "project"
     project.mkdir()
-    (project / "config.yaml").write_text("llm:\n  model: from-project\n", encoding="utf-8")
+    (project / "config.yaml").write_text(
+        "llm:\n  default: local/project\n  models:\n    local:\n      models:\n        project:\n          model: from-project\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
     monkeypatch.chdir(project)
@@ -52,13 +74,13 @@ def test_runtime_config_paths_must_be_outside_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
     local_config = workspace / "config.yaml"
-    local_config.write_text(f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
+    local_config.write_text(_MODEL_YAML + f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="config file must be outside workspace"):
         Settings.load(local_config)
 
     external = tmp_path / "config.yaml"
     external.write_text(
-        f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {workspace / 'keys'}\n",
+        _MODEL_YAML + f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {workspace / 'keys'}\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="keybindings directory must be outside workspace"):
@@ -78,7 +100,7 @@ def test_keybindings_symlink_into_workspace_is_rejected(tmp_path: Path) -> None:
     (external_dir / "keybindings.json").symlink_to(keybindings)
     config = tmp_path / "config.yaml"
     config.write_text(
-        f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {external_dir}\n",
+        _MODEL_YAML + f"sandbox:\n  workspace: {workspace}\npaths:\n  config_dir: {external_dir}\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="keybindings file must be outside workspace"):
@@ -89,7 +111,7 @@ def test_config_symlink_into_workspace_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
     local_config = workspace / "config.yaml"
-    local_config.write_text(f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
+    local_config.write_text(_MODEL_YAML + f"sandbox:\n  workspace: {workspace}\n", encoding="utf-8")
     external_link = tmp_path / "config.yaml"
     external_link.symlink_to(local_config)
     with pytest.raises(ValueError, match="config file must be outside workspace"):
@@ -99,7 +121,7 @@ def test_config_symlink_into_workspace_is_rejected(tmp_path: Path) -> None:
 def test_home_as_workspace_rejects_home_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_dir = tmp_path / ".deep-agent"
     config_dir.mkdir()
-    (config_dir / "config.yaml").write_text("{}\n", encoding="utf-8")
+    (config_dir / "config.yaml").write_text(_MODEL_YAML, encoding="utf-8")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -115,9 +137,14 @@ agent:
   instructions: |
     优先使用中文回答。
 llm:
-  model: demo-model
-  api_key: secret
-  base_url: http://example.test/v1
+  default: local/demo
+  models:
+    local:
+      api_key: secret
+      base_url: http://example.test/v1
+      models:
+        demo:
+          model: demo-model
 sandbox:
   workspace: work
   allow_unsandboxed: true
@@ -140,13 +167,13 @@ paths:
     (tmp_path / "mounts" / "ro").mkdir(parents=True)
 
     settings = Settings.load(path)
-    assert settings.llm_default == "default"
+    assert settings.llm_default == "local/demo"
     assert settings.agent_instructions == "优先使用中文回答。\n"
     assert settings.llm_model == "demo-model"
     assert settings.llm_api_key == "secret"
     assert settings.llm_base_url == "http://example.test/v1"
     assert len(settings.llm_profiles) == 1
-    assert settings.active_profile.id == "default"
+    assert settings.active_profile.id == "local/demo"
     assert settings.active_profile.input == ("text",)
     assert settings.sandbox.workspace == (tmp_path / "work").resolve()
     assert settings.sandbox.allow_unsandboxed is True
@@ -162,16 +189,19 @@ paths:
 
 def test_sandbox_timeout_is_optional_and_must_be_positive(tmp_path: Path) -> None:
     config = tmp_path / "config.yaml"
-    config.write_text("sandbox:\n  timeout_seconds: null\n", encoding="utf-8")
+    config.write_text(_MODEL_YAML + "sandbox:\n  timeout_seconds: null\n", encoding="utf-8")
     assert Settings.load(config).sandbox.timeout_seconds is None
-    config.write_text("sandbox:\n  timeout_seconds: 0\n", encoding="utf-8")
+    config.write_text(_MODEL_YAML + "sandbox:\n  timeout_seconds: 0\n", encoding="utf-8")
     with pytest.raises(ValueError, match="sandbox.timeout_seconds must be positive"):
         Settings.load(config)
 
 
 def test_deep_agent_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "custom.yaml"
-    path.write_text("llm:\n  model: from-env\n", encoding="utf-8")
+    path.write_text(
+        "llm:\n  default: local/env\n  models:\n    local:\n      models:\n        env:\n          model: from-env\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DEEP_AGENT_CONFIG", str(path))
     settings = Settings.load(base_dir=tmp_path / "other")
     assert settings.llm_model == "from-env"
@@ -180,7 +210,7 @@ def test_deep_agent_config_env_override(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_agent_instructions_rejects_non_text(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text("agent:\n  instructions: [not, text]\n", encoding="utf-8")
+    path.write_text(_MODEL_YAML + "agent:\n  instructions: [not, text]\n", encoding="utf-8")
     with pytest.raises(ValueError, match="agent.instructions"):
         Settings.load(path)
 
@@ -191,7 +221,7 @@ def test_workspace_dot_follows_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     path = cfg_dir / "config.yaml"
-    path.write_text("sandbox:\n  workspace: .\n", encoding="utf-8")
+    path.write_text(_MODEL_YAML + "sandbox:\n  workspace: .\n", encoding="utf-8")
     monkeypatch.chdir(project)
     settings = Settings.load(path)
     assert settings.sandbox.workspace == project.resolve()
@@ -201,7 +231,7 @@ def test_workspace_relative_resolves_against_config_dir(tmp_path: Path) -> None:
     work = tmp_path / "work"
     work.mkdir()
     path = tmp_path / "config.yaml"
-    path.write_text("sandbox:\n  workspace: work\n", encoding="utf-8")
+    path.write_text(_MODEL_YAML + "sandbox:\n  workspace: work\n", encoding="utf-8")
     settings = Settings.load(path)
     assert settings.sandbox.workspace == work.resolve()
 
@@ -211,33 +241,112 @@ def test_multi_model_catalog_and_prefix(tmp_path: Path) -> None:
     path.write_text(
         """
 llm:
-  default: qwen-plus
+  default: local/qwen-plus
   models:
-    qwen-plus:
-      model: qwen3.5-plus
+    local:
       api_key: a
       base_url: http://a.test/v1
-    qwen-fast:
-      model: qwen-turbo
-      api_key: b
-      base_url: http://b.test/v1
+      models:
+        qwen-plus:
+          model: qwen3.5-plus
+        qwen-fast:
+          model: qwen-turbo
+          api_key: b
+          base_url: http://b.test/v1
 """,
         encoding="utf-8",
     )
     settings = Settings.load(path)
-    assert settings.llm_default == "qwen-plus"
-    assert [item.id for item in settings.llm_profiles] == ["qwen-plus", "qwen-fast"]
-    assert settings.get_profile("qwen-f").id == "qwen-fast"
+    assert settings.llm_default == "local/qwen-plus"
+    assert [item.id for item in settings.llm_profiles] == ["local/qwen-plus", "local/qwen-fast"]
+    assert settings.get_profile("local/qwen-f").id == "local/qwen-fast"
     with pytest.raises(KeyError, match="Ambiguous"):
-        settings.get_profile("qwen")
+        settings.get_profile("local/qwen")
     with pytest.raises(KeyError, match="Unknown"):
         settings.get_profile("missing")
+
+
+def test_grouped_models_inherit_source_settings_and_reject_old_ids() -> None:
+    settings = Settings.from_mapping({"llm": {
+        "default": "token-plan/auto",
+        "models": {
+            "local": {"base_url": "http://local/v1", "models": {
+                "qwen-plus": {"model": "qwen3.5-plus"},
+                "qwen3.8-max": {},
+            }},
+            "token-plan": {
+                "api_key": "secret", "base_url": "https://plan/v1",
+                "provider": "openai-compatible", "stream_usage": True,
+                "context_window": "1m", "models": {
+                    "auto": {"input": ["text"]},
+                    "qwen3.8-max": {"input": ["text", "image"], "context_window": "128k"},
+                },
+            },
+        },
+    }})
+    assert settings.active_profile.id == "token-plan/auto"
+    assert settings.active_profile.model == "auto"
+    assert settings.active_profile.provider == "openai-compatible"
+    assert settings.active_profile.context_window == 1_000_000
+    assert settings.active_profile.stream_usage is True
+    assert settings.get_profile("token-plan/qwen3.8-max").context_window == 128_000
+    for old_id in ("token-plan-auto", "qwen-plus", "qwen3.8-max", "token-plan-qwen3.8-max"):
+        with pytest.raises(KeyError, match="Unknown"):
+            settings.get_profile(old_id)
+
+
+@pytest.mark.parametrize("llm", [
+    {"model": "qwen3.5-plus"},
+    {"default": "qwen-plus", "models": {"qwen-plus": {"model": "qwen3.5-plus"}}},
+    {"default": "local/test", "api_key": "old", "models": {"local": {"models": {"test": {}}}}},
+])
+def test_old_model_config_is_rejected(llm: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match=r"llm\.(model|models|api_key)"):
+        Settings.from_mapping({"llm": llm})
+
+
+def test_config_file_requires_grouped_models(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="llm.models must define grouped"):
+        Settings.load(path)
+
+
+@pytest.mark.parametrize("default", [None, "", "token-plan/missing", "missing/auto", 123])
+def test_grouped_models_require_a_valid_explicit_default(default: object) -> None:
+    with pytest.raises(ValueError, match="llm.default"):
+        Settings.from_mapping({"llm": {"default": default, "models": {
+            "token-plan": {"models": {"auto": {}}},
+        }}})
+
+
+def test_grouped_model_errors_include_field_and_config_path(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("llm:\n  default: token-plan/auto\n  models:\n    token-plan:\n      models:\n        auto:\n          context_window: huge\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"config.yaml: llm.models.token-plan.models.auto.context_window"):
+        Settings.load(config)
+
+
+def test_grouped_models_reject_non_string_connection_settings() -> None:
+    with pytest.raises(ValueError, match=r"llm.models.token-plan.models.auto.api_key"):
+        Settings.from_mapping({"llm": {
+            "default": "token-plan/auto",
+            "models": {"token-plan": {"api_key": ["bad"], "models": {"auto": {}}}},
+        }})
+
+
+def test_yaml_syntax_error_reports_location_without_source_text(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("llm:\n  models: [secret: value\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"config.yaml: invalid YAML syntax at line") as error:
+        Settings.load(config)
+    assert "secret" not in str(error.value)
 
 
 def test_model_input_capabilities(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  models:\n    vision:\n      model: qwen\n      input: [text, image]\n",
+        "llm:\n  default: local/vision\n  models:\n    local:\n      models:\n        vision:\n          model: qwen\n          input: [text, image]\n",
         encoding="utf-8",
     )
     profile = Settings.load(path).active_profile
@@ -250,36 +359,38 @@ def test_context_window_accepts_counts_and_shorthand(tmp_path: Path) -> None:
     path.write_text(
         """
 llm:
-  default: exact
-  context_window: 32k
+  default: local/exact
   models:
-    exact:
-      model: qwen3.5-plus
-      context_window: 1000000
-    shorthand:
-      model: qwen-turbo
-      context_window: 128k
-    fractional:
-      model: qwen-max
-      context_window: 1.5m
-    inherited:
-      model: qwen-flash
+    local:
+      context_window: 32k
+      models:
+        exact:
+          model: qwen3.5-plus
+          context_window: 1000000
+        shorthand:
+          model: qwen-turbo
+          context_window: 128k
+        fractional:
+          model: qwen-max
+          context_window: 1.5m
+        inherited:
+          model: qwen-flash
 """,
         encoding="utf-8",
     )
     windows = {item.id: item.context_window for item in Settings.load(path).llm_profiles}
     assert windows == {
-        "exact": 1_000_000,
-        "shorthand": 128_000,
-        "fractional": 1_500_000,
-        "inherited": 32_000,
+        "local/exact": 1_000_000,
+        "local/shorthand": 128_000,
+        "local/fractional": 1_500_000,
+        "local/inherited": 32_000,
     }
 
 
 def test_context_window_rejects_nonsense(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  models:\n    broken:\n      model: qwen\n      context_window: huge\n",
+        "llm:\n  default: local/broken\n  models:\n    local:\n      models:\n        broken:\n          model: qwen\n          context_window: huge\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="context_window"):
@@ -289,13 +400,13 @@ def test_context_window_rejects_nonsense(tmp_path: Path) -> None:
 def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  models:\n    compatible:\n      model: local\n      provider: openai-compatible\n",
+        "llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: openai-compatible\n      models:\n        compatible:\n          model: local\n",
         encoding="utf-8",
     )
     model = build_chat_model(Settings.load(path).active_profile)
     assert type(model) is ChatOpenAI
     assert model.use_responses_api is False
-    path.write_text("llm:\n  provider: unknown\n", encoding="utf-8")
+    path.write_text("llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: unknown\n      models:\n        compatible: {}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="provider"):
         Settings.load(path)
     assert isinstance(build_chat_model(Settings().active_profile), QwenChatOpenAI)
@@ -304,23 +415,23 @@ def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -
 def test_model_source_is_loaded_for_display(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  models:\n    plan:\n      model: qwen3.6-flash\n      source: Token Plan\n",
+        "llm:\n  default: token-plan/qwen3.6-flash\n  models:\n    token-plan:\n      models:\n        qwen3.6-flash: {}\n",
         encoding="utf-8",
     )
-    assert Settings.load(path).active_profile.source == "Token Plan"
+    assert Settings.load(path).active_profile.source == "token-plan"
 
 
 def test_stream_usage_can_be_enabled_per_provider(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  provider: openai-compatible\n  stream_usage: true\n"
-        "  models:\n    plan:\n      model: auto\n"
-        "    local:\n      model: qwen3.6-flash\n      stream_usage: false\n",
+        "llm:\n  default: plan/auto\n  models:\n"
+        "    plan:\n      provider: openai-compatible\n      stream_usage: true\n      models:\n        auto: {}\n"
+        "    local:\n      provider: openai-compatible\n      models:\n        qwen3.6-flash:\n          stream_usage: false\n",
         encoding="utf-8",
     )
     settings = Settings.load(path)
-    assert build_chat_model(settings.get_profile("plan")).stream_usage is True
-    assert build_chat_model(settings.get_profile("local")).stream_usage is False
+    assert build_chat_model(settings.get_profile("plan/auto")).stream_usage is True
+    assert build_chat_model(settings.get_profile("local/qwen3.6-flash")).stream_usage is False
 
 
 @pytest.mark.parametrize("value,match", [
@@ -332,7 +443,7 @@ def test_stream_usage_can_be_enabled_per_provider(tmp_path: Path) -> None:
 def test_invalid_model_inputs(tmp_path: Path, value: str, match: str) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        f"llm:\n  models:\n    bad:\n      model: qwen\n      input: {value}\n",
+        f"llm:\n  default: local/bad\n  models:\n    local:\n      models:\n        bad:\n          model: qwen\n          input: {value}\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=match):
@@ -344,10 +455,12 @@ def test_invalid_default_model_raises(tmp_path: Path) -> None:
     path.write_text(
         """
 llm:
-  default: nope
+  default: local/nope
   models:
-    only:
-      model: m
+    local:
+      models:
+        only:
+          model: m
 """,
         encoding="utf-8",
     )
@@ -357,6 +470,6 @@ llm:
 
 def test_invalid_bool_raises(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text("sandbox:\n  allow_unsandboxed: maybe\n", encoding="utf-8")
+    path.write_text(_MODEL_YAML + "sandbox:\n  allow_unsandboxed: maybe\n", encoding="utf-8")
     with pytest.raises(ValueError, match="allow_unsandboxed"):
         Settings.load(path)

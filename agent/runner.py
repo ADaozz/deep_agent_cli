@@ -8,6 +8,7 @@ from enum import StrEnum
 from functools import wraps
 from pathlib import Path
 import tempfile
+import time
 from threading import Lock
 from typing import Any, Callable, Sequence
 from uuid import uuid4
@@ -82,6 +83,12 @@ class RunEvent:
     result: Any = None
     is_error: bool = False
     stream: str = ""
+
+
+@dataclass(frozen=True)
+class TurnTiming:
+    elapsed_seconds: float
+    finished_at: datetime
 
 
 RunEventHandler = Callable[[RunEvent], None]
@@ -799,6 +806,18 @@ class AgentRunner:
         _emit(event_handler, RunEvent(type="run_started"))
 
         result: RunResult | None = None
+        turn_started = time.monotonic()
+
+        def emit_turn_completed(output: str) -> None:
+            _emit(event_handler, RunEvent(
+                type="turn_completed",
+                content=output,
+                result=TurnTiming(
+                    elapsed_seconds=max(0.0, time.monotonic() - turn_started),
+                    finished_at=datetime.now(timezone.utc),
+                ),
+            ))
+
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
             # Consume queued input at the same run boundary for every client.
@@ -808,9 +827,11 @@ class AgentRunner:
                     text = self.control.pop_follow_up()
                 if text is None:
                     break
+                emit_turn_completed(result.output)
                 run_control = self.control.begin_run()
                 self._seen_tool_calls.clear()
                 self._todo_call_ids.clear()
+                turn_started = time.monotonic()
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)]},
                     config,
@@ -819,6 +840,7 @@ class AgentRunner:
                 )
             if result.status == "completed":
                 _emit(event_handler, RunEvent(type="run_completed", content=result.output))
+                emit_turn_completed(result.output)
                 self._touch_status(StopReason.STOP)
             return result
         finally:

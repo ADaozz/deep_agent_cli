@@ -175,7 +175,9 @@ class InteractionController:
         if self.error:
             parts.append(Text(self.error, style="red"))
         hint = (
-            "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"
+            "↑↓ select  Enter confirm  Esc back"
+            if self.kind == "model" and self.values.get("source")
+            else "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"
             if self.kind in {"approval", "human", "pause"} and options
             else "↑↓ select  Enter confirm  Esc cancel"
             if options

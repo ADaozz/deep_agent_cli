@@ -27,6 +27,19 @@ def _settings_two_models() -> Settings:
     )
 
 
+def _settings_grouped_models() -> Settings:
+    return Settings.from_mapping({"llm": {
+        "default": "token-plan/auto",
+        "models": {
+            "local": {"models": {"qwen-plus": {"model": "qwen3.5-plus"}}},
+            "token-plan": {"provider": "openai-compatible", "models": {
+                "auto": {"context_window": "1m"},
+                "qwen3.8-max": {"context_window": "128k"},
+            }},
+        },
+    }})
+
+
 def test_switch_model_keeps_thread_and_rebuilds_graph() -> None:
     settings = _settings_two_models()
     runner = AgentRunner(
@@ -156,6 +169,61 @@ def test_cli_model_picker_distinguishes_model_sources() -> None:
                 "qwen3.6-flash · Local gateway · current",
                 "qwen3.6-flash · Token Plan",
             ]
+
+    asyncio.run(scenario())
+
+
+def test_cli_grouped_model_picker_selects_source_then_model_and_goes_back() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(), settings=_settings_grouped_models(),
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.select_model()
+            assert app.interaction is not None and app.interaction.kind == "model_source"
+            assert [item["value"] for item in app.interaction.current["options"]] == ["local", "token-plan"]
+            assert app.interaction.option_index == 1
+            assert app.interaction.accept("") is True
+            app._finish_interaction()
+            assert app.interaction is not None and app.interaction.kind == "model"
+            assert [item["label"] for item in app.interaction.current["options"]] == ["auto · current", "qwen3.8-max"]
+            app._finish_interaction(cancelled=True)
+            assert app.interaction is not None and app.interaction.kind == "model_source"
+            assert app.interaction.accept("") is True
+            app._finish_interaction()
+            assert app.interaction is not None
+            app.interaction.option_index = 1
+            assert app.interaction.accept("") is True
+            app._finish_interaction()
+            assert app.interaction is None
+            assert runner.current_model().id == "token-plan/qwen3.8-max"
+            assert runner.context_window() == 128_000
+
+    asyncio.run(scenario())
+
+
+def test_cli_model_source_arg_opens_group_and_full_id_switches() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(), settings=_settings_grouped_models(),
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.select_model("local")
+            assert app.interaction is not None and app.interaction.kind == "model"
+            assert [item["label"] for item in app.interaction.current["options"]] == ["qwen-plus"]
+            assert app.interaction.current["options"][0]["description"] == "qwen3.5-plus"
+            app._finish_interaction(cancelled=True)
+            assert app.interaction is not None and app.interaction.kind == "model_source"
+            app._finish_interaction(cancelled=True)
+            assert app.interaction is None
+            await app.select_model("local/qwen-plus")
+            assert runner.current_model().id == "local/qwen-plus"
 
     asyncio.run(scenario())
 

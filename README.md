@@ -37,9 +37,10 @@
 - **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
 - **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
 - **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
+- **转录区跟随** — 停留在底部时持续显示新输出；上滚后保留阅读位置，并提供可点击的回到底部提示
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
 - **后续任务** — `Alt+Enter` 排入 Runtime 队列，当前任务完成后由 `AgentRunner` 接续执行
-- **多模型** — YAML profile + `/model` / `Ctrl+P`；切换重建 graph，会话保留。本地网关与阿里云百炼 Qwen Token Plan 都已适配
+- **多模型** — YAML 按来源分组；`/model` 先选来源再选模型，`Ctrl+P` 循环切换。切换会重建 graph，会话保留
 - **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
 - **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
 - **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
@@ -70,25 +71,29 @@ pip install -r requirements.lock
 
 ### Configure
 
-首次运行 `deep-agent` 会生成 `~/.deep-agent/config.yaml` 和空的 `~/.deep-agent/skills/`，提示编辑配置后退出。修改 API Key 和端点后，再次运行：
+首次运行 `deep-agent` 会生成 `~/.deep-agent/config.yaml` 和空的 `~/.deep-agent/skills/`，提示编辑配置后退出。修改 API Key 和端点后，再次运行。配置示例：
 
 ```yaml
+ui:
+  timezone: Asia/Shanghai
 llm:
-  default: qwen-plus
+  default: local/qwen-plus
   models:
-    qwen-plus:
-      model: qwen3.5-plus
-      input: [text, image]
-      context_window: 1m
+    local:
       api_key: sk-your-key
       base_url: http://localhost:8000/v1
-    qwen3.6-flash:
-      model: qwen3.6-flash
-      input: [text, image]
-      context_window: 1m
-      api_key: sk-your-key
-      base_url: http://localhost:8000/v1
+      provider: qwen-responses
+      models:
+        qwen-plus:
+          model: qwen3.5-plus
+          input: [text, image]
+          context_window: 1m
+        qwen3.6-flash:
+          input: [text, image]
+          context_window: 1m
 ```
+
+每轮回答结束后，转录区显示耗时与结束时间，例如 `Worked for 7m 56s · 10:24`。时间默认按北京时间显示；`ui.timezone` 接受 IANA 时区名称。恢复会话时不会重建此前回合的耗时行。
 
 也可以不改文件，启动时指定：
 
@@ -96,29 +101,28 @@ llm:
 export DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
 ```
 
-接阿里云百炼 **Qwen Token Plan** 时用 `compatible-mode` 端点加 `provider: openai-compatible`，并打开 `stream_usage`，否则流式响应不回报 usage，底栏的上下文占用百分比会一直显示未知。profile 里没写的字段继承 `llm` 下的扁平配置，所以多个 Token Plan 模型可以共用一份端点和密钥：
+接阿里云百炼 **Qwen Token Plan** 时用 `compatible-mode` 端点加 `provider: openai-compatible`，并打开 `stream_usage`，否则流式响应不回报 usage，底栏的上下文占用百分比会一直显示未知。下例可单独使用；与本地网关并用时，把 `token-plan` 组并入已有的 `llm.models`，再按需要修改 `llm.default`。来源下的模型共用端点和密钥，模型级字段可以覆盖来源级字段：
 
 ```yaml
 llm:
-  default: token-plan-qwen3.8-max
-  api_key: sk-your-token-plan-key
-  base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-  provider: openai-compatible
-  stream_usage: true
+  default: token-plan/auto
   models:
-    token-plan-qwen3.8-max:
-      model: qwen3.8-max
-      source: Token Plan
-      input: [text, image]
+    token-plan:
+      api_key: sk-your-token-plan-key
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      provider: openai-compatible
+      stream_usage: true
       context_window: 1m
-    token-plan-auto:
-      model: auto                # 由 Token Plan 侧自动路由
-      source: Token Plan
-      input: [text]
-      context_window: 1m
+      models:
+        auto:                   # 由 Token Plan 侧自动路由
+          input: [text]
+        qwen3.8-max:
+          input: [text, image]
 ```
 
-`source` 只是 `/model` 列表、页脚和状态里显示的来源标签，不参与路由；`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
+`llm.default` 必须明确指定已配置的 `来源/模型`，例如 `token-plan/auto`。`local`、`token-plan` 和模型键都是自定义名称；模型键默认也是发给 API 的模型名，需要别名时在模型项内写 `model:`。配置只接受 `llm.models.<来源>.models.<模型>` 结构；旧版 `llm.model`、扁平 `llm.models.<模型>` 以及放在 `llm` 顶层的端点或密钥字段都会报错。缺少默认模型、字段无效或 YAML 语法错误时，启动会指出配置文件及错误位置，不会默默切换模型。
+
+`/model` 先选来源，再选来源下的模型；在模型列表按 `Esc` 返回来源列表。`/model token-plan` 可直接打开该来源，`/model token-plan/auto` 可直接切换。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
 
 ### Run
 
@@ -144,18 +148,19 @@ python examples/run_cli.py
 进入交互会话后，普通文本就是任务。以 `/` 开头是命令。
 
 ```text
-/help          命令与快捷键
-/status        工作区、沙箱、权限、session
-/session       当前线程、创建/更新时间与 SQLite 路径
-/new           开一条新线程
-/resume        列出有内容的会话并选择恢复
-/resume a1b2   按 id 前缀切换 session
-/model         打开模型选择器
-/model qwen3   按 id 前缀切换
-/compact       达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
+/help                    命令与快捷键
+/status                  工作区、沙箱、权限、session
+/session                 当前线程、创建/更新时间与 SQLite 路径
+/new                     开一条新线程
+/resume                  列出有内容的会话并选择恢复
+/resume a1b2             按 id 前缀切换 session
+/model                   先选来源，再选模型
+/model token-plan        打开 Token Plan 模型列表
+/model token-plan/auto   直接切换模型
+/compact                 达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
 /permission ask|allow   # allow 仅 SANDBOXED；UNSANDBOXED / CUSTOM 只有 ask
 /image clipboard | <path> | clear
-/pause         在下一个模型安全点暂停
+/pause                   在下一个模型安全点暂停
 /quit
 ```
 
@@ -167,7 +172,8 @@ python examples/run_cli.py
 | 命令候选 | 输入 `/` 后用方向键选择，`Tab` / `Enter` 填入，再按 `Enter` 执行 |
 | 换行 | `Ctrl+J` |
 | 排到本轮结束后再问 | `Alt+Enter` |
-| 取消并还原未应用内容 | `Esc` |
+| 上滚时回到底部；再次按下执行当前界面的取消操作 | `Esc`；也可点击 `↓ Back to bottom · esc` |
+| 清空输入；0.5 秒内再次按下退出 | `Ctrl+C` |
 | 切换模型 | `Ctrl+P` / `Alt+P` |
 | 粘贴图片 | `Ctrl+V` / `Alt+V` |
 | 展开已产生的工具输出 / Thinking | `Ctrl+O` / `Ctrl+T` |
@@ -177,7 +183,7 @@ python examples/run_cli.py
 | 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
 | 拖动滚动条 | 在最右列按下并拖动；点击即跳到对应位置 |
 
-底栏第三行显示当前工作区的 git 分支与改动文件数（每 5 秒后台刷新一次 `git status`，非 git 目录时留空），右侧是 `context_window` 对应的上下文占用百分比，数据来自模型最近一次返回的 token usage。
+底栏首行按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色；窄终端优先截断路径与模型。第二行显示运行状态、执行模式、权限，以及非 Git 目录的上下文占用。Git 仓库中，第三行显示分支、改动文件数和上下文占用；Git 状态每 5 秒后台刷新一次。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
 
 作为库使用：
 
@@ -259,23 +265,25 @@ config.example.yaml
 
 ## Configuration
 
-CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-agent/config.yaml`；默认配置缺失时会生成模板并退出。项目内的配置文件不会自动加载。作为库使用时可显式传入 `Settings`。
+CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-agent/config.yaml`；默认配置缺失时会生成模板并退出。项目内的配置文件不会自动加载。配置文件必须包含分组模型及有效的 `llm.default`；解析失败时 CLI 输出 `Configuration error` 并以状态码 2 退出。作为库使用时可显式传入 `Settings`。
 
 主配置和按键配置必须位于 workspace 外；如果将 home 目录作为 workspace，启动时会拒绝位于 `~/.deep-agent` 的配置。已有项目内的 `config.yaml` 可一次性迁到 `~/.deep-agent/config.yaml`，确认内容后删除旧文件。配置中的相对路径（除 `sandbox.workspace: .`）仍相对于配置文件所在目录解析，迁移时需检查这些路径。
 
-旧配置中的 `sandbox.protected_workspace_paths` 已移除，启动时会提示删除。将原工作区 `skills/` 中需要保留的目录手动复制到 `~/.deep-agent/skills/`；项目内的 `skills/` 不再自动加载。Agent 通过只读 `/skills` 路径读取用户 Skills；其他外部只读资源可使用 `extra_read_only_mounts` 显式开放。
+旧配置中的 `sandbox.protected_workspace_paths` 已移除，启动时会提示删除。旧版扁平模型配置需要按上面的 YAML 示例手动改成来源分组；程序不会自动迁移。将原工作区 `skills/` 中需要保留的目录手动复制到 `~/.deep-agent/skills/`；项目内的 `skills/` 不再自动加载。Agent 通过只读 `/skills` 路径读取用户 Skills；其他外部只读资源可使用 `extra_read_only_mounts` 显式开放。
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
 | `agent.instructions` | `null` | 追加到默认身份之后的长期说明；支持 YAML 多行文本 |
-| `llm.default` | 首个 profile | 启动时的模型 |
-| `llm.models.<id>.model` | — | OpenAI 兼容模型名 |
-| `llm.models.<id>.provider` | `qwen-responses` | `qwen-responses` 或 `openai-compatible`；Token Plan 的 compatible-mode 端点用后者 |
-| `llm.models.<id>.source` | 空 | `/model` 列表、页脚和状态中显示的来源，例如 `Local gateway` 或 `Token Plan` |
-| `llm.models.<id>.stream_usage` | `false` | 流式 Chat Completions 请求附带 `stream_options.include_usage`，以获取实际 Token 用量；也可在 `llm.stream_usage` 为多个模型设置默认值 |
-| `llm.models.<id>.base_url` | `http://localhost:8000/v1` | 推理端点 |
-| `llm.models.<id>.input` | `[text]` | 图片模型写成 `[text, image]` |
-| `llm.models.<id>.context_window` | `0` | 模型输入窗口，用于自动压缩阈值和底栏占用百分比；可写 `1000000`、`128k` 或 `1m`；`0` 表示未知并隐藏该指标 |
+| `ui.timezone` | `Asia/Shanghai` | 回合结束时间使用的 IANA 时区；无效名称会报配置错误 |
+| `llm.default` | 必填 | 启动模型，格式为 `来源/模型` |
+| `llm.models.<source>.models` | 必填 | 来源下的模型列表；来源名和模型名由用户自定义 |
+| `llm.models.<source>.models.<name>.model` | `<name>` | 实际 API 模型名；仅在模型键是别名时需要填写 |
+| `llm.models.<source>.api_key` | `sk-local` | 来源共用密钥；模型级可以覆盖 |
+| `llm.models.<source>.provider` | `qwen-responses` | 来源共用 `qwen-responses` 或 `openai-compatible`；模型级可以覆盖 |
+| `llm.models.<source>.stream_usage` | `false` | 流式 Chat Completions 请求附带 `stream_options.include_usage`；模型级可以覆盖 |
+| `llm.models.<source>.base_url` | `http://localhost:8000/v1` | 来源共用推理端点；模型级可以覆盖 |
+| `llm.models.<source>.models.<name>.input` | `[text]` | 图片模型写成 `[text, image]` |
+| `llm.models.<source>.context_window` | `0` | 模型输入窗口，可在模型级覆盖；可写 `1000000`、`128k` 或 `1m`；`0` 隐藏占用百分比 |
 | `sandbox.workspace` | `.` | 映射到 `/workspace`；`.` = 启动时的 cwd |
 | `sandbox.allow_unsandboxed` | `false` | 无 bwrap 时是否允许宿主机执行 |
 | `sandbox.timeout_seconds` | `null`（无限制） | 可选的单次命令超时上限，单位秒；工具可请求更短时间 |
@@ -292,7 +300,7 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 
 每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
 
-LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
+LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
 
 沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 

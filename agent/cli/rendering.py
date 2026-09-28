@@ -8,6 +8,7 @@ from difflib import unified_diff
 from io import StringIO
 from pathlib import PurePosixPath
 from typing import Any, TypeGuard
+from zoneinfo import ZoneInfo
 
 from prompt_toolkit import ANSI
 from prompt_toolkit.formatted_text import (
@@ -23,7 +24,8 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from agent.cli.state import CliState, MessageBlock, ToolBlock
+from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.config import DEFAULT_UI_TIMEZONE
 
 
 # FilesystemMiddleware explore tools from DEFAULT_FS_TOOLS (factory.py).
@@ -55,9 +57,10 @@ _EXPLORE_NOUN = {
 def render_transcript(
     state: CliState,
     width: int,
+    timezone: ZoneInfo | None = None,
 ) -> str:
     return "\n".join(
-        _capture(unit.build(), width) for unit in transcript_units(state)
+        _capture(unit.build(), width) for unit in transcript_units(state, timezone or ZoneInfo(DEFAULT_UI_TIMEZONE))
     )
 
 
@@ -91,8 +94,9 @@ def _render_unit(renderable: Any, width: int) -> RenderedUnit:
     return RenderedUnit(to_formatted_text(ANSI(text)), text.count("\n") + 1)
 
 
-def transcript_units(state: CliState) -> list[TranscriptUnit]:
+def transcript_units(state: CliState, timezone: ZoneInfo | None = None) -> list[TranscriptUnit]:
     """Structural pass over the timeline. Cheap: builds no Rich renderables."""
+    timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
     units: list[TranscriptUnit] = [
         TranscriptUnit("header", (), lambda: Group(*_header())),
     ]
@@ -109,6 +113,15 @@ def transcript_units(state: CliState) -> list[TranscriptUnit]:
         block = blocks[index]
         if isinstance(block, MessageBlock):
             units.append(_message_unit(block, state.thinking_collapsed))
+            index += 1
+            continue
+        if isinstance(block, TurnSummaryBlock):
+            units.append(TranscriptUnit(
+                key=("turn_summary", id(block)),
+                fingerprint=timezone.key,
+                build=lambda block=block: _turn_summary(block, timezone),
+                owner=block,
+            ))
             index += 1
             continue
         if not state.tools_expanded and _is_explore(block):
@@ -176,15 +189,16 @@ def _same_owner(cached: Any, current: Any) -> bool:
 class TranscriptRenderer:
     """Per-unit render cache: frozen history is replayed, only changes re-render."""
 
-    def __init__(self) -> None:
+    def __init__(self, timezone: ZoneInfo | None = None) -> None:
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
         self._width = 0
+        self._timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
 
     def render(self, state: CliState, width: int) -> tuple[FormattedText, int]:
         if width != self._width:
             self.clear()
             self._width = width
-        units = transcript_units(state)
+        units = transcript_units(state, self._timezone)
         live = {unit.key for unit in units}
         for key in [key for key in self._cache if key not in live]:
             del self._cache[key]
@@ -281,6 +295,20 @@ def _message(block: MessageBlock, thinking_collapsed: bool) -> list[Any]:
     else:
         items.append(Padding(Text(block.content, style="yellow"), (1, 1, 0, 1)))
     return items
+
+
+def _turn_summary(block: TurnSummaryBlock, timezone: ZoneInfo) -> Any:
+    elapsed = max(0, int(block.elapsed_seconds))
+    hours, remaining = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remaining, 60)
+    if hours:
+        duration = f"{hours}h {minutes}m {seconds}s"
+    elif minutes:
+        duration = f"{minutes}m {seconds}s"
+    else:
+        duration = f"{seconds}s"
+    finished = block.finished_at.astimezone(timezone).strftime("%H:%M")
+    return Padding(Text(f"Worked for {duration} · {finished}", style="dim"), (0, 1, 1, 1))
 
 
 def _header() -> list[Any]:

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -16,6 +17,11 @@ SAFE_INHERITED_ENV = (
 )
 
 _DEFAULT_CONFIG_NAME = "config.yaml"
+DEFAULT_UI_TIMEZONE = "Asia/Shanghai"
+
+
+class ConfigError(ValueError):
+    """A user configuration error safe to display without a traceback."""
 
 
 def default_skills_dir() -> Path:
@@ -88,6 +94,7 @@ class Settings:
     config_dir: Path | None = None
     source_path: Path | None = None
     agent_instructions: str | None = None
+    ui_timezone: str = DEFAULT_UI_TIMEZONE
 
     @property
     def llm_model(self) -> str:
@@ -129,8 +136,19 @@ class Settings:
         resolved = resolve_config_path(path, base_dir=base_dir)
         if resolved is None:
             return cls()
-        data = _read_yaml(resolved)
-        return cls.from_mapping(data, base_dir=resolved.parent, source_path=resolved)
+        try:
+            data = _read_yaml(resolved)
+            if "llm" not in data:
+                raise ValueError("llm.models must define grouped model sources")
+            return cls.from_mapping(data, base_dir=resolved.parent, source_path=resolved)
+        except yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None)
+            location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+            raise ConfigError(f"{resolved}: invalid YAML syntax{location}") from exc
+        except OSError as exc:
+            raise ConfigError(f"{resolved}: cannot read configuration ({exc.strerror or type(exc).__name__})") from exc
+        except ValueError as exc:
+            raise ConfigError(f"{resolved}: {exc}") from exc
 
     @classmethod
     def from_mapping(
@@ -144,6 +162,7 @@ class Settings:
         root = (base_dir or Path.cwd()).expanduser().resolve()
         llm = _section(raw, "llm")
         agent = _section(raw, "agent")
+        ui = _section(raw, "ui")
         paths = _section(raw, "paths")
         sandbox_raw = _section(raw, "sandbox")
         if "protected_workspace_paths" in sandbox_raw:
@@ -151,10 +170,17 @@ class Settings:
                 "sandbox.protected_workspace_paths was removed; move skills to "
                 "~/.deep-agent/skills and use explicit read-only mounts for other resources"
             )
-        profiles, default_id = _llm_profiles_from_mapping(llm)
+        profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise ValueError("agent.instructions must be a string or null")
+        timezone_name = ui.get("timezone", DEFAULT_UI_TIMEZONE)
+        if not isinstance(timezone_name, str) or not timezone_name.strip():
+            raise ValueError("ui.timezone must be a valid IANA time zone name")
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"ui.timezone is invalid: {timezone_name}") from exc
         result = cls(
             llm_profiles=profiles,
             llm_default=default_id,
@@ -163,6 +189,7 @@ class Settings:
             config_dir=_optional_path(paths.get("config_dir"), base_dir=root),
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
+            ui_timezone=timezone_name,
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -324,57 +351,65 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
 
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
+    legacy_fields = {"model", "api_key", "base_url", "input", "provider", "context_window", "source", "stream_usage"}
+    unsupported = legacy_fields.intersection(llm)
+    if unsupported:
+        field = sorted(unsupported)[0]
+        raise ValueError(f"llm.{field} is unsupported; configure it under llm.models.<source>")
     models_raw = llm.get("models")
-    if models_raw is None:
-        model = str(llm.get("model") or "qwen3.5-plus")
-        profile = ModelProfile(
-            id="default",
-            model=model,
-            api_key=str(llm.get("api_key") or "sk-local"),
-            base_url=str(llm.get("base_url") or "http://localhost:8000/v1"),
-            input=_model_inputs(llm.get("input"), field_name="llm.input"),
-            provider=_model_provider(llm.get("provider"), field_name="llm.provider"),
-            context_window=_model_context_window(
-                llm.get("context_window"), field_name="llm.context_window",
-            ),
-            source=str(llm.get("source") or "").strip(),
-            stream_usage=_model_stream_usage(llm.get("stream_usage"), field_name="llm.stream_usage"),
-        )
-        return (profile,), "default"
     if not isinstance(models_raw, Mapping) or not models_raw:
-        raise ValueError("llm.models must be a non-empty mapping of profile id → config")
+        raise ValueError("llm.models must be a non-empty mapping of grouped model sources")
+    return _grouped_llm_profiles(llm, models_raw)
+
+
+def _grouped_llm_profiles(
+    llm: Mapping[str, Any], groups: Mapping[str, Any],
+) -> tuple[tuple[ModelProfile, ...], str]:
     profiles: list[ModelProfile] = []
-    for profile_id, item in models_raw.items():
-        if not isinstance(item, Mapping):
-            raise ValueError(f"llm.models.{profile_id} must be a mapping")
-        pid = str(profile_id).strip()
-        if not pid:
-            raise ValueError("llm.models keys must be non-empty profile ids")
-        model_name = str(item.get("model") or "").strip()
-        if not model_name:
-            raise ValueError(f"llm.models.{pid}.model is required")
-        profiles.append(ModelProfile(
-            id=pid,
-            model=model_name,
-            api_key=str(item.get("api_key") or llm.get("api_key") or "sk-local"),
-            base_url=str(item.get("base_url") or llm.get("base_url") or "http://localhost:8000/v1"),
-            input=_model_inputs(item.get("input"), field_name=f"llm.models.{pid}.input"),
-            provider=_model_provider(item.get("provider", llm.get("provider")), field_name=f"llm.models.{pid}.provider"),
-            context_window=_model_context_window(
-                item.get("context_window", llm.get("context_window")),
-                field_name=f"llm.models.{pid}.context_window",
-            ),
-            source=str(item.get("source") or "").strip(),
-            stream_usage=_model_stream_usage(
-                item.get("stream_usage", llm.get("stream_usage")),
-                field_name=f"llm.models.{pid}.stream_usage",
-            ),
-        ))
-    default_id = str(llm.get("default") or profiles[0].id).strip()
-    if not any(item.id == default_id for item in profiles):
-        known = ", ".join(item.id for item in profiles)
-        raise ValueError(f"llm.default {default_id!r} is not in llm.models ({known})")
+    for source_key, group in groups.items():
+        if not isinstance(source_key, str) or not source_key.strip() or "/" in source_key:
+            raise ValueError("llm.models source keys must be non-empty strings containing no slash")
+        source = source_key.strip()
+        if not isinstance(group, Mapping) or not isinstance(group.get("models"), Mapping) or not group["models"]:
+            raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
+        for model_key, item in group["models"].items():
+            if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
+                raise ValueError(f"llm.models.{source}.models keys must be non-empty strings containing no slash")
+            name = model_key.strip()
+            field = f"llm.models.{source}.models.{name}"
+            if not isinstance(item, Mapping):
+                raise ValueError(f"{field} must be a mapping")
+            def inherited(key: str) -> Any:
+                return item.get(key, group.get(key))
+            model_name = item.get("model", name)
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise ValueError(f"{field}.model must be a non-empty string")
+            profiles.append(ModelProfile(
+                id=f"{source}/{name}",
+                model=model_name.strip(),
+                api_key=_model_text(inherited("api_key"), field_name=f"{field}.api_key", default="sk-local"),
+                base_url=_model_text(inherited("base_url"), field_name=f"{field}.base_url", default="http://localhost:8000/v1"),
+                input=_model_inputs(inherited("input"), field_name=f"{field}.input"),
+                provider=_model_provider(inherited("provider"), field_name=f"{field}.provider"),
+                context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
+                source=source,
+                stream_usage=_model_stream_usage(inherited("stream_usage"), field_name=f"{field}.stream_usage"),
+            ))
+    default = llm.get("default")
+    if not isinstance(default, str) or not default.strip():
+        raise ValueError("llm.default is required for grouped models (source/model)")
+    default_id = default.strip()
+    if default_id not in {item.id for item in profiles}:
+        raise ValueError(f"llm.default must name a configured source/model; unknown: {default_id}")
     return tuple(profiles), default_id
+
+
+def _model_text(value: Any, *, field_name: str, default: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
 
 
 def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:

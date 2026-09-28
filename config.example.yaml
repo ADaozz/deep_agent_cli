@@ -9,61 +9,42 @@ agent:
   #   优先使用中文回答。
   instructions: null
 
+ui:
+  # IANA time zone for the time shown after each completed answer.
+  timezone: Asia/Shanghai
+
 llm:
-  # Active profile id from models below. Flat llm.model/api_key/base_url still works.
-  default: qwen-plus
+  # Required for grouped models: source/model. Change this to select the startup model.
+  default: local/qwen-plus
   models:
-    qwen-plus:
-      model: qwen3.5-plus
-      provider: qwen-responses
-      input:
-        - text
-        - image
-      # Model input-token window for automatic context compression and the footer meter.
-      # 0/omitted leaves DeepAgents' default compression rule and hides the meter.
-      # Accepts a plain count (1000000) or a shorthand (128k, 1m).
-      context_window: 1m
+    local:
       api_key: sk-local
       base_url: http://localhost:8000/v1
-      stream_usage: false
-      source: Local gateway
-    qwen3.6-flash:
-      model: qwen3.6-flash
       provider: qwen-responses
-      input:
-        - text
-        - image
-      context_window: 1m
-      api_key: sk-local
-      base_url: http://localhost:8000/v1
       stream_usage: false
-      source: Local gateway
+      models:
+        qwen-plus:
+          model: qwen3.5-plus
+          input: [text, image]
+          context_window: 1m
+        qwen3.6-flash:
+          input: [text, image]
+          context_window: 1m
     # --- Aliyun Bailian Qwen Token Plan (compatible-mode endpoint) ---
-    # Shapes below mirror a working Token Plan config. Uncomment these profiles, the
-    # flat llm.* values at the end of this block, and `default: token-plan-auto`
-    # together. A profile that omits api_key/base_url/provider/stream_usage inherits
-    # the flat values, which is what lets many Token Plan models share one endpoint;
-    # the local profiles above set those keys explicitly, so they are unaffected.
-    # Any other Token Plan model takes the same four lines.
-    # token-plan-auto:
-    #   model: auto                 # routed by Token Plan
-    #   source: Token Plan          # label only: /model list, footer, /status
-    #   input: [text]
-    #   context_window: 1000000
-    # token-plan-qwen3.8-max:
-    #   model: qwen3.8-max
-    #   source: Token Plan
-    #   input: [text, image]
-    #   context_window: 1000000
-    # token-plan-qwen3.8-flash:
-    #   model: qwen3.8-flash
-    #   source: Token Plan
-    #   input: [text, image]
-    #   context_window: 1000000
-  # api_key: sk-your-token-plan-key
-  # base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-  # provider: openai-compatible     # Chat Completions; this endpoint is not qwen-responses
-  # stream_usage: true              # off = streaming reports no usage, footer meter stays unknown
+    # Uncomment this group and set default: token-plan/auto to start with Token Plan.
+    # token-plan:
+    #   api_key: sk-your-token-plan-key
+    #   base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    #   provider: openai-compatible
+    #   stream_usage: true
+    #   context_window: 1m
+    #   models:
+    #     auto:
+    #       input: [text]
+    #     qwen3.8-max:
+    #       input: [text, image]
+    #     qwen3.8-flash:
+    #       input: [text, image]
 
 sandbox:
   # Host directory mapped to /workspace. "." = the directory you start the TUI from (cwd).

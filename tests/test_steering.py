@@ -80,13 +80,17 @@ def test_runner_consumes_follow_up_without_tui() -> None:
         AIMessage(content="first reply"), AIMessage(content="second reply"),
     ]), backend=StateBackend())
     runner.follow_up("second task")
-    result = runner.invoke("first task")
+    events = []
+    result = runner.invoke("first task", on_event=events.append)
     assert result.status == "completed"
     assert result.output == "second reply"
     assert runner.control.pending_follow_up_count() == 0
     messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
     assert [message.content for message in messages if isinstance(message, HumanMessage)] == [
         "first task", "second task",
+    ]
+    assert [event.content for event in events if event.type == "turn_completed"] == [
+        "first reply", "second reply",
     ]
 
 

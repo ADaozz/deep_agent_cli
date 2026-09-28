@@ -48,7 +48,7 @@ def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> 
     model.profile = {"max_input_tokens": 128_000}
     runner = AgentRunner(
         model=model, backend=StateBackend(),
-        settings=Settings.from_mapping({"llm": {"context_window": "128k"}}),
+        settings=Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}}}),
     )
     assert runner.invoke("hello").status == "completed"
     before = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
@@ -72,7 +72,7 @@ def test_manual_compaction_archives_history_and_leaves_graph_ready() -> None:
     model.profile = {"max_input_tokens": 128_000}
     runner = AgentRunner(
         model=model, backend=StateBackend(),
-        settings=Settings.from_mapping({"llm": {"context_window": "128k"}}),
+        settings=Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}}}),
     )
     assert runner.invoke("long " * 15_000).status == "completed"
     result = runner.compact_context()
@@ -264,8 +264,8 @@ def test_latest_usage_reads_the_most_recent_ai_message() -> None:
 def test_context_window_comes_from_the_active_profile() -> None:
     settings = Settings.from_mapping({
         "llm": {
-            "default": "big",
-            "models": {"big": {"model": "qwen3.5-plus", "context_window": 1_000_000}},
+            "default": "local/big",
+            "models": {"local": {"models": {"big": {"model": "qwen3.5-plus", "context_window": 1_000_000}}}},
         },
     })
     runner = AgentRunner(

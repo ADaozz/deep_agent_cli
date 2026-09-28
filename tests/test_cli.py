@@ -1,5 +1,6 @@
 from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
+from prompt_toolkit.application.current import set_app
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent
@@ -9,6 +10,8 @@ import asyncio
 import re
 import pytest
 from collections.abc import Callable
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from agent.cli.gitinfo import GitSummary, parse_status
 from agent.cli.interactions import InteractionController
@@ -29,10 +32,10 @@ from agent.cli.rendering import (
     render_review,
     render_transcript,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock
+from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.config import Settings
 from agent.config import ModelProfile
-from agent.runner import AgentRunner, RunEvent
+from agent.runner import AgentRunner, RunEvent, TurnTiming
 from agent.session import SessionStore, TranscriptBlock
 from agent.tools.examples import build_example_tools
 from agent.factory import DEFAULT_FS_TOOLS, create_agent
@@ -62,7 +65,9 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        editor = app.application.layout.container.content.children[4].content
+        body = app.application.layout.container.content
+        assert not any(getattr(child, "style", None) == "class:editor-border" for child in body.children)
+        editor = body.children[4].content
         top, middle, bottom = editor.children
         prefix, input_window = middle.children
         assert top.height == bottom.height == 1
@@ -205,11 +210,34 @@ def test_runner_emits_tool_lifecycle_without_changing_result() -> None:
     assert result.output == "done"
     event_types = [event.type for event in events]
     assert event_types[0] == "run_started"
-    assert event_types[-1] == "run_completed"
+    assert event_types[-2:] == ["run_completed", "turn_completed"]
+    timing = events[-1].result
+    assert isinstance(timing, TurnTiming)
+    assert timing.elapsed_seconds >= 0
+    assert timing.finished_at.tzinfo is timezone.utc
     assert "assistant_started" in event_types
     assert "assistant_completed" in event_types
     tool_start = next(event for event in events if event.type == "tool_started")
     assert tool_start.tool_call_id == "call-docs"
+
+
+def test_turn_summary_is_after_answer_and_uses_configured_timezone() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="assistant_delta", content="done"))
+    state.apply(RunEvent(type="run_completed", content="done"))
+    state.apply(RunEvent(
+        type="turn_completed",
+        content="done",
+        result=TurnTiming(476, datetime(2026, 9, 28, 2, 24, tzinfo=timezone.utc)),
+    ))
+    assert isinstance(state.blocks[-1], TurnSummaryBlock)
+    assert len([block for block in state.blocks if isinstance(block, MessageBlock) and block.kind == "assistant"]) == 1
+    shanghai = _plain(render_transcript(state, 80, ZoneInfo("Asia/Shanghai")))
+    tokyo = _plain(render_transcript(state, 80, ZoneInfo("Asia/Tokyo")))
+    assert "done" in shanghai
+    assert "Worked for 7m 56s · 10:24" in shanghai
+    assert "Worked for 7m 56s · 11:24" in tokyo
+    assert shanghai.index("done") < shanghai.index("Worked for")
 
 
 def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path) -> None:
@@ -645,6 +673,41 @@ def test_tui_pipe_input_quits_and_restores_application() -> None:
     asyncio.run(scenario())
 
 
+def test_double_ctrl_c_disables_mouse_before_leaving_full_screen() -> None:
+    class RecordingOutput(DummyOutput):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+            super().__init__()
+
+        def enable_mouse_support(self) -> None:
+            self.events.append("enable_mouse")
+
+        def disable_mouse_support(self) -> None:
+            self.events.append("disable_mouse")
+
+        def quit_alternate_screen(self) -> None:
+            self.events.append("quit_alternate_screen")
+
+    async def scenario() -> None:
+        runner = AgentRunner(
+            model=scripted_model([AIMessage(content="unused")]),
+            backend=StateBackend(), thread_id="ctrl-c-mouse",
+        )
+        output = RecordingOutput()
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=output)
+            task = asyncio.create_task(app.run_async())
+            await asyncio.sleep(0.02)
+            pipe.send_text("\x03\x03")
+            await asyncio.wait_for(task, timeout=2)
+        assert "enable_mouse" in output.events
+        first_disable = output.events.index("disable_mouse")
+        assert first_disable < output.events.index("quit_alternate_screen")
+        assert "enable_mouse" not in output.events[first_disable + 1:]
+
+    asyncio.run(scenario())
+
+
 def _wheel(event_type: object) -> object:
     return MouseEvent(
         position=Point(x=0, y=0),
@@ -658,6 +721,17 @@ def _paint(app: CliApplication) -> None:
     """Render one frame. `_redraw` is a no-op until the application is running."""
     app.application.render_counter += 1
     app.application.renderer.render(app.application, app.application.layout)
+
+
+def _escape(app: CliApplication) -> None:
+    for binding in app.bindings.bindings:
+        if binding.keys == ("escape",):
+            class Event:
+                current_buffer = app.buffer
+
+            binding.handler(Event())
+            return
+    raise AssertionError("Escape binding missing")
 
 
 def _with_painted_app(
@@ -726,7 +800,7 @@ def test_transcript_scroll_down_moves_viewport_back() -> None:
         _paint(app)
         assert app.transcript_window.vertical_scroll == maximum - 6
 
-        for _ in range(2):
+        for _ in range(3):
             app.transcript_control.mouse_handler(_wheel(MouseEventType.SCROLL_DOWN))
             _paint(app)
         assert app._transcript_anchor is None
@@ -752,6 +826,94 @@ def test_transcript_page_down_follows_page_up() -> None:
         assert app.transcript_window.vertical_scroll == maximum
 
     _with_painted_app("page-scroll", scenario)
+
+
+def test_streamed_transcript_follows_only_while_tail_is_visible() -> None:
+    def scenario(app: CliApplication) -> None:
+        assert not app.transcript_away_from_bottom()
+        app._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 8))
+        _paint(app)
+        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
+
+        app.scroll_transcript(-6)
+        _paint(app)
+        pinned = app.transcript_window.vertical_scroll
+        assert app.transcript_away_from_bottom()
+        app._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 20))
+        _paint(app)
+        assert app.transcript_window.vertical_scroll == pinned
+
+        app.follow_transcript()
+        _paint(app)
+        assert app._transcript_anchor is None
+        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
+        assert not app.transcript_away_from_bottom()
+
+        app.scroll_transcript(-5)
+        _paint(app)
+        assert app.transcript_offset(0) == 0
+        assert app._transcript_anchor is None
+        assert not app.transcript_away_from_bottom()
+
+    _with_painted_app("stream-follow", scenario)
+
+
+def test_back_to_bottom_hint_click_and_escape_priority() -> None:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    def scenario(app: CliApplication) -> None:
+        app.state.running = True
+        app.runner.control.begin_run()
+        app.scroll_transcript(-5)
+        _paint(app)
+        assert app.transcript_away_from_bottom()
+        handlers = app.application.renderer.mouse_handlers.mouse_handlers
+        assert handlers[app.transcript_viewport_rows()][1] is not None
+
+        _escape(app)
+        _paint(app)
+        assert app._transcript_anchor is None
+        assert not app.runner.control.cancel_requested
+        assert not app.transcript_away_from_bottom()
+
+        app.scroll_transcript(-5)
+        _paint(app)
+        handlers = app.application.renderer.mouse_handlers.mouse_handlers
+        click = MouseEvent(
+            position=Point(x=1, y=app.transcript_viewport_rows()),
+            event_type=MouseEventType.MOUSE_DOWN,
+            button=MouseButton.LEFT,
+            modifiers=frozenset(),
+        )
+        app.application.layout.update_parents_relations()
+        with set_app(app.application):
+            assert handlers[app.transcript_viewport_rows()][1](click) is None
+        _paint(app)
+        assert app._transcript_anchor is None
+        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
+
+        _escape(app)
+        assert app.runner.control.cancel_requested
+
+    _with_painted_app("back-to-bottom", scenario)
+
+
+def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.interaction = InteractionController.approval([{
+            "toolCallId": "call-write", "name": "write_file", "args": {},
+        }])
+        app._finish_interaction = lambda *, cancelled=False: cancelled_calls.append(cancelled)  # type: ignore[method-assign]
+        app.scroll_transcript(-5)
+        _paint(app)
+        _escape(app)
+        assert app._transcript_anchor is None
+        assert cancelled_calls == []
+        _escape(app)
+        assert cancelled_calls == [True]
+
+    cancelled_calls: list[bool] = []
+    _with_painted_app("interaction-back-to-bottom", scenario)
 
 
 def test_transcript_scrollbar_margin_is_clickable() -> None:
@@ -808,7 +970,7 @@ def test_scrollbar_thumb_drag_preserves_grab_position_and_stops_on_release() -> 
     _with_painted_app("thumb-drag", scenario)
 
 
-def test_footer_keeps_current_model_at_bottom_right() -> None:
+def test_footer_puts_workspace_model_and_resume_id_on_first_line() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(),
@@ -820,15 +982,53 @@ def test_footer_keeps_current_model_at_bottom_right() -> None:
         footer = "".join(fragment[1] for fragment in app._footer_text())
         lines = footer.splitlines()
         assert len(lines) == FOOTER_LINES - 1
-        assert lines[1].rstrip().endswith("qwen3.5-plus")
-        assert "default ·" not in lines[1]
+        assert lines[0].strip() == f"{app._workspace()} · qwen3.5-plus · footer-m"
+        assert "default ·" not in lines[0]
+        assert "qwen3.5-plus" not in lines[1]
+
+
+def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        thread_id="footer-colors",
+        settings=Settings(),
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        fragments = list(app._footer_text())
+        first_line = "".join(value for _, value in fragments).splitlines()[0]
+        assert first_line.strip() == f"{app._workspace()} · qwen3.5-plus · footer-c"
+        assert any(style == "class:footer-workspace" and str(app._workspace()) in value for style, value in fragments)
+        assert ("class:footer-resume-id", "footer-c") in fragments
+        assert ("class:footer-model", "qwen3.5-plus") in fragments
+        for label, color in (
+            ("footer-workspace", "ansigreen"),
+            ("footer-resume-id", "ansicyan"),
+            ("footer-model", "ansiyellow"),
+        ):
+            assert app.application.style.get_attrs_for_style_str(f"class:{label}").color == color
+
+
+def test_footer_keeps_resume_id_visible_in_narrow_terminal(monkeypatch) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="narrow-resume", settings=Settings(),
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 20)
+        first_line = "".join(value for _, value in app._footer_text()).splitlines()[0]
+        assert first_line.endswith("narrow-r")
+        assert first_line.count(" · ") == 2
+        assert len(first_line) <= 20
 
 
 def test_footer_reports_workspace_git_and_context_usage() -> None:
     settings = Settings.from_mapping({
         "llm": {
-            "default": "metered",
-            "models": {"metered": {"model": "qwen3.5-plus", "context_window": "1m"}},
+            "default": "local/metered",
+            "models": {"local": {"models": {"metered": {"model": "qwen3.5-plus", "context_window": "1m"}}}},
         },
     })
     runner = AgentRunner(
@@ -861,14 +1061,14 @@ def test_footer_hides_context_meter_without_a_configured_window() -> None:
         app.state.apply(RunEvent(type="usage", result={"total_tokens": 500}))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES - 1
-        assert lines[1].rstrip().endswith("qwen3.5-plus")
+        assert lines[0].rstrip().endswith("qwen3.5-plus · footer-u")
 
 
-def test_footer_places_context_beside_model_when_git_unavailable() -> None:
+def test_footer_places_context_on_status_line_when_git_unavailable() -> None:
     settings = Settings.from_mapping({
         "llm": {
-            "default": "metered",
-            "models": {"metered": {"model": "auto", "source": "Token Plan", "context_window": "1m"}},
+            "default": "token-plan/metered",
+            "models": {"token-plan": {"models": {"metered": {"model": "auto", "context_window": "1m"}}}},
         },
     })
     runner = AgentRunner(
@@ -880,7 +1080,8 @@ def test_footer_places_context_beside_model_when_git_unavailable() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES - 1
-        assert lines[1].rstrip().endswith("auto · Token Plan · 1.0m Context")
+        assert "auto · token-plan" in lines[0]
+        assert lines[1].rstrip().endswith("1.0m Context")
 
 
 def test_context_usage_formatting() -> None:
@@ -902,7 +1103,7 @@ def test_compact_command_reports_threshold_and_current_usage() -> None:
     model.profile = {"max_input_tokens": 128_000}
     runner = AgentRunner(
         model=model, backend=StateBackend(),
-        settings=Settings.from_mapping({"llm": {"context_window": "128k"}}),
+        settings=Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}}}),
     )
     assert runner.invoke("hello").status == "completed"
 
@@ -923,7 +1124,7 @@ def test_compact_command_does_not_invent_usage_without_model_report() -> None:
     model.profile = {"max_input_tokens": 128_000}
     runner = AgentRunner(
         model=model, backend=StateBackend(),
-        settings=Settings.from_mapping({"llm": {"context_window": "128k"}}),
+        settings=Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}}}),
     )
 
     async def scenario() -> None:
@@ -950,7 +1151,7 @@ def test_compact_command_runs_upstream_tool_and_reports_success() -> None:
     model.profile = {"max_input_tokens": 128_000}
     runner = AgentRunner(
         model=model, backend=StateBackend(),
-        settings=Settings.from_mapping({"llm": {"context_window": "128k"}}),
+        settings=Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}}}),
     )
     assert runner.invoke("long " * 15_000).status == "completed"
 

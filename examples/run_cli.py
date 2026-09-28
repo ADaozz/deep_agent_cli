@@ -18,7 +18,7 @@ from rich.panel import Panel  # noqa: E402
 from agent.cli import CliApplication  # noqa: E402
 from agent.cli.app import default_config_dir  # noqa: E402
 from agent.bootstrap import initialize_user_files  # noqa: E402
-from agent.config import Settings, require_keybindings_outside_workspace  # noqa: E402
+from agent.config import ConfigError, Settings, require_keybindings_outside_workspace  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError, UNSANDBOXED_WARNING  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
@@ -91,7 +91,11 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     resume_id, open_picker = parse_startup_args(sys.argv[1:] if argv is None else argv)
-    settings = Settings.load()
+    try:
+        settings = Settings.load()
+    except (ConfigError, FileNotFoundError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     config_dir = settings.config_dir or default_config_dir()
     require_keybindings_outside_workspace(config_dir, settings.sandbox.workspace)
     runner = create_runner(settings)

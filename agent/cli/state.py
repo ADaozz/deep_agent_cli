@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from agent.attachments import ImageAttachmentRef
-from agent.runner import RunEvent
+from agent.runner import RunEvent, TurnTiming
 from agent.session import TranscriptBlock
 
 
@@ -34,10 +35,16 @@ class ToolBlock:
     revision: int = 0
 
 
-Block = MessageBlock | ToolBlock
+@dataclass(frozen=True)
+class TurnSummaryBlock:
+    elapsed_seconds: float
+    finished_at: datetime
 
 
-def touch(block: Block) -> Block:
+Block = MessageBlock | ToolBlock | TurnSummaryBlock
+
+
+def touch(block: MessageBlock | ToolBlock) -> MessageBlock | ToolBlock:
     """Mark a block as changed so its cached rendering is rebuilt."""
     block.revision += 1
     return block
@@ -198,6 +205,14 @@ class CliState:
             self.status = "Ready"
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
+            self.active_block = None
+        elif event.type == "turn_completed" and isinstance(event.result, TurnTiming):
+            if event.content and not self._has_assistant_text(event.content):
+                self.blocks.append(MessageBlock(kind="assistant", content=event.content))
+            self.blocks.append(TurnSummaryBlock(
+                elapsed_seconds=event.result.elapsed_seconds,
+                finished_at=event.result.finished_at,
+            ))
             self.active_block = None
         elif event.type == "run_cancelled":
             self.running = False

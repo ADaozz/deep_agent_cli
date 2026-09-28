@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from prompt_toolkit import ANSI, Application
 from prompt_toolkit.buffer import Buffer
@@ -52,7 +53,7 @@ from agent.cli.rendering import (
     render_review,
 )
 from agent.cli.state import CliState, ToolBlock
-from agent.config import ModelProfile, require_keybindings_outside_workspace
+from agent.config import DEFAULT_UI_TIMEZONE, ModelProfile, require_keybindings_outside_workspace
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -152,6 +153,20 @@ class _ScrollableTextControl(FormattedTextControl):
         return None
 
 
+class _BackToBottomControl(_ScrollableTextControl):
+    """Make the whole return-to-bottom hint clickable without stealing wheel events."""
+
+    def __init__(self, *args: Any, on_click: Any, **kwargs: Any) -> None:
+        self._on_click = on_click
+        super().__init__(*args, **kwargs)
+
+    def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if mouse_event.event_type is MouseEventType.MOUSE_DOWN and mouse_event.button is MouseButton.LEFT:
+            self._on_click()
+            return None
+        return super().mouse_handler(mouse_event)
+
+
 class _EditorScrollControl(BufferControl):
     """Input box: wheel scrolls the transcript instead of the empty editor."""
 
@@ -188,9 +203,8 @@ class _TranscriptWindow(Window):
     def _scroll(self, ui_content: Any, width: int, height: int) -> None:
         self.horizontal_scroll = 0
         self.vertical_scroll_2 = 0
-        anchor = self._viewport.transcript_anchor() if self._viewport is not None else None
         maximum = max(0, ui_content.line_count - height)
-        self.vertical_scroll = maximum if anchor is None else min(maximum, max(0, anchor))
+        self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
 
     def write_to_screen(self, screen: Any, mouse_handlers: Any, write_position: Any, *args: Any, **kwargs: Any) -> Any:
         self._scrollbar_ypos = write_position.ypos
@@ -280,11 +294,13 @@ class CliApplication:
         self._run_task: asyncio.Task[None] | None = None
         self._compacting = False
         self._last_ctrl_c = 0.0
+        self._exiting = False
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
         self._resume_picker_on_start = False
-        self._renderer = TranscriptRenderer()
+        timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
+        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
         self._git = GitProbe(self._workspace())
         self._git_summary = GitSummary()
         self._git_task: asyncio.Task[None] | None = None
@@ -312,6 +328,12 @@ class CliApplication:
         self.footer_control = _ScrollableTextControl(
             text=self._footer_text, focusable=False, on_scroll=self.scroll_transcript,
         )
+        self.back_to_bottom_control = _BackToBottomControl(
+            text="↓ Back to bottom · esc",
+            focusable=False,
+            on_scroll=self.scroll_transcript,
+            on_click=self.follow_transcript,
+        )
         self.editor_control = _EditorScrollControl(
             buffer=self.buffer, focusable=True, on_scroll=self.scroll_transcript,
         )
@@ -320,6 +342,7 @@ class CliApplication:
         interaction_visible = Condition(lambda: self.interaction is not None)
         editor_visible = Condition(lambda: self.interaction is None or self.interaction.accepts_text)
         attachments_visible = Condition(lambda: bool(self.state.attachments) and self.interaction is None)
+        back_to_bottom_visible = Condition(self.transcript_away_from_bottom)
 
         def editor_height() -> Any:
             lines = max(1, self.buffer.document.line_count)
@@ -352,7 +375,15 @@ class CliApplication:
         )
         body = HSplit([
             self.transcript_window,
-            Window(height=1, char="─", style="class:editor-border"),
+            ConditionalContainer(
+                Window(
+                    self.back_to_bottom_control,
+                    height=1,
+                    dont_extend_height=True,
+                    style="class:back-to-bottom",
+                ),
+                filter=back_to_bottom_visible,
+            ),
             ConditionalContainer(
                 Window(
                     self.attachment_control,
@@ -391,7 +422,6 @@ class CliApplication:
                 ]),
                 filter=editor_visible,
             ),
-            Window(height=1, char="─", style="class:editor-border"),
             Window(
                 self.footer_control,
                 height=lambda: FOOTER_LINES if self._git_summary.label() else FOOTER_LINES - 1,
@@ -409,13 +439,16 @@ class CliApplication:
             layout=Layout(root, focused_element=self.editor_control),
             key_bindings=self.bindings,
             full_screen=True,
-            mouse_support=True,
+            mouse_support=Condition(lambda: not self._exiting),
             style=Style.from_dict({
-                "editor-border": "#77a8bd",
                 "editor": "bg:#303030 #ffffff",
                 "footer": "#858585",
+                "footer-workspace": "ansigreen",
+                "footer-resume-id": "ansicyan",
+                "footer-model": "ansiyellow",
                 "interaction": "#d0d0d0",
                 "attachments": "#72d5e8",
+                "back-to-bottom": "bg:#202b32 #72d5e8",
                 "scrollbar.background": "#202020",
                 "scrollbar.button": "#666666",
                 "completion-menu": "bg:#15191d #d0d0d0",
@@ -644,42 +677,64 @@ class CliApplication:
             return
         try:
             if arg.strip():
+                groups = {item.id.split("/", 1)[0] for item in profiles if "/" in item.id}
+                if arg.strip() in groups:
+                    self._show_model_choices(arg.strip(), profiles)
+                    return
                 profile = self._switch_model(arg.strip())
                 self.state.add_system(f"Switched model to {model_display_name(profile)}")
                 self.set_status(f"Model: {model_display_name(profile)}")
                 return
-            current = self.runner.current_model()
-            current_id = current.id if current else ""
-            options = [
-                {
-                    "value": item.id,
-                    "label": model_display_name(item)
-                    + (" · current" if item.id == current_id else ""),
-                }
-                for item in profiles
-            ]
-            self.interaction = InteractionController(
-                kind="model",
-                title="Select model",
-                question="Choose an OpenAI-compatible model profile",
-                fields=[{
-                    "id": "model",
-                    "type": "single_select",
-                    "label": "Model",
-                    "required": True,
-                    "options": options,
-                }],
-            )
-            # Pre-select current model when possible.
-            if current_id:
-                for index, option in enumerate(options):
-                    if option["value"] == current_id:
-                        self.interaction.option_index = index
-                        break
-            self.set_status("Select a model · Enter confirm · Esc cancel")
-            self.application.invalidate()
+            if any("/" in item.id for item in profiles):
+                self._show_model_sources(profiles)
+                return
+            self._show_model_choices("", profiles)
         except (KeyError, RuntimeError) as exc:
             self.state.add_system(str(exc), error=True)
+
+    def _show_model_sources(self, profiles: list[ModelProfile]) -> None:
+        current = self.runner.current_model()
+        current_source = current.id.split("/", 1)[0] if current and "/" in current.id else ""
+        sources = list(dict.fromkeys(item.id.split("/", 1)[0] for item in profiles))
+        options = [
+            {"value": source, "label": source + (" · current" if source == current_source else "")}
+            for source in sources
+        ]
+        self.interaction = InteractionController(
+            kind="model_source", title="Select model source", question="Choose a model source",
+            fields=[{"id": "source", "type": "single_select", "label": "Source", "required": True, "options": options}],
+        )
+        if current_source in sources:
+            self.interaction.option_index = sources.index(current_source)
+        self.set_status("Select a source · Enter confirm · Esc cancel")
+        self.application.invalidate()
+
+    def _show_model_choices(self, source: str, profiles: list[ModelProfile]) -> None:
+        if source:
+            profiles = [item for item in profiles if item.id.startswith(f"{source}/")]
+        if not profiles:
+            raise KeyError(f"Unknown model source: {source}")
+        current = self.runner.current_model()
+        current_id = current.id if current else ""
+        options = []
+        for item in profiles:
+            name = item.id.split("/", 1)[1] if source else model_display_name(item)
+            options.append({
+                "value": item.id,
+                "label": name + (" · current" if item.id == current_id else ""),
+                "description": item.model if source and name != item.model else "",
+            })
+        self.interaction = InteractionController(
+            kind="model", title=f"Select model · {source}" if source else "Select model",
+            question="Choose a model", values={"source": source} if source else {},
+            fields=[{"id": "model", "type": "single_select", "label": "Model", "required": True, "options": options}],
+        )
+        for index, option in enumerate(options):
+            if option["value"] == current_id:
+                self.interaction.option_index = index
+                break
+        self.set_status("Select a model · Enter confirm · Esc back" if source else "Select a model · Enter confirm · Esc cancel")
+        self.application.invalidate()
 
     async def compact_command(self, arg: str = "") -> None:
         if arg.strip():
@@ -893,6 +948,13 @@ class CliApplication:
         self.application.invalidate()
 
     def exit(self) -> None:
+        if self._exiting:
+            return
+        self._exiting = True
+        # Stop mouse reports before prompt_toolkit leaves the alternate screen.
+        # Otherwise motion generated during shutdown can reach the shell.
+        self.application.output.disable_mouse_support()
+        self.application.output.flush()
         if self.state.running:
             self.runner.request_cancel()
         if self._git_task is not None:
@@ -952,6 +1014,22 @@ class CliApplication:
             return maximum
         return min(maximum, max(0, self._transcript_anchor))
 
+    def transcript_offset(self, maximum: int) -> int:
+        """Resolve a painted viewport's offset and restore following at its tail."""
+        anchor = self._transcript_anchor
+        if anchor is None or anchor >= maximum:
+            self._transcript_anchor = None
+            return maximum
+        return max(0, anchor)
+
+    def transcript_away_from_bottom(self) -> bool:
+        """Only offer the return action while the transcript tail is off screen."""
+        return self._transcript_anchor is not None and self.transcript_top() < self.transcript_max_scroll()
+
+    def follow_transcript(self) -> None:
+        self._transcript_anchor = None
+        self.application.invalidate()
+
     def scroll_transcript(self, delta: int) -> None:
         self.scroll_transcript_to(self.transcript_top() + delta)
 
@@ -987,19 +1065,33 @@ class CliApplication:
         perm = self.runner.permission_mode().value
         spinner = " ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 11] if self.state.running else ""
         width = self._width()
-        first = _fit_footer_line(f" {self._workspace()}", "", width)
-        left = f" {spinner}{self.state.status}{queue} · {mode} · perm:{perm} · {self.runner.thread_id[:8]}"
         model = self.runner.current_model()
-        right = model_display_name(model) if model is not None else "fixed model"
+        model_label = model_display_name(model) if model is not None else "fixed model"
+        resume_id = self.runner.thread_id[:8]
+        model_width = max(1, width - get_cwidth(resume_id) - 7)
+        model_fit = _truncate_cells(model_label, model_width)
+        workspace_width = max(1, width - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
+        workspace_fit = _truncate_cells(f" {self._workspace()}", workspace_width)
+        first_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
+        first_padding = " " * max(0, width - first_width)
         context = format_context_usage(self.state.usage, self.runner.context_window())
         git = self._git_summary.label()
-        if not git:
-            right = f"{right} · {context}" if context else right
-            second = _fit_footer_line(left, right, width)
-            return FormattedText([("class:footer", f"{first}\n{second}")])
-        second = _fit_footer_line(left, right, width)
-        third = _fit_footer_line(f" {git}", context, width)
-        return FormattedText([("class:footer", f"{first}\n{second}\n{third}")])
+        status = f" {spinner}{self.state.status}{queue} · {mode} · perm:{perm}"
+        fragments = []
+        if workspace_fit.startswith(" "):
+            fragments.append(("class:footer", " "))
+            fragments.append(("class:footer-workspace", workspace_fit[1:]))
+        else:
+            fragments.append(("class:footer-workspace", workspace_fit))
+        fragments.append(("class:footer", " · "))
+        fragments.append(("class:footer-model", model_fit))
+        fragments.append(("class:footer", " · "))
+        fragments.append(("class:footer-resume-id", resume_id))
+        fragments.append(("class:footer", first_padding + "\n"))
+        fragments.append(("class:footer", _fit_footer_line(status, context if not git else "", width)))
+        if git:
+            fragments.append(("class:footer", "\n" + _fit_footer_line(f" {git}", context, width)))
+        return FormattedText(fragments)
 
     def _create_bindings(self) -> KeyBindings:
         kb = KeyBindings()
@@ -1122,7 +1214,9 @@ class CliApplication:
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
-            if event.current_buffer.complete_state is not None:
+            if self.transcript_away_from_bottom():
+                self.follow_transcript()
+            elif event.current_buffer.complete_state is not None:
                 event.current_buffer.cancel_completion()
             elif self._reviewing:
                 self._close_review()
@@ -1417,10 +1511,7 @@ class CliApplication:
             self._apply_event(event)
 
     def _apply_event(self, event: RunEvent) -> None:
-        follow = self._transcript_anchor is None
         self.state.apply(event)
-        if follow:
-            self._transcript_anchor = None
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
@@ -1454,8 +1545,24 @@ class CliApplication:
                 return
             self._apply_session_snapshot(snapshot)
             return
+        if interaction.kind == "model_source":
+            if cancelled:
+                self.interaction = None
+                self.set_status("Model switch cancelled")
+                return
+            source = str(interaction.values.get("source") or "")
+            try:
+                self._show_model_choices(source, self.runner.list_models())
+            except KeyError as exc:
+                self.interaction = None
+                self.state.add_system(str(exc), error=True)
+            return
         if interaction.kind == "model":
             if cancelled:
+                source = str(interaction.values.get("source") or "")
+                if source:
+                    self._show_model_sources(self.runner.list_models())
+                    return
                 self.interaction = None
                 self.set_status("Model switch cancelled")
                 return
@@ -1639,11 +1746,17 @@ def _fit_footer_line(left: str, right: str, width: int) -> str:
     if not right:
         left = _truncate_cells(left, available)
         return left + (" " * max(0, available - get_cwidth(left)))
-    right = _truncate_cells(right, available)
-    remaining = max(0, available - get_cwidth(right) - 1)
-    left = _truncate_cells(left, remaining)
-    gap = max(1, available - get_cwidth(left) - get_cwidth(right))
-    return f"{left}{' ' * gap}{right}"
+    left_fit, gap, right_fit = _fit_footer_parts(left, right, width)
+    return f"{left_fit}{gap}{right_fit}"
+
+
+def _fit_footer_parts(left: str, right: str, width: int) -> tuple[str, str, str]:
+    available = max(1, width)
+    right_fit = _truncate_cells(right, available)
+    remaining = max(0, available - get_cwidth(right_fit) - 1)
+    left_fit = _truncate_cells(left, remaining)
+    gap = " " * max(1, available - get_cwidth(left_fit) - get_cwidth(right_fit))
+    return left_fit, gap, right_fit
 
 
 def _truncate_cells(value: str, width: int) -> str:

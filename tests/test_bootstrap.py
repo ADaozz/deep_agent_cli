@@ -86,3 +86,30 @@ def test_startup_args_parse_resume() -> None:
     assert parse_startup_args([]) == (None, False)
     assert parse_startup_args(["resume"]) == (None, True)
     assert parse_startup_args(["resume", "abc-123"]) == ("abc-123", True)
+
+
+def test_cli_reports_invalid_model_config_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from examples import run_cli
+
+    home = tmp_path / "home"
+    work = tmp_path / "project"
+    config_dir = home / ".deep-agent"
+    config_dir.mkdir(parents=True)
+    work.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "llm:\n  default: token-plan/missing\n  models:\n    token-plan:\n      models:\n        auto: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
+    monkeypatch.chdir(work)
+    with pytest.raises(SystemExit) as error:
+        run_cli.main([])
+    assert error.value.code == 2
+    output = capsys.readouterr().err
+    assert "Configuration error:" in output
+    assert "config.yaml" in output
+    assert "llm.default" in output
+    assert "Traceback" not in output
