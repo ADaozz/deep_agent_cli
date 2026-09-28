@@ -100,6 +100,35 @@ def test_complete_switch_takes_over_after_release(tmp_path: Path) -> None:
     store.close()
 
 
+def test_detached_runner_rejects_steer_and_follow_up(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "steer-guard.sqlite3")
+    holder = _runner(store)
+    waiter = _runner(store)
+    assert waiter.begin_session_switch(holder.thread_id).busy
+
+    with pytest.raises(RuntimeError, match="owns no session"):
+        waiter.steer("queued into the void")
+    with pytest.raises(RuntimeError, match="owns no session"):
+        waiter.follow_up("also into the void")
+    assert waiter.control.pending_steering_count() == 0
+    assert waiter.control.pending_follow_up_count() == 0
+    holder.close()
+    waiter.close()
+    store.close()
+
+
+def test_closed_runner_rejects_steer_and_follow_up() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="done")]),
+        backend=StateBackend(),
+    )
+    runner.close()
+    with pytest.raises(RuntimeError, match="Runner is closed"):
+        runner.steer("late")
+    with pytest.raises(RuntimeError, match="Runner is closed"):
+        runner.follow_up("late")
+
+
 def test_cancelled_wait_stays_detached(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "cancel.sqlite3")
     holder = _runner(store)
@@ -388,6 +417,41 @@ def test_switch_restore_failure_rolls_back_model_and_keeps_old_session(
     assert waiter.thread_id == old_thread
     assert waiter._runtime.lease is not None
     assert waiter._runtime.lease.thread_id == old_thread
+    assert store.try_acquire_session(target) is not None
+    assert waiter.invoke("still mine").status == "completed"
+    waiter.close()
+    store.close()
+
+
+def test_switch_catalog_failure_never_splits_runner_and_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SessionStore(tmp_path / "rollback-catalog.sqlite3")
+    holder = _runner(store)
+    waiter = _runner(store)
+    target = holder.thread_id
+    old_thread = waiter.thread_id
+    holder.close()  # free the target so the switch reaches the catalog phase
+
+    original_touch = store.touch
+    calls = {"count": 0}
+
+    def flaky_touch(*args: object, **kwargs: object) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("catalog write failed")
+        original_touch(*args, **kwargs)
+
+    monkeypatch.setattr(store, "touch", flaky_touch)
+    with pytest.raises(RuntimeError, match="catalog write failed"):
+        waiter.begin_session_switch(target)
+
+    # The commit point never fired: the runner still owns the old session and
+    # the target lease was handed back.
+    assert waiter.thread_id == old_thread
+    assert waiter._runtime.lease is not None
+    assert waiter._runtime.lease.thread_id == old_thread
+    assert waiter._runtime.pending_switch is None
     assert store.try_acquire_session(target) is not None
     assert waiter.invoke("still mine").status == "completed"
     waiter.close()

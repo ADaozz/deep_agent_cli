@@ -304,7 +304,7 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 
 LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
 
-同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
+同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 和 `deep-agent resume <id>` 启动恢复都会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；库调用者同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。会话切换的提交点在完成全部图与 catalog 读取之后，中途失败会回滚到原会话；`steer` / `follow_up` 在脱离会话或 Runner 关闭后会被拒绝。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
 
 沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 

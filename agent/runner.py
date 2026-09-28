@@ -59,8 +59,9 @@ from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbac
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
 
-# Safety valve only: a run whose tools ignore cancel must not wedge process exit
-# forever, so close() forces the lease out after this many seconds.
+# Maximum time close() waits for an active operation to drain. Timing out never
+# releases the session lease early: close() raises, keeps the lease, and can be
+# retried once the run finally drained.
 CLOSE_DRAIN_SECONDS = 30.0
 
 
@@ -454,9 +455,17 @@ class AgentRunner:
             self._touch_status(StopReason.ABORTED)
 
     def steer(self, text: str) -> None:
+        # No _exclusive_operation: steering must enter while a run holds the
+        # operation lock, but never while the runner is detached or closed.
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        self._require_active_session()
         self.control.steer(text)
 
     def follow_up(self, text: str) -> None:
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        self._require_active_session()
         self.control.follow_up(text)
 
     def take_unapplied_messages(self) -> list[str]:
@@ -533,7 +542,12 @@ class AgentRunner:
         lease = self._runtime.wait_acquire(session_id, cancelled=cancelled)
         if lease is None:
             return None
-        if self._closed or self._runtime.pending_switch != session_id or self._runtime.lease is not None:
+        if (
+            self._closed
+            or self._runtime.pending_switch != session_id
+            or self._runtime.lease is not None
+            or (cancelled is not None and cancelled())
+        ):
             lease.release()
             return None
         info = self._runtime.get(session_id)
@@ -567,7 +581,13 @@ class AgentRunner:
     def _load_and_commit_switch(
         self, info: SessionInfo, lease: SessionLeaseLike | None,
     ) -> SessionSnapshot:
-        """Restore the target's settings, load its snapshot, then take ownership."""
+        """Prepare everything, then commit the switch as the final step.
+
+        All fallible graph / catalog / checkpointer I/O happens while the old
+        session is still held; ``adopt`` is the commit point and is followed
+        only by in-memory state updates, so a failure can never split the
+        runner from the session the UI shows.
+        """
         assert self._runtime is not None
         previous = (self._chat_model, self._current_model_id, self._permission_mode)
         plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
@@ -576,6 +596,18 @@ class AgentRunner:
             if snapshot is None:
                 raise KeyError(f"Unknown session: {info.id}")
             self._apply_restore_plan(plan)
+            self.session_store.touch(
+                info.id, model_id=self._current_model_id,
+                permission_mode=self._permission_mode.value,
+            )
+            refreshed = self._runtime.get(info.id)
+            if refreshed is not None:
+                snapshot.info = refreshed
+            recovery = self._runtime.recovery_context(
+                info,
+                has_checkpoint=self._runtime.thread_has_checkpoint(info.id),
+                interrupt_active=snapshot.interrupt_kind is not None,
+            )
         except Exception:
             old_model, old_id, old_mode = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
@@ -590,16 +622,8 @@ class AgentRunner:
             self._runtime.bind(snapshot.info.id)
         self.control.clear_pause()
         self.control.set_defer_steering(bool(snapshot.interrupt_kind))
-        self.session_store.touch(
-            info.id, model_id=self._current_model_id, permission_mode=self._permission_mode.value,
-        )
-        snapshot.info = self._runtime.get(info.id) or snapshot.info
         snapshot.notices.extend(plan.notices)
-        self._resume_context = self._runtime.recovery_context(
-            info,
-            has_checkpoint=self._runtime.thread_has_checkpoint(info.id),
-            interrupt_active=snapshot.interrupt_kind is not None,
-        )
+        self._resume_context = recovery
         return snapshot
 
     def _apply_restore_plan(self, plan: RestorePlan) -> None:

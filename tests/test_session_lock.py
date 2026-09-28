@@ -78,6 +78,32 @@ def test_wait_acquire_honours_cancellation(tmp_path: Path) -> None:
         holder.release()
 
 
+def test_cancelled_wait_releases_a_lease_acquired_after_cancellation(tmp_path: Path) -> None:
+    manager = SessionLockManager(tmp_path / "race.sqlite3")
+    calls = {"count": 0}
+
+    def cancelled() -> bool:
+        calls["count"] += 1
+        return calls["count"] >= 2  # flips exactly at the post-acquire check
+
+    assert manager.wait_acquire("thread-a", cancelled=cancelled, poll_seconds=0.01) is None
+    # The lease acquired inside the wait was handed back.
+    assert manager.try_acquire("thread-a") is not None
+
+
+def test_in_process_cancelled_wait_releases_a_lease_acquired_after_cancellation() -> None:
+    saver = _FakeSaver()
+    manager = InProcessSessionLockManager(saver)
+    calls = {"count": 0}
+
+    def cancelled() -> bool:
+        calls["count"] += 1
+        return calls["count"] >= 2
+
+    assert manager.wait_acquire("thread-a", cancelled=cancelled, poll_seconds=0.01) is None
+    assert manager.try_acquire("thread-a") is not None
+
+
 def test_released_lock_file_is_not_deleted(tmp_path: Path) -> None:
     manager = SessionLockManager(tmp_path / "sessions.sqlite3")
     path = manager.lock_path("thread-a")

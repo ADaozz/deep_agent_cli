@@ -111,6 +111,11 @@ class SessionLockManager:
                 return None
             lease = self.try_acquire(thread_id)
             if lease is not None:
+                # Cancellation arriving between the check and the acquisition
+                # must still win: hand the lock straight back.
+                if cancelled is not None and cancelled():
+                    lease.release()
+                    return None
                 return lease
             time.sleep(poll_seconds)
 
@@ -196,6 +201,11 @@ class InProcessSessionLockManager:
                 return None
             lease = self.try_acquire(thread_id)
             if lease is not None:
+                # Cancellation arriving between the check and the acquisition
+                # must still win: hand the lock straight back.
+                if cancelled is not None and cancelled():
+                    lease.release()
+                    return None
                 return lease
             time.sleep(poll_seconds)
 

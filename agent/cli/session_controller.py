@@ -23,6 +23,7 @@ class SessionController:
     def __init__(self, app: CliApplication) -> None:
         self._app = app
         self.open_picker_on_start = False
+        self.startup_session_id: str | None = None
         self._wait_target: str | None = None
         self._wait_cancelled = False
         self._wait_task: asyncio.Task[None] | None = None
@@ -44,11 +45,15 @@ class SessionController:
         return WAIT_STATUS.format(self._wait_target[:8])
 
     def schedule_start(self, loop: asyncio.AbstractEventLoop) -> None:
-        if self.open_picker_on_start:
+        if self.startup_session_id is not None:
+            loop.create_task(self._switch_with_wait(self.startup_session_id))
+        elif self.open_picker_on_start:
             loop.create_task(self.resume())
 
     async def start(self) -> None:
-        if self.open_picker_on_start:
+        if self.startup_session_id is not None:
+            await self._switch_with_wait(self.startup_session_id)
+        elif self.open_picker_on_start:
             await self.resume()
 
     def new_session(self) -> None:

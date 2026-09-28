@@ -103,11 +103,10 @@ def main(argv: list[str] | None = None) -> None:
         Console(stderr=True).print(f"[bold red]UNSANDBOXED: {runner.prepared.security_warning}[/bold red]")
     Console(stderr=True).print(f"[dim]workspace={settings.sandbox.workspace}[/dim]")
     app = CliApplication(runner, config_dir=config_dir)
+    # Startup resume shares the controller workflow: a busy session waits
+    # inside the TUI (Esc cancels) instead of aborting the launch.
     if resume_id:
-        try:
-            app._apply_session_snapshot(runner.switch_session(resume_id))
-        except (KeyError, RuntimeError) as exc:
-            raise SystemExit(str(exc)) from exc
+        app.sessions.startup_session_id = resume_id
     elif open_picker:
         app.sessions.open_picker_on_start = True
     try:

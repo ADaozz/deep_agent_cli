@@ -1562,3 +1562,38 @@ def test_cli_esc_cancels_wait_and_returns_to_picker(tmp_path) -> None:
     asyncio.run(scenario())
     holder.close()
     store.close()
+
+
+def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
+    store = SessionStore(tmp_path / "cli-startup-wait.sqlite3")
+    holder = AgentRunner(
+        model=scripted_model([AIMessage(content="held")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+    holder.invoke("content for the picker")
+    target = holder.thread_id
+    waiter = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(waiter, input=pipe, output=DummyOutput())
+            app.sessions.startup_session_id = target
+            await app.sessions.start()
+            # Startup shares the controller workflow: busy means waiting UI.
+            assert app.sessions.wait_target == target
+            assert "Waiting for session" in app.state.status
+
+            holder.close()
+            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            assert app.sessions.wait_target is None
+            assert waiter.thread_id == target
+            assert any(getattr(block, "content", "") == "held" for block in app.state.blocks)
+            waiter.close()
+
+    asyncio.run(scenario())
+    store.close()
