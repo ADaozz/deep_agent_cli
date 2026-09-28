@@ -119,7 +119,11 @@ def main(argv: list[str] | None = None) -> None:
         try:
             runner.close()
         except RuntimeError as exc:
-            print(f"{exc}\nThe lock is released when this process exits.", file=sys.stderr)
+            print(
+                f"{exc}\nThe session lock is not released early; the operating "
+                "system releases it when this process actually exits.",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":
