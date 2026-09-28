@@ -456,3 +456,42 @@ def test_switch_catalog_failure_never_splits_runner_and_session(
     assert waiter.invoke("still mine").status == "completed"
     waiter.close()
     store.close()
+
+
+def test_switch_checkpoint_read_failure_leaves_target_row_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SessionStore(tmp_path / "rollback-checkpoint.sqlite3")
+    holder = _runner(store)
+    waiter = _runner(store)
+    target = holder.thread_id
+    old_thread = waiter.thread_id
+    # Distinctive target metadata: a switch that touched B before the failing
+    # read would overwrite these and bump updated_at.
+    store.touch(target, model_id="local/beta", permission_mode="allow")
+    before = store.get(target)
+    assert before is not None
+    holder.close()  # free the target so the switch reaches the checkpoint read
+
+    def broken_checkpoint(thread_id: str) -> bool:
+        raise RuntimeError("checkpoint read failed")
+
+    monkeypatch.setattr(waiter._runtime, "thread_has_checkpoint", broken_checkpoint)
+    with pytest.raises(RuntimeError, match="checkpoint read failed"):
+        waiter.begin_session_switch(target)
+
+    # A ownership is unchanged and B's lease was released...
+    assert waiter.thread_id == old_thread
+    assert waiter._runtime.lease is not None
+    assert waiter._runtime.lease.thread_id == old_thread
+    assert waiter._runtime.pending_switch is None
+    assert store.try_acquire_session(target) is not None
+    # ...and B's catalog row is exactly as it was before the attempt.
+    after = store.get(target)
+    assert after is not None
+    assert after.model_id == before.model_id == "local/beta"
+    assert after.permission_mode == before.permission_mode
+    assert after.updated_at == before.updated_at
+    assert waiter.invoke("still mine").status == "completed"
+    waiter.close()
+    store.close()

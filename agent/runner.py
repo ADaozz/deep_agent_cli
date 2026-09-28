@@ -583,10 +583,11 @@ class AgentRunner:
     ) -> SessionSnapshot:
         """Prepare everything, then commit the switch as the final step.
 
-        All fallible graph / catalog / checkpointer I/O happens while the old
-        session is still held; ``adopt`` is the commit point and is followed
-        only by in-memory state updates, so a failure can never split the
-        runner from the session the UI shows.
+        All fallible graph / catalog / checkpointer reads happen while the old
+        session is still held and before the target row is written, so a
+        failure rolls back cleanly and never dirties the target's catalog row.
+        ``touch`` is the only fallible operation left, and ``adopt`` — followed
+        by in-memory updates only — is the commit point.
         """
         assert self._runtime is not None
         previous = (self._chat_model, self._current_model_id, self._permission_mode)
@@ -596,17 +597,16 @@ class AgentRunner:
             if snapshot is None:
                 raise KeyError(f"Unknown session: {info.id}")
             self._apply_restore_plan(plan)
+            has_checkpoint = self._runtime.thread_has_checkpoint(info.id)
+            recovery = self._runtime.recovery_context(
+                info,
+                has_checkpoint=has_checkpoint,
+                interrupt_active=snapshot.interrupt_kind is not None,
+            )
+            refreshed = self._runtime.get(info.id)
             self.session_store.touch(
                 info.id, model_id=self._current_model_id,
                 permission_mode=self._permission_mode.value,
-            )
-            refreshed = self._runtime.get(info.id)
-            if refreshed is not None:
-                snapshot.info = refreshed
-            recovery = self._runtime.recovery_context(
-                info,
-                has_checkpoint=self._runtime.thread_has_checkpoint(info.id),
-                interrupt_active=snapshot.interrupt_kind is not None,
             )
         except Exception:
             old_model, old_id, old_mode = previous
@@ -616,6 +616,8 @@ class AgentRunner:
             if lease is not None:
                 lease.release()
             raise
+        if refreshed is not None:
+            snapshot.info = refreshed
         if lease is not None:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
