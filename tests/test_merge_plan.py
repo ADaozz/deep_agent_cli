@@ -149,6 +149,7 @@ def test_resume_permission_fallback_and_stop_status(tmp_path: Path) -> None:
     assert runner.invoke("hello").status == "completed"
     assert store.get(thread).last_run_status is StopReason.STOP
     store.touch(thread, permission_mode="allow", last_run_status=StopReason.ABORTED)
+    runner.close()
     second = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(),
                          settings=_settings(tmp_path), session_store=store)
     snapshot = second.switch_session(thread)
@@ -265,6 +266,7 @@ def test_recovery_survives_pause_before_first_model_call(tmp_path: Path) -> None
     thread = first.thread_id
     first.invoke("first")
     store.touch(thread, last_run_status=StopReason.ABORTED)
+    first.close()
     second = AgentRunner(model=scripted_model([AIMessage(content="after")]),
                          backend=StateBackend(), session_store=store)
     second.switch_session(thread)

@@ -201,7 +201,9 @@ def test_removed_handoff_session_has_clear_resume_error() -> None:
             func=handoff_to_human, name="handoff_to_human", description="Old human input tool",
         )],
     )
-    assert AgentRunner(prepared=old_prepared, thread_id="old-human").invoke("问用户").status == "waiting_human"
+    old_runner = AgentRunner(prepared=old_prepared, thread_id="old-human")
+    assert old_runner.invoke("问用户").status == "waiting_human"
+    old_runner.close()
 
     current = AgentRunner(
         model=scripted_model([AIMessage(content="done")]), backend=StateBackend(),

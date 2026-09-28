@@ -183,7 +183,7 @@ python examples/run_cli.py
 | 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
 | 拖动滚动条 | 在最右列按下并拖动；点击即跳到对应位置 |
 
-底栏首行按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色；窄终端优先截断路径与模型。第二行显示运行状态、执行模式、权限，以及非 Git 目录的上下文占用。Git 仓库中，第三行显示分支、改动文件数和上下文占用；Git 状态每 5 秒后台刷新一次。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
+底栏固定两行：首行左侧按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色，右侧显示 Git 分支与改动文件数（非 Git 目录显示 `⎇ no git`）；第二行左侧显示运行状态、执行模式、权限，右侧显示上下文占用。Git 状态每 5 秒后台刷新一次。窄终端优先保留右侧 Git 与上下文信息，左侧路径与模型先被截断。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
 
 作为库使用：
 
@@ -218,8 +218,8 @@ result = runner.invoke("列出 /workspace 下的文件")
 cli/                 输入、渲染、按键、人工确认
    │ RunEvent
    ▼
-AgentRunner          流式、中断、恢复、session、附件
-   │
+AgentRunner          流式、中断、恢复、附件
+   │ SessionRuntime  thread 独占租约与切换
    ▼
 create_deep_agent()  LangGraph 图（不 Fork 上游）
    │
@@ -248,13 +248,15 @@ create_deep_agent()  LangGraph 图（不 Fork 上游）
 
 ```text
 agent/
-├── cli/           # TUI
+├── cli/           # TUI（含 session_controller 会话工作流）
 ├── tools/         # 文件、execute、人工输入
 ├── middleware/    # 暂停、转向、取消、联网
 ├── factory.py     # 装配入口
 ├── runner.py      # 运行时
 ├── sandbox.py     # Bubblewrap
 ├── session.py     # SQLite session
+├── session_lock.py     # thread 独占锁
+├── session_runtime.py  # 租约与会话生命周期
 └── llm.py         # 模型适配
 bin/deep-agent     # 任意目录启动（cwd → /workspace）
 examples/          # TUI 与流式冒烟
@@ -301,6 +303,8 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
 
 LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
+
+同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
 
 沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
 

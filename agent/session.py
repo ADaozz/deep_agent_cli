@@ -8,7 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 import sqlite3
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -22,6 +22,7 @@ from agent.attachments import (
     find_attachment_storage_keys,
     refs_from_message,
 )
+from agent.session_lock import SessionLease, SessionLockManager
 from agent.stream import message_text, reasoning_text, visible_text
 
 SessionStatus = Literal[
@@ -119,6 +120,7 @@ class SessionStore:
             except OSError:
                 pass
         self.checkpointer = SqliteSaver(self._conn, serde=_strict_serde())
+        self.session_locks = SessionLockManager(self.path)
         self.attachment_store = AttachmentStore.beside_database(self.path)
         self.startup_cleanup: AttachmentCleanupResult | None = None
         try:
@@ -126,6 +128,7 @@ class SessionStore:
         except Exception:  # noqa: BLE001 - persistence must remain usable if maintenance fails
             self.startup_cleanup = None
         self.attachment_store.acquire_runtime_lease()
+        self._closed = False
 
     @classmethod
     def for_workspace(
@@ -136,7 +139,24 @@ class SessionStore:
     ) -> "SessionStore":
         return cls(workspace_state_path(workspace, override=override))
 
+    def try_acquire_session(self, thread_id: str) -> SessionLease | None:
+        """Take exclusive ownership of a persisted thread; None when busy."""
+        return self.session_locks.try_acquire(thread_id)
+
+    def wait_acquire_session(
+        self,
+        thread_id: str,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> SessionLease | None:
+        """Block until the thread is free, the wait is cancelled, or ownership lands."""
+        return self.session_locks.wait_acquire(thread_id, cancelled=cancelled)
+
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.session_locks.close()
         self.attachment_store.close()
         self._conn.close()
 

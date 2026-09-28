@@ -53,14 +53,22 @@ from agent.session import (
     tool_message_is_error,
     workspace_state_path,
 )
+from agent.session_lock import SessionLockBusyError
+from agent.session_runtime import RestorePlan, SessionLeaseLike, SessionRuntime
 from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
+
+# Safety valve only: a run whose tools ignore cancel must not wedge process exit
+# forever, so close() forces the lease out after this many seconds.
+CLOSE_DRAIN_SECONDS = 30.0
 
 
 def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(method)
     def guarded(self: AgentRunner, *args: Any, **kwargs: Any) -> Any:
+        if self._closed:
+            raise RuntimeError("Runner is closed")
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Runner already has an active operation")
         try:
@@ -143,6 +151,24 @@ class SessionSnapshot:
     notices: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SessionSwitchResult:
+    """Phase one of a session switch.
+
+    ``busy`` means the target thread is owned elsewhere: the runner has already
+    released its own lease and refuses operations until the wait completes or
+    another session is selected.
+    """
+
+    status: str  # "switched" | "busy"
+    target_id: str = ""
+    snapshot: SessionSnapshot | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self.status == "busy"
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -176,6 +202,9 @@ class AgentRunner:
         self._operation_lock = Lock()
         self._permission_mode = PermissionMode.ASK
         self._resume_context: RecoveryContext | None = None
+        self._closed = False
+        self._close_completed = False
+        self._runtime: SessionRuntime | None = None
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -226,26 +255,36 @@ class AgentRunner:
         self._checkpointer = self.prepared.checkpointer
         self._chat_model = initial_model
 
-        if thread_id is None:
-            if self.session_store is not None:
-                info = self.session_store.create_session(
-                    model_id=self._current_model_id, permission_mode=self._permission_mode.value,
-                )
-                self.thread_id = info.id
-            else:
-                self.thread_id = f"cli-{uuid4()}"
-        else:
-            self.thread_id = thread_id
-            if self.session_store is not None and self.session_store.get(thread_id) is None:
-                self.session_store.create_session(
-                    session_id=thread_id, model_id=self._current_model_id,
-                    permission_mode=self._permission_mode.value,
-                )
+        # Every runner owns exactly one lease for the thread it may write.
+        self._runtime = SessionRuntime(
+            session_store=self.session_store, checkpointer=self._checkpointer,
+            settings=self.settings,
+        )
+        self._runtime.acquire_initial(
+            thread_id, model_id=self._current_model_id,
+            permission_mode=self._permission_mode.value,
+        )
 
         self.state_path = (
             self.session_store.path if self.session_store is not None
             else workspace_state_path(workspace or Path.cwd())
         )
+
+    @property
+    def thread_id(self) -> str:
+        """The thread this runner currently points at (lease may be absent)."""
+        assert self._runtime is not None and self._runtime.thread_id is not None
+        return self._runtime.thread_id
+
+    def _require_active_session(self) -> None:
+        """Invariant guard: writes to a persisted thread need its lease held."""
+        assert self._runtime is not None
+        if self._runtime.lease is None:
+            raise RuntimeError("This runner owns no session; start or switch to one first")
+        if self._runtime.lease.thread_id != self.thread_id:
+            raise RuntimeError("The session lease does not cover the active thread")
+        if self._runtime.pending_switch is not None:
+            raise RuntimeError("A session switch is in progress")
 
     def list_models(self) -> list[ModelProfile]:
         if self.settings is None:
@@ -280,6 +319,7 @@ class AgentRunner:
     @_exclusive_operation
     def compact_context(self) -> CompactResult:
         """Run Deep Agents' compact tool in the graph, then close its tool turn."""
+        self._require_active_session()
         self._require_empty_input_queue()
         middleware = self.prepared.compact_middleware
         if middleware is None:
@@ -345,6 +385,7 @@ class AgentRunner:
     def switch_model(self, id_or_prefix: str) -> ModelProfile:
         if self.settings is None:
             raise RuntimeError("Model switching requires Settings with llm.models")
+        self._require_active_session()
         profile = self.settings.get_profile(id_or_prefix)
         if profile.id == self._current_model_id:
             return profile
@@ -361,6 +402,7 @@ class AgentRunner:
 
     @_exclusive_operation
     def set_permission_mode(self, mode: PermissionMode | str) -> PermissionMode:
+        self._require_active_session()
         if isinstance(mode, str):
             parsed = parse_permission_mode(mode)
             if parsed is None:
@@ -421,16 +463,14 @@ class AgentRunner:
         return [item.text for item in self.control.take_unapplied()]
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
-        if self.session_store is None:
-            return []
-        return self.session_store.list_sessions(limit=limit)
+        assert self._runtime is not None
+        return self._runtime.list_sessions(limit=limit)
 
     def thread_has_content(self, thread_id: str | None = None) -> bool:
         tid = thread_id or self.thread_id
         if self.session_store is not None:
-            return self.session_store.checkpointer.get_tuple(
-                {"configurable": {"thread_id": tid}}
-            ) is not None
+            assert self._runtime is not None
+            return self._runtime.thread_has_checkpoint(tid)
         try:
             state = self.prepared.graph.get_state({"configurable": {"thread_id": tid}})
         except Exception:  # noqa: BLE001
@@ -439,9 +479,8 @@ class AgentRunner:
         return any(bool(getattr(message, "content", None) or getattr(message, "tool_calls", None)) for message in messages)
 
     def load_session(self, session_id: str) -> SessionSnapshot | None:
-        if self.session_store is None:
-            return None
-        info = self.session_store.resolve_prefix(session_id) or self.session_store.get(session_id)
+        assert self._runtime is not None
+        info = self._runtime.resolve(session_id)
         if info is None:
             return None
         config = {"configurable": {"thread_id": info.id}}
@@ -462,71 +501,134 @@ class AgentRunner:
 
     @_exclusive_operation
     def switch_session(self, session_id: str) -> SessionSnapshot:
-        info = self.session_store.resolve_prefix(session_id) if self.session_store is not None else None
+        """Switch synchronously; a busy target raises instead of detaching."""
+        result = self._begin_session_switch(session_id, detach_on_busy=False)
+        if result.status == "busy":
+            raise SessionLockBusyError(
+                f"Session {result.target_id} is already open in another window"
+            )
+        assert result.snapshot is not None
+        return result.snapshot
+
+    @_exclusive_operation
+    def begin_session_switch(self, session_id: str) -> SessionSwitchResult:
+        """Phase one of a switch: either finish immediately or detach to wait."""
+        return self._begin_session_switch(session_id, detach_on_busy=True)
+
+    @_exclusive_operation
+    def complete_session_switch(
+        self,
+        session_id: str,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> SessionSnapshot | None:
+        """Phase two: wait for a busy target, then load it and take ownership.
+
+        Returns None when the wait was cancelled or superseded; the runner stays
+        detached (no lease) in that case.
+        """
+        assert self._runtime is not None
+        if self._runtime.pending_switch != session_id or self._runtime.lease is not None:
+            return None
+        lease = self._runtime.wait_acquire(session_id, cancelled=cancelled)
+        if lease is None:
+            return None
+        if self._closed or self._runtime.pending_switch != session_id or self._runtime.lease is not None:
+            lease.release()
+            return None
+        info = self._runtime.get(session_id)
+        if info is None:
+            self._runtime.clear_pending()
+            lease.release()
+            raise KeyError(f"Unknown session: {session_id}")
+        return self._load_and_commit_switch(info, lease)
+
+    def _begin_session_switch(self, session_id: str, *, detach_on_busy: bool) -> SessionSwitchResult:
+        assert self._runtime is not None
+        info = self._runtime.resolve(session_id)
         if info is None:
             raise KeyError(f"Unknown session: {session_id}")
         if info.id != self.thread_id:
             self._require_empty_input_queue()
+        self._runtime.clear_pending()
+        # A→A with the lease still held only reloads the snapshot; every other
+        # target is acquired first so the old thread never sees a lock gap.
+        already_owned = self._runtime.owns(info.id)
+        lease = None if already_owned else self._runtime.try_acquire(info.id)
+        if lease is None and not already_owned:
+            if not detach_on_busy:
+                return SessionSwitchResult(status="busy", target_id=info.id)
+            # The old thread must accept no further operations while waiting.
+            self._runtime.detach_for_wait(info.id)
+            return SessionSwitchResult(status="busy", target_id=info.id)
+        snapshot = self._load_and_commit_switch(info, lease)
+        return SessionSwitchResult(status="switched", target_id=info.id, snapshot=snapshot)
+
+    def _load_and_commit_switch(
+        self, info: SessionInfo, lease: SessionLeaseLike | None,
+    ) -> SessionSnapshot:
+        """Restore the target's settings, load its snapshot, then take ownership."""
+        assert self._runtime is not None
         previous = (self._chat_model, self._current_model_id, self._permission_mode)
-        notices = self._restore_thread_settings(info)
+        plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
         try:
             snapshot = self.load_session(info.id)
+            if snapshot is None:
+                raise KeyError(f"Unknown session: {info.id}")
+            self._apply_restore_plan(plan)
         except Exception:
             old_model, old_id, old_mode = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
             self._current_model_id = old_id
             self._permission_mode = old_mode
+            if lease is not None:
+                lease.release()
             raise
-        if snapshot is None:
-            raise KeyError(f"Unknown session: {session_id}")
-        self.thread_id = snapshot.info.id
+        if lease is not None:
+            self._runtime.adopt(snapshot.info.id, lease)
+        else:
+            self._runtime.bind(snapshot.info.id)
         self.control.clear_pause()
         self.control.set_defer_steering(bool(snapshot.interrupt_kind))
         self.session_store.touch(
             info.id, model_id=self._current_model_id, permission_mode=self._permission_mode.value,
         )
-        snapshot.info = self.session_store.get(info.id) or snapshot.info
-        snapshot.notices.extend(notices)
-        has_checkpoint = self.session_store.checkpointer.get_tuple(
-            {"configurable": {"thread_id": info.id}}
-        ) is not None
-        needs_recovery = info.last_run_status in {StopReason.ABORTED, StopReason.ERROR} or (
-            info.last_run_status is StopReason.PENDING and has_checkpoint
-        )
-        self._resume_context = (
-            RecoveryContext.for_stop_reason(info.last_run_status)
-            if needs_recovery and not snapshot.interrupt_kind else None
+        snapshot.info = self._runtime.get(info.id) or snapshot.info
+        snapshot.notices.extend(plan.notices)
+        self._resume_context = self._runtime.recovery_context(
+            info,
+            has_checkpoint=self._runtime.thread_has_checkpoint(info.id),
+            interrupt_active=snapshot.interrupt_kind is not None,
         )
         return snapshot
 
-    def _restore_thread_settings(self, info: SessionInfo) -> list[str]:
-        notices: list[str] = []
-        profile = self.settings.active_profile if self.settings is not None else None
-        if self.settings is not None and info.model_id:
-            try:
-                profile = self.settings.get_profile(info.model_id)
-            except KeyError:
-                notices.append(f"Saved model {info.model_id} is unavailable; using {profile.id}.")
-        mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
-        if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
-            mode = PermissionMode.ASK
-            notices.append("Saved allow permission is unavailable here; using ask.")
-        if profile is not None and profile.id != self._current_model_id:
-            self._rebuild_prepared(model=build_chat_model(profile, attachment_store=self.attachment_store), permission_mode=mode)
+    def _apply_restore_plan(self, plan: RestorePlan) -> None:
+        if (
+            self.settings is not None
+            and plan.model_id
+            and plan.model_id != self._current_model_id
+        ):
+            profile = self.settings.get_profile(plan.model_id)
+            self._rebuild_prepared(
+                model=build_chat_model(profile, attachment_store=self.attachment_store),
+                permission_mode=plan.permission_mode,
+            )
             self._current_model_id = profile.id
-        elif mode is not self._permission_mode:
-            self._rebuild_prepared(permission_mode=mode)
-        self._permission_mode = mode
-        return notices
+        elif plan.permission_mode is not self._permission_mode:
+            self._rebuild_prepared(permission_mode=plan.permission_mode)
+        self._permission_mode = plan.permission_mode
 
     @_exclusive_operation
     def new_session(self, *, title: str = "") -> SessionInfo:
+        assert self._runtime is not None
         self._require_empty_input_queue()
         self._resume_context = None
         self.control.clear_pause()
         self.control.set_defer_steering(False)
+        self._runtime.clear_pending()
         if self.session_store is None:
-            self.thread_id = f"cli-{uuid4()}"
+            thread_id = f"cli-{uuid4()}"
+            self._runtime.adopt_new(thread_id)
             now = datetime.now(timezone.utc)
             return SessionInfo(
                 id=self.thread_id,
@@ -541,8 +643,38 @@ class AgentRunner:
             title=title, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,
         )
-        self.thread_id = info.id
+        self._runtime.adopt_new(info.id)
         return info
+
+    def close(self) -> None:
+        """Forbid new operations, drain an active run, then drop the lease.
+
+        The lease is never released while a run can still write the thread: a
+        close that times out keeps the lease (and the temporary attachment
+        store) and raises, so no other window can take the thread mid-write.
+        The lock then either drops when this process exits or when close() is
+        retried after the run finally drained.
+        """
+        assert self._runtime is not None
+        if self._closed and self._close_completed:
+            return
+        self._closed = True
+        self._runtime.abort_wait()
+        if self._busy:
+            self.request_cancel()
+        drained = self._operation_lock.acquire(timeout=CLOSE_DRAIN_SECONDS)
+        if drained:
+            self._operation_lock.release()
+        else:
+            raise RuntimeError(
+                "Runner close timed out with a run still active; the session "
+                "lease is kept until the run drains and close is retried"
+            )
+        self._close_completed = True
+        self._runtime.close()
+        if self._attachment_tempdir is not None:
+            self._attachment_tempdir.cleanup()
+            self._attachment_tempdir = None
 
     def _require_empty_input_queue(self) -> None:
         if self.control.pending_steering_count() or self.control.pending_follow_up_count():
@@ -594,6 +726,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         refs = tuple(image_refs)
         if refs and not self.supports_input("image"):
             raise ValueError("The current model does not declare image input support")
@@ -646,6 +779,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         self._require_interrupt(InterruptKind.PAUSED, "continue_run")
         self.control.clear_pause()
         return self._resume(True, on_delta=on_delta, on_event=on_event)
@@ -658,6 +792,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "approve_tool")
         return self._resume(
             _tool_decisions(list(state.pending_tools), decision_type="approve", tool_call_ids=[tool_call_id]),
@@ -674,6 +809,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "reject_tool")
         return self._resume(
             _tool_decisions(
@@ -691,6 +827,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_HUMAN, "submit_human_input")
         if _has_pending_legacy_handoff(self.prepared.graph, self._thread_config()):
             raise RuntimeError(
@@ -742,6 +879,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
+        self._require_active_session()
         self.control.set_defer_steering(False)
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, last_run_status=StopReason.PENDING)

@@ -109,13 +109,17 @@ def main(argv: list[str] | None = None) -> None:
         except (KeyError, RuntimeError) as exc:
             raise SystemExit(str(exc)) from exc
     elif open_picker:
-        app._resume_picker_on_start = True
+        app.sessions.open_picker_on_start = True
     try:
         app.run()
     finally:
         message = app.continue_session_message()
         if message:
             Console().print(message)
+        try:
+            runner.close()
+        except RuntimeError as exc:
+            print(f"{exc}\nThe lock is released when this process exits.", file=sys.stderr)
 
 
 if __name__ == "__main__":

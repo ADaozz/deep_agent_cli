@@ -970,7 +970,7 @@ def test_scrollbar_thumb_drag_preserves_grab_position_and_stops_on_release() -> 
     _with_painted_app("thumb-drag", scenario)
 
 
-def test_footer_puts_workspace_model_and_resume_id_on_first_line() -> None:
+def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(),
@@ -979,15 +979,18 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line() -> None:
     )
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 140)
         footer = "".join(fragment[1] for fragment in app._footer_text())
         lines = footer.splitlines()
-        assert len(lines) == FOOTER_LINES - 1
-        assert lines[0].strip() == f"{app._workspace()} · qwen3.5-plus · footer-m"
+        assert len(lines) == FOOTER_LINES
+        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · footer-m")
+        assert lines[0].rstrip().endswith("⎇ no git")
         assert "default ·" not in lines[0]
         assert "qwen3.5-plus" not in lines[1]
+        assert "Ready" in lines[1]
 
 
-def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model() -> None:
+def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypatch) -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(),
@@ -996,9 +999,11 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model() -> Non
     )
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 140)
         fragments = list(app._footer_text())
         first_line = "".join(value for _, value in fragments).splitlines()[0]
-        assert first_line.strip() == f"{app._workspace()} · qwen3.5-plus · footer-c"
+        assert first_line.startswith(f" {app._workspace()} · qwen3.5-plus · footer-c")
+        assert first_line.rstrip().endswith("⎇ no git")
         assert any(style == "class:footer-workspace" and str(app._workspace()) in value for style, value in fragments)
         assert ("class:footer-resume-id", "footer-c") in fragments
         assert ("class:footer-model", "qwen3.5-plus") in fragments
@@ -1010,7 +1015,7 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model() -> Non
             assert app.application.style.get_attrs_for_style_str(f"class:{label}").color == color
 
 
-def test_footer_keeps_resume_id_visible_in_narrow_terminal(monkeypatch) -> None:
+def test_footer_keeps_the_right_side_in_narrow_terminal(monkeypatch) -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(), thread_id="narrow-resume", settings=Settings(),
@@ -1018,10 +1023,12 @@ def test_footer_keeps_resume_id_visible_in_narrow_terminal(monkeypatch) -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         monkeypatch.setattr(app, "_width", lambda: 20)
-        first_line = "".join(value for _, value in app._footer_text()).splitlines()[0]
-        assert first_line.endswith("narrow-r")
-        assert first_line.count(" · ") == 2
-        assert len(first_line) <= 20
+        lines = "".join(value for _, value in app._footer_text()).splitlines()
+        # The right side wins in a narrow terminal; the left side truncates.
+        assert lines[0].rstrip().endswith("⎇ no git")
+        assert "narrow-r" in lines[0]
+        assert len(lines[0]) <= 20
+        assert len(lines[1]) <= 20
 
 
 def test_footer_reports_workspace_git_and_context_usage() -> None:
@@ -1045,11 +1052,12 @@ def test_footer_reports_workspace_git_and_context_usage() -> None:
             result={"input_tokens": 39_000, "output_tokens": 12, "total_tokens": 39_012},
         ))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
-        assert "⎇ main · 5 changed" in lines[2]
-        assert "1.0m Context · 3.9% used" in lines[2]
+        assert len(lines) == FOOTER_LINES
+        assert lines[0].rstrip().endswith("⎇ main · 5 changed")
+        assert lines[1].rstrip().endswith("1.0m Context · 3.9% used")
 
 
-def test_footer_hides_context_meter_without_a_configured_window() -> None:
+def test_footer_hides_context_meter_without_a_configured_window(monkeypatch) -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(),
@@ -1058,10 +1066,12 @@ def test_footer_hides_context_meter_without_a_configured_window() -> None:
     )
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 140)
         app.state.apply(RunEvent(type="usage", result={"total_tokens": 500}))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
-        assert len(lines) == FOOTER_LINES - 1
-        assert lines[0].rstrip().endswith("qwen3.5-plus · footer-u")
+        assert len(lines) == FOOTER_LINES
+        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · footer-u")
+        assert "Context" not in lines[1]
 
 
 def test_footer_places_context_on_status_line_when_git_unavailable() -> None:
@@ -1079,8 +1089,9 @@ def test_footer_places_context_on_status_line_when_git_unavailable() -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
-        assert len(lines) == FOOTER_LINES - 1
+        assert len(lines) == FOOTER_LINES
         assert "auto · token-plan" in lines[0]
+        assert lines[0].rstrip().endswith("⎇ no git")
         assert lines[1].rstrip().endswith("1.0m Context")
 
 
@@ -1468,3 +1479,86 @@ def test_clipboard_image_is_not_exported_for_text_model() -> None:
             app._io_executor.shutdown(wait=True)
 
     asyncio.run(scenario())
+
+
+def test_cli_waits_for_a_busy_session_and_takes_over(tmp_path) -> None:
+    store = SessionStore(tmp_path / "cli-wait.sqlite3")
+    holder = AgentRunner(
+        model=scripted_model([AIMessage(content="held")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+    holder.invoke("content for the picker")
+    target = holder.thread_id
+    waiter = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(waiter, input=pipe, output=DummyOutput())
+            await app.resume_session(target[:8])
+            assert app.sessions.wait_target == target
+            assert "Waiting for session" in app.state.status
+            assert app.interaction is None
+
+            # Input cannot reach the runner while the wait is active.
+            app.buffer.text = "blocked during wait"
+            app._submit_buffer("steer")
+            assert waiter.control.pending_steering_count() == 0
+            assert app.state.running is False
+
+            holder.close()
+            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            assert app.sessions.wait_target is None
+            assert waiter.thread_id == target
+            assert any(getattr(block, "content", "") == "held" for block in app.state.blocks)
+            waiter.close()
+
+    asyncio.run(scenario())
+    store.close()
+
+
+def test_cli_esc_cancels_wait_and_returns_to_picker(tmp_path) -> None:
+    store = SessionStore(tmp_path / "cli-esc-wait.sqlite3")
+    holder = AgentRunner(
+        model=scripted_model([AIMessage(content="held")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+    holder.invoke("content for the picker")
+    target = holder.thread_id
+    waiter = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        session_store=store,
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(waiter, input=pipe, output=DummyOutput())
+            await app.resume_session(target[:8])
+            assert app.sessions.wait_target == target
+
+            for binding in app.bindings.bindings:
+                keys = getattr(binding, "keys", ())
+                if keys == ("escape",) or (isinstance(keys, tuple) and keys == ("escape",)):
+                    class _E:
+                        current_buffer = app.buffer
+                    binding.handler(_E())  # type: ignore[misc]
+                    break
+
+            assert app.sessions._wait_cancelled is True
+            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            assert app.sessions.wait_target is None
+            # Esc keeps the runner detached and reopens the picker.
+            assert waiter._runtime.lease is None
+            assert app.interaction is not None
+            assert app.interaction.kind == "resume"
+            waiter.close()
+
+    asyncio.run(scenario())
+    holder.close()
+    store.close()

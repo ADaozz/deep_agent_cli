@@ -52,6 +52,7 @@ from agent.cli.rendering import (
     render_interaction,
     render_review,
 )
+from agent.cli.session_controller import SessionController
 from agent.cli.state import CliState, ToolBlock
 from agent.config import DEFAULT_UI_TIMEZONE, ModelProfile, require_keybindings_outside_workspace
 from agent.permission import (
@@ -64,8 +65,8 @@ from agent.permission import (
 )
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
 
-# Path / status / workspace-git + context-usage.
-FOOTER_LINES = 3
+# Workspace/model/status on the left; git and context usage on the right.
+FOOTER_LINES = 2
 
 
 def format_context_window(window: int) -> str:
@@ -287,6 +288,7 @@ class CliApplication:
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
         self.keymap = Keymap.load(keymap_path)
         self.interaction: InteractionController | None = None
+        self.sessions = SessionController(self)
         self._reviewing = False
         self.clipboard = ClipboardAdapter()
         self._io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deep-agent-io")
@@ -298,7 +300,6 @@ class CliApplication:
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
-        self._resume_picker_on_start = False
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
         self._git = GitProbe(self._workspace())
@@ -424,7 +425,7 @@ class CliApplication:
             ),
             Window(
                 self.footer_control,
-                height=lambda: FOOTER_LINES if self._git_summary.label() else FOOTER_LINES - 1,
+                height=FOOTER_LINES,
                 style="class:footer",
                 dont_extend_height=True,
             ),
@@ -468,16 +469,14 @@ class CliApplication:
         def capture_loop() -> None:
             self._loop = asyncio.get_running_loop()
             self._start_git_watch()
-            if self._resume_picker_on_start:
-                self._loop.create_task(self.resume_session())
+            self.sessions.schedule_start(self._loop)
 
         self.application.run(pre_run=capture_loop)
 
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._start_git_watch()
-        if self._resume_picker_on_start:
-            await self.resume_session()
+        await self.sessions.start()
         await self.application.run_async()
 
     def _start_git_watch(self) -> None:
@@ -582,85 +581,20 @@ class CliApplication:
         )
 
     def new_session(self) -> None:
-        if self.state.running:
-            self.set_status("Cancel the active run before starting a new session")
-            return
-        self._restore_queued_to_editor(self.buffer)
-        try:
-            info = self.runner.new_session()
-        except RuntimeError as exc:
-            self.state.add_system(str(exc), error=True)
-            return
-        self.state.clear()
-        self.state.attachments.clear()
-        self.interaction = None
-        self._reviewing = False
-        self._transcript_anchor = None
-        self._renderer.clear()
-        self.state.add_system(f"Started session {info.id}")
-        self.set_status("Ready")
+        self.sessions.new_session()
 
     async def resume_session(self, arg: str = "") -> None:
-        if self.state.running:
-            self.set_status("Cancel the active run before switching sessions")
-            return
-        if self.runner.session_store is None:
-            self.state.add_system("/resume is unavailable: persistent session storage is not configured", error=True)
-            return
-        try:
-            if arg.strip():
-                self._restore_queued_to_editor(self.buffer)
-                snapshot = self.runner.switch_session(arg.strip())
-            else:
-                sessions = self._sessions_with_content(limit=50)
-                if not sessions:
-                    self.state.add_system("No sessions with conversation content.", error=True)
-                    return
-                options = [
-                    {
-                        "value": item.id,
-                        "label": f"{item.id[:8]} · {item.last_run_status.value} · {item.title[:40]}",
-                        "right_label": item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                    for item in sessions
-                ]
-                self.interaction = InteractionController(
-                    kind="resume",
-                    title="Resume session",
-                    question="Select a session to restore",
-                    fields=[{
-                        "id": "session",
-                        "type": "single_select",
-                        "label": "Session",
-                        "required": True,
-                        "options": options,
-                    }],
-                )
-                self.set_status("Select a session · Enter confirm · Esc cancel")
-                self.application.invalidate()
-                return
-        except KeyError as exc:
-            self.state.add_system(str(exc), error=True)
-            return
-        except RuntimeError as exc:
-            self.state.add_system(str(exc), error=True)
-            return
-        self._apply_session_snapshot(snapshot)
+        await self.sessions.resume(arg)
 
-    def _sessions_with_content(self, *, limit: int = 50) -> list[Any]:
-        store = self.runner.session_store
-        if store is None:
-            return []
-        sessions = []
-        for info in self.runner.list_sessions(limit=limit):
-            if not self.runner.thread_has_content(info.id):
-                continue
-            sessions.append(info)
-        return sessions
+    def _apply_session_snapshot(self, snapshot: Any) -> None:
+        self.sessions.apply_snapshot(snapshot)
 
     async def select_model(self, arg: str = "") -> None:
         if self.state.running:
             self.set_status("Cancel the active run before switching models")
+            return
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status())
             return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before switching models")
@@ -743,6 +677,9 @@ class CliApplication:
         if self.state.running or self.interaction is not None:
             self.set_status("Finish the current run or interaction before compacting")
             return
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status())
+            return
         self._compacting = True
         self.state.running = True
         self.set_status("Compacting context…")
@@ -790,6 +727,9 @@ class CliApplication:
     async def select_permission(self, arg: str = "") -> None:
         if self.state.running:
             self.set_status("Cancel the active run before changing permission mode")
+            return
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status())
             return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before changing permission mode")
@@ -884,6 +824,9 @@ class CliApplication:
         if self.state.running:
             self.set_status("Cancel the active run before switching models")
             return
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status())
+            return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before switching models")
             return
@@ -955,6 +898,7 @@ class CliApplication:
         # Otherwise motion generated during shutdown can reach the shell.
         self.application.output.disable_mouse_support()
         self.application.output.flush()
+        self.sessions.notify_exit()
         if self.state.running:
             self.runner.request_cancel()
         if self._git_task is not None:
@@ -1068,29 +1012,39 @@ class CliApplication:
         model = self.runner.current_model()
         model_label = model_display_name(model) if model is not None else "fixed model"
         resume_id = self.runner.thread_id[:8]
-        model_width = max(1, width - get_cwidth(resume_id) - 7)
-        model_fit = _truncate_cells(model_label, model_width)
-        workspace_width = max(1, width - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
-        workspace_fit = _truncate_cells(f" {self._workspace()}", workspace_width)
-        first_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
-        first_padding = " " * max(0, width - first_width)
         context = format_context_usage(self.state.usage, self.runner.context_window())
-        git = self._git_summary.label()
+        # Row 1: workspace · model · resume on the left, git on the right.
+        # Row 2: status/sandbox/permission on the left, context on the right.
+        # The left side always truncates before the right side.
+        git = self._git_summary.label() or "⎇ no git"
         status = f" {spinner}{self.state.status}{queue} · {mode} · perm:{perm}"
-        fragments = []
-        if workspace_fit.startswith(" "):
-            fragments.append(("class:footer", " "))
-            fragments.append(("class:footer-workspace", workspace_fit[1:]))
+        git_fit = _truncate_cells(git, width)
+        available = max(1, width - get_cwidth(git_fit) - 1)
+        fragments: list[tuple[str, str]] = []
+        if available < 6 + get_cwidth(resume_id) + 2:
+            # Extremely narrow: keep the session handle and the git label only.
+            resume_fit = _truncate_cells(resume_id, available)
+            gap = " " * max(1, width - get_cwidth(resume_fit) - get_cwidth(git_fit))
+            fragments.append(("class:footer-resume-id", resume_fit))
+            fragments.append(("class:footer", gap + git_fit + "\n"))
         else:
-            fragments.append(("class:footer-workspace", workspace_fit))
-        fragments.append(("class:footer", " · "))
-        fragments.append(("class:footer-model", model_fit))
-        fragments.append(("class:footer", " · "))
-        fragments.append(("class:footer-resume-id", resume_id))
-        fragments.append(("class:footer", first_padding + "\n"))
-        fragments.append(("class:footer", _fit_footer_line(status, context if not git else "", width)))
-        if git:
-            fragments.append(("class:footer", "\n" + _fit_footer_line(f" {git}", context, width)))
+            model_width = max(1, available - get_cwidth(resume_id) - 6)
+            model_fit = _truncate_cells(model_label, model_width)
+            workspace_width = max(1, available - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
+            workspace_fit = _truncate_cells(f" {self._workspace()}", workspace_width)
+            left_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
+            first_padding = " " * max(1, width - left_width - get_cwidth(git_fit))
+            if workspace_fit.startswith(" "):
+                fragments.append(("class:footer", " "))
+                fragments.append(("class:footer-workspace", workspace_fit[1:]))
+            else:
+                fragments.append(("class:footer-workspace", workspace_fit))
+            fragments.append(("class:footer", " · "))
+            fragments.append(("class:footer-model", model_fit))
+            fragments.append(("class:footer", " · "))
+            fragments.append(("class:footer-resume-id", resume_id))
+            fragments.append(("class:footer", first_padding + git_fit + "\n"))
+        fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
     def _create_bindings(self) -> KeyBindings:
@@ -1218,6 +1172,8 @@ class CliApplication:
                 self.follow_transcript()
             elif event.current_buffer.complete_state is not None:
                 event.current_buffer.cancel_completion()
+            elif self.sessions.waiting:
+                self.sessions.cancel_wait()
             elif self._reviewing:
                 self._close_review()
             elif self.interaction is not None:
@@ -1303,6 +1259,9 @@ class CliApplication:
 
     def _submit_buffer(self, queue_mode: str) -> None:
         self.slash_completer.accepted_text = None
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status())
+            return
         text = self.buffer.text.strip()
         if self.interaction is not None:
             was_text = self.interaction.accepts_text
@@ -1537,13 +1496,7 @@ class CliApplication:
             if not session_id:
                 self.state.add_system("No session selected", error=True)
                 return
-            try:
-                self._restore_queued_to_editor(self.buffer)
-                snapshot = self.runner.switch_session(session_id)
-            except (KeyError, RuntimeError) as exc:
-                self.state.add_system(str(exc), error=True)
-                return
-            self._apply_session_snapshot(snapshot)
+            self.sessions.begin_switch(session_id)
             return
         if interaction.kind == "model_source":
             if cancelled:
