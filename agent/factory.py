@@ -121,7 +121,10 @@ def build_agent(
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     if supports_execute:
-        tools.append(build_execute_tool(fs_backend))
+        tools.append(build_execute_tool(
+            fs_backend,
+            network_by_default=permission is PermissionMode.ALLOW,
+        ))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )

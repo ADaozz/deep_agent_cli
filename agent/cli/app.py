@@ -766,7 +766,7 @@ class CliApplication:
         if self._allow_available():
             options.append({
                 "value": PermissionMode.ALLOW.value,
-                "label": "allow · auto-approve all tools (SANDBOXED, HIGH RISK)"
+                "label": "allow · auto-approve all tools; sandbox network open (SANDBOXED, HIGH RISK)"
                 + (" · current" if current is PermissionMode.ALLOW else ""),
             })
         if len(options) == 1:
@@ -821,7 +821,7 @@ class CliApplication:
             fields=[{
                 "id": "confirm",
                 "type": "text",
-                "label": 'Type ALLOW to confirm auto-approve for all tools',
+                "label": 'Type ALLOW to confirm auto-approve + sandbox network open',
                 "required": True,
                 "options": [],
             }],

@@ -2,7 +2,7 @@
 
 面向 Linux / WSL2 的本地沙箱 Coding Agent，安装后运行 `deep-agent` 即可使用。
 
-在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、按需搜索公开 Web、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批。自定义副作用工具需要显式配置审批规则。
+在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、按需搜索公开 Web、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批；allow 模式自动放行全部工具并默认开放沙箱网络。自定义副作用工具需要显式配置审批规则。
 
 ![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/os-Linux%20%2F%20WSL2-FCC624?logo=linux&logoColor=black)
@@ -34,8 +34,8 @@
 
 - **工作区工具** — `ls` / `read` / `write` / `edit` / `glob` / `grep` / `delete` 访问 `/workspace`；用户 Skills 可在只读 `/skills` 下读取
 - **公开 Web 搜索** — 配置 Tavily 密钥后提供 `web_search`；只返回带 URL 的相关摘要，不授予沙箱命令联网权限
-- **沙箱执行** — 默认隔离网络；`execute(network=true)` 使用宿主网络，可访问互联网、localhost 和局域网
-- **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
+- **沙箱执行** — 默认隔离网络；`execute(network=true)` 使用宿主网络，可访问互联网、localhost 和局域网；allow 模式下所有 `execute` 默认使用宿主网络
+- **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`），开启后 `execute` 默认开放宿主网络
 - **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
 - **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
 - **转录区跟随** — 停留在底部时持续显示新输出；上滚后保留阅读位置，并提供可点击的回到底部提示
@@ -161,7 +161,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 /model token-plan        打开 Token Plan 模型列表
 /model token-plan/auto   直接切换模型
 /compact                 达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
-/permission ask|allow   # allow 仅 SANDBOXED；UNSANDBOXED / CUSTOM 只有 ask
+/permission ask|allow   # allow 仅 SANDBOXED 且开放沙箱网络；UNSANDBOXED / CUSTOM 只有 ask
 /image clipboard | <path> | clear
 /pause                   在下一个模型安全点暂停
 /quit
@@ -328,7 +328,7 @@ LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `sess
 
 同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 和 `deep-agent resume <id>` 启动恢复都会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；库调用者同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。会话切换的提交点在完成全部图与 catalog 读取之后，中途失败会回滚到原会话；`steer` / `follow_up` 在脱离会话或 Runner 关闭后会被拒绝。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
 
-沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。
+沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。allow 模式下每个 `execute` 都默认使用宿主网络，单次调用无法关闭。
 
 ## Development
 

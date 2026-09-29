@@ -20,13 +20,15 @@ from agent.tools.examples import build_example_tools
 from agent.network import network_requested
 from agent.network import get_execute_network
 from agent.tools.execute import build_execute_tool
-from deepagents.backends.protocol import ExecuteResponse
+from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from agent.permission import (
     ASK_INTERRUPT_ON,
+    PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
     interrupt_on_for_mode,
     parse_permission_mode,
+    permission_mode_label,
 )
 from agent.runner import AgentRunner
 from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableError, select_backend
@@ -63,6 +65,12 @@ def test_network_requested_truthy() -> None:
     assert not network_requested({})
 
 
+def test_allow_mode_texts_call_out_open_network() -> None:
+    assert "network" in PERMISSION_ALLOW_WARNING.lower()
+    assert "network" in permission_mode_label(PermissionMode.ALLOW).lower()
+    assert "network" not in permission_mode_label(PermissionMode.ASK).lower()
+
+
 def test_execute_network_setting_is_scoped_to_one_call() -> None:
     seen: list[bool] = []
 
@@ -75,6 +83,21 @@ def test_execute_network_setting_is_scoped_to_one_call() -> None:
     assert execute.invoke({"command": "first", "network": True}) == "first"
     assert execute.invoke({"command": "second"}) == "second"
     assert seen == [True, False]
+    assert not get_execute_network()
+
+
+def test_execute_tool_network_by_default_applies_without_declaration() -> None:
+    seen: list[bool] = []
+
+    class Backend:
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            seen.append(get_execute_network())
+            return ExecuteResponse(command, 0, False)
+
+    execute = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
+    assert execute.invoke({"command": "one"}) == "one"
+    assert execute.invoke({"command": "two", "network": False}) == "two"
+    assert seen == [True, True]
     assert not get_execute_network()
 
 
@@ -228,6 +251,42 @@ def test_sandboxed_allow_execute_with_network_runs(tmp_path: Path) -> None:
     assert result.output == "online"
 
 
+class _RecordingSandboxBackend(StateBackend, SandboxBackendProtocol):
+    def __init__(self) -> None:
+        super().__init__()
+        self.network_calls: list[bool] = []
+
+    @property
+    def id(self) -> str:
+        return "recording-sandbox"
+
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        self.network_calls.append(get_execute_network())
+        return ExecuteResponse(command, 0, False)
+
+
+def test_allow_mode_opens_network_without_per_call_declaration() -> None:
+    backend = _RecordingSandboxBackend()
+    messages = [*_execute_messages("ex-allow-open"), *_execute_messages("ex-ask-closed")]
+    with patch(
+        "agent.factory.select_backend",
+        return_value=BackendSelection(backend, ExecutionMode.SANDBOXED),
+    ):
+        prepared = create_agent(model=scripted_model(messages))
+        runner = AgentRunner(prepared=prepared, thread_id="perm-net-default")
+        runner.set_permission_mode("allow")
+        assert runner.invoke("run").status == "completed"
+        assert backend.network_calls == [True]
+
+        runner.set_permission_mode("ask")
+        waiting = runner.invoke("run again")
+        assert waiting.status == "waiting_confirmation"
+        assert not network_requested(waiting.pending_tool_calls[0].get("args") or {})
+        resumed = runner.approve_tool("ex-ask-closed")
+        assert resumed.status == "completed"
+        assert backend.network_calls == [True, False]
+
+
 def test_unsandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
     runner = _unsandboxed_runner(tmp_path, _execute_messages("ex-un-ask"), thread_id="un-ask-off")
     waiting = runner.invoke("run")
@@ -362,10 +421,14 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
             assert app.interaction is not None
             assert app.interaction.kind == "permission_confirm"
             assert "HIGH RISK" in app.interaction.question
+            assert "network" in app.interaction.question.lower()
             assert app.interaction.accept("ALLOW")
             app._finish_interaction()
             assert app.runner.permission_mode() is PermissionMode.ALLOW
             assert app.interaction is None
+            assert any(
+                "network" in getattr(block, "content", "") for block in app.state.blocks
+            )
 
     asyncio.run(scenario())
 

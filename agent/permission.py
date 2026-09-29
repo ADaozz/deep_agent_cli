@@ -11,7 +11,7 @@ class PermissionMode(StrEnum):
     """Two-state tool permission policy."""
 
     ASK = "ask"  # Side-effect tools and every execute pause for approval.
-    ALLOW = "allow"  # Auto-approve declared capabilities (SANDBOXED only).
+    ALLOW = "allow"  # Auto-approve all tools; sandbox network open (SANDBOXED only).
 
 
 ASK_INTERRUPT_ON: dict[str, Any] = {
@@ -23,9 +23,10 @@ ASK_INTERRUPT_ON: dict[str, Any] = {
 
 PERMISSION_ALLOW_WARNING = (
     "HIGH RISK: Permission mode ALLOW auto-approves every tool call and any "
-    "capabilities it declares (including execute with network=true, file writes, "
-    "and deletes). There is no per-call confirmation. Only enable "
-    "this if the agent is running in a SANDBOXED backend."
+    "capabilities it declares (including file writes and deletes), and runs "
+    "every execute with the sandbox network OPEN: full host network access "
+    "(internet, localhost, LAN). There is no per-call confirmation. Only "
+    "enable this if the agent is running in a SANDBOXED backend."
 )
 
 
@@ -75,5 +76,5 @@ def parse_permission_mode(value: str) -> PermissionMode | None:
 
 def permission_mode_label(mode: PermissionMode) -> str:
     if mode is PermissionMode.ALLOW:
-        return "allow (auto-approve declared capabilities — SANDBOXED only, HIGH RISK)"
+        return "allow (auto-approve all tools; sandbox network OPEN — SANDBOXED only, HIGH RISK)"
     return "ask (side-effect tools and every execute require approval)"

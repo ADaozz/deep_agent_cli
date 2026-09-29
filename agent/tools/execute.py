@@ -5,11 +5,31 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
 from agent.network import reset_execute_network, set_execute_network
 
+_ASK_DESCRIPTION = (
+    "Run a shell command inside the sandbox workspace (/workspace). "
+    "Defaults to no network. Under permission ask every execute needs "
+    "approval. network=true grants host network access, including localhost "
+    "and LAN addresses, for this command. "
+    "Prefer ls/read_file/glob/grep/write_file for filesystem work."
+)
+_ALLOW_DESCRIPTION = (
+    "Run a shell command inside the sandbox workspace (/workspace). "
+    "Permission allow mode: commands run without approval and host network "
+    "(internet, localhost, LAN) is enabled by default for every call. "
+    "Prefer ls/read_file/glob/grep/write_file for filesystem work."
+)
 
-def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
+
+def build_execute_tool(
+    backend: SandboxBackendProtocol,
+    *,
+    network_by_default: bool = False,
+) -> BaseTool:
     """Shell execute bound to a sandbox backend.
 
     ``network=True`` shares the host network namespace for this command.
+    ``network_by_default=True`` (permission mode allow) opens host network
+    for every call; a per-call ``network=false`` cannot turn it off.
     """
 
     def execute(
@@ -17,7 +37,7 @@ def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
         timeout: int | None = None,
         network: bool = False,
     ) -> tuple[str, dict[str, object]]:
-        token = set_execute_network(network)
+        token = set_execute_network(network or network_by_default)
         try:
             if timeout is not None:
                 response = backend.execute(command, timeout=timeout)
@@ -49,11 +69,5 @@ def build_execute_tool(backend: SandboxBackendProtocol) -> BaseTool:
         func=execute,
         name="execute",
         response_format="content_and_artifact",
-        description=(
-            "Run a shell command inside the sandbox workspace (/workspace). "
-            "Defaults to no network. Under permission ask every execute needs "
-            "approval. network=true grants host network access, including localhost "
-            "and LAN addresses, for this command. "
-            "Prefer ls/read_file/glob/grep/write_file for filesystem work."
-        ),
+        description=_ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION,
     )

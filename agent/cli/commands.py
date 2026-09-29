@@ -32,7 +32,7 @@ def command_table() -> tuple[Command, ...]:
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),
         Command(
             "permission",
-            "Tool approval: ask (every execute) or allow (SANDBOXED auto-approve, HIGH RISK)",
+            "Tool approval: ask (every execute) or allow (SANDBOXED auto-approve + sandbox network open, HIGH RISK)",
             _permission,
         ),
         Command("quit", "Exit DeepAgent", _quit),
