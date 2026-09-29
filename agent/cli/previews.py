@@ -23,6 +23,10 @@ from agent.file_mutation import FileMutationOperation
 PreviewStyle = Literal["plain", "dim", "add", "delete", "error", "url"]
 PreviewGroup = Literal["explore", "mutation", "command", "web", "other"]
 PreviewAction = Literal["none", "expand", "review"]
+CommandExecutionStatus = Literal[
+    "running", "succeeded", "failed", "timeout", "cancelled",
+    "spawn_error", "interrupted", "waiting",
+]
 
 # Hint vocabulary selected by ToolPreview.action: review -> Ctrl+R,
 # expand -> Ctrl+O. Shared by builders and the renderer so no branch
@@ -59,6 +63,20 @@ class ToolPreview:
     action: PreviewAction = "none"
     syntax: str | None = None
     file_mutation: FileMutationPreview | None = None
+    command_execution: CommandExecutionPreview | None = None
+
+
+@dataclass(frozen=True)
+class CommandExecutionPreview:
+    """Command result semantics; live output remains in ToolBlock.output."""
+
+    command: str
+    status: CommandExecutionStatus
+    exit_code: int | None = None
+    termination_reason: str | None = None
+    truncated: bool = False
+    log_path: str | None = None
+    log_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -494,15 +512,48 @@ def build_delete_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
+def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
+    """Interpret execute metadata once, without reading output text."""
+    artifact = block.artifact if isinstance(block.artifact, dict) else {}
+    raw_code = artifact.get("exit_code")
+    exit_code = block.exit_code
+    if exit_code is None and isinstance(raw_code, int) and not isinstance(raw_code, bool):
+        exit_code = raw_code
+    reason = artifact.get("termination_reason")
+    reason = reason if isinstance(reason, str) else None
+    if block.status == "waiting":
+        status: CommandExecutionStatus = "waiting"
+    elif block.status == "interrupted":
+        status = "interrupted"
+    elif block.status == "running":
+        status = "running"
+    elif reason in ("cancelled", "timeout", "spawn_error"):
+        status = reason
+    elif exit_code not in (None, 0) or block.is_error or block.status == "error":
+        status = "failed"
+    else:
+        status = "succeeded"
+    agent_path = artifact.get("agent_log_path")
+    host_path = artifact.get("host_log_path")
+    log_path = agent_path or host_path
+    log_error = artifact.get("log_error")
+    return CommandExecutionPreview(
+        command=str(block.arguments.get("command") or "…"),
+        status=status,
+        exit_code=exit_code,
+        termination_reason=reason,
+        truncated=artifact.get("truncated") is True,
+        log_path=str(log_path) if log_path else None,
+        log_error=str(log_error) if log_error else None,
+    )
+
+
 def build_execute_preview(block: ToolBlock) -> ToolPreview:
-    command = str(block.arguments.get("command") or "…")
-    lines: tuple[PreviewLine, ...] = ()
-    if block.status == "completed" and not block.output.strip():
-        lines = (PreviewLine("(no output)", "dim"),)
+    execution = normalize_command_execution(block)
     return ToolPreview(
-        kind="execute", verb="execute", target=command,
-        summary=f"execute {command}", lines=lines,
-        group="command", action="expand",
+        kind="execute", verb="execute", target=execution.command,
+        summary=f"execute {execution.command}",
+        group="command", action="expand", command_execution=execution,
     )
 
 
@@ -635,10 +686,7 @@ def build_failure_preview(block: ToolBlock) -> ToolPreview:
     builder = _PREVIEW_BUILDERS.get(block.name, build_generic_preview)
     base = builder(block)
     group = tool_group(block.name)
-    if block.name == "execute":
-        summary = str(block.arguments.get("command") or "execute")
-    else:
-        summary = base.summary or f"{base.verb} {base.target}".strip() or base.kind
+    summary = base.summary or f"{base.verb} {base.target}".strip() or base.kind
     return ToolPreview(
         kind="failure",
         verb="Failed",
@@ -652,6 +700,8 @@ def build_failure_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_tool_preview(block: ToolBlock) -> ToolPreview:
+    if block.name == "execute":
+        return build_execute_preview(block)
     if block.is_error:
         return build_failure_preview(block)
     builder = _PREVIEW_BUILDERS.get(block.name)

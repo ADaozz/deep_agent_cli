@@ -25,6 +25,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.cli.previews import (
+    CommandExecutionPreview,
     EXPAND_HINT,
     REVIEW_HINT,
     ToolPreview,
@@ -40,7 +41,7 @@ from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.config import DEFAULT_UI_TIMEZONE
 
 # Non-file output folding stays in the renderer.
-EXECUTE_TAIL_LINES = 8
+EXECUTE_TAIL_LINES = 4
 
 EXPLORE_PREVIEW_LIMIT = 5
 EXPLORE_FAILURE_PREVIEW_LIMIT = 3
@@ -554,6 +555,8 @@ def render_tool_preview(
     block: ToolBlock, preview: ToolPreview, *, expanded: bool, width: int = 80,
 ) -> Any:
     """Generic tool card: status, spinner, colors, folding — no tool semantics."""
+    if preview.command_execution is not None:
+        return _command_card(block.output, preview.command_execution, expanded, width)
     if preview.kind == "failure":
         return _failure_card(block, preview, expanded, width)
     symbol = _spinner() if block.status == "running" and preview.group != "explore" else "●"
@@ -590,20 +593,68 @@ def render_tool_preview(
         output = block.output.strip()
         if output:
             lines = output.splitlines()
-            if preview.group == "command":
-                if block.status != "running" and not expanded and len(lines) > EXECUTE_TAIL_LINES:
-                    skipped = len(lines) - EXECUTE_TAIL_LINES
-                    lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-EXECUTE_TAIL_LINES:]]
-            else:
-                limit = 40 if expanded else 8
-                if len(lines) > limit:
-                    skipped = len(lines) - limit
-                    lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-limit:]]
+            limit = 40 if expanded else 8
+            if len(lines) > limit:
+                skipped = len(lines) - limit
+                lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-limit:]]
             body.append(Text(
                 "\n".join(f"  {line}" for line in lines),
                 style="dim" if not block.is_error else "red",
             ))
     return Padding(Group(*body), (1, 1, 0, 1), expand=False)
+
+
+def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool, width: int) -> Any:
+    """Render the current output snapshot; every delta rebuilds this card."""
+    status = preview.status
+    verb = {
+        "running": "execute", "waiting": "execute", "interrupted": "execute",
+        "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
+        "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
+    }[status]
+    suffix = (
+        " — waiting for input" if status == "waiting"
+        else " — interrupted (completion unconfirmed)" if status == "interrupted"
+        else ""
+    )
+    color = "#888888" if status == "interrupted" else "yellow" if status == "waiting" else "green"
+    symbol = _spinner() if status == "running" else "●"
+    title = Text.assemble(
+        (f"{symbol} ", color), (f"{verb} {preview.command}", "bold"), (suffix, "dim"),
+    )
+    console = Console(width=max(20, width))
+    body: list[Any] = []
+    body.extend(_wrap_failure_line(title, console, width))
+
+    display_output = output
+    if preview.truncated:
+        # The executor embeds a saved-log footer in its returned text. It is
+        # still kept in ToolBlock.output, but the card displays one normalized
+        # notice with the agent-visible path after the live output.
+        display_output = re.sub(
+            r"(?:\n\n|^)\[Output truncated(?::|\.)[^\]]*\]",
+            "", display_output, count=1, flags=re.DOTALL,
+        )
+    lines = display_output.strip().splitlines()
+    if not expanded and len(lines) > EXECUTE_TAIL_LINES:
+        hidden = len(lines) - EXECUTE_TAIL_LINES
+        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-EXECUTE_TAIL_LINES:]]
+    if not lines and status not in {"running", "waiting", "interrupted"}:
+        lines = ["(no output)"]
+    if lines:
+        body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
+    for line in lines:
+        body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width))
+
+    if preview.truncated:
+        if preview.log_error:
+            notice = f"Full output could not be saved: {preview.log_error}"
+        elif preview.log_path:
+            notice = f"Output truncated · full output: {preview.log_path}"
+        else:
+            notice = "Output truncated"
+        body.extend(_wrap_failure_line(Text(f"  {notice}", style="dim"), console, width))
+    return Padding(Group(*body), (1, 0, 0, 0), expand=False)
 
 
 def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:

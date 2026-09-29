@@ -27,11 +27,13 @@ from agent.cli.app import (
     format_context_window,
 )
 from agent.cli.previews import (
+    CommandExecutionPreview,
     FileMutationPreview,
     aggregate_file_mutations,
     build_diff_preview,
     build_tool_preview,
     normalize_file_mutation,
+    normalize_command_execution,
 )
 from agent.cli.rendering import (
     TranscriptRenderer,
@@ -457,7 +459,7 @@ def test_explore_tools_collapse_into_summary() -> None:
     assert 'Search "foo"' not in collapsed
     assert "Ctrl+O to expand" in collapsed
     assert "/workspace/a.py" not in collapsed
-    assert "execute pytest" in collapsed
+    assert "Ran pytest" in collapsed
     assert "write workspace/out.txt" in collapsed
     state.tools_expanded = True
     expanded = render_transcript(state, 80)
@@ -649,14 +651,126 @@ def test_tool_render_is_compact_then_expandable() -> None:
         status="completed",
     )])
     collapsed = render_transcript(state, 80)
-    assert "execute pytest tests/" in collapsed
-    assert "22 output lines hidden" in collapsed
+    assert "Ran pytest tests/" in collapsed
+    assert "└ output" in collapsed
+    assert "26 earlier output lines hidden" in collapsed
+    assert "line 25" not in collapsed
+    assert collapsed.index("26 earlier output lines hidden") < collapsed.index("line 26")
     assert "line 29" in collapsed
     assert "line 0" not in collapsed
     state.tools_expanded = True
     expanded = render_transcript(state, 80)
     assert "line 0" in expanded
     assert "output lines hidden" not in expanded
+
+
+def test_execute_running_tail_and_expanded_output_update_with_stream() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="stream", name="execute",
+        arguments={"command": "pytest -q"},
+    ))
+    for index in range(6):
+        state.apply(RunEvent(type="tool_output_delta", tool_call_id="stream", content=f"line {index}\n"))
+    collapsed = _plain(render_transcript(state, 100))
+    assert "execute pytest -q" in collapsed
+    assert "└ output" in collapsed
+    assert "2 earlier output lines hidden · Ctrl+O to expand" in collapsed
+    assert "line 2" in collapsed and "line 5" in collapsed
+    assert "line 1" not in collapsed
+
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="stream", content="line 6\n"))
+    collapsed = _plain(render_transcript(state, 100))
+    assert "3 earlier output lines hidden" in collapsed
+    assert "line 2" not in collapsed and "line 6" in collapsed
+
+    state.tools_expanded = True
+    assert "line 0" in _plain(render_transcript(state, 100))
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="stream", content="line 7\n"))
+    expanded = _plain(render_transcript(state, 100))
+    assert "line 0" in expanded and "line 7" in expanded
+    assert "earlier output lines hidden" not in expanded
+
+    state.tools_expanded = False
+    collapsed = _plain(render_transcript(state, 100))
+    assert "4 earlier output lines hidden" in collapsed
+    assert "line 4" in collapsed and "line 7" in collapsed
+
+
+def test_execute_stream_invalidates_collapsed_and_expanded_document_cache() -> None:
+    state = CliState()
+    renderer = TranscriptRenderer()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="cache", name="execute",
+        arguments={"command": "watch"},
+    ))
+
+    def document_text() -> str:
+        document = renderer.render_document(state, 100)
+        return _plain("\n".join(
+            "".join(fragment[1] for fragment in document.get_line(index))
+            for index in range(document.line_count)
+        ))
+
+    for index in range(6):
+        state.apply(RunEvent(type="tool_output_delta", tool_call_id="cache", content=f"line {index}\n"))
+    assert "line 5" in document_text()
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="cache", content="line 6\n"))
+    compact = document_text()
+    assert "line 6" in compact and "line 2" not in compact
+
+    state.tools_expanded = True
+    assert "line 0" in document_text()
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="cache", content="line 7\n"))
+    expanded = document_text()
+    assert "line 0" in expanded and "line 7" in expanded
+
+
+@pytest.mark.parametrize(("reason", "exit_code", "expected"), [
+    (None, 0, "Ran"),
+    (None, 3, "Failed (exit 3)"),
+    ("timeout", 1, "Timed out"),
+    ("cancelled", 1, "Cancelled"),
+    ("spawn_error", 1, "Failed to start"),
+])
+def test_execute_status_semantics_precede_exit_code(reason, exit_code, expected) -> None:
+    block = ToolBlock(
+        "command", "execute", {"command": "pytest -q"},
+        output="result", status="error" if exit_code else "completed", is_error=bool(exit_code),
+        artifact={"exit_code": exit_code, "termination_reason": reason}, exit_code=exit_code,
+    )
+    preview = build_tool_preview(block)
+    assert isinstance(preview.command_execution, CommandExecutionPreview)
+    rendered = _plain(_capture(_tool(block, False), 100))
+    assert f"● {expected} pytest -q" in rendered
+    assert "└ output" in rendered and "result" in rendered
+
+
+@pytest.mark.parametrize(("block_status", "expected"), [
+    ("waiting", "waiting for input"),
+    ("interrupted", "interrupted (completion unconfirmed)"),
+])
+def test_execute_unconfirmed_states_override_stale_exit_code(block_status, expected) -> None:
+    block = ToolBlock(
+        "command", "execute", {"command": "pytest -q"},
+        status=block_status, exit_code=1,
+        artifact={"exit_code": 1, "termination_reason": "cancelled"},
+    )
+    assert normalize_command_execution(block).status == block_status
+    rendered = _plain(_capture(_tool(block, False), 100))
+    assert f"execute pytest -q — {expected}" in rendered
+    assert "Cancelled" not in rendered
+
+
+def test_execute_legacy_metadata_falls_back_without_parsing_output() -> None:
+    block = ToolBlock(
+        "legacy", "execute", {"command": "pytest -q"},
+        output="Exit code: 7\nCancelled by user.", status="completed",
+    )
+    assert normalize_command_execution(block).status == "succeeded"
+    assert "Ran pytest -q" in _plain(_capture(_tool(block, False), 100))
+    block.is_error = True
+    assert normalize_command_execution(block).status == "failed"
 
 
 def test_edit_waiting_shows_short_diff_preview() -> None:
@@ -1374,6 +1488,51 @@ def test_truncated_tool_completion_keeps_stream_and_shows_log_path() -> None:
     assert output.count("Full output saved to:") == 1
     assert "/current/workspace/.deep-agent/logs/exec/example.log" in output
     assert "/workspace/.deep-agent/logs/exec/example.log" in output
+
+
+def test_execute_truncated_tail_keeps_latest_lines_and_agent_log_path() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="truncated", name="execute",
+        arguments={"command": "long-command"},
+    ))
+    for index in range(7):
+        state.apply(RunEvent(type="tool_output_delta", tool_call_id="truncated", content=f"line {index}\n"))
+    before = _plain(render_transcript(state, 100))
+    assert "3 earlier output lines hidden" in before
+    assert "line 6" in before and "line 2" not in before
+
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="truncated", name="execute",
+        artifact={
+            "exit_code": 0, "truncated": True, "max_output_bytes": 8,
+            "host_log_path": "/host/exec.log", "agent_log_path": "/workspace/exec.log",
+        },
+    ))
+    collapsed = _plain(render_transcript(state, 100))
+    assert "Ran long-command" in collapsed
+    assert "3 earlier output lines hidden" in collapsed
+    assert "line 3" in collapsed and "line 6" in collapsed
+    assert "Output truncated · full output: /workspace/exec.log" in collapsed
+    assert "/host/exec.log" not in collapsed
+    state.tools_expanded = True
+    expanded = _plain(render_transcript(state, 100))
+    assert "line 0" in expanded and "line 6" in expanded
+    assert "Output truncated · full output: /workspace/exec.log" in expanded
+
+
+def test_execute_truncated_log_error_and_host_fallback() -> None:
+    failed_save = ToolBlock(
+        "save", "execute", {"command": "build"}, output="last line", status="completed",
+        artifact={"truncated": True, "log_error": "disk full"},
+    )
+    assert "Full output could not be saved: disk full" in _plain(_capture(_tool(failed_save, False), 100))
+    host_only = ToolBlock(
+        "host", "execute", {"command": "build"}, output="last line", status="completed",
+        artifact={"truncated": True, "host_log_path": "/host/exec.log"},
+    )
+    assert normalize_command_execution(host_only).log_path == "/host/exec.log"
+    assert "Output truncated · full output: /host/exec.log" in _plain(_capture(_tool(host_only, False), 100))
 
 
 def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
