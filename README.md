@@ -189,7 +189,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 
 探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
 
-`web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write` 新建文件时显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
+`web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write_file` 根据执行前的文件状态显示 `Create /path` 或 `Wrote /path`；连续创建多个文件合并为 `Create N files`，按 `Ctrl+O` 展开完整文件列表。覆盖写入预览显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在写入预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
 
 工具失败时显示灰色圆点、`Failed (exit N)`、具体命令或工具目标，以及简短错误；`Ctrl+O` 展开完整输出。探索组在标题中统计失败数，并额外列出最近的失败项。`execute` 显示命令的真实退出码；没有进程退出码的工具错误以约定的 `exit 1` 显示。搜索超时但返回部分结果时只提示结果不完整，不计为失败。
 

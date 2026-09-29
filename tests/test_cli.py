@@ -26,6 +26,13 @@ from agent.cli.app import (
     format_context_usage,
     format_context_window,
 )
+from agent.cli.previews import (
+    FileMutationPreview,
+    aggregate_file_mutations,
+    build_diff_preview,
+    build_tool_preview,
+    normalize_file_mutation,
+)
 from agent.cli.rendering import (
     TranscriptRenderer,
     _capture,
@@ -40,13 +47,17 @@ from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock,
 from agent.config import Settings
 from agent.config import ModelProfile
 from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
-from agent.session import SessionStore, TranscriptBlock
+from agent.session import SessionStore, TranscriptBlock, messages_to_transcript
 from agent.tools.examples import build_example_tools
 from agent.factory import DEFAULT_FS_TOOLS, create_agent
 from tests.conftest import scripted_model
 
 
 _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _without_diff_number(text: str) -> str:
+    return re.sub(r"^\s*\d+ (?=[+-])", "", text)
 
 
 def _plain(rendered: str) -> str:
@@ -663,7 +674,7 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
     assert "--- a/workspace/tests/test_cache.py" not in rendered
     assert "+++ b/workspace/tests/test_cache.py" not in rendered
     assert "@@" not in rendered
-    assert "-keep-0" in rendered
+    assert "- keep-0" in rendered
     assert "keep-15" not in rendered
     assert "Ctrl+R to review" in rendered
     review = render_review([("edit_file", {
@@ -673,9 +684,9 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
     assert "--- a/workspace/tests/test_cache.py" in review
 
 
-def test_edit_preview_hides_unified_diff_headers() -> None:
+def test_edit_preview_excludes_context_and_metadata_lines() -> None:
     state = CliState(blocks=[ToolBlock(
-        tool_call_id="edit-2",
+        tool_call_id="edit-ctx",
         name="edit_file",
         arguments={
             "file_path": "/workspace/notes.md",
@@ -686,10 +697,454 @@ def test_edit_preview_hides_unified_diff_headers() -> None:
     )])
     rendered = _plain(render_transcript(state, 100))
     assert "Edited /workspace/notes.md (+1 -1)" in rendered
+    assert "- second" in rendered
+    assert "+ changed" in rendered
+    assert "first" not in rendered
+    assert "third" not in rendered
     for header in ("--- a/", "+++ b/", "@@"):
         assert header not in rendered
-    assert "-second" in rendered
-    assert "+changed" in rendered
+
+
+def test_edit_counts_are_colored_and_changed_lines_are_numbered(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    block = ToolBlock(
+        tool_call_id="edit-numbered", name="edit_file",
+        arguments={
+            "file_path": "/workspace/notes.md",
+            "old_string": "first\nsecond\nthird",
+            "new_string": "first\nchanged\nthird",
+        },
+        status="completed",
+    )
+    rendered = render_transcript(CliState(blocks=[block]), 100)
+    plain = _plain(rendered)
+    assert "2 - second" in plain
+    assert "2 + changed" in plain
+    assert re.search(r"\x1b\[32m\+1\x1b\[0m", rendered)
+    assert re.search(r"\x1b\[31m-1\x1b\[0m", rendered)
+    review = _plain(render_review([("edit_file", block.arguments)], 100))
+    assert "2 -second" in review
+    assert "2 +changed" in review
+
+
+def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
+    path = "/workspace/report.md"
+    blocks = [ToolBlock(
+        tool_call_id=f"edit-{index}", name="edit_file",
+        arguments={"file_path": path, "old_string": f"old {index}", "new_string": f"entry {index}"},
+        status="completed",
+    ) for index in range(4)]
+    state = CliState(blocks=blocks)
+    rendered = _plain(render_transcript(state, 100))
+    assert rendered.count(f"Edited {path}") == 1
+    assert f"Edited {path} (+4 -4)" in rendered
+    for index in range(4):
+        assert f"+ entry {index}" in rendered
+    app = CliApplication.__new__(CliApplication)
+    app.state = state
+    app.interaction = None
+    calls = app._review_calls()
+    assert len(calls) == 4
+    review = _plain(render_review(calls, 100))
+    for index in range(4):
+        assert f"+entry {index}" in review
+
+
+def test_edit_group_stops_at_other_file_or_message() -> None:
+    def edit(identifier: str, path: str) -> ToolBlock:
+        return ToolBlock(
+            tool_call_id=identifier, name="edit_file",
+            arguments={"file_path": path, "old_string": "x", "new_string": "y"},
+            status="completed",
+        )
+
+    path = "/workspace/report.md"
+    state = CliState(blocks=[
+        edit("one", path), edit("other", "/workspace/other.md"), edit("two", path),
+        MessageBlock(kind="assistant", content="done"), edit("three", path),
+    ])
+    rendered = _plain(render_transcript(state, 100))
+    assert rendered.count(f"Edited {path}") == 3
+
+
+def test_diff_background_fills_each_visual_row_in_preview_and_review(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    block = ToolBlock(
+        tool_call_id="edit-background", name="edit_file",
+        arguments={
+            "file_path": "/workspace/notes.md",
+            "old_string": "old",
+            "new_string": "x" * 80,
+        },
+        status="completed",
+    )
+    for rendered in (
+        render_transcript(CliState(blocks=[block]), 40),
+        render_review([("edit_file", block.arguments)], 40),
+        render_transcript(CliState(blocks=[ToolBlock(
+            tool_call_id="write-background", name="write_file",
+            arguments={"file_path": "/workspace/new.md", "content": "new"}, status="completed",
+        )]), 40),
+        render_review([("write_file", {"file_path": "/workspace/new.md", "content": "new"})], 40),
+    ):
+        for color in ("74;32;40", "36;92;56"):
+            rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
+            if color == "36;92;56":
+                assert rows
+            if rows:
+                assert all(len(row) == 39 for row in rows)
+                assert all(row.endswith(" ") for row in rows if len(row.strip()) < 39)
+
+
+def test_edit_review_keeps_context_headers_and_full_diff() -> None:
+    args = {
+        "file_path": "/workspace/notes.md",
+        "old_string": "first\nsecond\nthird",
+        "new_string": "first\nchanged\nthird",
+    }
+    review = _plain(render_review([("edit_file", args)], 100))
+    assert "--- a/workspace/notes.md" in review
+    assert "+++ b/workspace/notes.md" in review
+    assert "@@" in review
+    assert " first" in review
+    assert "-second" in review
+    assert "+changed" in review
+
+
+def test_edit_preview_pure_deletion_over_budget() -> None:
+    old = "\n".join(f"line-{index}" for index in range(10))
+    block = ToolBlock(
+        tool_call_id="edit-del",
+        name="edit_file",
+        arguments={"file_path": "/workspace/f.md", "old_string": old, "new_string": ""},
+        status="completed",
+    )
+    state = CliState(blocks=[block])
+    rendered = _plain(render_transcript(state, 100))
+    assert "Edited /workspace/f.md (+0 -10)" in rendered
+    assert "- line-0" in rendered
+    assert "- line-7" in rendered
+    assert "- line-8" not in rendered
+    assert "- line-9" not in rendered
+    assert "… 2 changed lines hidden · Ctrl+R to review" in rendered
+    changed = [line for line in build_tool_preview(block).lines if _without_diff_number(line.text).startswith(("-", "+"))]
+    assert len(changed) == 8
+    assert all(_without_diff_number(line.text).startswith("-") for line in changed)
+
+
+def test_edit_with_empty_old_string_stays_edited_and_keeps_review_diff() -> None:
+    new = "\n".join(f"line-{index}" for index in range(10))
+    block = ToolBlock(
+        tool_call_id="edit-add",
+        name="edit_file",
+        arguments={"file_path": "/workspace/f.md", "old_string": "", "new_string": new},
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/f.md (+10 -0)" in rendered
+    assert "+ line-0" in rendered
+    review = _plain(render_review([("edit_file", block.arguments)], 100))
+    assert "+line-0" in review
+    assert "+line-9" in review
+
+
+def test_consecutive_creates_collapse_and_ctrl_o_expands_file_list() -> None:
+    blocks = [ToolBlock(
+        tool_call_id=f"create-{index}", name="write_file",
+        arguments={
+            "file_path": f"/workspace/file-{index}.md",
+            "content": f"content {index}",
+        },
+        artifact={"operation": "create"},
+        status="completed",
+    ) for index in range(18)]
+    state = CliState(blocks=blocks)
+    collapsed = _plain(render_transcript(state, 100))
+    assert collapsed.count("Create 18 files") == 1
+    assert "├ … 13 more" in collapsed
+    assert "└ /workspace/file-17.md" in collapsed
+    assert "/workspace/file-0.md" not in collapsed
+    assert "Ctrl+O to expand" in collapsed
+
+    state.tools_expanded = True
+    expanded = _plain(render_transcript(state, 100))
+    assert "Create 18 files" in expanded
+    assert all(f"/workspace/file-{index}.md" in expanded for index in range(18))
+    assert "more" not in expanded
+    assert "Ctrl+O to expand" not in expanded
+    app = CliApplication.__new__(CliApplication)
+    app.state = state
+    app.interaction = None
+    review = _plain(render_review(app._review_calls(), 100))
+    assert "+content 0" in review
+    assert "+content 17" in review
+
+
+def test_write_operation_artifact_controls_create_and_overwrite_titles() -> None:
+    path = "/workspace/report.md"
+    args = {"file_path": path, "content": "hello"}
+    created = ToolBlock("write-new", "write_file", args, artifact={"operation": "create"}, status="completed")
+    overwritten = ToolBlock("write-old", "write_file", args, artifact={"operation": "overwrite"}, status="completed")
+    unknown = ToolBlock("write-legacy", "write_file", args, status="completed")
+    edited = ToolBlock(
+        "edit-old-empty", "edit_file",
+        {"file_path": path, "old_string": "", "new_string": "hello"},
+        artifact={"operation": "create"}, status="completed",
+    )
+    assert "● Create /workspace/report.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
+    assert "● Wrote /workspace/report.md" in _plain(render_transcript(CliState(blocks=[overwritten]), 100))
+    assert "● write workspace/report.md" in _plain(render_transcript(CliState(blocks=[unknown]), 100))
+    assert "● Edited /workspace/report.md" in _plain(render_transcript(CliState(blocks=[edited]), 100))
+
+
+def test_file_mutation_normalizer_produces_semantics_and_compact_rows() -> None:
+    path = "/workspace/report.md"
+    created = ToolBlock("create", "write_file", {"file_path": path, "content": "x"},
+                        artifact={"operation": "create"}, status="completed")
+    overwritten = ToolBlock("overwrite", "write_file", {
+        "file_path": path, "content": "\n".join(f"line-{index}" for index in range(10)),
+    }, artifact={"operation": "overwrite"}, status="completed")
+    edited = ToolBlock("modify", "edit_file", {
+        "file_path": path, "old_string": "old", "new_string": "new",
+    }, status="completed")
+    deleted = ToolBlock("delete", "delete", {"file_path": path}, status="completed")
+    assert normalize_file_mutation(created).operation == "create"
+    assert normalize_file_mutation(edited).operation == "modify"
+    assert normalize_file_mutation(overwritten).operation == "overwrite"
+    assert normalize_file_mutation(deleted).operation == "delete"
+    compact = normalize_file_mutation(overwritten).compact_lines
+    assert len([line for line in compact if line.style == "add"]) == 6
+    assert compact[-1].text == "… 4 lines hidden · Ctrl+R to review"
+    assert normalize_file_mutation(ToolBlock("legacy", "write_file", overwritten.arguments,
+                                            status="completed")) is None
+
+
+def test_create_aggregation_consumes_semantics_without_tool_identity() -> None:
+    mutations = [FileMutationPreview(f"/workspace/{index}.py", "create") for index in range(7)]
+    collapsed = aggregate_file_mutations(mutations)
+    expanded = aggregate_file_mutations(mutations, expanded=True)
+    assert collapsed.paths == tuple(mutation.path for mutation in mutations)
+    assert collapsed.compact_lines[0].text == "  ├ … 2 more"
+    assert collapsed.compact_lines[-1].text == "  Ctrl+O to expand"
+    assert len(expanded.compact_lines) == 7
+
+
+def test_edit_preview_many_deletions_keep_one_addition() -> None:
+    old = "\n".join(f"keep-{index}" for index in range(20))
+    block = ToolBlock(
+        tool_call_id="edit-floor-plus",
+        name="edit_file",
+        arguments={"file_path": "/workspace/file.md", "old_string": old, "new_string": "replaced"},
+        status="completed",
+    )
+    state = CliState(blocks=[block])
+    rendered = _plain(render_transcript(state, 100))
+    assert "Edited /workspace/file.md (+1 -20)" in rendered
+    assert "+ replaced" in rendered
+    assert "- keep-6" in rendered
+    assert "- keep-7" not in rendered
+    assert "⋮" in rendered
+    assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    assert texts == [
+        "",
+        *[f"- keep-{index}" for index in range(7)],
+        "  ⋮",
+        "+ replaced",
+        "",
+        "… 13 changed lines hidden · Ctrl+R to review",
+    ]
+    review = _plain(render_review([("edit_file", block.arguments)], 100))
+    assert "-keep-15" in review
+    assert "+replaced" in review
+
+
+def test_edit_preview_many_additions_keep_one_deletion() -> None:
+    new = "\n".join(f"add-{index}" for index in range(20))
+    block = ToolBlock(
+        tool_call_id="edit-floor-minus",
+        name="edit_file",
+        arguments={"file_path": "/workspace/file.md", "old_string": "keep", "new_string": new},
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/file.md (+20 -1)" in rendered
+    assert "- keep" in rendered
+    assert "+ add-6" in rendered
+    assert "+ add-7" not in rendered
+    assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    assert texts == [
+        "",
+        "- keep",
+        *[f"+ add-{index}" for index in range(7)],
+        "",
+        "… 13 changed lines hidden · Ctrl+R to review",
+    ]
+    assert "  ⋮" not in texts
+
+
+def test_edit_preview_under_budget_shows_all_without_hidden_hint() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-small",
+        name="edit_file",
+        arguments={"file_path": "/workspace/notes.md", "old_string": "l1\nl2\nl3", "new_string": "n1\nn2"},
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/notes.md (+2 -3)" in rendered
+    for line in ("- l1", "- l2", "- l3", "+ n1", "+ n2"):
+        assert line in rendered
+    assert "changed lines hidden" not in rendered
+    assert "⋮" not in rendered
+
+
+def test_edit_preview_marks_hunk_jumps_with_separator() -> None:
+    keep = "\n".join(f"M{index}" for index in range(7))
+    block = ToolBlock(
+        tool_call_id="edit-hunks",
+        name="edit_file",
+        arguments={
+            "file_path": "/workspace/file.md",
+            "old_string": f"old1\n{keep}\nold2",
+            "new_string": f"new1\n{keep}\nnew2",
+        },
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/file.md (+2 -2)" in rendered
+    assert "- old1" in rendered
+    assert "+ new1" in rendered
+    assert "- old2" in rendered
+    assert "+ new2" in rendered
+    assert "changed lines hidden" not in rendered
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    assert texts == ["", "- old1", "+ new1", "  ⋮", "- old2", "+ new2"]
+
+
+def test_edit_preview_single_hunk_never_shows_separator() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-single-hunk",
+        name="edit_file",
+        arguments={"file_path": "/workspace/notes.md", "old_string": "a\nb\nc", "new_string": "a\nb\nx"},
+        status="completed",
+    )
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    assert texts == ["", "- c", "+ x"]
+
+
+def test_edit_preview_separator_does_not_consume_budget() -> None:
+    keep_p = "\n".join(f"P{index}" for index in range(7))
+    keep_q = "\n".join(f"Q{index}" for index in range(7))
+    block = ToolBlock(
+        tool_call_id="edit-three-hunks",
+        name="edit_file",
+        arguments={
+            "file_path": "/workspace/file.md",
+            "old_string": f"A\n{keep_p}\nB1\nB2\n{keep_q}\nD",
+            "new_string": f"A2\n{keep_p}\nB\n{keep_q}\nD1\nD2",
+        },
+        status="completed",
+    )
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    changed = [text for text in texts if text.startswith(("-", "+"))]
+    assert len(changed) == 8
+    assert texts.count("  ⋮") == 2
+    assert texts == [
+        "", "- A", "+ A2", "  ⋮", "- B1", "- B2", "+ B", "  ⋮", "- D", "+ D1", "+ D2",
+    ]
+    assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100))
+
+
+def test_edit_preview_hidden_count_counts_only_changed_lines() -> None:
+    keep = "\n".join(f"N{index}" for index in range(7))
+    old = "\n".join(f"A{index}" for index in range(7)) + f"\n{keep}\n" + "\n".join(f"B{index}" for index in range(7))
+    block = ToolBlock(
+        tool_call_id="edit-hidden-count",
+        name="edit_file",
+        arguments={"file_path": "/workspace/file.md", "old_string": old, "new_string": keep},
+        status="completed",
+    )
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    changed = [text for text in texts if text.startswith(("-", "+"))]
+    assert len(changed) == 8
+    assert texts.count("  ⋮") == 1
+    assert texts[-1] == "… 6 changed lines hidden · Ctrl+R to review"
+
+
+def test_edit_preview_wraps_long_lines_before_terminal_edge() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-wide",
+        name="edit_file",
+        arguments={"file_path": "/workspace/f.md", "old_string": "short", "new_string": "x" * 200},
+        status="completed",
+    )
+    rendered = _plain(_capture(_tool(block, False), 80))
+    assert all(len(line) < 80 for line in rendered.splitlines())
+    assert rendered.count("x") >= 200
+
+
+def test_edit_preview_empty_new_string_still_shows_deletion() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-empty-new",
+        name="edit_file",
+        arguments={"file_path": "/workspace/f.md", "old_string": "foo", "new_string": ""},
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "- foo" in rendered
+    assert "changed lines hidden" not in rendered
+    review = _plain(render_review([("edit_file", block.arguments)], 100))
+    assert "-foo" in review
+
+
+def test_edit_preview_empty_old_string_shows_addition() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-empty-old",
+        name="edit_file",
+        arguments={"file_path": "/workspace/f.md", "old_string": "", "new_string": "foo"},
+        status="completed",
+    )
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/f.md (+1 -0)" in rendered
+    assert "+ foo" in rendered
+    review = _plain(render_review([("edit_file", block.arguments)], 100))
+    assert "+foo" in review
+
+
+def test_edit_preview_both_empty_strings_has_no_change() -> None:
+    args = {"file_path": "/workspace/f.md", "old_string": "", "new_string": ""}
+    block = ToolBlock(
+        tool_call_id="edit-both-empty", name="edit_file", arguments=args,
+        status="completed",
+    )
+    assert build_diff_preview("edit_file", args) is None
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "Edited /workspace/f.md" in rendered
+    assert "(+" not in rendered
+    assert " - " not in rendered
+    assert " + " not in rendered
+    assert "Nothing to review." in _plain(render_review([("edit_file", args)], 100))
+
+
+def test_write_empty_file_has_no_fabricated_diff() -> None:
+    args = {"file_path": "/workspace/empty.md", "content": ""}
+    block = ToolBlock(
+        tool_call_id="write-empty", name="write_file", arguments=args,
+        status="completed",
+    )
+    assert build_diff_preview("write_file", args) is None
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "write /workspace/empty.md" in rendered
+    assert "+0 lines" not in rendered
+    review = _plain(render_review([("write_file", args)], 100))
+    assert "Nothing to review." in review
+
+    created = ToolBlock(
+        tool_call_id="write-empty-created", name="write_file", arguments=args,
+        artifact={"operation": "create"}, status="completed",
+    )
+    assert "● Create /workspace/empty.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
 
 
 def test_edit_preview_counts_added_deleted() -> None:
@@ -719,6 +1174,124 @@ def test_edit_preview_without_reliable_diff_omits_counts() -> None:
     assert "(+" not in rendered
 
 
+def test_unknown_tool_start_creates_block_with_identity_preserved() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="u-1", name="custom_unknown_tool",
+        arguments={"query": "middleware", "to": "agent/"},
+    ))
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    assert block.name == "custom_unknown_tool"
+    assert block.arguments == {"query": "middleware", "to": "agent/"}
+    assert block.status == "running"
+
+
+def test_unknown_tool_output_and_completion_render_without_builder() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="u-2", name="custom_unknown_tool",
+        arguments={"query": "middleware"},
+    ))
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="u-2", content="entry 0\n"))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="u-2", name="custom_unknown_tool",
+        content="entry 0\nentry 1",
+    ))
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    assert block.status == "completed"
+    assert block.output == "entry 0\nentry 1"
+    rendered = _plain(render_transcript(state, 100))
+    assert "custom_unknown_tool middleware" in rendered
+    assert "entry 1" in rendered
+
+
+def test_unknown_tool_output_folds_like_generic_output() -> None:
+    output = "\n".join(f"row {index}" for index in range(12))
+    block = ToolBlock(
+        "u-3", "custom_unknown_tool", {"query": "q"},
+        output=output, status="completed",
+    )
+    collapsed = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "row 11" in collapsed
+    assert "row 0" not in collapsed
+    assert "… 4 output lines hidden · Ctrl+O to expand" in collapsed
+
+
+def test_unknown_tool_completion_freezes_status_transitions() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="u-4", name="custom_unknown_tool", arguments={}))
+    state.apply(RunEvent(type="tool_completed", tool_call_id="u-4", name="custom_unknown_tool", content="ok"))
+    ok = state.blocks[0]
+    assert isinstance(ok, ToolBlock)
+    assert ok.status == "completed"
+    assert not ok.is_error
+
+    state.apply(RunEvent(type="tool_started", tool_call_id="u-5", name="custom_unknown_tool", arguments={}))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="u-5", name="custom_unknown_tool",
+        content="Error: boom", is_error=True,
+    ))
+    failed = state.blocks[1]
+    assert isinstance(failed, ToolBlock)
+    assert failed.status == "error"
+    assert failed.is_error
+    rendered = _plain(render_transcript(state, 100))
+    assert "Failed (exit 1) custom_unknown_tool" in rendered
+    assert "boom" in rendered
+
+
+def test_unknown_tool_preview_falls_back_to_generic_builder() -> None:
+    block = ToolBlock(
+        "u-6", "custom_unknown_tool", {"query": "middleware"},
+        output="found", status="completed",
+    )
+    preview = build_tool_preview(block)
+    assert preview.kind == "custom_unknown_tool"
+    assert preview.verb == "custom_unknown_tool"
+    assert preview.target == "middleware"
+    assert preview.summary == "custom_unknown_tool middleware"
+    assert preview.group == "other"
+    assert preview.action == "expand"
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "custom_unknown_tool middleware" in rendered
+    assert "found" in rendered
+
+
+def test_unknown_tool_with_artifact_renders_and_keeps_artifact() -> None:
+    block = ToolBlock(
+        "u-7", "custom_unknown_tool", {"query": "q"},
+        output="raw result", artifact={"provider": "custom", "rows": 3},
+        status="completed",
+    )
+    preview = build_tool_preview(block)
+    assert preview.kind == "custom_unknown_tool"
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "custom_unknown_tool" in rendered
+    assert "raw result" in rendered
+
+
+def test_unknown_tool_round_trips_through_transcript_restore() -> None:
+    blocks = messages_to_transcript([
+        AIMessage(content="", tool_calls=[{
+            "id": "u-8", "name": "custom_unknown_tool", "args": {"query": "middleware"},
+        }]),
+        ToolMessage(content="found 3 entries", tool_call_id="u-8", name="custom_unknown_tool"),
+    ])
+    assert blocks[0].kind == "tool"
+    assert blocks[0].name == "custom_unknown_tool"
+    assert blocks[0].status == "completed"
+    state = CliState()
+    state.load_transcript(blocks)
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    assert block.name == "custom_unknown_tool"
+    rendered = _plain(render_transcript(state, 100))
+    assert "custom_unknown_tool middleware" in rendered
+    assert "found 3 entries" in rendered
+
+
 def test_delete_preview_does_not_invent_deleted_line_count() -> None:
     state = CliState(blocks=[ToolBlock(
         tool_call_id="delete-1",
@@ -727,7 +1300,7 @@ def test_delete_preview_does_not_invent_deleted_line_count() -> None:
         status="completed",
     )])
     rendered = _plain(render_transcript(state, 100))
-    assert "delete /workspace/old-report.md" in rendered
+    assert "Deleted /workspace/old-report.md" in rendered
     assert "-83" not in rendered
     assert "lines hidden" not in rendered
 

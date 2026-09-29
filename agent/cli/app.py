@@ -49,7 +49,7 @@ from agent.cli.commands import Command, command_table
 from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
-from agent.cli.previews import is_mutation_tool
+from agent.cli.previews import is_mutation_tool, normalize_file_mutation
 from agent.cli.rendering import (
     RenderedUnit,
     TranscriptDocument,
@@ -1681,8 +1681,25 @@ class CliApplication:
             ]
             if found:
                 return found
-        for block in reversed(self.state.blocks):
+        for index in range(len(self.state.blocks) - 1, -1, -1):
+            block = self.state.blocks[index]
             if isinstance(block, ToolBlock) and is_mutation_tool(block.name):
+                mutation = normalize_file_mutation(block)
+                if mutation is not None and mutation.operation in {"create", "modify"}:
+                    first = index
+                    while first > 0:
+                        prior = self.state.blocks[first - 1]
+                        prior_mutation = normalize_file_mutation(prior) if isinstance(prior, ToolBlock) else None
+                        if prior_mutation is None or prior_mutation.operation != mutation.operation:
+                            break
+                        if mutation.operation == "modify" and prior_mutation.path != mutation.path:
+                            break
+                        first -= 1
+                    return [
+                        (item.name, item.arguments)
+                        for item in self.state.blocks[first:index + 1]
+                        if isinstance(item, ToolBlock)
+                    ]
                 return [(block.name, block.arguments)]
         return []
 

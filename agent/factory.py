@@ -32,6 +32,7 @@ from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
 from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
+from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.permission import (
     PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
@@ -136,6 +137,7 @@ def build_agent(
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),
             ToolArgHintMiddleware(),
+            WriteOperationMiddleware(fs_backend),
             AttachmentMaterializationMiddleware(),
             TodoListMiddleware(),
             FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),

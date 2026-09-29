@@ -1,13 +1,17 @@
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+import asyncio
 
 import pytest
 from deepagents.backends.protocol import SandboxBackendProtocol
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.config import BindMount, SandboxConfig
 from agent.factory import create_agent
 from agent.factory import _default_skill_sources
+from agent.middleware.write_operation import WriteOperationMiddleware
+from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import (
     BubblewrapBackend,
     ExecutionMode,
@@ -181,6 +185,76 @@ def test_user_skills_are_read_only_for_file_backend(tmp_path: Path, monkeypatch:
     outside = selected.backend.write("/outside.txt", "bad")
     assert outside.error and "under /workspace" in outside.error
     assert not (workspace / "outside.txt").exists()
+
+
+def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
+    backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/true"), check=False).backend
+    middleware = WriteOperationMiddleware(backend)
+    request = SimpleNamespace(tool_call={
+        "name": "write_file", "args": {"file_path": "/workspace/report.md", "content": "text"},
+    })
+
+    def write(_request: object) -> ToolMessage:
+        result = backend.write("/workspace/report.md", "text")
+        assert result.error is None
+        return ToolMessage(content="Updated file /workspace/report.md", tool_call_id="write-1", name="write_file")
+
+    created = middleware.wrap_tool_call(request, write)
+    overwritten = middleware.wrap_tool_call(request, write)
+    assert created.artifact == {"operation": "create"}
+    assert overwritten.artifact == {"operation": "overwrite"}
+
+    empty_request = SimpleNamespace(tool_call={
+        "name": "write_file", "args": {"file_path": "/workspace/empty.md", "content": ""},
+    })
+
+    def write_empty(_request: object) -> ToolMessage:
+        result = backend.write("/workspace/empty.md", "")
+        assert result.error is None
+        return ToolMessage(content="Updated file /workspace/empty.md", tool_call_id="write-empty", name="write_file")
+
+    assert middleware.wrap_tool_call(empty_request, write_empty).artifact == {"operation": "create"}
+
+    def fail(_request: object) -> ToolMessage:
+        return ToolMessage(content="failed", tool_call_id="write-2", name="write_file", status="error")
+
+    assert middleware.wrap_tool_call(request, fail).artifact is None
+
+    async def async_write(_request: object) -> ToolMessage:
+        result = backend.write("/workspace/async.md", "text")
+        assert result.error is None
+        return ToolMessage(content="Updated file /workspace/async.md", tool_call_id="write-3", name="write_file")
+
+    async_request = SimpleNamespace(tool_call={
+        "name": "write_file", "args": {"file_path": "/workspace/async.md", "content": "text"},
+    })
+    async def check_async() -> None:
+        first = await middleware.awrap_tool_call(async_request, async_write)
+        second = await middleware.awrap_tool_call(async_request, async_write)
+        assert first.artifact == {"operation": "create"}
+        assert second.artifact == {"operation": "overwrite"}
+
+    asyncio.run(check_async())
+
+
+def test_write_operation_reaches_tool_completion_artifact(tmp_path: Path) -> None:
+    backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/true"), check=False).backend
+    path = "/workspace/report.md"
+    model = scripted_model([
+        AIMessage(content="", tool_calls=[{
+            "id": "write-new", "name": "write_file",
+            "args": {"file_path": path, "content": "first"},
+        }]),
+        AIMessage(content="done"),
+    ])
+    runner = AgentRunner(prepared=create_agent(model=model, backend=backend, skills=[]), thread_id="write-operation")
+    events: list[RunEvent] = []
+    assert runner.invoke("write", on_event=events.append).status == "waiting_confirmation"
+    assert runner.approve_tool("write-new", on_event=events.append).status == "completed"
+    completed = [event for event in events if event.type == "tool_completed" and event.tool_call_id == "write-new"]
+    assert len(completed) == 1
+    assert completed[0].artifact == {"operation": "create"}
+    runner.close()
 
 
 def test_default_skills_ignore_project_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

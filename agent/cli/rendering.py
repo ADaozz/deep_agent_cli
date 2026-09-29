@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,20 +29,32 @@ from agent.cli.previews import (
     REVIEW_HINT,
     ToolPreview,
     added_line_label,
-    build_diff_preview,
+    aggregate_file_mutations,
+    build_review_mutation,
     build_tool_preview,
+    file_tool_preview,
+    normalize_file_mutation,
     tool_group,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.config import DEFAULT_UI_TIMEZONE
 
-# Renderer folding limits: how much of a preview is shown before hiding lines.
-DIFF_PREVIEW_LINES = 10
-WRITE_PREVIEW_LINES = 6
+# Non-file output folding stays in the renderer.
 EXECUTE_TAIL_LINES = 8
 
 EXPLORE_PREVIEW_LIMIT = 5
 EXPLORE_FAILURE_PREVIEW_LIMIT = 3
+
+# PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
+_PREVIEW_LINE_STYLES: dict[str, str] = {
+    "plain": "",
+    "dim": "dim",
+    "hunk": "bold cyan",
+    "add": "white on #245c38",
+    "delete": "white on #4a2028",
+    "error": "red",
+    "url": "bright_cyan",
+}
 
 
 def render_transcript(
@@ -134,6 +147,18 @@ def transcript_units(state: CliState, timezone: ZoneInfo | None = None, width: i
             ))
             index += 1
             continue
+        create_path = _created_file_path(block)
+        if create_path is not None:
+            group = [block]
+            while index + len(group) < len(blocks):
+                candidate = blocks[index + len(group)]
+                if _created_file_path(candidate) is None:
+                    break
+                group.append(candidate)
+            if len(group) > 1:
+                units.append(_create_group_unit(group, state.tools_expanded, width))
+                index += len(group)
+                continue
         if not state.tools_expanded and _is_explore(block):
             group = [block]
             index += 1
@@ -145,6 +170,18 @@ def transcript_units(state: CliState, timezone: ZoneInfo | None = None, width: i
                 index += 1
             units.append(_explore_unit(group, width))
             continue
+        edit_path = _mergeable_modify_path(block)
+        if edit_path is not None:
+            group = [block]
+            while index + len(group) < len(blocks):
+                candidate = blocks[index + len(group)]
+                if _mergeable_modify_path(candidate) != edit_path:
+                    break
+                group.append(candidate)
+            if len(group) > 1:
+                units.append(_modify_group_unit(group, width))
+                index += len(group)
+                continue
         units.append(_tool_unit(block, state.tools_expanded, width))
         index += 1
     return units
@@ -177,6 +214,55 @@ def _explore_unit(blocks: list[ToolBlock], width: int) -> TranscriptUnit:
         build=lambda: _explore_group(list(members), width),
         owner=members,
     )
+
+
+def _mergeable_modify_path(block: Any) -> str | None:
+    mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
+    return mutation.path if mutation and mutation.operation == "modify" and mutation.diff else None
+
+
+def _created_file_path(block: Any) -> str | None:
+    mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
+    return mutation.path if mutation and mutation.operation == "create" else None
+
+
+def _create_group_unit(blocks: list[ToolBlock], expanded: bool, width: int) -> TranscriptUnit:
+    members = tuple(blocks)
+    return TranscriptUnit(
+        key=("create_group", id(members[0]), expanded),
+        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), expanded),
+        build=lambda: _create_group(list(members), expanded, width),
+        owner=members,
+    )
+
+
+def _create_group(blocks: list[ToolBlock], expanded: bool, width: int) -> Any:
+    mutations = [item for block in blocks if (item := normalize_file_mutation(block)) is not None]
+    mutation = aggregate_file_mutations(mutations, expanded=expanded)
+    if len(mutation.paths) == 1:
+        return _tool(blocks[-1], expanded, width)
+    title = Text.assemble(("● ", "green"), (f"Create {len(mutation.paths)} files", "bold"))
+    rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
+    for row in (title, *rows):
+        row.truncate(max(1, width - 1), overflow="ellipsis")
+    return Group(Text(""), title, *rows)
+
+
+def _modify_group_unit(blocks: list[ToolBlock], width: int) -> TranscriptUnit:
+    members = tuple(blocks)
+    return TranscriptUnit(
+        key=("modify_group", id(members[0])),
+        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members),),
+        build=lambda: _modify_group(list(members), width),
+        owner=members,
+    )
+
+
+def _modify_group(blocks: list[ToolBlock], width: int) -> Any:
+    mutations = [item for block in blocks if (item := normalize_file_mutation(block)) is not None]
+    mutation = aggregate_file_mutations(mutations)
+    preview = file_tool_preview(mutation)
+    return render_tool_preview(blocks[-1], preview, expanded=False, width=width)
 
 
 def _live_tick(block: ToolBlock) -> int | None:
@@ -267,24 +353,65 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
         Text("Esc or Ctrl+R close · this is not an approval", style="dim"),
     ]
     for name, args in calls:
-        diff = build_diff_preview(name, args)
-        if diff is None or not diff.full_diff:
+        mutation = build_review_mutation(name, args)
+        if mutation is None or mutation.diff is None or not mutation.diff.full_diff:
             continue
+        diff = mutation.diff
         parts.append(Text(""))
-        if diff.kind == "write":
+        if mutation.operation == "overwrite":
             parts.append(Text(f"write {diff.path}", style="bold"))
             parts.append(Text(added_line_label(diff.added or 0), style="green"))
-            parts.append(Syntax(
-                "\n".join(line.text for line in diff.lines),
-                "diff", theme="ansi_dark", word_wrap=True,
-            ))
-        elif diff.kind == "delete":
+            parts.append(Group(*(
+                row
+                for number, line in enumerate(diff.lines, 1)
+                for row in _diff_row(f"{number:>4} {line.text}", "add", width)
+            )))
+        elif mutation.operation == "delete":
             parts.append(Text(f"delete {diff.path}", style="dim"))
         else:
-            parts.append(Syntax(diff.full_diff, "diff", theme="ansi_dark", word_wrap=True))
+            parts.append(Group(*_numbered_diff(diff.full_diff, width)))
     if len(parts) == 2:
         parts.append(Text("Nothing to review.", style="dim"))
     return _capture(Group(*parts), width)
+
+
+def _diff_row(content: str, kind: str, width: int) -> list[Text]:
+    """Fill every visual row of a changed line, including wrapped rows."""
+    style = _PREVIEW_LINE_STYLES[kind]
+    available = max(1, width - 1)  # Spare terminal column avoids auto-wrap.
+    console = Console(width=max(20, width))
+    rows = list(Text(content, style=style).wrap(console, available, overflow="fold"))
+    if kind in {"add", "delete"}:
+        for row in rows:
+            row.pad_right(max(0, available - row.cell_len))
+    return rows
+
+
+def _numbered_diff(raw: str, width: int) -> list[Text]:
+    """Render source line numbers from unified hunk coordinates."""
+    result: list[Text] = []
+    old_number = new_number = 0
+    for line in raw.splitlines():
+        if line.startswith("@@"):
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match:
+                old_number, new_number = map(int, match.groups())
+            result.extend(_diff_row(line, "hunk", width))
+        elif line.startswith(("---", "+++")):
+            result.extend(_diff_row(line, "dim", width))
+        elif line.startswith("-"):
+            result.extend(_diff_row(f"{old_number:>4} {line}", "delete", width))
+            old_number += 1
+        elif line.startswith("+"):
+            result.extend(_diff_row(f"{new_number:>4} {line}", "add", width))
+            new_number += 1
+        elif line.startswith(" "):
+            result.extend(_diff_row(f"{new_number:>4} {line}", "dim", width))
+            old_number += 1
+            new_number += 1
+        else:
+            result.extend(_diff_row(line, "dim", width))
+    return result
 
 
 def _message(block: MessageBlock, thinking_collapsed: bool) -> list[Any]:
@@ -437,12 +564,21 @@ def render_tool_preview(
     )
     color = "#888888" if block.status == "interrupted" else "yellow" if block.status == "waiting" else "green"
     summary = f"{preview.verb} {preview.target}".strip()
-    if preview.group == "mutation" and preview.detail:
-        summary = f"{summary} {preview.detail}"
-    title = Text.assemble((f"{symbol} ", color), (summary, "bold"), (suffix, "dim"))
+    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
+    mutation = preview.file_mutation
+    if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
+        title.append(" (")
+        title.append(f"+{mutation.diff.added or 0}", style="green")
+        title.append(" ")
+        title.append(f"-{mutation.diff.deleted or 0}", style="red")
+        title.append(")")
+    elif preview.group == "mutation" and preview.detail:
+        title.append(f" {preview.detail}", style="bold")
+    title.append(suffix, style="dim")
     body: list[Any] = [title]
     if preview.group == "mutation":
-        body.extend(_mutation_body(preview))
+        body.extend(_mutation_body(preview, width))
+        return Padding(Group(*body), (1, 0, 0, 0), expand=False)
     elif preview.lines:
         body.append(Text(
             "\n".join(f"  {line.text}" for line in preview.lines),
@@ -470,21 +606,20 @@ def render_tool_preview(
     return Padding(Group(*body), (1, 1, 0, 1), expand=False)
 
 
-def _mutation_body(preview: ToolPreview) -> list[Any]:
+def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
     body: list[Any] = []
     if preview.label:
         body.append(Text(f"  {preview.label}", style="green"))
         body.append(Text(""))
-    limit = WRITE_PREVIEW_LINES if preview.kind == "write" else DIFF_PREVIEW_LINES
-    shown = preview.lines[:limit]
-    if shown:
-        body.append(Syntax(
-            "\n".join(line.text for line in shown),
-            "diff", theme="ansi_dark", word_wrap=True,
-        ))
-    hidden = len(preview.lines) - limit
-    if hidden > 0:
-        body.append(Text(f"  … {hidden} lines hidden · {REVIEW_HINT}", style="dim"))
+    console = Console(width=max(20, width))
+    for line in preview.lines:
+        if not line.text:
+            body.append(Text(""))
+        elif line.style in {"add", "delete"}:
+            body.extend(_diff_row(f"  {line.text}", line.style, width))
+        else:
+            text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
+            body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
     return body
 
 

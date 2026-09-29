@@ -10,6 +10,7 @@ is never persisted; sessions keep the raw ToolMessage artifact instead.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 from dataclasses import dataclass
 from difflib import unified_diff
@@ -17,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
+from agent.file_mutation import FileMutationOperation
 
 PreviewStyle = Literal["plain", "dim", "add", "delete", "error", "url"]
 PreviewGroup = Literal["explore", "mutation", "command", "web", "other"]
@@ -27,6 +29,12 @@ PreviewAction = Literal["none", "expand", "review"]
 # hand-writes its own wording.
 EXPAND_HINT = "Ctrl+O to expand"
 REVIEW_HINT = "Ctrl+R to review"
+
+# Maximum changed lines (- and +) shown in the edit compact preview.
+# Separators, blanks and the hidden hint never count against it.
+EDIT_PREVIEW_CHANGED_LINES = 8
+WRITE_PREVIEW_LINES = 6
+CREATE_PREVIEW_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -50,18 +58,41 @@ class ToolPreview:
     group: PreviewGroup = "other"
     action: PreviewAction = "none"
     syntax: str | None = None
+    file_mutation: FileMutationPreview | None = None
 
 
 @dataclass(frozen=True)
 class DiffPreview:
     """Mutation domain model shared by the compact card and the full review."""
 
-    kind: Literal["write", "edit", "delete"]
     path: str
     added: int | None = None
     deleted: int | None = None
     lines: tuple[PreviewLine, ...] = ()
     full_diff: str = ""
+
+
+@dataclass(frozen=True)
+class FileMutationPreview:
+    """A file change independent of the tool that produced it."""
+
+    path: str
+    operation: FileMutationOperation
+    diff: DiffPreview | None = None
+    compact_lines: tuple[PreviewLine, ...] = ()
+    label: str = ""
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ChangedLine:
+    """One real -/+ line of a unified diff, with its hunk and diff order."""
+
+    text: str
+    kind: Literal["add", "delete"]
+    hunk: int
+    order: int
+    number: int
 
 
 PreviewBuilder = Callable[[ToolBlock], ToolPreview]
@@ -112,6 +143,92 @@ def added_line_label(count: int) -> str:
     return f"+{count} {'line' if count == 1 else 'lines'}"
 
 
+def _changed_lines(raw: str) -> list[_ChangedLine]:
+    """Real -/+ lines with hunk index and diff order; context is dropped."""
+    changed: list[_ChangedLine] = []
+    hunk = -1
+    seen_hunk = False
+    old_number = new_number = 0
+    for line in raw.splitlines():
+        if line.startswith("@@"):
+            seen_hunk = True
+            hunk += 1
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match:
+                old_number, new_number = map(int, match.groups())
+            continue
+        if not seen_hunk:
+            continue  # --- / +++ header lines before the first hunk
+        if line.startswith("+"):
+            changed.append(_ChangedLine(line, "add", hunk, len(changed), new_number))
+            new_number += 1
+        elif line.startswith("-"):
+            changed.append(_ChangedLine(line, "delete", hunk, len(changed), old_number))
+            old_number += 1
+        elif line.startswith(" "):
+            old_number += 1
+            new_number += 1
+    return changed
+
+
+def _select_changed_lines(changed: list[_ChangedLine]) -> list[_ChangedLine]:
+    """Pick the compact-preview lines: first N, then a +/- floor, then re-sort.
+
+    When both sides exist, the preview must show at least one - and one +;
+    the replacement line keeps its original diff position after sorting.
+    """
+    if len(changed) <= EDIT_PREVIEW_CHANGED_LINES:
+        return list(changed)
+    selected = changed[:EDIT_PREVIEW_CHANGED_LINES]
+    if len({line.kind for line in changed}) < 2:
+        return selected
+    if "add" not in {line.kind for line in selected}:
+        replacement = next(line for line in changed if line.kind == "add")
+        for index in range(len(selected) - 1, -1, -1):
+            if selected[index].kind == "delete":
+                selected[index] = replacement
+                break
+    elif "delete" not in {line.kind for line in selected}:
+        replacement = next(line for line in changed if line.kind == "delete")
+        for index in range(len(selected) - 1, -1, -1):
+            if selected[index].kind == "add":
+                selected[index] = replacement
+                break
+    selected.sort(key=lambda line: line.order)
+    return selected
+
+
+def _format_changed_text(line: str) -> str:
+    prefix, content = line[:1], line[1:]
+    return f"{prefix} {content}" if content else prefix
+
+
+def _edit_display_lines(changed: list[_ChangedLine]) -> tuple[PreviewLine, ...]:
+    """Compact edit body: changed lines only, ⋮ at skipped spans, hidden count.
+
+    A ⋮ marks that the preview jumped over hidden changed lines or crossed a
+    hunk boundary; it never counts against the budget or the hidden total.
+    """
+    selected = _select_changed_lines(changed)
+    if not selected:
+        return ()
+    display: list[PreviewLine] = [PreviewLine("", "plain")]
+    previous: _ChangedLine | None = None
+    for line in selected:
+        if previous is not None and (line.order > previous.order + 1 or line.hunk != previous.hunk):
+            display.append(PreviewLine("  ⋮", "dim"))
+        display.append(PreviewLine(
+            f"{line.number:>4} {_format_changed_text(line.text)}",
+            "add" if line.kind == "add" else "delete",
+        ))
+        previous = line
+    hidden = len(changed) - len(selected)
+    if hidden > 0:
+        display.append(PreviewLine("", "plain"))
+        display.append(PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim"))
+    return tuple(display)
+
+
 def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
     """Parse mutation arguments into the shared DiffPreview domain model."""
     if name == "write_file":
@@ -129,15 +246,15 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
             return None
         content_lines = [f"+{line}" for line in content.splitlines()]
         return DiffPreview(
-            kind="write",
             path=_mutation_path(name, args),
             added=len(content_lines),
             lines=tuple(PreviewLine(line, "add") for line in content_lines),
             full_diff=raw,
         )
     if name == "edit_file":
-        old = args.get("old_string") or args.get("old_text")
-        new = args.get("new_string") or args.get("new_text")
+        # Presence checks, not truthiness: an explicit "" is a legal edit side.
+        old = args["old_string"] if "old_string" in args else args.get("old_text")
+        new = args["new_string"] if "new_string" in args else args.get("new_text")
         if not isinstance(old, str) or not isinstance(new, str):
             return None
         path = str(args.get("file_path") or args.get("path") or "file")
@@ -150,23 +267,14 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
         ))
         if not raw:
             return None
-        # Compact preview hides unified diff headers; only real changes and
-        # their context lines remain.
-        changed = [
-            line for line in raw.splitlines()
-            if not line.startswith(("---", "+++", "@@"))
-        ]
-        added = sum(1 for line in changed if line.startswith("+"))
-        deleted = sum(1 for line in changed if line.startswith("-"))
+        changed = _changed_lines(raw)
+        added = sum(1 for line in changed if line.kind == "add")
+        deleted = sum(1 for line in changed if line.kind == "delete")
         lines = tuple(
-            PreviewLine(
-                line,
-                "add" if line.startswith("+") else "delete" if line.startswith("-") else "dim",
-            )
+            PreviewLine(line.text, "add" if line.kind == "add" else "delete")
             for line in changed
         )
         return DiffPreview(
-            kind="edit",
             path=_mutation_path(name, args),
             added=added,
             deleted=deleted,
@@ -175,11 +283,127 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
         )
     if name == "delete":
         return DiffPreview(
-            kind="delete",
             path=_mutation_path(name, args),
             full_diff=f"delete {_mutation_path(name, args)}",
         )
     return None
+
+
+def _write_compact_lines(diff: DiffPreview | None) -> tuple[PreviewLine, ...]:
+    if diff is None:
+        return ()
+    lines = [
+        PreviewLine(f"{number:>4} {line.text}", line.style)
+        for number, line in enumerate(diff.lines[:WRITE_PREVIEW_LINES], 1)
+    ]
+    hidden = len(diff.lines) - len(lines)
+    if hidden:
+        lines.append(PreviewLine(f"… {hidden} lines hidden · {REVIEW_HINT}", "dim"))
+    return tuple(lines)
+
+
+def normalize_file_mutation(block: ToolBlock) -> FileMutationPreview | None:
+    """Map a successful tool result to file semantics; never infer a missing write operation."""
+    if block.status != "completed" or block.is_error:
+        return None
+    if block.name == "edit_file":
+        diff = build_diff_preview(block.name, block.arguments)
+        return FileMutationPreview(
+            path=diff.path if diff else _operand(block.arguments),
+            operation="modify", diff=diff,
+            compact_lines=_edit_display_lines(_changed_lines(diff.full_diff)) if diff else (),
+        )
+    if block.name == "write_file":
+        operation = block.artifact.get("operation") if isinstance(block.artifact, dict) else None
+        if operation not in {"create", "overwrite"}:
+            return None
+        diff = build_diff_preview(block.name, block.arguments) if operation == "overwrite" else None
+        return FileMutationPreview(
+            path=_operand(block.arguments), operation=operation, diff=diff,
+            compact_lines=_write_compact_lines(diff) if operation == "overwrite" else (),
+            label=added_line_label(diff.added or 0) if operation == "overwrite" and diff else "",
+        )
+    if block.name == "delete":
+        return FileMutationPreview(path=_operand(block.arguments), operation="delete")
+    return None
+
+
+def build_review_mutation(name: str, args: dict[str, Any]) -> FileMutationPreview | None:
+    """Build proposed diff content when a review has arguments but no tool result."""
+    diff = build_diff_preview(name, args)
+    if diff is None:
+        return None
+    operation: FileMutationOperation = {
+        "edit_file": "modify", "write_file": "overwrite", "delete": "delete",
+    }[name]
+    return FileMutationPreview(path=diff.path, operation=operation, diff=diff)
+
+
+def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
+    verb = {"create": "Create", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
+    detail = ""
+    if mutation.operation == "modify" and mutation.diff:
+        detail = f"(+{mutation.diff.added or 0} -{mutation.diff.deleted or 0})"
+    return ToolPreview(
+        kind="file_mutation", verb=verb, target=mutation.path, detail=detail,
+        label=mutation.label, lines=mutation.compact_lines,
+        group="mutation", action="review", file_mutation=mutation,
+    )
+
+
+def aggregate_file_mutations(
+    mutations: list[FileMutationPreview], *, expanded: bool = False,
+) -> FileMutationPreview:
+    """Select compact rows for a consecutive semantic mutation group."""
+    first = mutations[0]
+    if first.operation == "create":
+        paths = tuple(dict.fromkeys(mutation.path for mutation in mutations))
+        hidden = 0 if expanded else max(0, len(paths) - CREATE_PREVIEW_LIMIT)
+        rows: list[PreviewLine] = []
+        if hidden:
+            rows.append(PreviewLine(f"  ├ … {hidden} more", "dim"))
+        shown = paths if expanded else paths[-CREATE_PREVIEW_LIMIT:]
+        for index, path in enumerate(shown):
+            branch = "└" if index == len(shown) - 1 else "├"
+            rows.append(PreviewLine(f"  {branch} {path}"))
+        if not expanded:
+            rows.append(PreviewLine(f"  {EXPAND_HINT}", "dim"))
+        return FileMutationPreview(
+            path=first.path, operation="create", compact_lines=tuple(rows), paths=paths,
+        )
+    if first.operation != "modify":
+        raise ValueError("Only create and modify mutations can be grouped")
+    changes = [
+        (index, line)
+        for index, mutation in enumerate(mutations)
+        for line in mutation.compact_lines
+        if line.style in {"add", "delete"}
+    ]
+    selected = list(enumerate(changes[:EDIT_PREVIEW_CHANGED_LINES]))
+    if len(changes) > EDIT_PREVIEW_CHANGED_LINES:
+        kinds = {line.style for _, line in changes}
+        shown = {line.style for _, (_, line) in selected}
+        if len(kinds) == 2 and len(shown) == 1:
+            replacement = next((order, item) for order, item in enumerate(changes) if item[1].style not in shown)
+            selected[-1] = replacement
+            selected.sort(key=lambda item: item[0])
+    rows = [PreviewLine("")]
+    previous_order = previous_edit = None
+    for order, (edit_index, line) in selected:
+        if previous_order is not None and (order != previous_order + 1 or edit_index != previous_edit):
+            rows.append(PreviewLine("  ⋮", "dim"))
+        rows.append(line)
+        previous_order, previous_edit = order, edit_index
+    added = sum(mutation.diff.added or 0 for mutation in mutations if mutation.diff)
+    deleted = sum(mutation.diff.deleted or 0 for mutation in mutations if mutation.diff)
+    hidden = added + deleted - len(selected)
+    if hidden:
+        rows.extend((PreviewLine(""), PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim")))
+    return FileMutationPreview(
+        path=first.path, operation="modify",
+        diff=DiffPreview(path=first.path, added=added, deleted=deleted),
+        compact_lines=tuple(rows), paths=tuple(mutation.path for mutation in mutations),
+    )
 
 
 def build_read_preview(block: ToolBlock) -> ToolPreview:
@@ -220,6 +444,9 @@ def build_ls_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_write_preview(block: ToolBlock) -> ToolPreview:
+    mutation = normalize_file_mutation(block)
+    if mutation is not None:
+        return file_tool_preview(mutation)
     diff = build_diff_preview("write_file", block.arguments)
     if diff is None:
         return ToolPreview(
@@ -229,13 +456,16 @@ def build_write_preview(block: ToolBlock) -> ToolPreview:
     return ToolPreview(
         kind="write", verb="write", target=diff.path,
         label=added_line_label(diff.added or 0),
-        lines=diff.lines, group="mutation", action="review",
+        lines=_write_compact_lines(diff), group="mutation", action="review",
     )
 
 
 def build_edit_preview(block: ToolBlock) -> ToolPreview:
+    mutation = normalize_file_mutation(block)
+    if mutation is not None:
+        return file_tool_preview(mutation)
     diff = build_diff_preview("edit_file", block.arguments)
-    verb = "Edited" if block.status == "completed" else "edit"
+    verb = "edit"
     if diff is None:
         return ToolPreview(
             kind="edit", verb=verb, target=_operand(block.arguments),
@@ -247,11 +477,15 @@ def build_edit_preview(block: ToolBlock) -> ToolPreview:
         detail = ""
     return ToolPreview(
         kind="edit", verb=verb, target=diff.path, detail=detail,
-        lines=diff.lines, group="mutation", action="review",
+        lines=_edit_display_lines(_changed_lines(diff.full_diff)),
+        group="mutation", action="review",
     )
 
 
 def build_delete_preview(block: ToolBlock) -> ToolPreview:
+    mutation = normalize_file_mutation(block)
+    if mutation is not None:
+        return file_tool_preview(mutation)
     diff = build_diff_preview("delete", block.arguments)
     target = diff.path if diff is not None else _operand(block.arguments)
     return ToolPreview(
