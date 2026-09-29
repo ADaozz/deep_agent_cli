@@ -12,7 +12,6 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.summarization import (
     SummarizationToolMiddleware,
     create_summarization_tool_middleware,
@@ -33,6 +32,7 @@ from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
 from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
+from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
 from agent.permission import (
     PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
@@ -140,7 +140,7 @@ def build_agent(
             WriteOperationMiddleware(fs_backend),
             AttachmentMaterializationMiddleware(),
             TodoListMiddleware(),
-            FilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+            WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
             compact_middleware,
         ],
         skills=skill_sources,

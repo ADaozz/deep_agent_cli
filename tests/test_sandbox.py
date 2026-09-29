@@ -5,7 +5,7 @@ import asyncio
 
 import pytest
 from deepagents.backends.protocol import SandboxBackendProtocol
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent.config import BindMount, SandboxConfig
 from agent.factory import create_agent
@@ -298,6 +298,30 @@ def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
     assert len(names) == 11
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
+
+
+def test_workspace_execute_reaches_model_tool_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graph registration alone cannot catch middleware filtering at request time."""
+    config = replace(config_for(tmp_path), bwrap_path="/bin/true")
+    selected = select_backend(config, check=False)
+    model = scripted_model([AIMessage(content="done")])
+    bound_names: list[set[str]] = []
+    original_bind = type(model).bind_tools
+
+    def record_bind(self, tools, **kwargs):  # type: ignore[no-untyped-def]
+        bound_names.append({tool.name for tool in tools})
+        return original_bind(self, tools, **kwargs)
+
+    monkeypatch.setattr(type(model), "bind_tools", record_bind)
+    prepared = create_agent(
+        model=model, backend=selected.backend, sandbox_config=config, skills=[],
+    )
+    assert "execute" in prepared.exposed_tool_names
+    prepared.graph.invoke(
+        {"messages": [HumanMessage(content="Check available tools")]},
+        config={"configurable": {"thread_id": "tool-schema-check"}},
+    )
+    assert bound_names and "execute" in bound_names[-1]
 
 
 def test_real_bubblewrap_workspace_isolation_when_available(
