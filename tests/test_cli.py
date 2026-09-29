@@ -2801,7 +2801,7 @@ def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None
 def test_transcript_renderer_matches_uncached_render() -> None:
     state = CliState()
     state.add_user("hello there")
-    state.todos = [{"content": "Inspect files", "status": "in_progress"}]
+    state.todos = [{"content": "Inspect files", "status": "completed"}]
     state.blocks.append(ToolBlock(
         tool_call_id="t1", name="execute", arguments={"command": "pytest -q"},
         output="ok\nfailed", status="completed",
