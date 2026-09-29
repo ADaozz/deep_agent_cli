@@ -16,8 +16,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Install and enable Bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install package and test tools
         run: python -m pip install -e ".[dev]"
       - name: Run tests
