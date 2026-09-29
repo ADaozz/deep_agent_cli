@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import shlex
 import time
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import unified_diff
@@ -16,6 +18,7 @@ from prompt_toolkit.formatted_text import (
     StyleAndTextTuples,
     to_formatted_text,
 )
+from prompt_toolkit.formatted_text.utils import split_lines
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -34,24 +37,7 @@ MUTATION_TOOLS = frozenset({"edit_file", "write_file", "delete"})
 DIFF_PREVIEW_LINES = 10
 EXECUTE_TAIL_LINES = 8
 
-_EXPLORE_KIND = {
-    "read_file": "file",
-    "grep": "grep",
-    "glob": "glob",
-    "ls": "listing",
-}
-_EXPLORE_VERB = {
-    "file": ("Read", "read"),
-    "grep": ("Grepped", "grepped"),
-    "glob": ("Globbed", "globbed"),
-    "listing": ("Listed", "listed"),
-}
-_EXPLORE_NOUN = {
-    "file": ("file", "files"),
-    "grep": ("grep", "greps"),
-    "glob": ("glob", "globs"),
-    "listing": ("listing", "listings"),
-}
+EXPLORE_PREVIEW_LIMIT = 5
 
 
 def render_transcript(
@@ -60,7 +46,7 @@ def render_transcript(
     timezone: ZoneInfo | None = None,
 ) -> str:
     return "\n".join(
-        _capture(unit.build(), width) for unit in transcript_units(state, timezone or ZoneInfo(DEFAULT_UI_TIMEZONE))
+        _capture(unit.build(), width) for unit in transcript_units(state, timezone or ZoneInfo(DEFAULT_UI_TIMEZONE), width)
     )
 
 
@@ -73,10 +59,29 @@ def render_transcript(
 # dirty, so frozen history never pays for Markdown/Syntax parsing again.
 
 
-@dataclass(frozen=True)
+@dataclass
 class RenderedUnit:
     fragments: StyleAndTextTuples
-    lines: int
+    line_count: int
+    _lines: tuple[StyleAndTextTuples, ...] | None = None
+
+    def get_line(self, index: int) -> StyleAndTextTuples:
+        if self._lines is None:
+            self._lines = tuple(list(line) for line in split_lines(self.fragments))
+        return self._lines[index]
+
+
+@dataclass(frozen=True)
+class TranscriptDocument:
+    units: tuple[RenderedUnit, ...]
+    starts: tuple[int, ...]
+    line_count: int
+
+    def get_line(self, index: int) -> StyleAndTextTuples:
+        if index < 0 or index >= self.line_count:
+            raise IndexError(index)
+        unit_index = bisect_right(self.starts, index) - 1
+        return self.units[unit_index].get_line(index - self.starts[unit_index])
 
 
 @dataclass(frozen=True)
@@ -91,10 +96,11 @@ class TranscriptUnit:
 
 def _render_unit(renderable: Any, width: int) -> RenderedUnit:
     text = _capture(renderable, width)
-    return RenderedUnit(to_formatted_text(ANSI(text)), text.count("\n") + 1)
+    fragments = to_formatted_text(ANSI(text))
+    return RenderedUnit(fragments, text.count("\n") + 1)
 
 
-def transcript_units(state: CliState, timezone: ZoneInfo | None = None) -> list[TranscriptUnit]:
+def transcript_units(state: CliState, timezone: ZoneInfo | None = None, width: int = 80) -> list[TranscriptUnit]:
     """Structural pass over the timeline. Cheap: builds no Rich renderables."""
     timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
     units: list[TranscriptUnit] = [
@@ -133,7 +139,7 @@ def transcript_units(state: CliState, timezone: ZoneInfo | None = None) -> list[
                     break
                 group.append(next_block)
                 index += 1
-            units.append(_explore_unit(group))
+            units.append(_explore_unit(group, width))
             continue
         units.append(_tool_unit(block, state.tools_expanded))
         index += 1
@@ -151,27 +157,27 @@ def _message_unit(block: MessageBlock, thinking_collapsed: bool) -> TranscriptUn
 
 def _tool_unit(block: ToolBlock, expanded: bool) -> TranscriptUnit:
     return TranscriptUnit(
-        key=("tool", id(block)),
+        key=("tool", id(block), expanded),
         fingerprint=(block.revision, expanded, _live_tick(block)),
         build=lambda: _tool(block, expanded),
         owner=block,
     )
 
 
-def _explore_unit(blocks: list[ToolBlock]) -> TranscriptUnit:
+def _explore_unit(blocks: list[ToolBlock], width: int) -> TranscriptUnit:
     members = tuple(blocks)
     tick = next((item for item in (_live_tick(block) for block in members) if item is not None), None)
     return TranscriptUnit(
         key=("explore", id(members[0])),
         fingerprint=(tuple(item.revision for item in members), tick),
-        build=lambda: _explore_group(list(members)),
+        build=lambda: _explore_group(list(members), width),
         owner=members,
     )
 
 
 def _live_tick(block: ToolBlock) -> int | None:
     """Spinner frame for in-flight tools, None once they are frozen."""
-    return _spinner_tick() if block.status in {"running", "waiting"} else None
+    return _spinner_tick() if block.status == "running" and block.name not in EXPLORE_TOOLS else None
 
 
 def _same_owner(cached: Any, current: Any) -> bool:
@@ -191,22 +197,29 @@ class TranscriptRenderer:
 
     def __init__(self, timezone: ZoneInfo | None = None) -> None:
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
+        self._documents: dict[bool, tuple[Any, tuple[Any, ...], TranscriptDocument]] = {}
         self._width = 0
         self._timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
 
-    def render(self, state: CliState, width: int) -> tuple[FormattedText, int]:
+    def render_document(self, state: CliState, width: int) -> TranscriptDocument:
         if width != self._width:
             self.clear()
             self._width = width
-        units = transcript_units(state, self._timezone)
-        live = {unit.key for unit in units}
+        units = transcript_units(state, self._timezone, width)
+        live_ids = {id(block) for block in state.blocks}
+        live = {"header", "todos"}
+        live.update(key for key in self._cache if isinstance(key, tuple) and len(key) > 1 and key[1] in live_ids)
         for key in [key for key in self._cache if key not in live]:
             del self._cache[key]
-        fragments: StyleAndTextTuples = []
-        lines = 0
-        for position, unit in enumerate(units):
-            if position:
-                fragments.append(("", "\n"))
+        signature = tuple((unit.key, unit.fingerprint) for unit in units)
+        mode = state.tools_expanded
+        document_entry = self._documents.get(mode)
+        if document_entry is not None and document_entry[0] == signature:
+            return document_entry[2]
+        rendered_units: list[RenderedUnit] = []
+        starts: list[int] = []
+        line_count = 0
+        for unit in units:
             entry = self._cache.get(unit.key)
             if (
                 entry is None
@@ -217,12 +230,25 @@ class TranscriptRenderer:
                 self._cache[unit.key] = (unit.owner, unit.fingerprint, rendered)
             else:
                 rendered = entry[2]
-            fragments.extend(rendered.fragments)
-            lines += rendered.lines
-        return FormattedText(fragments), lines
+            starts.append(line_count)
+            line_count += rendered.line_count
+            rendered_units.append(rendered)
+        document = TranscriptDocument(tuple(rendered_units), tuple(starts), line_count)
+        self._documents[mode] = (signature, tuple(unit.owner for unit in units), document)
+        return document
+
+    def render(self, state: CliState, width: int) -> tuple[FormattedText, int]:
+        document = self.render_document(state, width)
+        fragments: StyleAndTextTuples = []
+        for index in range(document.line_count):
+            if index:
+                fragments.append(("", "\n"))
+            fragments.extend(document.get_line(index))
+        return FormattedText(fragments), document.line_count
 
     def clear(self) -> None:
         self._cache.clear()
+        self._documents.clear()
 
 
 def render_interaction(controller: Any, width: int) -> str:
@@ -338,39 +364,54 @@ def _is_explore(block: Any) -> TypeGuard[ToolBlock]:
     return isinstance(block, ToolBlock) and block.name in EXPLORE_TOOLS
 
 
-def _explore_group(blocks: list[ToolBlock]) -> Any:
-    kinds: list[str] = []
-    counts: dict[str, int] = {}
-    for block in blocks:
-        kind = _EXPLORE_KIND.get(block.name, "file")
-        if kind not in counts:
-            kinds.append(kind)
-        counts[kind] = counts.get(kind, 0) + 1
-    verbs: list[str] = []
-    nouns: list[str] = []
-    for offset, kind in enumerate(kinds):
-        first, rest = _EXPLORE_VERB[kind]
-        verbs.append(first if offset == 0 else rest)
-        count = counts[kind]
-        singular, plural = _EXPLORE_NOUN[kind]
-        nouns.append(f"{count} {singular if count == 1 else plural}")
+def _explore_group(blocks: list[ToolBlock], width: int = 80) -> Any:
     running = any(block.status == "running" for block in blocks)
     waiting = any(block.status == "waiting" for block in blocks)
-    symbol = _spinner() if running else "●"
     suffix = " — waiting for input" if waiting and not running else ""
     color = "green" if running else "red" if any(block.is_error for block in blocks) else "yellow" if waiting else "green"
+    count = len(blocks)
     title = Text.assemble(
-        (f"{symbol} ", color),
-        (f"{', '.join(verbs)} {', '.join(nouns)}", "bold"),
+        (" ● ", color),
+        (f"Explored {count} {'item' if count == 1 else 'items'}", "bold"),
         (suffix, "dim"),
     )
-    hidden_label = "item" if len(blocks) == 1 else "items"
-    hidden = Text(f"    … {len(blocks)} {hidden_label} hidden", style="dim")
-    return Padding(Group(title, hidden), (1, 1, 0, 1))
+    title.truncate(max(1, width - 1), overflow="ellipsis")
+    rows: list[Text] = []
+    hidden = count - EXPLORE_PREVIEW_LIMIT
+    if hidden > 0:
+        row = Text(f"  ├ … {hidden} more", style="dim")
+        row.truncate(max(1, width - 1), overflow="ellipsis")
+        rows.append(row)
+    preview = blocks[-EXPLORE_PREVIEW_LIMIT:]
+    for index, block in enumerate(preview):
+        branch = "└" if index == len(preview) - 1 else "├"
+        row = Text.assemble((f"  {branch} ", "dim"), (_explore_summary(block), ""))
+        row.truncate(max(1, width - 1), overflow="ellipsis")
+        rows.append(row)
+    hint = Text("  Ctrl+O to expand", style="dim")
+    hint.truncate(max(1, width - 1), overflow="ellipsis")
+    rows.append(hint)
+    # Avoid full-width Padding here: a terminal auto-wrap can leave stale text
+    # over the editor when this summary changes.
+    return Group(Text(""), title, *rows)
+
+
+def _explore_summary(block: ToolBlock) -> str:
+    args = block.arguments
+    if block.name == "read_file":
+        return "Read " + _tool_summary(block.name, args).removeprefix("read ")
+    if block.name in {"grep", "glob"}:
+        verb = "Search" if block.name == "grep" else "Glob"
+        pattern = args.get("pattern") or args.get("query")
+        return f"{verb} {json.dumps(str(pattern), ensure_ascii=False)}" if pattern else verb
+    if block.name == "ls":
+        path = args.get("path") or args.get("file_path")
+        return f"List {PurePosixPath(str(path))}" if path else "List"
+    return _tool_summary(block.name, args)
 
 
 def _tool(block: ToolBlock, expanded: bool) -> Any:
-    symbol = _spinner() if block.status == "running" else "●"
+    symbol = _spinner() if block.status == "running" and block.name not in EXPLORE_TOOLS else "●"
     suffix = " — waiting for input" if block.status == "waiting" else ""
     color = "green" if block.status == "running" else "red" if block.is_error else "yellow" if block.status == "waiting" else "green"
     title = Text.assemble((f"{symbol} ", color), (_tool_summary(block.name, block.arguments), "bold"), (suffix, "dim"))
@@ -380,7 +421,7 @@ def _tool(block: ToolBlock, expanded: bool) -> Any:
         if diff:
             preview = _preview_diff(diff)
             body.append(Syntax(preview, "diff", theme="ansi_dark", word_wrap=True))
-        return Padding(Group(*body), (1, 1, 0, 1))
+        return Padding(Group(*body), (1, 1, 0, 1), expand=False)
     output = block.output.strip()
     if block.name == "execute":
         if output:
@@ -391,7 +432,7 @@ def _tool(block: ToolBlock, expanded: bool) -> Any:
             body.append(Text("\n".join(f"  {line}" for line in lines), style="dim" if not block.is_error else "red"))
         elif block.status == "completed":
             body.append(Text("  (no output)", style="dim"))
-        return Padding(Group(*body), (1, 1, 0, 1))
+        return Padding(Group(*body), (1, 1, 0, 1), expand=False)
     if output:
         lines = output.splitlines()
         limit = 40 if expanded else 8
@@ -399,7 +440,7 @@ def _tool(block: ToolBlock, expanded: bool) -> Any:
             skipped = len(lines) - limit
             lines = [f"… {skipped} output lines hidden · Ctrl+O to expand", *lines[-limit:]]
         body.append(Text("\n".join(f"  {line}" for line in lines), style="dim" if not block.is_error else "red"))
-    return Padding(Group(*body), (1, 1, 0, 1))
+    return Padding(Group(*body), (1, 1, 0, 1), expand=False)
 
 
 def _preview_diff(diff: str) -> str:

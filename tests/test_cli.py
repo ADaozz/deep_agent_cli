@@ -1,12 +1,16 @@
 from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
+from prompt_toolkit.buffer import CompletionState
+from prompt_toolkit.completion import Completion
 from prompt_toolkit.application.current import set_app
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.layout.containers import WindowAlign
 
 import asyncio
+import logging
 import re
 import pytest
 from collections.abc import Callable
@@ -32,7 +36,7 @@ from agent.cli.rendering import (
     render_review,
     render_transcript,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock, touch
 from agent.config import Settings
 from agent.config import ModelProfile
 from agent.runner import AgentRunner, RunEvent, TurnTiming
@@ -48,6 +52,18 @@ _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
 def _plain(rendered: str) -> str:
     """Strip SGR sequences so assertions survive Rich splitting a run mid-word."""
     return _ANSI_SGR.sub("", rendered)
+
+
+async def _await_cli_io(awaitable, *, timeout: float = 5.0):  # type: ignore[no-untyped-def]
+    """Drive the loop while testing CLI I/O without Application.run's refresh timer."""
+    task = asyncio.ensure_future(awaitable)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not task.done() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    if not task.done():
+        task.cancel()
+        raise TimeoutError("CLI I/O did not finish")
+    return await task
 
 
 def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
@@ -67,7 +83,7 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         body = app.application.layout.container.content
         assert not any(getattr(child, "style", None) == "class:editor-border" for child in body.children)
-        editor = body.children[4].content
+        editor = body.children[5].content
         top, middle, bottom = editor.children
         prefix, input_window = middle.children
         assert top.height == bottom.height == 1
@@ -76,15 +92,73 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
         assert input_window.content is app.editor_control
 
 
-def test_running_tools_use_a_green_spinner() -> None:
+def test_back_to_bottom_hint_is_centered_above_editor() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        body = app.application.layout.container.content
+        hint = body.children[2].content
+        divider = body.children[3].content
+        editor = body.children[5].content
+        assert hint.content is app.back_to_bottom_control
+        assert hint.align is WindowAlign.CENTER
+        assert divider.char == "─"
+        assert divider.style == "class:interaction-divider"
+        assert editor.children[1].children[1].content is app.editor_control
+
+
+def test_interaction_divider_only_appears_for_interactive_screens() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        body = app.application.layout.container.content
+        divider = body.children[3]
+        with set_app(app.application):
+            assert not divider.filter()
+            app.buffer.text = "/"
+            app.buffer.complete_state = CompletionState(app.buffer.document, [Completion("/help")])
+            assert not divider.filter()
+            app.interaction = InteractionController(
+                kind="model", title="Select model", question="Choose a model",
+                fields=[{"id": "model", "type": "single_select", "label": "Model", "options": []}],
+            )
+            assert divider.filter()
+            app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+            assert divider.filter()
+            app.interaction = None
+            app.buffer.reset()
+            assert not divider.filter()
+
+
+def test_filesystem_warning_appears_in_transcript_not_terminal(capsys) -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        logger = logging.getLogger("deepagents.backends.filesystem")
+        original_handlers = logger.handlers[:]
+        original_propagate = logger.propagate
+        with app._capture_filesystem_warnings():
+            logger.warning("Glob of '/' timed out after 5s with 0 match(es); returning partial results")
+            assert "Glob of '/' timed out" in app.state.blocks[-1].content
+            assert app.buffer.text == ""
+        assert logger.handlers == original_handlers
+        assert logger.propagate is original_propagate
+        assert capsys.readouterr().err == ""
+
+
+def test_explore_tools_keep_a_green_dot_while_running() -> None:
     running = ToolBlock("call", "execute", {"command": "pwd"}, status="running")
-    for renderable in (_tool(running, False), _explore_group([
-        ToolBlock("list", "ls", {}, status="running"),
-    ])):
-        title = renderable.renderable.renderables[0]
-        assert title.plain[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        assert title.spans[0].style == "green"
-        assert not title.plain.startswith("●")
+    title = _tool(running, False).renderable.renderables[0]
+    assert title.plain.lstrip()[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert title.spans[0].style == "green"
+
+    for status in ("running", "completed"):
+        explore = ToolBlock("list", "ls", {}, status=status)
+        collapsed_title = _explore_group([explore]).renderables[1]
+        expanded_title = _tool(explore, True).renderable.renderables[0]
+        for item in (collapsed_title, expanded_title):
+            assert item.plain.lstrip().startswith("●")
+            assert item.spans[0].style == "green"
 
 
 def test_cli_rejects_keybindings_inside_workspace(tmp_path) -> None:
@@ -364,8 +438,13 @@ def test_explore_tools_collapse_into_summary() -> None:
         ),
     ])
     collapsed = render_transcript(state, 80)
-    assert "Read, grepped, globbed, listed 1 file, 2 greps, 3 globs, 1 listing" in collapsed
-    assert "7 items hidden" in collapsed
+    assert "Explored 7 items" in collapsed
+    assert "… 2 more" in collapsed
+    assert 'Search "bar"' in collapsed
+    assert 'Glob "*.py"' in collapsed
+    assert "List /workspace" in collapsed
+    assert 'Search "foo"' not in collapsed
+    assert "Ctrl+O to expand" in collapsed
     assert "/workspace/a.py" not in collapsed
     assert "execute pytest" in collapsed
     assert "write /workspace/out.txt" in collapsed
@@ -373,6 +452,66 @@ def test_explore_tools_collapse_into_summary() -> None:
     expanded = render_transcript(state, 80)
     assert "read /workspace/a.py" in expanded
     assert "items hidden" not in expanded
+
+
+@pytest.mark.parametrize("count", [1, 5, 6, 74])
+def test_explore_preview_shows_only_last_five_in_order(count: int) -> None:
+    blocks = [
+        ToolBlock(str(index), "read_file", {"file_path": f"file-{index}.py"}, status="completed")
+        for index in range(count)
+    ]
+    group = _explore_group(blocks)
+    rendered = _plain(_capture(group, 100))
+    lines = rendered.splitlines()
+    assert f"Explored {count} {'item' if count == 1 else 'items'}" in rendered
+    shown = min(count, 5)
+    assert [f"Read file-{index}.py" for index in range(count - shown, count)] == [
+        line.strip().split(" ", 1)[1] for line in lines if "Read file-" in line
+    ]
+    assert rendered.count("Read file-") == shown
+    if count > 5:
+        assert f"├ … {count - 5} more" in rendered
+    else:
+        assert " more" not in rendered
+    assert f"└ Read file-{count - 1}.py" in rendered
+    assert lines[-1].strip() == "Ctrl+O to expand"
+    assert group.renderables[-1].style == "dim"
+
+
+def test_running_explore_group_does_not_fill_terminal_width() -> None:
+    """Live summaries must leave room before the terminal's auto-wrap edge."""
+    blocks = [
+        ToolBlock(str(index), ("ls", "glob", "grep")[index % 3], {}, status="running")
+        for index in range(10)
+    ]
+    for count in (4, 6, 8, 10):
+        rendered = _plain(_capture(_explore_group(blocks[:count], width=245), 245))
+        assert f"Explored {count} items" in rendered
+        if count > 5:
+            assert f"… {count - 5} more" in rendered
+        assert all(len(line) < 245 for line in rendered.splitlines())
+
+
+def test_explore_preview_truncates_long_paths_before_terminal_edge() -> None:
+    block = ToolBlock(
+        "long", "read_file",
+        {"file_path": "some/really/long/path/to/a/file/that/exceeds/the/terminal/width.py"},
+        status="running",
+    )
+    rendered = _plain(_capture(_explore_group([block], width=20), 20))
+    assert all(len(line) < 20 for line in rendered.splitlines())
+    assert "Ctrl+O to expand" in rendered
+
+
+def test_running_tool_card_does_not_fill_terminal_width() -> None:
+    for name, arguments in (
+        ("execute", {"command": "pwd"}),
+        ("write_file", {"file_path": "note.txt", "content": "hello"}),
+        ("request_human_input", {"question": "Continue?"}),
+    ):
+        block = ToolBlock("call", name, arguments, status="running")
+        rendered = _plain(_capture(_tool(block, False), 120))
+        assert all(len(line) < 120 for line in rendered.splitlines())
 
 
 def test_approval_pane_stays_decision_only() -> None:
@@ -514,6 +653,22 @@ def test_run_cancelled_keeps_streamed_tool_output() -> None:
     assert tool.status == "error"
     assert tool.is_error
     assert state.status == "Cancelled"
+
+
+def test_terminal_run_events_stop_every_tool_spinner() -> None:
+    for terminal_event, expected_status in (
+        ("interaction_requested", "waiting"),
+        ("run_completed", "completed"),
+        ("run_failed", "error"),
+    ):
+        state = CliState()
+        for index in range(3):
+            state.apply(RunEvent(type="tool_started", tool_call_id=str(index), name="grep"))
+        state.apply(RunEvent(type=terminal_event))
+        tools = [block for block in state.blocks if isinstance(block, ToolBlock)]
+        assert len(tools) == 3
+        assert all(block.status == expected_status and block.revision == 1 for block in tools)
+        assert all(block.is_error == (terminal_event == "run_failed") for block in tools)
 
 
 def test_load_transcript_keeps_failed_execute_error() -> None:
@@ -900,6 +1055,22 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
     _with_painted_app("back-to-bottom", scenario)
 
 
+def test_escape_cancels_slash_command_before_scrolling_or_cancelling_run() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.state.running = True
+        app.runner.control.begin_run()
+        app.scroll_transcript(-5)
+        app.buffer.text = "/model"
+        _escape(app)
+        assert app.buffer.text == ""
+        assert app.transcript_away_from_bottom()
+        assert not app.runner.control.cancel_requested
+        assert app.application.ttimeoutlen <= 0.1
+        assert app.application.timeoutlen <= 0.2
+
+    _with_painted_app("slash-escape", scenario)
+
+
 def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
     def scenario(app: CliApplication) -> None:
         app.interaction = InteractionController.approval([{
@@ -918,58 +1089,38 @@ def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
     _with_painted_app("interaction-back-to-bottom", scenario)
 
 
-def test_transcript_scrollbar_margin_is_clickable() -> None:
-    """prompt_toolkit registers no handler for margins, so dragging did nothing."""
-    from prompt_toolkit.mouse_events import MouseEventType
-
+def test_back_to_bottom_hint_sits_immediately_above_interaction_divider() -> None:
     def scenario(app: CliApplication) -> None:
-        handlers = app.application.renderer.mouse_handlers
-        column = app.application.output.get_size().columns - 1
-        assert handlers.mouse_handlers[0][column] == app.transcript_window._scrollbar_mouse_handler
-
-        top = _wheel(MouseEventType.MOUSE_DOWN)
-        assert app.transcript_window._scrollbar_mouse_handler(top) is None
-        assert app._transcript_anchor == 0
-
-        bottom = MouseEvent(
-            position=Point(x=column, y=app.transcript_viewport_rows() - 1),
-            event_type=MouseEventType.MOUSE_DOWN,
-            button=MouseButton.LEFT,
-            modifiers=frozenset(),
+        app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+        app.scroll_transcript(-5)
+        _paint(app)
+        screen = app.application.renderer._last_screen
+        assert screen is not None
+        columns = app.application.output.get_size().columns
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(columns))
+            for y in range(app.application.output.get_size().rows)
+        ]
+        hint_row = next(y for y, row in enumerate(rows) if "↓ Back to bottom · esc" in row)
+        divider_row = next(
+            y for y, row in enumerate(rows)
+            if "─" in row and "class:interaction-divider" in screen.data_buffer[y][0].style
         )
-        assert app.transcript_window._scrollbar_mouse_handler(bottom) is None
-        assert app._transcript_anchor is None
+        assert divider_row == hint_row + 1
 
-    _with_painted_app("scrollbar-drag", scenario)
+    _with_painted_app("hint-above-divider", scenario)
 
 
-def test_scrollbar_thumb_drag_preserves_grab_position_and_stops_on_release() -> None:
-    from prompt_toolkit.mouse_events import MouseEventType
-
+def test_transcript_uses_full_width_without_scrollbar_margin() -> None:
     def scenario(app: CliApplication) -> None:
         window = app.transcript_window
         info = window.render_info
         assert info is not None
-        assert info.vertical_scroll == app.transcript_max_scroll()
-        thumb_top = int(info.window_height * info.vertical_scroll / info.content_height)
-        assert thumb_top > 1
+        assert window.right_margins == []
+        assert info.window_width == app.application.output.get_size().columns
+        assert app._width() == info.window_width
 
-        def event(kind: MouseEventType, row: int) -> MouseEvent:
-            return MouseEvent(
-                position=Point(x=app.application.output.get_size().columns - 1, y=row),
-                event_type=kind, button=MouseButton.LEFT, modifiers=frozenset(),
-            )
-
-        window._scrollbar_mouse_handler(event(MouseEventType.MOUSE_DOWN, thumb_top))
-        assert app._transcript_anchor is None
-        window._scrollbar_mouse_handler(event(MouseEventType.MOUSE_MOVE, thumb_top - 1))
-        assert app.transcript_top() < info.vertical_scroll
-        moved = app.transcript_top()
-        window._scrollbar_mouse_handler(event(MouseEventType.MOUSE_UP, thumb_top - 1))
-        assert window._scrollbar_mouse_handler(event(MouseEventType.MOUSE_MOVE, thumb_top - 2)) is NotImplemented
-        assert app.transcript_top() == moved
-
-    _with_painted_app("thumb-drag", scenario)
+    _with_painted_app("full-width-transcript", scenario)
 
 
 def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) -> None:
@@ -1268,7 +1419,7 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
 
     fragments, _ = renderer.render(state, 80)
     assert len(rendered) == 2  # header + one collapsed group
-    assert "Read, grepped, globbed" in _plain("".join(part[1] for part in fragments))
+    assert "Explored 3 items" in _plain("".join(part[1] for part in fragments))
 
     for _ in range(3):
         renderer.render(state, 80)
@@ -1278,9 +1429,90 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
     renderer.render(state, 80)
     assert len(rendered) == 3  # the group gained a member
 
+    state.blocks.extend(explore(index, "read_file") for index in range(4, 7))
+    fragments, _ = renderer.render(state, 80)
+    text = _plain("".join(part[1] for part in fragments))
+    assert "Explored 7 items" in text
+    assert "… 2 more" in text
+    assert "Read f6.py" in text
+    assert "Read f0.py" not in text
+
     state.tools_expanded = True
-    renderer.render(state, 80)
-    assert len(rendered) == 7  # header replayed, four tool units built
+    fragments, _ = renderer.render(state, 80)
+    assert len(rendered) == 11  # cached header, seven tool units built
+    expanded = _plain("".join(part[1] for part in fragments))
+    assert "read f0.py" in expanded
+    assert "read f6.py" in expanded
+    assert "Ctrl+O to expand" not in expanded
+
+
+def test_expanded_tool_cache_survives_collapse_and_invalidates_changed_tool(monkeypatch) -> None:
+    import agent.cli.rendering as rendering
+
+    original = rendering._render_unit
+    rendered: list[int] = []
+
+    def counting(renderable: object, width: int) -> object:
+        rendered.append(width)
+        return original(renderable, width)
+
+    monkeypatch.setattr(rendering, "_render_unit", counting)
+    state = CliState(blocks=[
+        ToolBlock(str(index), "read_file", {"file_path": f"f{index}.py"}, output="old", status="completed")
+        for index in range(6)
+    ])
+    renderer = TranscriptRenderer()
+    state.tools_expanded = True
+    first = renderer.render_document(state, 80)
+    assert len(rendered) == 7  # header and six tool cards
+    assert renderer.render_document(state, 80) is first
+
+    state.tools_expanded = False
+    renderer.render_document(state, 80)
+    assert len(rendered) == 8  # one collapsed summary
+    state.tools_expanded = True
+    assert renderer.render_document(state, 80) is first
+    assert len(rendered) == 8
+
+    tool = state.blocks[0]
+    assert isinstance(tool, ToolBlock)
+    touch(tool).output = "new"
+    changed = renderer.render_document(state, 80)
+    assert changed is not first
+    assert len(rendered) == 9  # only the changed card
+    assert any(
+        "new" in "".join(part[1] for part in changed.get_line(index))
+        for index in range(changed.line_count)
+    )
+
+
+def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None:
+    import agent.cli.rendering as rendering
+
+    original = rendering.split_lines
+    calls: list[int] = []
+
+    def counting(fragments):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        return original(fragments)
+
+    monkeypatch.setattr(rendering, "split_lines", counting)
+    state = CliState(
+        blocks=[
+            ToolBlock(str(index), "read_file", {"file_path": f"f{index}.py"}, output="one\ntwo", status="completed")
+            for index in range(20)
+        ],
+        tools_expanded=True,
+    )
+    renderer = TranscriptRenderer()
+    document = renderer.render_document(state, 80)
+    assert calls == []
+    assert "two" in "".join(part[1] for part in document.get_line(document.line_count - 1))
+    assert len(calls) == 1
+    document.get_line(document.line_count - 2)
+    assert len(calls) == 1
+    assert renderer.render_document(state, 80) is document
+    assert len(calls) == 1
 
 
 def test_transcript_renderer_matches_uncached_render() -> None:
@@ -1367,7 +1599,7 @@ def test_cli_resume_prefix_switches_session(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.resume_session(first[:8])
+            await _await_cli_io(app.resume_session(first[:8]))
             assert app.runner.thread_id == first
             assert any(
                 getattr(block, "content", "") == "saved"
@@ -1393,13 +1625,13 @@ def test_cli_returns_queued_input_on_new_and_resume(tmp_path) -> None:
             assert runner.control.pending_follow_up_count() == 0
 
             runner.steer("second draft")
-            await app.resume_session(original[:8])
+            await _await_cli_io(app.resume_session(original[:8]))
             assert runner.thread_id == original
             assert "second draft" in app.buffer.text
 
             runner.follow_up("third draft")
             target = next(item.id for item in runner.list_sessions() if item.id != original)
-            await app.resume_session(target[:8])
+            await _await_cli_io(app.resume_session(target[:8]))
             assert runner.thread_id == target
             assert "third draft" in app.buffer.text
             assert runner.control.pending_follow_up_count() == 0
@@ -1501,7 +1733,7 @@ def test_cli_waits_for_a_busy_session_and_takes_over(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(waiter, input=pipe, output=DummyOutput())
-            await app.resume_session(target[:8])
+            await _await_cli_io(app.resume_session(target[:8]))
             assert app.sessions.wait_target == target
             assert "Waiting for session" in app.state.status
             assert app.interaction is None
@@ -1513,7 +1745,7 @@ def test_cli_waits_for_a_busy_session_and_takes_over(tmp_path) -> None:
             assert app.state.running is False
 
             holder.close()
-            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            await _await_cli_io(app.sessions.wait_task)
             assert app.sessions.wait_target is None
             assert waiter.thread_id == target
             assert any(getattr(block, "content", "") == "held" for block in app.state.blocks)
@@ -1541,7 +1773,7 @@ def test_cli_esc_cancels_wait_and_returns_to_picker(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(waiter, input=pipe, output=DummyOutput())
-            await app.resume_session(target[:8])
+            await _await_cli_io(app.resume_session(target[:8]))
             assert app.sessions.wait_target == target
 
             for binding in app.bindings.bindings:
@@ -1553,7 +1785,7 @@ def test_cli_esc_cancels_wait_and_returns_to_picker(tmp_path) -> None:
                     break
 
             assert app.sessions._wait_cancelled is True
-            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            await _await_cli_io(app.sessions.wait_task)
             assert app.sessions.wait_target is None
             # Esc keeps the runner detached and reopens the picker.
             assert waiter._runtime.lease is None
@@ -1585,13 +1817,13 @@ def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(waiter, input=pipe, output=DummyOutput())
             app.sessions.startup_session_id = target
-            await app.sessions.start()
+            await _await_cli_io(app.sessions.start())
             # Startup shares the controller workflow: busy means waiting UI.
             assert app.sessions.wait_target == target
             assert "Waiting for session" in app.state.status
 
             holder.close()
-            await asyncio.wait_for(app.sessions.wait_task, timeout=5)
+            await _await_cli_io(app.sessions.wait_task)
             assert app.sessions.wait_target is None
             assert waiter.thread_id == target
             assert any(getattr(block, "content", "") == "held" for block in app.state.blocks)

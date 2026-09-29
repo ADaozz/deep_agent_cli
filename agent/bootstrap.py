@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from importlib.resources import files
 from pathlib import Path
 import tempfile
 
@@ -26,7 +27,7 @@ def initialize_user_files(*, workspace: Path | None = None) -> Path | None:
         if not config.is_file():
             raise ValueError(f"configuration path must be a file: {config}")
         return None
-    template = Path(__file__).resolve().parents[1] / "config.example.yaml"
+    template = files("agent").joinpath("config.example.yaml")
     with tempfile.NamedTemporaryFile(mode="wb", dir=root, prefix=".config-", delete=False) as temporary:
         temp_path = Path(temporary.name)
         try:

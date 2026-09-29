@@ -11,3 +11,5 @@ config.yml
 *.pyc
 *.sqlite3
 *.sqlite3-journal
+dist/
+build/

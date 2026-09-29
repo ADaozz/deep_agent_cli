@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import partial
+import logging
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,9 +22,9 @@ from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.containers import WindowAlign
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
@@ -48,6 +51,8 @@ from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
 from agent.cli.rendering import (
     MUTATION_TOOLS,
+    RenderedUnit,
+    TranscriptDocument,
     TranscriptRenderer,
     render_interaction,
     render_review,
@@ -168,6 +173,34 @@ class _BackToBottomControl(_ScrollableTextControl):
         return super().mouse_handler(mouse_event)
 
 
+class _TranscriptControl(UIControl):
+    """Expose cached transcript lines to prompt_toolkit without splitting them again."""
+
+    def __init__(self, document: Any, cursor: Any, on_scroll: Any) -> None:
+        self._document = document
+        self._cursor = cursor
+        self._on_scroll = on_scroll
+
+    def create_content(self, width: int, height: int) -> UIContent:
+        document = self._document()
+        return UIContent(
+            get_line=document.get_line,
+            line_count=document.line_count,
+            cursor_position=self._cursor(),
+            show_cursor=False,
+        )
+
+    def preferred_height(self, width: int, max_available_height: int, wrap_lines: bool, get_line_prefix: Any) -> int:
+        return min(max_available_height, self._document().line_count)
+
+    def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if mouse_event.event_type is MouseEventType.SCROLL_UP:
+            self._on_scroll(-3)
+        elif mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+            self._on_scroll(3)
+        return None
+
+
 class _EditorScrollControl(BufferControl):
     """Input box: wheel scrolls the transcript instead of the empty editor."""
 
@@ -191,14 +224,12 @@ class _TranscriptWindow(Window):
     a cursor visible. Disguising the scroll anchor as a cursor therefore left the
     viewport stuck: ``max(previous_scroll, ...)`` blocked downward movement and
     ``min(..., get_max_vertical_scroll())`` blocked upward movement, so the
-    scrollbar barely responded in either direction. This window computes the offset
+    viewport barely responded in either direction. This window computes the offset
     outright and skips the cursor-chasing arithmetic entirely.
     """
 
     def __init__(self, *args: Any, viewport: Any = None, **kwargs: Any) -> None:
         self._viewport = viewport
-        self._scrollbar_drag: tuple[int, int] | None = None
-        self._scrollbar_ypos = 0
         super().__init__(*args, **kwargs)
 
     def _scroll(self, ui_content: Any, width: int, height: int) -> None:
@@ -206,64 +237,6 @@ class _TranscriptWindow(Window):
         self.vertical_scroll_2 = 0
         maximum = max(0, ui_content.line_count - height)
         self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
-
-    def write_to_screen(self, screen: Any, mouse_handlers: Any, write_position: Any, *args: Any, **kwargs: Any) -> Any:
-        self._scrollbar_ypos = write_position.ypos
-        super().write_to_screen(screen, mouse_handlers, write_position, *args, **kwargs)
-        if self._viewport is None:
-            return
-        margin_width = sum(self._get_margin_width(margin) for margin in self.right_margins)
-        if margin_width <= 0:
-            return
-        # prompt_toolkit registers body handlers only up to `width - margin`, so
-        # without this the scrollbar column swallows clicks and does nothing.
-        mouse_handlers.set_mouse_handler_for_range(
-            x_min=write_position.xpos + write_position.width - margin_width,
-            x_max=write_position.xpos + write_position.width,
-            y_min=write_position.ypos,
-            y_max=write_position.ypos + write_position.height,
-            handler=self._scrollbar_mouse_handler,
-        )
-
-    def _scrollbar_mouse_handler(self, mouse_event: Any) -> Any:
-        info = self.render_info
-        if info is None:
-            return NotImplemented
-        if mouse_event.event_type is MouseEventType.SCROLL_UP:
-            self._viewport.scroll_transcript(-3)
-        elif mouse_event.event_type is MouseEventType.SCROLL_DOWN:
-            self._viewport.scroll_transcript(3)
-        elif mouse_event.event_type is MouseEventType.MOUSE_UP:
-            self._scrollbar_drag = None
-        elif mouse_event.event_type is MouseEventType.MOUSE_DOWN and mouse_event.button is MouseButton.LEFT:
-            rows = max(1, info.window_height)
-            maximum = max(0, info.content_height - rows)
-            y = min(rows - 1, max(0, mouse_event.position.y - self._scrollbar_ypos))
-            thumb_height = min(rows, max(1, int(rows * len(info.displayed_lines) / max(1, info.content_height)) + 1))
-            current_scroll = self._viewport.transcript_top()
-            thumb_top = int(rows * current_scroll / max(1, info.content_height))
-            if thumb_top <= y < thumb_top + thumb_height:
-                # Holding the existing thumb must not move the viewport.
-                self._scrollbar_drag = (y, current_scroll)
-            else:
-                # A track click jumps across the whole range, including both ends.
-                target = round(y / max(1, rows - 1) * maximum)
-                self._viewport.scroll_transcript_to(target)
-                self._scrollbar_drag = (y, target)
-        elif mouse_event.event_type is MouseEventType.MOUSE_MOVE and mouse_event.button is MouseButton.LEFT:
-            if self._scrollbar_drag is None:
-                return NotImplemented
-            rows = max(1, info.window_height)
-            maximum = max(0, info.content_height - rows)
-            thumb_height = min(rows, max(1, int(rows * len(info.displayed_lines) / max(1, info.content_height)) + 1))
-            travel = max(1, rows - thumb_height)
-            start_y, start_scroll = self._scrollbar_drag
-            y = min(rows - 1, max(0, mouse_event.position.y - self._scrollbar_ypos))
-            self._viewport.scroll_transcript_to(start_scroll + round((y - start_y) * maximum / travel))
-        else:
-            return NotImplemented
-        return None
-
 
 class CliApplication:
     """pi-inspired terminal presentation over the existing synchronous runner."""
@@ -313,11 +286,9 @@ class CliApplication:
             completer=self.slash_completer,
             complete_while_typing=True,
         )
-        self.transcript_control = _ScrollableTextControl(
-            text=self._transcript_text,
-            focusable=False,
-            show_cursor=False,
-            get_cursor_position=self._transcript_cursor,
+        self.transcript_control = _TranscriptControl(
+            document=self._transcript_document,
+            cursor=self._transcript_cursor,
             on_scroll=self.scroll_transcript,
         )
         self.interaction_control = _ScrollableTextControl(
@@ -368,23 +339,16 @@ class CliApplication:
 
         self.transcript_window = _TranscriptWindow(
             self.transcript_control,
-            wrap_lines=True,
+            # Rich already wraps each captured transcript line to the viewport.
+            # Re-wrapping those padded lines here makes physical rows diverge
+            # from _transcript_line_count, shifting the viewport and editor.
+            wrap_lines=False,
             height=Dimension(min=3, weight=1),
             always_hide_cursor=True,
-            right_margins=[ScrollbarMargin(display_arrows=False)],
             viewport=self,
         )
         body = HSplit([
             self.transcript_window,
-            ConditionalContainer(
-                Window(
-                    self.back_to_bottom_control,
-                    height=1,
-                    dont_extend_height=True,
-                    style="class:back-to-bottom",
-                ),
-                filter=back_to_bottom_visible,
-            ),
             ConditionalContainer(
                 Window(
                     self.attachment_control,
@@ -394,6 +358,20 @@ class CliApplication:
                     style="class:attachments",
                 ),
                 filter=attachments_visible,
+            ),
+            ConditionalContainer(
+                Window(
+                    self.back_to_bottom_control,
+                    height=1,
+                    dont_extend_height=True,
+                    align=WindowAlign.CENTER,
+                    style="class:back-to-bottom",
+                ),
+                filter=back_to_bottom_visible,
+            ),
+            ConditionalContainer(
+                Window(height=1, char="─", style="class:interaction-divider"),
+                filter=interaction_visible,
             ),
             ConditionalContainer(
                 Window(
@@ -430,14 +408,11 @@ class CliApplication:
                 dont_extend_height=True,
             ),
         ])
-        root = FloatContainer(
-            content=body,
-            floats=[
-                Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1)),
-            ],
-        )
         self.application: Application[None] = Application(
-            layout=Layout(root, focused_element=self.editor_control),
+            layout=Layout(FloatContainer(
+                content=body,
+                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1))],
+            ), focused_element=self.editor_control),
             key_bindings=self.bindings,
             full_screen=True,
             mouse_support=Condition(lambda: not self._exiting),
@@ -449,9 +424,8 @@ class CliApplication:
                 "footer-model": "ansiyellow",
                 "interaction": "#d0d0d0",
                 "attachments": "#72d5e8",
-                "back-to-bottom": "bg:#202b32 #72d5e8",
-                "scrollbar.background": "#202020",
-                "scrollbar.button": "#666666",
+                "back-to-bottom": "bg:#163a5f #d7edff",
+                "interaction-divider": "#3b82f6",
                 "completion-menu": "bg:#15191d #d0d0d0",
                 "completion-menu.completion.current": "bg:#3b5c73 #ffffff",
                 "completion-menu.meta.completion.current": "bg:#3b5c73 #ffffff",
@@ -460,6 +434,8 @@ class CliApplication:
             output=output,
             refresh_interval=0.1,
         )
+        self.application.ttimeoutlen = 0.05
+        self.application.timeoutlen = 0.10
         if self.keymap.warning:
             self.state.add_system(self.keymap.warning, error=True)
         if self.runner.on_event is None:
@@ -471,13 +447,46 @@ class CliApplication:
             self._start_git_watch()
             self.sessions.schedule_start(self._loop)
 
-        self.application.run(pre_run=capture_loop)
+        with self._capture_filesystem_warnings():
+            self.application.run(pre_run=capture_loop)
 
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._start_git_watch()
-        await self.sessions.start()
-        await self.application.run_async()
+        with self._capture_filesystem_warnings():
+            await self.sessions.start()
+            await self.application.run_async()
+
+    @contextmanager
+    def _capture_filesystem_warnings(self) -> Iterator[None]:
+        """Keep backend warnings out of stderr while the full-screen UI is active."""
+        logger = logging.getLogger("deepagents.backends.filesystem")
+        previous_handlers = logger.handlers[:]
+        previous_propagate = logger.propagate
+
+        class TranscriptHandler(logging.Handler):
+            def emit(handler_self, record: logging.LogRecord) -> None:
+                if record.levelno < logging.WARNING:
+                    return
+                message = record.getMessage()
+                if self._loop is not None and self._loop.is_running():
+                    self._loop.call_soon_threadsafe(self._show_filesystem_warning, message)
+                else:
+                    self._show_filesystem_warning(message)
+
+        handler = TranscriptHandler()
+        logger.handlers = [handler]
+        logger.propagate = False
+        try:
+            yield
+        finally:
+            logger.handlers = previous_handlers
+            logger.propagate = previous_propagate
+            handler.close()
+
+    def _show_filesystem_warning(self, message: str) -> None:
+        self.state.add_system(message)
+        self.application.invalidate()
 
     def _start_git_watch(self) -> None:
         if self._git_task is not None:
@@ -923,7 +932,7 @@ class CliApplication:
             columns = self.application.output.get_size().columns
         except Exception:  # noqa: BLE001
             columns = 100
-        return max(20, columns - 1)
+        return max(20, columns)
 
     def _transcript_cursor(self) -> Point:
         last = max(0, self._transcript_line_count - 1)
@@ -983,14 +992,15 @@ class CliApplication:
         self._transcript_anchor = None if nxt >= maximum else nxt
         self.application.invalidate()
 
-    def _transcript_text(self):  # type: ignore[no-untyped-def]
+    def _transcript_document(self) -> TranscriptDocument:
         if self._reviewing:
             rendered = render_review(self._review_calls(), self._width())
-            self._transcript_line_count = rendered.count("\n") + 1
-            return to_formatted_text(ANSI(rendered))
-        fragments, lines = self._renderer.render(self.state, self._width())
-        self._transcript_line_count = lines
-        return fragments
+            unit = RenderedUnit(to_formatted_text(ANSI(rendered)), rendered.count("\n") + 1)
+            document = TranscriptDocument((unit,), (0,), unit.line_count)
+        else:
+            document = self._renderer.render_document(self.state, self._width())
+        self._transcript_line_count = document.line_count
+        return document
 
     def _interaction_text(self):  # type: ignore[no-untyped-def]
         return to_formatted_text(ANSI(render_interaction(self.interaction, self._width())))
@@ -1168,7 +1178,11 @@ class CliApplication:
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
-            if self.transcript_away_from_bottom():
+            if self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
+                self.slash_completer.accepted_text = None
+                event.current_buffer.reset()
+                self.application.invalidate()
+            elif self.transcript_away_from_bottom():
                 self.follow_transcript()
             elif event.current_buffer.complete_state is not None:
                 event.current_buffer.cancel_completion()

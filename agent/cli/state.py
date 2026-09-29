@@ -196,13 +196,15 @@ class CliState:
             self.running = False
             self.status = "Waiting for input"
             self.active_block = None
-            for block in reversed(self.blocks):
+            for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
                     touch(block).status = "waiting"
-                    break
         elif event.type == "run_completed":
             self.running = False
             self.status = "Ready"
+            for block in self.blocks:
+                if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
+                    touch(block).status = "completed"
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
             self.active_block = None
@@ -229,6 +231,10 @@ class CliState:
         elif event.type == "run_failed":
             self.running = False
             self.status = "Failed"
+            for block in self.blocks:
+                if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
+                    touch(block).status = "error"
+                    block.is_error = True
             self.add_system(event.content or "Unknown error", error=True)
 
     def _assistant_block(self) -> MessageBlock:

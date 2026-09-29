@@ -65,7 +65,7 @@ def test_init_rejects_home_workspace_and_skills_symlink(
 def test_cli_first_run_exits_before_creating_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from examples import run_cli
+    from agent.cli import main as run_cli
 
     home = tmp_path / "home"
     work = tmp_path / "project"
@@ -75,23 +75,38 @@ def test_cli_first_run_exits_before_creating_runner(
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
     monkeypatch.chdir(work)
     monkeypatch.setattr(run_cli, "create_runner", lambda settings: pytest.fail("runner started"))
-    run_cli.main()
+    run_cli.main([])
     assert (home / ".deep-agent" / "config.yaml").exists()
     assert not (home / ".deep-agent" / "sessions").exists()
 
 
 def test_startup_args_parse_resume() -> None:
-    from examples.run_cli import parse_startup_args
+    from agent.cli.main import parse_startup_args
 
     assert parse_startup_args([]) == (None, False)
     assert parse_startup_args(["resume"]) == (None, True)
     assert parse_startup_args(["resume", "abc-123"]) == ("abc-123", True)
 
 
+def test_help_does_not_bootstrap_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agent.cli.main import main
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+    assert "Usage: deep-agent" in capsys.readouterr().out
+    assert not (home / ".deep-agent").exists()
+
+
 def test_cli_reports_invalid_model_config_without_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from examples import run_cli
+    from agent.cli import main as run_cli
 
     home = tmp_path / "home"
     work = tmp_path / "project"

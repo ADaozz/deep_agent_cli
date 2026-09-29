@@ -1,6 +1,6 @@
-# Deep Agent
+# deep-agent-cli
 
-一个面向本地开发环境的 AI Coding Agent。
+面向 Linux / WSL2 的本地沙箱 Coding Agent，安装后运行 `deep-agent` 即可使用。
 
 在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批。自定义副作用工具需要显式配置审批规则。
 
@@ -54,20 +54,32 @@
 ### Requirements
 
 - Python 3.12+
-- Linux 或 WSL2（需要 [Bubblewrap](https://github.com/containers/bubblewrap)）
-- 一台 OpenAI 兼容推理服务（默认 `http://localhost:8000/v1`；百炼 Qwen Token Plan 的 compatible-mode 端点已适配，见 Configure）
+- Linux 或 WSL2
+- Bubblewrap（Debian / Ubuntu：`sudo apt install bubblewrap`）
+- OpenAI 兼容推理服务（默认 `http://localhost:8000/v1`）
 
-### Installation
+### Install
+
+推荐使用独立环境安装：
 
 ```bash
-cd deep-agent
-
-sudo apt-get install bubblewrap   # Debian / Ubuntu
-
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.lock
+pipx install deep-agent-cli
 ```
+
+也可以：
+
+```bash
+pip install deep-agent-cli
+```
+
+### Start
+
+```bash
+cd ~/projects/my-app
+deep-agent
+```
+
+首次运行会生成配置模板并退出。编辑 `~/.deep-agent/config.yaml` 的模型端点和 API key 后，再运行 `deep-agent`。当前不支持原生 Windows 或 macOS 沙箱。
 
 ### Configure
 
@@ -124,24 +136,14 @@ llm:
 
 `/model` 先选来源，再选来源下的模型；在模型列表按 `Esc` 返回来源列表。`/model token-plan` 可直接打开该来源，`/model token-plan/auto` 可直接切换。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
 
-### Run
+### Resume
 
 ```bash
-# 任意项目目录 = Agent 的工作区
-export PATH="$PATH:/path/to/deep-agent/bin"
-cd ~/projects/my-app
-deep-agent
-deep-agent resume                 # 列出有内容的会话
+deep-agent resume                 # 选择已有会话
 deep-agent resume 01a08aae-...   # 按 id 恢复
 ```
 
-仓库内也可以：
-
-```bash
-python examples/run_cli.py
-```
-
-没有 `bwrap` 时默认拒绝启动。交互式终端必须完整输入 `UNSANDBOXED` 才降级到宿主机执行；脚本 / 服务必须在配置里写 `sandbox.allow_unsandboxed: true`。
+源码仓库中也可运行 `python -m agent.cli.main`。没有 `bwrap` 时默认拒绝启动；交互式终端只有输入 `UNSANDBOXED` 才会降级到宿主执行。
 
 ## Usage
 
@@ -176,12 +178,15 @@ python examples/run_cli.py
 | 清空输入；0.5 秒内再次按下退出 | `Ctrl+C` |
 | 切换模型 | `Ctrl+P` / `Alt+P` |
 | 粘贴图片 | `Ctrl+V` / `Alt+V` |
-| 展开已产生的工具输出 / Thinking | `Ctrl+O` / `Ctrl+T` |
+| 展开或收起工具详情 / Thinking | `Ctrl+O` / `Ctrl+T` |
 | 审查即将批准的 edit/write/delete | `Ctrl+R` |
 | 重开 pending 交互 | `F2` |
 | 取回未应用的 steering | `Alt+Up` |
 | 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
-| 拖动滚动条 | 在最右列按下并拖动；点击即跳到对应位置 |
+
+输入 `/` 时显示命令候选，按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
+
+探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
 
 底栏固定两行：首行左侧按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色，右侧显示 Git 分支与改动文件数（非 Git 目录显示 `⎇ no git`）；第二行左侧显示运行状态、执行模式、权限，右侧显示上下文占用。Git 状态每 5 秒后台刷新一次。窄终端优先保留右侧 Git 与上下文信息，左侧路径与模型先被截断。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
 
@@ -258,11 +263,11 @@ agent/
 ├── session_lock.py     # thread 独占锁
 ├── session_runtime.py  # 租约与会话生命周期
 └── llm.py         # 模型适配
-bin/deep-agent     # 任意目录启动（cwd → /workspace）
+agent/cli/main.py # pip 安装后的 deep-agent 入口
 examples/          # TUI 与流式冒烟
 skills/            # SKILL.md 示例
 tests/
-config.example.yaml
+agent/config.example.yaml  # 首次启动时使用的配置模板
 ```
 
 ## Configuration
@@ -311,11 +316,14 @@ LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `sess
 ## Development
 
 ```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
+pip install -e ".[dev]"
 pytest -q
+python -m build
 ```
 
-`requirements.lock` 记录 Python 3.12 环境的完整依赖版本；升级依赖时，在干净的虚拟环境中安装 `requirements.txt`，运行 `python -m pip freeze > requirements.lock`，再运行测试。
+`pyproject.toml` 是依赖声明的唯一维护入口。`requirements.lock` 是目前 Python 3.12 开发环境的冻结快照；升级依赖后在干净环境安装 `.[dev]`，再更新快照并运行测试。
 
 测试不打真模型。对着本地端点做流式冒烟：
 
@@ -336,7 +344,7 @@ python examples/stream_smoke.py
 - [x] 运行中 steering / 取消
 - [x] 语义化人工输入
 - [x] 自动上下文压缩（Deep Agents 默认 `SummarizationMiddleware`）
-- [ ] 可安装的 Python 包
+- [x] 可安装的 Python 包
 - [ ] MCP
 
 ## Project Status
@@ -351,4 +359,4 @@ Issue 和 Pull Request 都欢迎。改行为请带测试；不要在 PR 里提�
 
 ## License
 
-尚未指定开源许可证。使用前请先确认仓库后续声明。
+MIT，详见 [LICENSE](LICENSE)。

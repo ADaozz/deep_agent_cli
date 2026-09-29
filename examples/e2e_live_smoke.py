@@ -30,7 +30,7 @@ from agent.permission import PermissionMode, allow_mode_available  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
-from examples.run_cli import create_runner  # noqa: E402
+from agent.cli.main import create_runner  # noqa: E402
 
 
 CODING_PROMPT = """在 /workspace 创建 hello_lib.py：函数 greet(name) 返回 "Hello, {name}!"。

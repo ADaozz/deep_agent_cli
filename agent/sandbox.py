@@ -313,7 +313,11 @@ def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelec
     workspace = _validate_config(config)
     validated = replace(config, workspace=workspace)
     executable = _resolve_executable(validated.bwrap_path)
-    reason = "bubblewrap executable was not found"
+    reason = (
+        "Bubblewrap is required but `bwrap` was not found.\n"
+        "Ubuntu / Debian: sudo apt install bubblewrap\n"
+        "deep-agent currently supports Linux and WSL2"
+    )
     if executable:
         candidate = BubblewrapBackend(validated, executable=executable)
         if not check:
