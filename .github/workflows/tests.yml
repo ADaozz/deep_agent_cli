@@ -16,11 +16,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install Bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Install package and test tools
         run: python -m pip install -e ".[dev]"
-      # No bubblewrap install and no REQUIRE_BWRAP_TEST: sandbox-dependent
-      # tests skip themselves so a bare runner stays green without blocking.
       - name: Run tests
+        env:
+          REQUIRE_BWRAP_TEST: "1"
         run: python -m pytest -q --tb=short -o faulthandler_timeout=30
       - name: Build distributions
         run: python -m build
