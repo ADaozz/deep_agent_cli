@@ -75,6 +75,7 @@ class TranscriptBlock:
     is_error: bool = False
     status: str = ""
     attachments: tuple[ImageAttachmentRef, ...] = ()
+    exit_code: int | None = None
 
 
 def workspace_state_path(workspace: Path, *, override: str | Path | None = None) -> Path:
@@ -381,12 +382,20 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
             if getattr(message, "name", None) == "write_todos" or tool_call_id in todo_call_ids:
                 continue
             is_error = tool_message_is_error(message)
+            artifact = getattr(message, "artifact", None)
+            code = (
+                artifact.get("exit_code")
+                if isinstance(artifact, dict) and getattr(message, "name", None) == "execute"
+                else None
+            )
+            exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
             updated = False
             for block in reversed(blocks):
                 if block.kind == "tool" and block.tool_call_id == tool_call_id:
                     block.content = content
                     block.is_error = is_error
                     block.status = "error" if is_error else "completed"
+                    block.exit_code = exit_code
                     updated = True
                     break
             if not updated:
@@ -397,5 +406,21 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     content=content,
                     is_error=is_error,
                     status="error" if is_error else "completed",
+                    exit_code=exit_code,
                 ))
     return blocks
+
+
+def settle_restored_tools(
+    blocks: list[TranscriptBlock], *, waiting_ids: set[str] | None = None,
+    waiting_human: bool = False,
+) -> None:
+    """Freeze tool calls without results when showing a saved checkpoint."""
+    pending = waiting_ids or set()
+    for block in blocks:
+        if block.kind != "tool" or block.status != "running":
+            continue
+        if block.tool_call_id in pending or (waiting_human and block.name == "request_human_input"):
+            block.status = "waiting"
+        else:
+            block.status = "interrupted"

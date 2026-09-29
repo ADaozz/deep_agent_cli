@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import wraps
 from pathlib import Path
+import os
 import tempfile
 import time
 from threading import Lock
@@ -50,6 +51,7 @@ from agent.session import (
     StopReason,
     TranscriptBlock,
     messages_to_transcript,
+    settle_restored_tools,
     tool_message_is_error,
     workspace_state_path,
 )
@@ -238,6 +240,7 @@ class AgentRunner:
         self._spec = prepared.spec if prepared is not None else AgentSpec(
             instructions=cfg.agent_instructions,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
+            web_search_api_key=os.environ.get("TAVILY_API_KEY") or cfg.tavily_api_key,
         )
         self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
         self._custom_interrupt_on = None
@@ -499,9 +502,18 @@ class AgentRunner:
             raise RuntimeError(f"Failed to load session {info.id}: {exc}") from exc
         messages = list((state.values or {}).get("messages", []) or [])
         interrupt = interrupt_kind_from_state(self.prepared.graph, config)
+        transcript = messages_to_transcript(messages)
+        settle_restored_tools(
+            transcript,
+            waiting_ids={
+                str(call.get("toolCallId") or "")
+                for call in interrupt.pending_tools
+            } if interrupt is not None else set(),
+            waiting_human=interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN,
+        )
         return SessionSnapshot(
             info=info,
-            transcript=messages_to_transcript(messages),
+            transcript=transcript,
             todos=list((state.values or {}).get("todos", []) or []),
             interrupt_kind=interrupt.kind if interrupt is not None else None,
             human_input=interrupt.payload if interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN else {},

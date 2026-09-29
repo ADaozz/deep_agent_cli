@@ -13,7 +13,7 @@ import pytest
 
 from agent.factory import create_agent
 from agent.runner import AgentRunner
-from agent.session import SessionStore, StopReason, messages_to_transcript, workspace_state_path
+from agent.session import SessionStore, StopReason, messages_to_transcript, settle_restored_tools, workspace_state_path
 from tests.conftest import scripted_model
 
 
@@ -184,6 +184,26 @@ def test_messages_to_transcript_rebuilds_tools() -> None:
     assert blocks[1].status == "completed"
 
 
+def test_restored_unfinished_tools_stop_running_without_inventing_an_outcome() -> None:
+    blocks = messages_to_transcript([
+        AIMessage(content="", tool_calls=[
+            {"id": "write-1", "name": "write_file", "args": {"file_path": "/workspace/report.md", "content": "draft"}},
+            {"id": "read-1", "name": "read_file", "args": {"file_path": "/workspace/a.txt"}},
+        ]),
+        ToolMessage(content="read", tool_call_id="read-1", name="read_file"),
+    ])
+    settle_restored_tools(blocks)
+    assert blocks[0].status == "interrupted"
+    assert not blocks[0].is_error
+    assert blocks[1].status == "completed"
+
+    pending = messages_to_transcript([AIMessage(content="", tool_calls=[
+        {"id": "write-2", "name": "write_file", "args": {"file_path": "/workspace/next.md", "content": "draft"}},
+    ])])
+    settle_restored_tools(pending, waiting_ids={"write-2"})
+    assert pending[0].status == "waiting"
+
+
 def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     failed = messages_to_transcript([
         ToolMessage(
@@ -195,6 +215,7 @@ def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     ])
     assert failed[0].is_error
     assert failed[0].status == "error"
+    assert failed[0].exit_code == 2
 
     misleading = messages_to_transcript([
         ToolMessage(
@@ -217,6 +238,7 @@ def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     ])
     assert cancelled[0].is_error
     assert cancelled[0].status == "error"
+    assert cancelled[0].exit_code == 130
 
     timed_out = messages_to_transcript([
         ToolMessage(
@@ -228,3 +250,4 @@ def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     ])
     assert timed_out[0].is_error
     assert timed_out[0].status == "error"
+    assert timed_out[0].exit_code == 124

@@ -33,6 +33,7 @@ class ToolBlock:
     status: str = "running"
     is_error: bool = False
     revision: int = 0
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ class CliState:
                     output=item.content,
                     status=item.status or ("error" if item.is_error else "completed"),
                     is_error=item.is_error,
+                    exit_code=item.exit_code,
                 ))
 
     def apply(self, event: RunEvent) -> None:
@@ -169,6 +171,9 @@ class CliState:
                 tool.output = event.content
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
+            if event.name == "execute" and isinstance(event.result, dict):
+                code = event.result.get("exit_code")
+                tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
             mode = ""
             message_id = ""
@@ -225,6 +230,7 @@ class CliState:
                     touch(block)
                     block.status = "error"
                     block.is_error = True
+                    block.exit_code = 1
                     if notice and notice not in block.output:
                         block.output = f"{block.output.rstrip()}\n\n{notice}".strip()
             self.add_system("Operation cancelled.", error=True)
@@ -235,6 +241,7 @@ class CliState:
                 if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
                     touch(block).status = "error"
                     block.is_error = True
+                    block.exit_code = 1
             self.add_system(event.content or "Unknown error", error=True)
 
     def _assistant_block(self) -> MessageBlock:

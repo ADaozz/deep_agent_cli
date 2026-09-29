@@ -35,9 +35,11 @@ from agent.config import DEFAULT_UI_TIMEZONE
 EXPLORE_TOOLS = frozenset({"ls", "read_file", "glob", "grep"})
 MUTATION_TOOLS = frozenset({"edit_file", "write_file", "delete"})
 DIFF_PREVIEW_LINES = 10
+WRITE_PREVIEW_LINES = 6
 EXECUTE_TAIL_LINES = 8
 
 EXPLORE_PREVIEW_LIMIT = 5
+EXPLORE_FAILURE_PREVIEW_LIMIT = 3
 
 
 def render_transcript(
@@ -141,7 +143,7 @@ def transcript_units(state: CliState, timezone: ZoneInfo | None = None, width: i
                 index += 1
             units.append(_explore_unit(group, width))
             continue
-        units.append(_tool_unit(block, state.tools_expanded))
+        units.append(_tool_unit(block, state.tools_expanded, width))
         index += 1
     return units
 
@@ -155,11 +157,11 @@ def _message_unit(block: MessageBlock, thinking_collapsed: bool) -> TranscriptUn
     )
 
 
-def _tool_unit(block: ToolBlock, expanded: bool) -> TranscriptUnit:
+def _tool_unit(block: ToolBlock, expanded: bool, width: int) -> TranscriptUnit:
     return TranscriptUnit(
         key=("tool", id(block), expanded),
         fingerprint=(block.revision, expanded, _live_tick(block)),
-        build=lambda: _tool(block, expanded),
+        build=lambda: _tool(block, expanded, width),
         owner=block,
     )
 
@@ -267,7 +269,13 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
         if not diff:
             continue
         parts.append(Text(""))
-        parts.append(Syntax(diff, "diff", theme="ansi_dark", word_wrap=True))
+        if name == "write_file":
+            added = _written_lines(diff)
+            parts.append(Text(_tool_summary(name, args), style="bold"))
+            parts.append(Text(_added_line_label(len(added)), style="green"))
+            parts.append(Syntax("\n".join(added), "diff", theme="ansi_dark", word_wrap=True))
+        else:
+            parts.append(Syntax(diff, "diff", theme="ansi_dark", word_wrap=True))
     if len(parts) == 2:
         parts.append(Text("Nothing to review.", style="dim"))
     return _capture(Group(*parts), width)
@@ -367,12 +375,16 @@ def _is_explore(block: Any) -> TypeGuard[ToolBlock]:
 def _explore_group(blocks: list[ToolBlock], width: int = 80) -> Any:
     running = any(block.status == "running" for block in blocks)
     waiting = any(block.status == "waiting" for block in blocks)
+    interrupted = sum(block.status == "interrupted" for block in blocks)
     suffix = " — waiting for input" if waiting and not running else ""
-    color = "green" if running else "red" if any(block.is_error for block in blocks) else "yellow" if waiting else "green"
+    failed = [block for block in blocks if block.is_error]
+    color = "#888888" if failed or interrupted else "green" if running else "yellow" if waiting else "green"
     count = len(blocks)
     title = Text.assemble(
         (" ● ", color),
         (f"Explored {count} {'item' if count == 1 else 'items'}", "bold"),
+        (f" · {len(failed)} failed", "dim") if failed else ("", ""),
+        (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
         (suffix, "dim"),
     )
     title.truncate(max(1, width - 1), overflow="ellipsis")
@@ -388,6 +400,21 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80) -> Any:
         row = Text.assemble((f"  {branch} ", "dim"), (_explore_summary(block), ""))
         row.truncate(max(1, width - 1), overflow="ellipsis")
         rows.append(row)
+    if failed:
+        omitted = max(0, len(failed) - EXPLORE_FAILURE_PREVIEW_LIMIT)
+        if omitted:
+            row = Text(f"  ├ … {omitted} more failed", style="dim")
+            row.truncate(max(1, width - 1), overflow="ellipsis")
+            rows.append(row)
+        for block in failed[-EXPLORE_FAILURE_PREVIEW_LIMIT:]:
+            reason = _failure_summary(block.output)
+            row = Text.assemble(
+                (f"  ├ Failed (exit {_failure_code(block)}) ", "dim"),
+                (_explore_summary(block), ""),
+                (f": {reason}" if reason else "", "dim"),
+            )
+            row.truncate(max(1, width - 1), overflow="ellipsis")
+            rows.append(row)
     hint = Text("  Ctrl+O to expand", style="dim")
     hint.truncate(max(1, width - 1), overflow="ellipsis")
     rows.append(hint)
@@ -410,19 +437,53 @@ def _explore_summary(block: ToolBlock) -> str:
     return _tool_summary(block.name, args)
 
 
-def _tool(block: ToolBlock, expanded: bool) -> Any:
+def _tool(block: ToolBlock, expanded: bool, width: int = 80) -> Any:
+    if block.is_error:
+        summary = str(block.arguments.get("command") or "execute") if block.name == "execute" else _tool_summary(block.name, block.arguments)
+        title = Text.assemble(
+            ("● ", "#888888"),
+            (f"Failed (exit {_failure_code(block)}) ", "bold"),
+            (summary, ""),
+        )
+        console = Console(width=max(20, width))
+        body: list[Any] = [Text("")]
+        body.extend(_wrap_failure_line(title, console, width))
+        lines = _failure_lines(block, expanded)
+        if lines:
+            body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
+            for line in lines:
+                body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width))
+        return Group(*body)
     symbol = _spinner() if block.status == "running" and block.name not in EXPLORE_TOOLS else "●"
-    suffix = " — waiting for input" if block.status == "waiting" else ""
-    color = "green" if block.status == "running" else "red" if block.is_error else "yellow" if block.status == "waiting" else "green"
+    suffix = (
+        " — waiting for input" if block.status == "waiting"
+        else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
+        else ""
+    )
+    color = "#888888" if block.status == "interrupted" else "yellow" if block.status == "waiting" else "green"
     title = Text.assemble((f"{symbol} ", color), (_tool_summary(block.name, block.arguments), "bold"), (suffix, "dim"))
     body: list[Any] = [title]
     if block.name in MUTATION_TOOLS:
         diff = mutation_diff(block.name, block.arguments)
         if diff:
-            preview = _preview_diff(diff)
-            body.append(Syntax(preview, "diff", theme="ansi_dark", word_wrap=True))
+            if block.name == "write_file":
+                added = _written_lines(diff)
+                body.append(Text(f"  {_added_line_label(len(added))}", style="green"))
+                body.append(Text(""))
+                body.append(Syntax("\n".join(added[:WRITE_PREVIEW_LINES]), "diff", theme="ansi_dark", word_wrap=True))
+                hidden = len(added) - WRITE_PREVIEW_LINES
+                if hidden > 0:
+                    body.append(Text(f"  … {hidden} lines hidden · Ctrl+R to review", style="dim"))
+            else:
+                preview = _preview_diff(diff)
+                body.append(Syntax(preview, "diff", theme="ansi_dark", word_wrap=True))
         return Padding(Group(*body), (1, 1, 0, 1), expand=False)
     output = block.output.strip()
+    if block.name == "web_search" and block.status == "completed" and not expanded and output.startswith("Web search results for:"):
+        count_line = next((line for line in output.splitlines() if line.endswith(" results") and line.split(" ", 1)[0].isdigit()), "")
+        if count_line:
+            body.append(Text(f"  … {count_line} · Ctrl+O to expand", style="dim"))
+            return Padding(Group(*body), (1, 1, 0, 1), expand=False)
     if block.name == "execute":
         if output:
             lines = output.splitlines()
@@ -443,6 +504,42 @@ def _tool(block: ToolBlock, expanded: bool) -> Any:
     return Padding(Group(*body), (1, 1, 0, 1), expand=False)
 
 
+def _failure_code(block: ToolBlock) -> int:
+    return block.exit_code if isinstance(block.exit_code, int) and not isinstance(block.exit_code, bool) else 1
+
+
+def _wrap_failure_line(line: Text, console: Console, width: int) -> list[Text]:
+    """Leave a spare terminal column while preserving long commands and output."""
+    return list(line.wrap(console, max(1, width - 2), overflow="fold"))
+
+
+def _failure_summary(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if lines[0].startswith("参数校验失败"):
+        return next((line.removeprefix("- ") for line in lines if line.startswith("- ")), lines[0])
+    return next((line for line in lines if not line.startswith("Exit code:")), "")
+
+
+def _failure_lines(block: ToolBlock, expanded: bool) -> list[str]:
+    lines = block.output.strip().splitlines()
+    if expanded:
+        return lines
+    if lines and lines[0].startswith("参数校验失败"):
+        details = [line.strip().removeprefix("- ") for line in lines if line.startswith("- ")]
+        shown = details[:4] or lines[:1]
+        hidden = len(lines) - len(shown)
+    else:
+        content = [line for line in lines if line.strip() and not line.strip().startswith("Exit code:")]
+        limit = 6 if block.name == "execute" else 4
+        shown = content[-limit:] if block.name == "execute" else content[:limit]
+        hidden = len(content) - len(shown)
+    if hidden > 0:
+        shown.append(f"… {hidden} output lines hidden · Ctrl+O to expand")
+    return shown
+
+
 def _preview_diff(diff: str) -> str:
     lines = diff.splitlines()
     if len(lines) <= DIFF_PREVIEW_LINES:
@@ -454,17 +551,34 @@ def _preview_diff(diff: str) -> str:
     ])
 
 
+def _written_lines(diff: str) -> list[str]:
+    """Extract added content from the synthetic new-file diff for write_file."""
+    lines = diff.splitlines()
+    if len(lines) < 3 or lines[0] != "--- /dev/null" or not lines[1].startswith("+++ "):
+        return []
+    return [line for line in lines[2:] if line.startswith("+")]
+
+
+def _added_line_label(count: int) -> str:
+    return f"+{count} {'line' if count == 1 else 'lines'}"
+
+
 def _tool_summary(name: str, args: dict[str, Any]) -> str:
     display = {"read_file": "read", "write_file": "write", "edit_file": "edit"}.get(name, name)
     if name == "execute":
         command = str(args.get("command") or "…")
         return f"execute {command}"
+    if name == "web_search":
+        query = str(args.get("query") or "…").replace("\n", " ")
+        return f'web_search "{query[:80]}"'
     if name == "request_human_input":
         question = str(args.get("question") or "input required").replace("\n", " ")
         return f"ask {question[:100]}"
     path = args.get("file_path") or args.get("path")
     if path:
         label = str(PurePosixPath(str(path)))
+        if name == "write_file" and label.startswith("/workspace/"):
+            label = label.lstrip("/")
         offset = args.get("offset")
         limit = args.get("limit")
         if offset is not None or limit is not None:

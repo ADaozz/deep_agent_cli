@@ -447,7 +447,7 @@ def test_explore_tools_collapse_into_summary() -> None:
     assert "Ctrl+O to expand" in collapsed
     assert "/workspace/a.py" not in collapsed
     assert "execute pytest" in collapsed
-    assert "write /workspace/out.txt" in collapsed
+    assert "write workspace/out.txt" in collapsed
     state.tools_expanded = True
     expanded = render_transcript(state, 80)
     assert "read /workspace/a.py" in expanded
@@ -514,6 +514,103 @@ def test_running_tool_card_does_not_fill_terminal_width() -> None:
         assert all(len(line) < 120 for line in rendered.splitlines())
 
 
+def test_failed_execute_shows_real_exit_code_command_and_compact_output() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="push", name="execute", arguments={"command": "git push origin main"}))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="push", name="execute", is_error=True,
+        content="\n".join(f"detail {index}" for index in range(10)) + "\nExit code: 7",
+        result={"exit_code": 7},
+    ))
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock) and block.exit_code == 7
+    collapsed = _plain(render_transcript(state, 100))
+    assert "● Failed (exit 7) git push origin main" in collapsed
+    assert "└ output" in collapsed
+    assert "detail 9" in collapsed
+    assert "detail 0" not in collapsed
+    assert "Ctrl+O to expand" in collapsed
+    state.tools_expanded = True
+    assert "detail 0" in _plain(render_transcript(state, 100))
+
+
+def test_failed_human_input_summarizes_fields_without_schema_until_expanded() -> None:
+    output = (
+        "参数校验失败，`request_human_input` 没有执行，也没有产生任何副作用。\n"
+        "请按下面的说明修正参数后重新调用。\n\n错误：\n"
+        "- fields: 收到 str → 必须是原生 JSON 数组\n"
+        "  收到内容：[serialized fields]\n"
+        "- recommendation: 收到 str → 必须是 JSON 对象\n"
+        "  收到内容：{serialized recommendation}\n\n"
+        "`request_human_input` 的参数 schema：\n{large schema}"
+    )
+    state = CliState(blocks=[ToolBlock(
+        "ask", "request_human_input", {"question": "下一步怎么处理？"},
+        output=output, status="error", is_error=True,
+    )])
+    collapsed = _plain(render_transcript(state, 100))
+    assert "Failed (exit 1) ask 下一步怎么处理？" in collapsed
+    assert "fields: 收到 str" in collapsed
+    assert "recommendation: 收到 str" in collapsed
+    assert "schema" not in collapsed
+    assert "serialized" not in collapsed
+    state.tools_expanded = True
+    expanded = _plain(render_transcript(state, 100))
+    assert "{large schema}" in expanded
+    assert "serialized fields" in expanded
+
+
+def test_failed_mutation_shows_error_instead_of_unapplied_diff() -> None:
+    state = CliState(blocks=[ToolBlock(
+        "write", "write_file", {"file_path": "/workspace/out.txt", "content": "hello"},
+        output="Error: permission denied", status="error", is_error=True,
+    )])
+    for expanded in (False, True):
+        state.tools_expanded = expanded
+        rendered = _plain(render_transcript(state, 100))
+        assert "Failed (exit 1) write workspace/out.txt" in rendered
+        assert "permission denied" in rendered
+        assert "+hello" not in rendered
+
+
+def test_failed_tool_wraps_long_command_and_output_before_terminal_edge() -> None:
+    block = ToolBlock(
+        "long", "execute", {"command": "git push " + "a" * 180},
+        output="Error: " + "b" * 180, status="error", is_error=True,
+    )
+    for expanded in (False, True):
+        rendered = _plain(_capture(_tool(block, expanded, 80), 80))
+        assert all(len(line) < 80 for line in rendered.splitlines())
+        assert rendered.count("a") >= 180
+        assert rendered.count("b") >= 180
+
+
+def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:
+    blocks = [ToolBlock(str(index), "read_file", {"file_path": f"file-{index}.py"}, status="completed") for index in range(8)]
+    blocks[0].status = "error"
+    blocks[0].is_error = True
+    blocks[0].output = "Error: permission denied"
+    group = _explore_group(blocks, 100)
+    rendered = _plain(_capture(group, 100))
+    assert "Explored 8 items · 1 failed" in rendered
+    assert "… 3 more" in rendered
+    assert "└ Read file-7.py" in rendered
+    assert "Failed (exit 1) Read file-0.py: Error: permission denied" in rendered
+    assert group.renderables[1].spans[0].style == "#888888"
+
+
+def test_explore_group_caps_failure_preview_and_terminal_width() -> None:
+    blocks = [ToolBlock(
+        str(index), "glob", {"pattern": f"file-{index}.py"},
+        output="Error: search failed", status="error", is_error=True,
+    ) for index in range(10)]
+    rendered = _plain(_capture(_explore_group(blocks, 80), 80))
+    assert "Explored 10 items · 10 failed" in rendered
+    assert "… 7 more failed" in rendered
+    assert rendered.count("Failed (exit 1)") == 3
+    assert all(len(line) < 80 for line in rendered.splitlines())
+
+
 def test_approval_pane_stays_decision_only() -> None:
     command = "python -m pytest tests/test_cli.py tests/test_runner.py -q --tb=short"
     controller = InteractionController.approval([{
@@ -578,8 +675,9 @@ def test_write_and_delete_previews_use_real_schema() -> None:
         arguments={"file_path": "/workspace/out.txt", "content": "hello"},
         status="waiting",
     )]), 80)
-    assert "write /workspace/out.txt" in write
-    assert "/dev/null" in write
+    assert "write workspace/out.txt" in write
+    assert "+1 line" in write
+    assert "/dev/null" not in write
     assert "+hello" in write
     delete = render_transcript(CliState(blocks=[ToolBlock(
         tool_call_id="d1", name="delete",
@@ -587,6 +685,31 @@ def test_write_and_delete_previews_use_real_schema() -> None:
         status="waiting",
     )]), 80)
     assert "delete /workspace/out.txt" in delete
+
+
+def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
+    lines = ["# Tavily 接口调研报告", "", "> 生成时间：待核实", "", "---", *[f"line {index}" for index in range(297)]]
+    content = "\n".join(lines) + "\n"
+    args = {"file_path": "/workspace/tavily-api-research.md", "content": content}
+    state = CliState(blocks=[ToolBlock(
+        tool_call_id="write-302", name="write_file", arguments=args, status="completed",
+    )])
+    preview = _plain(render_transcript(state, 100))
+    assert "write workspace/tavily-api-research.md" in preview
+    assert "+302 lines" in preview
+    assert "+# Tavily 接口调研报告" in preview
+    assert "+> 生成时间：待核实" in preview
+    assert "… 296 lines hidden · Ctrl+R to review" in preview
+    assert "--- /dev/null" not in preview
+    assert "+++ b/workspace" not in preview
+    assert "@@ -0,0" not in preview
+    assert "line 296" not in preview
+
+    review = _plain(render_review([("write_file", args)], 100))
+    assert "+302 lines" in review
+    assert "+line 296" in review
+    assert "--- /dev/null" not in review
+    assert "@@ -0,0" not in review
 
 
 def test_truncated_tool_completion_keeps_stream_and_shows_log_path() -> None:
@@ -639,6 +762,7 @@ def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
     ))
     assert state.blocks[-1].output.endswith("Exit code: 2")
     assert state.blocks[-1].is_error
+    assert state.blocks[-1].exit_code == 2
 
 
 def test_run_cancelled_keeps_streamed_tool_output() -> None:
@@ -669,6 +793,8 @@ def test_terminal_run_events_stop_every_tool_spinner() -> None:
         assert len(tools) == 3
         assert all(block.status == expected_status and block.revision == 1 for block in tools)
         assert all(block.is_error == (terminal_event == "run_failed") for block in tools)
+        if terminal_event == "run_failed":
+            assert all(block.exit_code == 1 for block in tools)
 
 
 def test_load_transcript_keeps_failed_execute_error() -> None:
@@ -687,6 +813,29 @@ def test_load_transcript_keeps_failed_execute_error() -> None:
     assert isinstance(tool, ToolBlock)
     assert tool.is_error
     assert tool.status == "error"
+    assert tool.exit_code is None
+    assert "Failed (exit 1)" in _plain(render_transcript(state, 100))
+
+    state.load_transcript([TranscriptBlock(
+        kind="tool", tool_call_id="new", name="execute", content="failed",
+        is_error=True, status="error", exit_code=9,
+    )])
+    assert "Failed (exit 9)" in _plain(render_transcript(state, 100))
+
+
+def test_restored_interrupted_write_has_static_gray_status() -> None:
+    state = CliState()
+    state.load_transcript([TranscriptBlock(
+        kind="tool", tool_call_id="write-1", name="write_file",
+        arguments={"file_path": "/workspace/report.md", "content": "draft"},
+        status="interrupted",
+    )])
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    title = _tool(block, False).renderable.renderables[0]
+    assert title.plain.startswith("● write workspace/report.md")
+    assert "interrupted (completion unconfirmed)" in title.plain
+    assert title.spans[0].style == "#888888"
 
 
 def test_transcript_header_avoids_duplicate_runtime_context() -> None:
