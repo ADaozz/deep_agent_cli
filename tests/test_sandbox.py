@@ -5,17 +5,22 @@ import asyncio
 
 import pytest
 from deepagents.backends.protocol import SandboxBackendProtocol
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from deepagents.middleware.filesystem import FilesystemMiddleware, _route_host_path_prompt
+from langchain.agents.middleware.types import ModelRequest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.config import BindMount, SandboxConfig
-from agent.factory import create_agent
+from agent.factory import DEFAULT_FS_TOOLS, create_agent
 from agent.factory import _default_skill_sources
+from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import (
     BubblewrapBackend,
     ExecutionMode,
     SandboxUnavailableError,
+    UnsandboxedShellBackend,
+    WorkspaceCompositeBackend,
     sandbox_environment,
     select_backend,
 )
@@ -185,6 +190,41 @@ def test_user_skills_are_read_only_for_file_backend(tmp_path: Path, monkeypatch:
     outside = selected.backend.write("/outside.txt", "bad")
     assert outside.error and "under /workspace" in outside.error
     assert not (workspace / "outside.txt").exists()
+
+
+def test_workspace_middleware_reports_executor_and_skips_shell_denial_prompt(
+    tmp_path: Path,
+) -> None:
+    executor = UnsandboxedShellBackend(config_for(tmp_path, allow_unsandboxed=True))
+    composite = WorkspaceCompositeBackend(executor, skills_dir=None)
+
+    unsupported, execution_active, backend = FilesystemMiddleware(
+        backend=composite, tools=list(DEFAULT_FS_TOOLS),
+    )._unsupported_tools_and_execution_state({"execute", "ls"})
+    assert unsupported == {"execute"}
+    assert execution_active is False
+    # The default route is neither a shell nor a sandbox, so upstream's route
+    # prompt blames the shell for paths the execute tool can actually reach.
+    assert "not accessible from the shell" in _route_host_path_prompt(composite)
+
+    middleware = WorkspaceFilesystemMiddleware(backend=composite, tools=list(DEFAULT_FS_TOOLS))
+    unsupported, execution_active, backend = middleware._unsupported_tools_and_execution_state({"execute", "ls"})
+    assert unsupported == set()
+    assert execution_active is True
+    assert backend is executor
+    assert _route_host_path_prompt(backend) == ""
+
+    request = ModelRequest(
+        model=scripted_model([AIMessage(content="unused")]),
+        messages=[HumanMessage(content="list files")],
+        system_message=SystemMessage(content="base"),
+        tools=[{"name": "execute"}, {"name": "ls"}],
+    )
+    seen = []
+    middleware.wrap_model_call(request, lambda item: seen.append(item) or item)
+    filtered = seen[0]
+    assert [tool["name"] for tool in filtered.tools] == ["execute", "ls"]
+    assert filtered.system_message.content == "base"
 
 
 def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:

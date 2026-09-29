@@ -27,4 +27,12 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
         if "execute" in tool_names and isinstance(self.backend, WorkspaceCompositeBackend):
             unsupported.discard("execute")
             execution_active = True
+            # Upstream builds its "virtual mounts vs. shell paths" prompt from
+            # the returned backend, judging reachability by the composite's
+            # default route. Our execute shell runs on the executor's
+            # filesystem, where /workspace is the shell root, so returning the
+            # composite would inject a bogus "/workspace is not accessible
+            # from the shell" notice. The executor is not a CompositeBackend,
+            # which makes that prompt empty.
+            backend = self.backend.executor
         return unsupported, execution_active, backend

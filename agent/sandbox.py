@@ -447,6 +447,29 @@ def _write_all(fd: int, data: bytes | bytearray) -> None:
         view = view[written:]
 
 
+def _drop_partial_character_head(data: bytearray) -> None:
+    """Drop continuation bytes a window trim stranded at the head.
+
+    ``del data[:-max]`` can cut a multi-byte UTF-8 character in half; the
+    orphaned continuation bytes at the front would decode as U+FFFD in every
+    snapshot and in the final tail.
+    """
+    head = 0
+    while head < len(data) and (data[head] & 0xC0) == 0x80:
+        head += 1
+    del data[:head]
+
+
+def _decode_tail_snapshot(data: bytes) -> str:
+    """Decode a rolling tail without flashing split characters.
+
+    A non-final incremental decode keeps a trailing partial multi-byte
+    character buffered instead of replacing it with U+FFFD; the next chunk
+    completes it and the following snapshot shows it whole.
+    """
+    return getincrementaldecoder("utf-8")(errors="replace").decode(data)
+
+
 def _run_process(
     command: list[str] | str,
     *,
@@ -545,10 +568,11 @@ def _run_process(
         tail_bytes.extend(raw)
         if len(tail_bytes) > max_output_bytes:
             del tail_bytes[:-max_output_bytes]
+            _drop_partial_character_head(tail_bytes)
         if truncated:
             # Replace the bounded in-memory view with the latest bytes after
             # every chunk. The full stream continues into the workspace log.
-            current_tail = bytes(tail_bytes).decode("utf-8", errors="replace")
+            current_tail = _decode_tail_snapshot(bytes(tail_bytes))
             emit_tool_output(tool_call_id, current_tail, stream="tail_snapshot")
 
     try:

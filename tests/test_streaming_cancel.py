@@ -107,6 +107,26 @@ def test_unicode_split_across_chunks(tmp_path: Path) -> None:
     assert "中" in result.output or "中" in "".join(chunks)
 
 
+def test_truncated_rolling_tail_never_splits_utf8_characters(tmp_path: Path) -> None:
+    chunks: list[tuple[str, str]] = []
+    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
+    # 4800 bytes of 3-byte CJK characters under a 50-byte cap: the window trim
+    # lands mid-character at the head, and pipe chunk boundaries split them.
+    script = "import sys; sys.stdout.buffer.write(b'\\xe4\\xb8\\xad' * 1600)"
+    try:
+        result = _unsandboxed(tmp_path, max_output_bytes=50).execute(f'python3 -c "{script}"')
+    finally:
+        set_output_emitter(None)
+    assert result.truncated
+    snapshots = [text for stream, text in chunks if stream == "tail_snapshot"]
+    assert snapshots
+    tail = result.output.split("\n\n[Output truncated")[0]
+    for text in (tail, *snapshots):
+        assert "\ufffd" not in text
+        assert set(text) == {"中"}
+    assert len(tail.encode("utf-8")) <= 50
+
+
 def test_truncation_keeps_draining(tmp_path: Path) -> None:
     backend = _unsandboxed(tmp_path, max_output_bytes=8)
     result = backend.execute("printf 'abcdefghijklmnop'")
