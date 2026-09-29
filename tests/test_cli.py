@@ -159,7 +159,7 @@ def test_filesystem_warning_appears_in_transcript_not_terminal(capsys) -> None:
         assert capsys.readouterr().err == ""
 
 
-def test_explore_tools_keep_a_green_dot_while_running() -> None:
+def test_running_tools_use_green_spinner_and_completed_tools_green_dot() -> None:
     running = ToolBlock("call", "execute", {"command": "pwd"}, status="running")
     title = _tool(running, False).renderable.renderables[0]
     assert title.plain.lstrip()[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -170,7 +170,7 @@ def test_explore_tools_keep_a_green_dot_while_running() -> None:
         collapsed_title = _explore_group([explore]).renderables[1]
         expanded_title = _tool(explore, True).renderable.renderables[0]
         for item in (collapsed_title, expanded_title):
-            assert item.plain.lstrip().startswith("●")
+            assert item.plain.lstrip()[0] in ("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if status == "running" else "●")
             assert item.spans[0].style == "green"
 
 
@@ -359,9 +359,8 @@ def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path)
         app._apply_session_snapshot(snapshot)
         rendered = _plain(render_transcript(app.state, 80))
         assert rendered.count("Plan") == 1
-        assert "✓ Inspect files" in rendered
-        assert "● Run tests" in rendered
-        assert "○ Run tests" not in rendered
+        assert "● Inspect files" in rendered
+        assert re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Run tests", rendered)
     thread = runner.thread_id
     runner.close()
     store.close()
@@ -773,6 +772,59 @@ def test_execute_legacy_metadata_falls_back_without_parsing_output() -> None:
     assert normalize_command_execution(block).status == "failed"
 
 
+def test_run_completed_cannot_confirm_unfinished_execute() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="unfinished", name="execute",
+        arguments={"command": "pytest -q"},
+    ))
+    state.apply(RunEvent(type="tool_output_delta", tool_call_id="unfinished", content="partial\n"))
+    state.apply(RunEvent(type="run_completed"))
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock) and block.status == "interrupted"
+    rendered = _plain(render_transcript(state, 100))
+    assert "execute pytest -q — interrupted (completion unconfirmed)" in rendered
+    assert "Ran pytest -q" not in rendered
+
+
+@pytest.mark.parametrize(("status", "artifact", "output", "synthetic"), [
+    ("failed", {"exit_code": 2}, "real output\n\nExit code: 2", "Exit code: 2"),
+    ("timeout", {"exit_code": 124, "termination_reason": "timeout"},
+     "real output\n\nError: Command timed out after 2 seconds.", "Command timed out"),
+    ("cancelled", {"exit_code": 130, "termination_reason": "cancelled"},
+     "real output\n\nCancelled by user.", "Cancelled by user."),
+])
+def test_execute_card_hides_known_completion_footer(status, artifact, output, synthetic) -> None:
+    block = ToolBlock(
+        "footer", "execute", {"command": "build"}, output=output,
+        artifact=artifact, status="error", is_error=True,
+    )
+    rendered = _plain(_capture(_tool(block, False), 100))
+    assert "real output" in rendered
+    assert synthetic not in rendered
+    assert status != "failed" or "Failed (exit 2)" in rendered
+
+
+@pytest.mark.parametrize(("status", "reason", "color"), [
+    ("completed", None, "green"),
+    ("waiting", None, "yellow"),
+    ("interrupted", None, "#888888"),
+    ("error", None, "#888888"),
+    ("error", "timeout", "#888888"),
+    ("error", "cancelled", "#888888"),
+    ("error", "spawn_error", "#888888"),
+])
+def test_execute_status_marker_colors(status, reason, color) -> None:
+    block = ToolBlock(
+        "marker", "execute", {"command": "build"}, status=status,
+        is_error=status == "error",
+        artifact={"termination_reason": reason, "exit_code": 0 if status == "completed" else 1},
+    )
+    title = _tool(block, False).renderable.renderables[0]
+    assert title.spans[0].style == color
+    assert title.plain.startswith("● ")
+
+
 def test_edit_waiting_shows_short_diff_preview() -> None:
     old = "\n".join(f"keep-{index}" for index in range(20))
     new = "replaced"
@@ -908,6 +960,46 @@ def test_diff_background_fills_each_visual_row_in_preview_and_review(monkeypatch
             if rows:
                 assert all(len(row) == 39 for row in rows)
                 assert all(row.endswith(" ") for row in rows if len(row.strip()) < 39)
+
+
+def test_large_write_preview_has_numbered_full_width_green_rows(monkeypatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    content = "\n".join(["#!/usr/bin/env node", "/**", *[f"line {index}" for index in range(116)]])
+    block = ToolBlock(
+        "script", "write_file",
+        {"file_path": "workspace/login-coolcollege.mjs", "content": content},
+        status="completed",
+    )
+    rendered = render_transcript(CliState(blocks=[block]), 60)
+    plain = _plain(rendered)
+    assert re.search(r"(?m)^\s+1 \+#!/usr/bin/env node", plain)
+    assert re.search(r"(?m)^\s+2 \+/\*\*", plain)
+    assert "… 112 lines hidden · Ctrl+R to review" in plain
+    green_rows = re.findall(r"\x1b\[[0-9;]*48;2;36;92;56m([^\n]*?)\x1b\[0m", rendered)
+    assert green_rows and all(len(row) == 59 for row in green_rows)
+
+    review = _plain(render_review([("write_file", block.arguments)], 60))
+    assert re.search(r"(?m)^\s+118 \+line 115", review)
+
+
+def test_edit_context_stays_unhighlighted_while_changed_rows_fill_width(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    args = {
+        "file_path": "/workspace/example.py",
+        "old_string": "keep\nold\nend",
+        "new_string": "keep\nnew\nend",
+    }
+    rendered = render_review([("edit_file", args)], 50)
+    plain = _plain(rendered)
+    assert re.search(r"(?m)^\s+2 -old", plain)
+    assert re.search(r"(?m)^\s+2 \+new", plain)
+    assert re.search(r"(?m)^\s+1  keep", plain)
+    assert "\x1b[48;2;" not in next(
+        line for line in rendered.splitlines() if "keep" in line
+    )
+    for color in ("74;32;40", "36;92;56"):
+        rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
+        assert rows and all(len(row) == 49 for row in rows)
 
 
 def test_edit_review_keeps_context_headers_and_full_diff() -> None:
@@ -1462,7 +1554,7 @@ def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
     assert "@@ -0,0" not in review
 
 
-def test_truncated_tool_completion_keeps_stream_and_shows_log_path() -> None:
+def test_truncated_tool_completion_uses_final_tail_without_snapshot() -> None:
     state = CliState()
     state.apply(RunEvent(type="tool_started", tool_call_id="exec-log", name="execute"))
     state.apply(RunEvent(
@@ -1483,8 +1575,8 @@ def test_truncated_tool_completion_keeps_stream_and_shows_log_path() -> None:
         },
     ))
     output = state.blocks[-1].output
-    assert output.startswith("first-eight")
-    assert "last-eight" not in output
+    assert output.startswith("last-eight")
+    assert "first-eight" not in output
     assert output.count("Full output saved to:") == 1
     assert "/current/workspace/.deep-agent/logs/exec/example.log" in output
     assert "/workspace/.deep-agent/logs/exec/example.log" in output
@@ -1503,6 +1595,24 @@ def test_execute_truncated_tail_keeps_latest_lines_and_agent_log_path() -> None:
     assert "line 6" in before and "line 2" not in before
 
     state.apply(RunEvent(
+        type="tool_output_delta", tool_call_id="truncated", stream="tail_snapshot",
+        content="\n".join(f"line {index}" for index in range(3, 8)) + "\n",
+    ))
+    live_tail = _plain(render_transcript(state, 100))
+    assert "1 earlier output lines hidden" in live_tail
+    assert "line 3" not in live_tail and "line 7" in live_tail
+    assert "Output truncated" in live_tail
+
+    state.tools_expanded = True
+    state.apply(RunEvent(
+        type="tool_output_delta", tool_call_id="truncated", stream="tail_snapshot",
+        content="\n".join(f"line {index}" for index in range(4, 9)) + "\n",
+    ))
+    expanded_live = _plain(render_transcript(state, 100))
+    assert "line 8" in expanded_live and "line 3" not in expanded_live
+    state.tools_expanded = False
+
+    state.apply(RunEvent(
         type="tool_completed", tool_call_id="truncated", name="execute",
         artifact={
             "exit_code": 0, "truncated": True, "max_output_bytes": 8,
@@ -1511,13 +1621,13 @@ def test_execute_truncated_tail_keeps_latest_lines_and_agent_log_path() -> None:
     ))
     collapsed = _plain(render_transcript(state, 100))
     assert "Ran long-command" in collapsed
-    assert "3 earlier output lines hidden" in collapsed
-    assert "line 3" in collapsed and "line 6" in collapsed
+    assert "1 earlier output lines hidden" in collapsed
+    assert "line 5" in collapsed and "line 8" in collapsed
     assert "Output truncated · full output: /workspace/exec.log" in collapsed
     assert "/host/exec.log" not in collapsed
     state.tools_expanded = True
     expanded = _plain(render_transcript(state, 100))
-    assert "line 0" in expanded and "line 6" in expanded
+    assert "line 0" not in expanded and "line 4" in expanded and "line 8" in expanded
     assert "Output truncated · full output: /workspace/exec.log" in expanded
 
 
@@ -1555,7 +1665,7 @@ def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
         type="tool_completed", tool_call_id="exec-failed", name="execute",
         content="failed\n\nExit code: 2", artifact={"exit_code": 2, "truncated": False}, is_error=True,
     ))
-    assert state.blocks[-1].output.endswith("Exit code: 2")
+    assert state.blocks[-1].output == "failed\n"
     assert state.blocks[-1].is_error
     assert state.blocks[-1].exit_code == 2
 
@@ -1615,10 +1725,14 @@ def test_run_cancelled_keeps_streamed_tool_output() -> None:
     tool = state.blocks[0]
     assert isinstance(tool, ToolBlock)
     assert tool.output.startswith("already produced")
-    assert "Cancelled by user" in tool.output
+    assert "Cancelled by user" not in tool.output
+    assert tool.artifact["termination_reason"] == "cancelled"
     assert tool.status == "error"
     assert tool.is_error
     assert state.status == "Cancelled"
+    rendered = _plain(render_transcript(state, 100))
+    assert "● Cancelled" in rendered
+    assert "Failed (exit 1)" not in rendered
 
 
 def test_tool_started_upserts_existing_tool_call() -> None:
@@ -1802,7 +1916,7 @@ def test_terminal_run_events_stop_every_tool_spinner() -> None:
     )
     for terminal_event, expected_status in (
         (interaction, "waiting"),
-        (RunEvent(type="run_completed"), "completed"),
+        (RunEvent(type="run_completed"), "interrupted"),
         (RunEvent(type="run_failed", content="boom"), "error"),
     ):
         state = CliState()

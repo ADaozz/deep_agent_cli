@@ -162,7 +162,13 @@ class CliState:
             if tool is None:
                 tool = ToolBlock(event.tool_call_id, event.name or "tool", {})
                 self.blocks.append(tool)
-            touch(tool).output += event.content
+            touch(tool)
+            if event.stream == "tail_snapshot" and tool.name == "execute":
+                tool.output = event.content
+                artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
+                tool.artifact = {**artifact, "truncated": True}
+            else:
+                tool.output += event.content
         elif event.type == "assistant_completed":
             self.active_block = None
         elif event.type == "tool_completed":
@@ -172,15 +178,18 @@ class CliState:
                 self.blocks.append(tool)
             touch(tool)
             artifact = event.artifact if isinstance(event.artifact, dict) else None
+            had_tail_snapshot = (
+                event.name == "execute" and isinstance(tool.artifact, dict)
+                and tool.artifact.get("truncated") is True
+            )
             if artifact is not None:
                 tool.artifact = artifact
             if event.name == "execute" and artifact is not None:
-                if not tool.output:
+                if artifact.get("truncated") and not had_tail_snapshot and event.content:
+                    # Legacy/no-stream fallback: the final result has the tail.
                     tool.output = event.content
-                else:
-                    notice = _execute_completion_notice(artifact)
-                    if notice:
-                        tool.output = f"{tool.output.rstrip()}\n\n{notice}"
+                elif not tool.output:
+                    tool.output = event.content
             elif event.content and (not tool.output or event.content.startswith(tool.output)):
                 tool.output = event.content
             tool.is_error = event.is_error
@@ -224,7 +233,7 @@ class CliState:
             self.status = "Ready"
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
-                    touch(block).status = "completed"
+                    touch(block).status = "interrupted"
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
             self.active_block = None
@@ -239,15 +248,15 @@ class CliState:
         elif event.type == "run_cancelled":
             self.running = False
             self.status = "Cancelled"
-            notice = _execute_completion_notice({"termination_reason": "cancelled"})
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
                     touch(block)
                     block.status = "error"
                     block.is_error = True
                     block.exit_code = 1
-                    if notice and notice not in block.output:
-                        block.output = f"{block.output.rstrip()}\n\n{notice}".strip()
+                    if block.name == "execute":
+                        artifact = block.artifact if isinstance(block.artifact, dict) else {}
+                        block.artifact = {**artifact, "termination_reason": "cancelled"}
             self.add_system("Operation cancelled.", error=True)
         elif event.type == "run_failed":
             self.running = False
@@ -315,30 +324,3 @@ def _interaction_settlement(result: Any) -> Callable[[ToolBlock], str]:
     if status == "waiting_human":
         return lambda block: "waiting" if block.name == "request_human_input" else "interrupted"
     return lambda _block: "interrupted"
-
-
-def _execute_completion_notice(metadata: dict[str, Any]) -> str:
-    lines: list[str] = []
-    if metadata.get("truncated"):
-        limit = metadata.get("max_output_bytes")
-        lines.append(
-            f"[Output truncated: showing the last {limit} bytes."
-            if isinstance(limit, int) else "[Output truncated."
-        )
-        if metadata.get("host_log_path"):
-            lines.append(f"Full output saved to: {metadata['host_log_path']}")
-            if metadata.get("agent_log_path"):
-                lines.append(f"Agent path: {metadata['agent_log_path']}")
-        elif metadata.get("log_error"):
-            lines.append(f"Full output could not be saved: {metadata['log_error']}")
-        lines[-1] += "]"
-    reason = metadata.get("termination_reason")
-    if reason == "cancelled":
-        lines.append("Cancelled by user.")
-    elif reason == "timeout":
-        lines.append("Command timed out.")
-    elif reason == "spawn_error":
-        lines.append("Command could not start.")
-    elif isinstance(metadata.get("exit_code"), int) and metadata["exit_code"] != 0:
-        lines.append(f"Exit code: {metadata['exit_code']}")
-    return "\n".join(lines)

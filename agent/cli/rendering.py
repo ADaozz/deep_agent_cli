@@ -128,7 +128,10 @@ def transcript_units(state: CliState, timezone: ZoneInfo | None = None, width: i
         todos = [dict(item) for item in state.todos]
         units.append(TranscriptUnit(
             "todos",
-            tuple((item.get("content"), item.get("status")) for item in todos),
+            (
+                tuple((item.get("content"), item.get("status")) for item in todos),
+                _spinner_tick() if any(item.get("status") == "in_progress" for item in todos) else None,
+            ),
             lambda: _todos(todos),
         ))
     index = 0
@@ -268,7 +271,7 @@ def _modify_group(blocks: list[ToolBlock], width: int) -> Any:
 
 def _live_tick(block: ToolBlock) -> int | None:
     """Spinner frame for in-flight tools, None once they are frozen."""
-    return _spinner_tick() if block.status == "running" and tool_group(block.name) != "explore" else None
+    return _spinner_tick() if block.status == "running" else None
 
 
 def _same_owner(cached: Any, current: Any) -> bool:
@@ -473,10 +476,11 @@ def _todos(todos: list[dict[str, str]]) -> Any:
     lines: list[Text] = [Text("Plan", style="bold bright_cyan")]
     for item in todos:
         status = item.get("status")
-        symbol, style = {
-            "completed": ("✓", "green"),
-            "in_progress": ("●", "yellow"),
-        }.get(status, ("○", "dim"))
+        marker_status = {
+            "in_progress": "running", "pending": "waiting", "blocked": "waiting",
+            "failed": "error", "completed": "completed",
+        }.get(status or "", "waiting")
+        symbol, style = _tool_status_marker(marker_status)
         lines.append(Text.assemble((f"{symbol} ", style), (str(item.get("content") or ""), style)))
     return Padding(Group(*lines), (0, 1, 1, 1))
 
@@ -500,10 +504,11 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80) -> Any:
         for block, preview in zip(blocks, previews)
         if block.is_error
     ]
-    color = "#888888" if failed or interrupted else "green" if running else "yellow" if waiting else "green"
+    marker_status = "error" if failed or interrupted else "running" if running else "waiting" if waiting else "completed"
+    symbol, color = _tool_status_marker(marker_status)
     count = len(blocks)
     title = Text.assemble(
-        (" ● ", color),
+        (f" {symbol} ", color),
         (f"Explored {count} {'item' if count == 1 else 'items'}", "bold"),
         (f" · {len(failed)} failed", "dim") if failed else ("", ""),
         (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
@@ -559,13 +564,12 @@ def render_tool_preview(
         return _command_card(block.output, preview.command_execution, expanded, width)
     if preview.kind == "failure":
         return _failure_card(block, preview, expanded, width)
-    symbol = _spinner() if block.status == "running" and preview.group != "explore" else "●"
+    symbol, color = _tool_status_marker(block.status, block.is_error)
     suffix = (
         " — waiting for input" if block.status == "waiting"
         else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
         else ""
     )
-    color = "#888888" if block.status == "interrupted" else "yellow" if block.status == "waiting" else "green"
     summary = f"{preview.verb} {preview.target}".strip()
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
     mutation = preview.file_mutation
@@ -617,8 +621,10 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
         else " — interrupted (completion unconfirmed)" if status == "interrupted"
         else ""
     )
-    color = "#888888" if status == "interrupted" else "yellow" if status == "waiting" else "green"
-    symbol = _spinner() if status == "running" else "●"
+    marker_status = {
+        "running": "running", "waiting": "waiting", "succeeded": "completed",
+    }.get(status, "error")
+    symbol, color = _tool_status_marker(marker_status)
     title = Text.assemble(
         (f"{symbol} ", color), (f"{verb} {preview.command}", "bold"), (suffix, "dim"),
     )
@@ -634,6 +640,18 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
         display_output = re.sub(
             r"(?:\n\n|^)\[Output truncated(?::|\.)[^\]]*\]",
             "", display_output, count=1, flags=re.DOTALL,
+        )
+        display_output = display_output.removesuffix("\n\n[output truncated]")
+    if status == "failed" and preview.exit_code is not None:
+        footer = f"Exit code: {preview.exit_code}"
+        display_output = "" if display_output == footer else display_output.removesuffix(f"\n\n{footer}")
+    elif status == "cancelled":
+        footer = "Cancelled by user."
+        display_output = "" if display_output == footer else display_output.removesuffix(f"\n\n{footer}")
+    elif status == "timeout":
+        display_output = re.sub(
+            r"(?:\n\n|^)Error: Command timed out after [0-9.]+ seconds\.$",
+            "", display_output,
         )
     lines = display_output.strip().splitlines()
     if not expanded and len(lines) > EXECUTE_TAIL_LINES:
@@ -675,8 +693,9 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
 
 
 def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int) -> Any:
+    _symbol, color = _tool_status_marker("error")
     title = Text.assemble(
-        ("● ", "#888888"),
+        ("● ", color),
         (f"Failed (exit {_failure_code(block)}) ", "bold"),
         (preview.target, ""),
     )
@@ -706,6 +725,17 @@ def _wrap_failure_line(line: Text, console: Console, width: int) -> list[Text]:
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
+def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
+    """Shared status icon and color for tool cards and grouped tools."""
+    if status == "running":
+        return _spinner(), "green"
+    if status == "waiting":
+        return "●", "yellow"
+    if status in {"error", "interrupted"} or is_error:
+        return "●", "#888888"
+    return "●", "green"
+
+
 def _spinner_tick() -> int:
     return int(time.monotonic() * 10) % len(_SPINNER_FRAMES)
 
@@ -731,6 +761,9 @@ def _capture(renderable: Any, width: int) -> str:
         file=stream,
         force_terminal=True,
         color_system="truecolor",
+        # The TUI uses these ANSI styles for semantic diff rows and statuses;
+        # an inherited NO_COLOR from the shell must not erase them.
+        no_color=False,
         width=max(20, width),
     )
     console.print(renderable)

@@ -486,7 +486,6 @@ def _run_process(
     tail_bytes = bytearray()
     total_bytes = 0
     truncated = False
-    truncation_marked = False
     cancelled = False
     timed_out = False
     log_fd: int | None = None
@@ -518,7 +517,7 @@ def _run_process(
                 pass
 
     def _append_chunk(raw: bytes) -> None:
-        nonlocal total_bytes, truncated, truncation_marked
+        nonlocal total_bytes, truncated
         nonlocal log_fd, log_directory_fd, log_name, log_error
         if not raw:
             return
@@ -546,13 +545,11 @@ def _run_process(
         tail_bytes.extend(raw)
         if len(tail_bytes) > max_output_bytes:
             del tail_bytes[:-max_output_bytes]
-        if truncated and not truncation_marked:
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                emit_tool_output(tool_call_id, tail, stream="merged")
-            marker = f"\n\n... Output truncated at {max_output_bytes} bytes."
-            emit_tool_output(tool_call_id, marker, stream="merged")
-            truncation_marked = True
+        if truncated:
+            # Replace the bounded in-memory view with the latest bytes after
+            # every chunk. The full stream continues into the workspace log.
+            current_tail = bytes(tail_bytes).decode("utf-8", errors="replace")
+            emit_tool_output(tool_call_id, current_tail, stream="tail_snapshot")
 
     try:
         while True:

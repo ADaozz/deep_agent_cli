@@ -9,9 +9,12 @@ import re
 import pytest
 
 from agent.cancel import ToolCancelContext, set_cancel_context, set_output_emitter
+from agent.cli.rendering import render_transcript
+from agent.cli.state import CliState
 from agent.config import SandboxConfig
 from agent.control import RunController
 from agent.sandbox import UnsandboxedShellBackend, WorkspaceCompositeBackend, _run_process
+from agent.runner import RunEvent
 from agent.tools.execute import build_execute_tool
 
 
@@ -112,18 +115,21 @@ def test_truncation_keeps_draining(tmp_path: Path) -> None:
 
 
 def test_truncation_also_caps_streamed_output(tmp_path: Path) -> None:
-    chunks: list[str] = []
-    set_output_emitter(lambda _id, text, _stream: chunks.append(text))
+    chunks: list[tuple[str, str]] = []
+    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
     try:
         result = _unsandboxed(tmp_path, max_output_bytes=16).execute("printf '%020000d' 0")
     finally:
         set_output_emitter(None)
-    streamed = "".join(chunks)
+    streamed = "".join(text for stream, text in chunks if stream == "merged")
+    snapshots = [text for stream, text in chunks if stream == "tail_snapshot"]
     assert result.exit_code == 0
     assert result.truncated
     assert streamed.startswith("0000000000000000")
-    assert streamed.count("Output truncated") == 1
-    assert len(streamed) < 120
+    assert snapshots
+    assert all(len(snapshot.encode("utf-8")) <= 16 for snapshot in snapshots)
+    assert len(snapshots[-1].encode("utf-8")) <= 16
+    assert len(streamed) <= 16
 
 
 def test_short_and_exact_limit_output_do_not_create_log(tmp_path: Path) -> None:
@@ -136,8 +142,8 @@ def test_short_and_exact_limit_output_do_not_create_log(tmp_path: Path) -> None:
 
 
 def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) -> None:
-    chunks: list[str] = []
-    set_output_emitter(lambda _id, text, _stream: chunks.append(text))
+    chunks: list[tuple[str, str]] = []
+    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
     try:
         backend = _unsandboxed(tmp_path, max_output_bytes=8)
         result = backend.execute("printf ABCD; sleep 0.05; printf efgh >&2; sleep 0.05; printf 1234")
@@ -155,10 +161,10 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     assert routed.file_data and routed.file_data["content"] == "ABCDefgh1234"
     assert log_path.stat().st_mode & 0o777 == 0o600
     assert log_path.parent.stat().st_mode & 0o777 == 0o700
-    streamed = "".join(chunks)
+    streamed = "".join(text for stream, text in chunks if stream == "merged")
+    snapshots = [text for stream, text in chunks if stream == "tail_snapshot"]
     assert streamed.startswith("ABCDefgh")
-    assert "1234" not in streamed
-    assert streamed.count("Output truncated") == 1
+    assert snapshots[-1] == "efgh1234"
     tool_message = build_execute_tool(backend).invoke({
         "type": "tool_call", "id": "exec-test", "name": "execute",
         "args": {"command": "printf ABCDefgh1234"},
@@ -169,6 +175,54 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     assert artifact["truncated"] is True
     assert artifact["host_log_path"] and str(tmp_path) in artifact["host_log_path"]
     assert artifact["agent_log_path"].startswith("/workspace/.deep-agent/logs/exec/")
+
+
+def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="live", name="execute",
+        arguments={"command": "emit lines"},
+    ))
+    snapshots: list[str] = []
+
+    def on_output(tool_call_id: str, content: str, stream: str) -> None:
+        state.apply(RunEvent(
+            type="tool_output_delta", tool_call_id=tool_call_id,
+            content=content, stream=stream,
+        ))
+        if stream == "tail_snapshot":
+            snapshots.append(state.blocks[0].output)
+
+    set_output_emitter(on_output)
+    ctx = ToolCancelContext(tool_name="execute", tool_call_id="live", cancel_event=threading.Event())
+    set_cancel_context(ctx)
+    try:
+        result = _unsandboxed(tmp_path, max_output_bytes=24).execute(
+            "for i in 1 2 3 4 5 6; do printf 'line %02d\\n' \"$i\"; sleep 0.05; done"
+        )
+    finally:
+        set_cancel_context(None)
+        set_output_emitter(None)
+
+    assert result.truncated
+    assert len(snapshots) >= 2
+    assert snapshots[0] != snapshots[-1]
+    assert snapshots[-1] == "line 04\nline 05\nline 06\n"
+    assert state.blocks[0].output == snapshots[-1]
+    assert "line 06" in render_transcript(state, 100)
+    assert "line 01" not in render_transcript(state, 100)
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="live", name="execute",
+        content=result.output,
+        artifact={
+            "exit_code": result.exit_code, "truncated": result.truncated,
+            "agent_log_path": result.agent_log_path,
+            "host_log_path": result.host_log_path,
+            "max_output_bytes": result.max_output_bytes,
+        },
+    ))
+    assert state.blocks[0].output == snapshots[-1]
+    assert "line 06" in render_transcript(state, 100)
 
 
 def test_truncated_timeout_keeps_tail_and_captured_log(tmp_path: Path) -> None:
