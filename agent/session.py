@@ -76,6 +76,9 @@ class TranscriptBlock:
     status: str = ""
     attachments: tuple[ImageAttachmentRef, ...] = ()
     exit_code: int | None = None
+    # Raw ToolMessage.artifact restored from the checkpoint; UI previews are
+    # re-derived from it instead of being persisted.
+    artifact: Any = None
 
 
 def workspace_state_path(workspace: Path, *, override: str | Path | None = None) -> Path:
@@ -396,6 +399,7 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     block.is_error = is_error
                     block.status = "error" if is_error else "completed"
                     block.exit_code = exit_code
+                    block.artifact = artifact
                     updated = True
                     break
             if not updated:
@@ -407,6 +411,7 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     is_error=is_error,
                     status="error" if is_error else "completed",
                     exit_code=exit_code,
+                    artifact=artifact,
                 ))
     return blocks
 

@@ -49,8 +49,8 @@ from agent.cli.commands import Command, command_table
 from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
+from agent.cli.previews import is_mutation_tool
 from agent.cli.rendering import (
-    MUTATION_TOOLS,
     RenderedUnit,
     TranscriptDocument,
     TranscriptRenderer,
@@ -1677,12 +1677,12 @@ class CliApplication:
             found = [
                 (str(call.get("name") or "tool"), call.get("args") if isinstance(call.get("args"), dict) else {})
                 for call in self.interaction.calls
-                if str(call.get("name") or "") in MUTATION_TOOLS
+                if is_mutation_tool(str(call.get("name") or ""))
             ]
             if found:
                 return found
         for block in reversed(self.state.blocks):
-            if isinstance(block, ToolBlock) and block.name in MUTATION_TOOLS:
+            if isinstance(block, ToolBlock) and is_mutation_tool(block.name):
                 return [(block.name, block.arguments)]
         return []
 

@@ -152,3 +152,40 @@ def test_web_search_tui_collapses_to_result_count() -> None:
     assert "… 2 results · Ctrl+O to expand" in collapsed
     assert "https://example.com/first" not in collapsed
     assert "https://example.com/first" in expanded
+
+
+def test_web_search_preview_uses_artifact() -> None:
+    block = ToolBlock(
+        tool_call_id="call-2", name="web_search", arguments={"query": "deepagents"},
+        output="Web search results for: deepagents\n5 results\n\n1. Deep Agents\n   URL: https://example.com/a",
+        artifact={
+            "provider": "tavily",
+            "query": "deepagents",
+            "results": [
+                {"title": "Deep Agents", "url": "https://example.com/a"},
+                {"title": "Deep Agents docs", "url": "https://example.com/b"},
+                {"title": "Deep Agents repo", "url": "https://example.com/c"},
+                {"title": "Deep Agents blog", "url": "https://example.com/d"},
+                {"title": "Deep Agents paper", "url": "https://example.com/e"},
+            ],
+            "response_time": "0.42",
+        },
+        status="completed",
+    )
+    collapsed = _capture(_tool(block, False), 100)
+    assert 'web_search "deepagents"' in collapsed
+    assert "5 results" in collapsed
+    assert "0.42" in collapsed
+    assert "https://example.com/a" not in collapsed
+    assert "… 5 results · 0.42s · Ctrl+O to expand" in collapsed
+
+
+def test_web_search_preview_formats_numeric_response_time() -> None:
+    block = ToolBlock(
+        tool_call_id="call-3", name="web_search", arguments={"query": "timing"},
+        output="Web search results for: timing\n1 results",
+        artifact={"provider": "tavily", "results": [{"title": "T", "url": "https://x"}], "response_time": 2.0},
+        status="completed",
+    )
+    collapsed = _capture(_tool(block, False), 100)
+    assert "… 1 results · 2s · Ctrl+O to expand" in collapsed

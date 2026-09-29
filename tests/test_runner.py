@@ -221,8 +221,22 @@ def test_execute_tool_event_uses_artifact_status() -> None:
         artifact={"exit_code": 0, "truncated": False, "termination_reason": None},
     )]}}, events.append)
     assert len(events) == 1
-    assert events[0].result["exit_code"] == 0
+    assert events[0].artifact["exit_code"] == 0
     assert events[0].is_error is False
+
+
+def test_runner_forwards_generic_tool_artifact() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    events = []
+    runner._emit_update_events({"tools": {"messages": [ToolMessage(
+        content="Web search results for: deepagents", name="web_search", tool_call_id="search-1",
+        artifact={"provider": "tavily", "query": "deepagents", "results": [
+            {"title": "Deep Agents", "url": "https://example.com"},
+        ]},
+    )]}}, events.append)
+    assert len(events) == 1
+    assert events[0].artifact["provider"] == "tavily"
+    assert events[0].artifact["results"][0]["url"] == "https://example.com"
 
 
 def test_ai_message_usage_reaches_runner_event() -> None:
@@ -301,9 +315,9 @@ def test_execute_artifact_reaches_runner_event_after_approval(tmp_path) -> None:
     assert runner.approve_tool("exec-artifact", on_event=events.append).status == "completed"
     completed = [event for event in events if event.type == "tool_completed" and event.name == "execute"]
     assert len(completed) == 1
-    assert completed[0].result["truncated"] is True
-    assert completed[0].result["agent_log_path"].startswith("/workspace/.deep-agent/logs/exec/")
-    assert completed[0].result["exit_code"] == 0
+    assert completed[0].artifact["truncated"] is True
+    assert completed[0].artifact["agent_log_path"].startswith("/workspace/.deep-agent/logs/exec/")
+    assert completed[0].artifact["exit_code"] == 0
 
 
 def test_request_human_input_structured_fields() -> None:

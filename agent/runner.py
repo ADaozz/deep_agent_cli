@@ -94,6 +94,9 @@ class RunEvent:
     result: Any = None
     is_error: bool = False
     stream: str = ""
+    # Structured tool result payload (ToolMessage.artifact), forwarded as-is
+    # for every tool, not just execute.
+    artifact: Any = None
 
 
 @dataclass(frozen=True)
@@ -1156,15 +1159,15 @@ class AgentRunner:
                     continue
                 content = _message_text(message)
                 artifact = getattr(message, "artifact", None)
-                execute_metadata = artifact if tool_name == "execute" and isinstance(artifact, dict) else None
                 is_error = tool_message_is_error(message)
                 _emit(handler, RunEvent(
                     type="tool_completed",
                     tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
                     name=tool_name,
                     content=content,
-                    result=execute_metadata if execute_metadata is not None else getattr(message, "content", content),
+                    result=getattr(message, "content", content),
                     is_error=is_error,
+                    artifact=artifact,
                 ))
 
 def interrupt_payloads(interrupts: Any) -> list[dict[str, Any]]:

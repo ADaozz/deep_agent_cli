@@ -39,7 +39,7 @@ from agent.cli.rendering import (
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock, touch
 from agent.config import Settings
 from agent.config import ModelProfile
-from agent.runner import AgentRunner, RunEvent, TurnTiming
+from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
 from agent.session import SessionStore, TranscriptBlock
 from agent.tools.examples import build_example_tools
 from agent.factory import DEFAULT_FS_TOOLS, create_agent
@@ -520,7 +520,7 @@ def test_failed_execute_shows_real_exit_code_command_and_compact_output() -> Non
     state.apply(RunEvent(
         type="tool_completed", tool_call_id="push", name="execute", is_error=True,
         content="\n".join(f"detail {index}" for index in range(10)) + "\nExit code: 7",
-        result={"exit_code": 7},
+        artifact={"exit_code": 7},
     ))
     block = state.blocks[0]
     assert isinstance(block, ToolBlock) and block.exit_code == 7
@@ -660,13 +660,76 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
     rendered = render_transcript(state, 80)
     assert "edit /workspace/tests/test_cache.py" in rendered
     assert "waiting for input" in rendered
-    assert "--- a/workspace/tests/test_cache.py" in rendered
-    assert "Ctrl+R to review" in rendered
+    assert "--- a/workspace/tests/test_cache.py" not in rendered
+    assert "+++ b/workspace/tests/test_cache.py" not in rendered
+    assert "@@" not in rendered
+    assert "-keep-0" in rendered
     assert "keep-15" not in rendered
+    assert "Ctrl+R to review" in rendered
     review = render_review([("edit_file", {
         "file_path": "/workspace/tests/test_cache.py", "old_string": old, "new_string": new,
     })], 80)
     assert "keep-15" in review
+    assert "--- a/workspace/tests/test_cache.py" in review
+
+
+def test_edit_preview_hides_unified_diff_headers() -> None:
+    state = CliState(blocks=[ToolBlock(
+        tool_call_id="edit-2",
+        name="edit_file",
+        arguments={
+            "file_path": "/workspace/notes.md",
+            "old_string": "first\nsecond\nthird",
+            "new_string": "first\nchanged\nthird",
+        },
+        status="completed",
+    )])
+    rendered = _plain(render_transcript(state, 100))
+    assert "Edited /workspace/notes.md (+1 -1)" in rendered
+    for header in ("--- a/", "+++ b/", "@@"):
+        assert header not in rendered
+    assert "-second" in rendered
+    assert "+changed" in rendered
+
+
+def test_edit_preview_counts_added_deleted() -> None:
+    state = CliState(blocks=[ToolBlock(
+        tool_call_id="edit-3",
+        name="edit_file",
+        arguments={
+            "file_path": "/workspace/notes.md",
+            "old_string": "a\nb\nc",
+            "new_string": "a\nb\nc\nd\ne",
+        },
+        status="completed",
+    )])
+    rendered = _plain(render_transcript(state, 100))
+    assert "Edited /workspace/notes.md (+2 -0)" in rendered
+
+
+def test_edit_preview_without_reliable_diff_omits_counts() -> None:
+    state = CliState(blocks=[ToolBlock(
+        tool_call_id="edit-4",
+        name="edit_file",
+        arguments={"file_path": "/workspace/notes.md"},
+        status="completed",
+    )])
+    rendered = _plain(render_transcript(state, 100))
+    assert "Edited /workspace/notes.md" in rendered
+    assert "(+" not in rendered
+
+
+def test_delete_preview_does_not_invent_deleted_line_count() -> None:
+    state = CliState(blocks=[ToolBlock(
+        tool_call_id="delete-1",
+        name="delete",
+        arguments={"file_path": "/workspace/old-report.md"},
+        status="completed",
+    )])
+    rendered = _plain(render_transcript(state, 100))
+    assert "delete /workspace/old-report.md" in rendered
+    assert "-83" not in rendered
+    assert "lines hidden" not in rendered
 
 
 def test_write_and_delete_previews_use_real_schema() -> None:
@@ -726,7 +789,7 @@ def test_truncated_tool_completion_keeps_stream_and_shows_log_path() -> None:
             "Full output saved to: /current/workspace/.deep-agent/logs/exec/example.log\n"
             "Agent path: /workspace/.deep-agent/logs/exec/example.log]"
         ),
-        result={
+        artifact={
             "exit_code": 0, "truncated": True, "max_output_bytes": 8,
             "host_log_path": "/current/workspace/.deep-agent/logs/exec/example.log",
             "agent_log_path": "/workspace/.deep-agent/logs/exec/example.log",
@@ -749,7 +812,7 @@ def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
     state.apply(RunEvent(
         type="tool_completed", tool_call_id="exec-marker", name="execute",
         content="Exit code: 7\nCancelled by user.",
-        result={"exit_code": 0, "truncated": False, "termination_reason": None},
+        artifact={"exit_code": 0, "truncated": False, "termination_reason": None},
     ))
     assert state.blocks[-1].output == "Exit code: 7\nCancelled by user.\n"
     assert not state.blocks[-1].is_error
@@ -758,11 +821,58 @@ def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
     state.apply(RunEvent(type="tool_output_delta", tool_call_id="exec-failed", content="failed\n"))
     state.apply(RunEvent(
         type="tool_completed", tool_call_id="exec-failed", name="execute",
-        content="failed\n\nExit code: 2", result={"exit_code": 2, "truncated": False}, is_error=True,
+        content="failed\n\nExit code: 2", artifact={"exit_code": 2, "truncated": False}, is_error=True,
     ))
     assert state.blocks[-1].output.endswith("Exit code: 2")
     assert state.blocks[-1].is_error
     assert state.blocks[-1].exit_code == 2
+
+
+def test_cli_state_stores_generic_tool_artifact() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="search-1", name="web_search",
+        arguments={"query": "deepagents"},
+    ))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="search-1", name="web_search",
+        content="Web search results for: deepagents\n5 results",
+        artifact={
+            "provider": "tavily", "query": "deepagents",
+            "results": [{"title": "Deep Agents", "url": "https://example.com"}],
+            "response_time": 0.42,
+        },
+    ))
+    block = next(
+        block for block in state.blocks
+        if isinstance(block, ToolBlock) and block.tool_call_id == "search-1"
+    )
+    assert block.artifact["provider"] == "tavily"
+    assert block.artifact["response_time"] == 0.42
+    assert block.status == "completed"
+
+
+def test_transcript_restores_tool_artifact() -> None:
+    state = CliState()
+    state.load_transcript([TranscriptBlock(
+        kind="tool", tool_call_id="search-1", name="web_search",
+        arguments={"query": "deepagents"},
+        content="Web search results for: deepagents\n5 results",
+        status="completed",
+        artifact={
+            "provider": "tavily",
+            "results": [
+                {"title": "Deep Agents", "url": "https://example.com"},
+                {"title": "Docs", "url": "https://docs.example.com"},
+            ],
+            "response_time": 0.42,
+        },
+    )])
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    assert block.artifact["provider"] == "tavily"
+    assert len(block.artifact["results"]) == 2
+    assert block.status == "completed"
 
 
 def test_run_cancelled_keeps_streamed_tool_output() -> None:
@@ -779,21 +889,199 @@ def test_run_cancelled_keeps_streamed_tool_output() -> None:
     assert state.status == "Cancelled"
 
 
+def test_tool_started_upserts_existing_tool_call() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="edit-1", name="edit_file",
+        arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"},
+    ))
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="edit-1", name="edit_file",
+        arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"},
+    ))
+    tools = [
+        block for block in state.blocks
+        if isinstance(block, ToolBlock) and block.tool_call_id == "edit-1"
+    ]
+    assert len(tools) == 1
+    assert tools[0].status == "running"
+
+
+def test_waiting_tool_resume_does_not_duplicate_block() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="edit-1", name="edit_file",
+        arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"},
+    ))
+    state.apply(RunEvent(
+        type="interaction_requested",
+        result=RunResult(status="waiting_confirmation", pending_tool_calls=[
+            {"toolCallId": "edit-1", "name": "edit_file", "args": {}},
+        ]),
+    ))
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="edit-1", name="edit_file",
+        arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"},
+    ))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="edit-1", name="edit_file", content="ok",
+    ))
+    tools = [
+        block for block in state.blocks
+        if isinstance(block, ToolBlock) and block.tool_call_id == "edit-1"
+    ]
+    assert len(tools) == 1
+    assert tools[0].status == "completed"
+    assert not tools[0].is_error
+    assert len(state.blocks) == 1
+
+
+def test_completed_tool_is_not_reopened_by_replayed_start() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="read-1", name="read_file", arguments={}))
+    state.apply(RunEvent(type="tool_completed", tool_call_id="read-1", name="read_file", content="data"))
+    state.apply(RunEvent(type="tool_started", tool_call_id="read-1", name="read_file", arguments={}))
+    tools = [
+        block for block in state.blocks
+        if isinstance(block, ToolBlock) and block.tool_call_id == "read-1"
+    ]
+    assert len(tools) == 1
+    assert tools[0].status == "completed"
+
+
+def test_hitl_lifecycle_keeps_a_single_tool_block() -> None:
+    state = CliState()
+    flow = [
+        (RunEvent(type="tool_started", tool_call_id="edit-1", name="edit_file",
+                  arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"}), "running"),
+        (RunEvent(
+            type="interaction_requested",
+            result=RunResult(status="waiting_confirmation", pending_tool_calls=[
+                {"toolCallId": "edit-1", "name": "edit_file", "args": {}},
+            ]),
+        ), "waiting"),
+        (RunEvent(type="tool_started", tool_call_id="edit-1", name="edit_file",
+                  arguments={"file_path": "/workspace/a.py", "old_string": "x", "new_string": "y"}), "running"),
+        (RunEvent(type="tool_completed", tool_call_id="edit-1", name="edit_file", content="ok"), "completed"),
+    ]
+    for event, expected_status in flow:
+        state.apply(event)
+        tools = [
+            block for block in state.blocks
+            if isinstance(block, ToolBlock) and block.tool_call_id == "edit-1"
+        ]
+        assert len(tools) == 1
+        assert tools[0].status == expected_status
+
+
+def test_parallel_interaction_distinguishes_waiting_from_interrupted() -> None:
+    state = CliState()
+    for tool_call_id, name in (
+        ("read-1", "read_file"), ("grep-1", "grep"), ("edit-1", "edit_file"),
+    ):
+        state.apply(RunEvent(type="tool_started", tool_call_id=tool_call_id, name=name, arguments={}))
+    state.apply(RunEvent(
+        type="interaction_requested",
+        result=RunResult(status="waiting_confirmation", pending_tool_calls=[
+            {"toolCallId": "edit-1", "name": "edit_file", "args": {}},
+        ]),
+    ))
+    by_id = {
+        block.tool_call_id: block.status
+        for block in state.blocks if isinstance(block, ToolBlock)
+    }
+    assert by_id == {"read-1": "interrupted", "grep-1": "interrupted", "edit-1": "waiting"}
+
+
+def test_human_input_interaction_marks_only_ask_tool_waiting() -> None:
+    state = CliState()
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="ask-1", name="request_human_input",
+        arguments={"question": "Continue?"},
+    ))
+    state.apply(RunEvent(type="tool_started", tool_call_id="read-1", name="read_file", arguments={}))
+    state.apply(RunEvent(
+        type="interaction_requested",
+        result=RunResult(status="waiting_human", human_input={"question": "Continue?"}),
+    ))
+    by_id = {
+        block.tool_call_id: block.status
+        for block in state.blocks if isinstance(block, ToolBlock)
+    }
+    assert by_id == {"ask-1": "waiting", "read-1": "interrupted"}
+
+
+def test_paused_interaction_interrupts_unfinished_tools() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="read-1", name="read_file", arguments={}))
+    state.apply(RunEvent(
+        type="interaction_requested", result=RunResult(status="paused"),
+    ))
+    block = next(
+        block for block in state.blocks
+        if isinstance(block, ToolBlock) and block.tool_call_id == "read-1"
+    )
+    assert block.status == "interrupted"
+    assert not block.is_error
+    assert block.exit_code is None
+
+
+def test_real_hitl_resume_keeps_a_single_tool_card() -> None:
+    """The runner replays tool_started after an approval; the card must not duplicate."""
+    events: list[RunEvent] = []
+    prepared = create_agent(model=scripted_model([
+        AIMessage(content="", tool_calls=[{
+            "id": "call-write-1", "name": "write_file",
+            "args": {"file_path": "/workspace/note.txt", "content": "hello"},
+        }]),
+        AIMessage(content="done"),
+    ]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared, thread_id="hitl-single-card")
+    state = CliState()
+
+    def on_event(event: RunEvent) -> None:
+        events.append(event)
+        state.apply(event)
+
+    waiting = runner.invoke("write a note", on_event=on_event)
+    assert waiting.status == "waiting_confirmation"
+    tools = [b for b in state.blocks if isinstance(b, ToolBlock)]
+    assert len(tools) == 1 and tools[0].status == "waiting"
+
+    assert runner.approve_tool("call-write-1", on_event=on_event).status == "completed"
+    tools = [b for b in state.blocks if isinstance(b, ToolBlock)]
+    assert len(tools) == 1
+    assert tools[0].status == "completed"
+    assert not tools[0].is_error
+    started = [e for e in events if e.type == "tool_started" and e.tool_call_id == "call-write-1"]
+    assert len(started) >= 2  # the resume replay is the case the upsert guards
+    rendered = _plain(render_transcript(state, 100))
+    assert rendered.count("write workspace/note.txt") == 1
+    runner.close()
+
+
 def test_terminal_run_events_stop_every_tool_spinner() -> None:
+    interaction = RunEvent(
+        type="interaction_requested",
+        result=RunResult(status="waiting_confirmation", pending_tool_calls=[
+            {"toolCallId": str(index), "name": "grep", "args": {}}
+            for index in range(3)
+        ]),
+    )
     for terminal_event, expected_status in (
-        ("interaction_requested", "waiting"),
-        ("run_completed", "completed"),
-        ("run_failed", "error"),
+        (interaction, "waiting"),
+        (RunEvent(type="run_completed"), "completed"),
+        (RunEvent(type="run_failed", content="boom"), "error"),
     ):
         state = CliState()
         for index in range(3):
             state.apply(RunEvent(type="tool_started", tool_call_id=str(index), name="grep"))
-        state.apply(RunEvent(type=terminal_event))
+        state.apply(terminal_event)
         tools = [block for block in state.blocks if isinstance(block, ToolBlock)]
         assert len(tools) == 3
         assert all(block.status == expected_status and block.revision == 1 for block in tools)
-        assert all(block.is_error == (terminal_event == "run_failed") for block in tools)
-        if terminal_event == "run_failed":
+        assert all(block.is_error == (terminal_event.type == "run_failed") for block in tools)
+        if terminal_event.type == "run_failed":
             assert all(block.exit_code == 1 for block in tools)
 
 

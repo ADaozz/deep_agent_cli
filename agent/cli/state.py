@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from agent.attachments import ImageAttachmentRef
-from agent.runner import RunEvent, TurnTiming
+from agent.runner import RunEvent, RunResult, TurnTiming
 from agent.session import TranscriptBlock
 
 
@@ -30,6 +30,9 @@ class ToolBlock:
     name: str
     arguments: dict[str, Any]
     output: str = ""
+    # Raw ToolMessage.artifact: the structured tool result, preserved for
+    # preview builders. Not persisted as a derived preview.
+    artifact: Any = None
     status: str = "running"
     is_error: bool = False
     revision: int = 0
@@ -110,6 +113,7 @@ class CliState:
                     name=item.name or "tool",
                     arguments=item.arguments or {},
                     output=item.content,
+                    artifact=item.artifact,
                     status=item.status or ("error" if item.is_error else "completed"),
                     is_error=item.is_error,
                     exit_code=item.exit_code,
@@ -140,11 +144,18 @@ class CliState:
             else:
                 block.content = event.content
         elif event.type == "tool_started":
-            self.blocks.append(ToolBlock(
-                tool_call_id=event.tool_call_id,
-                name=event.name,
-                arguments=event.arguments,
-            ))
+            tool = self._tool_by_id(event.tool_call_id)
+            if tool is None:
+                self.blocks.append(ToolBlock(
+                    tool_call_id=event.tool_call_id,
+                    name=event.name,
+                    arguments=event.arguments,
+                ))
+            elif tool.status not in {"completed", "error"}:
+                touch(tool)
+                tool.name = event.name or tool.name
+                tool.arguments = event.arguments or tool.arguments
+                tool.status = "running"
             self.active_block = None
         elif event.type == "tool_output_delta":
             tool = self._tool(event.tool_call_id) or self._running_tool()
@@ -160,19 +171,22 @@ class CliState:
                 tool = ToolBlock(event.tool_call_id, event.name, {})
                 self.blocks.append(tool)
             touch(tool)
-            if event.name == "execute" and isinstance(event.result, dict):
+            artifact = event.artifact if isinstance(event.artifact, dict) else None
+            if artifact is not None:
+                tool.artifact = artifact
+            if event.name == "execute" and artifact is not None:
                 if not tool.output:
                     tool.output = event.content
                 else:
-                    notice = _execute_completion_notice(event.result)
+                    notice = _execute_completion_notice(artifact)
                     if notice:
                         tool.output = f"{tool.output.rstrip()}\n\n{notice}"
             elif event.content and (not tool.output or event.content.startswith(tool.output)):
                 tool.output = event.content
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
-            if event.name == "execute" and isinstance(event.result, dict):
-                code = event.result.get("exit_code")
+            if event.name == "execute" and artifact is not None:
+                code = artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
             mode = ""
@@ -201,9 +215,10 @@ class CliState:
             self.running = False
             self.status = "Waiting for input"
             self.active_block = None
+            settle = _interaction_settlement(event.result)
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
-                    touch(block).status = "waiting"
+                    touch(block).status = settle(block)
         elif event.type == "run_completed":
             self.running = False
             self.status = "Ready"
@@ -261,6 +276,15 @@ class CliState:
                 return block
         return None
 
+    def _tool_by_id(self, tool_call_id: str) -> ToolBlock | None:
+        """Exact identity lookup; never falls back to an unrelated running tool."""
+        if not tool_call_id:
+            return None
+        for block in reversed(self.blocks):
+            if isinstance(block, ToolBlock) and block.tool_call_id == tool_call_id:
+                return block
+        return None
+
     def _running_tool(self) -> ToolBlock | None:
         for block in reversed(self.blocks):
             if isinstance(block, ToolBlock) and block.status == "running":
@@ -272,6 +296,25 @@ class CliState:
             isinstance(block, MessageBlock) and block.kind == "assistant" and block.content == text
             for block in self.blocks
         )
+
+
+def _interaction_settlement(result: Any) -> Callable[[ToolBlock], str]:
+    """Classify running tools at an interrupt as waiting or interrupted.
+
+    Only the calls the interrupt actually blocks keep the ``waiting`` label;
+    every other unfinished call merely lost its completion confirmation.
+    """
+    status = str(getattr(result, "status", "") or "")
+    if status == "waiting_confirmation":
+        pending = {
+            str(call.get("toolCallId") or "")
+            for call in getattr(result, "pending_tool_calls", None) or []
+            if isinstance(call, dict)
+        }
+        return lambda block: "waiting" if block.tool_call_id in pending else "interrupted"
+    if status == "waiting_human":
+        return lambda block: "waiting" if block.name == "request_human_input" else "interrupted"
+    return lambda _block: "interrupted"
 
 
 def _execute_completion_notice(metadata: dict[str, Any]) -> str:

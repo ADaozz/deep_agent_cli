@@ -184,6 +184,43 @@ def test_messages_to_transcript_rebuilds_tools() -> None:
     assert blocks[1].status == "completed"
 
 
+def test_messages_to_transcript_restores_generic_tool_artifact() -> None:
+    blocks = messages_to_transcript([
+        AIMessage(content="", tool_calls=[{
+            "id": "search-1", "name": "web_search", "args": {"query": "deepagents"},
+        }]),
+        ToolMessage(
+            content="Web search results for: deepagents\n5 results",
+            tool_call_id="search-1", name="web_search",
+            artifact={
+                "provider": "tavily", "query": "deepagents",
+                "results": [{"title": "Deep Agents", "url": "https://example.com"}],
+                "response_time": 0.42,
+            },
+        ),
+    ])
+    tool = blocks[0]
+    assert tool.kind == "tool"
+    assert tool.artifact["provider"] == "tavily"
+    assert tool.artifact["response_time"] == 0.42
+    assert tool.artifact["results"][0]["title"] == "Deep Agents"
+    assert tool.exit_code is None
+
+
+def test_messages_to_transcript_updates_existing_tool_block_artifact() -> None:
+    blocks = messages_to_transcript([
+        AIMessage(content="", tool_calls=[{
+            "id": "exec-1", "name": "execute", "args": {"command": "pwd"},
+        }]),
+        ToolMessage(
+            content="ok", tool_call_id="exec-1", name="execute",
+            artifact={"exit_code": 0, "truncated": False},
+        ),
+    ])
+    assert blocks[0].artifact == {"exit_code": 0, "truncated": False}
+    assert blocks[0].exit_code == 0
+
+
 def test_restored_unfinished_tools_stop_running_without_inventing_an_outcome() -> None:
     blocks = messages_to_transcript([
         AIMessage(content="", tool_calls=[
