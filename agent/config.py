@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -95,6 +96,7 @@ class Settings:
     source_path: Path | None = None
     agent_instructions: str | None = None
     ui_timezone: str = DEFAULT_UI_TIMEZONE
+    tavily_api_key: str | None = field(default=None, repr=False)
 
     @property
     def llm_model(self) -> str:
@@ -165,6 +167,7 @@ class Settings:
         ui = _section(raw, "ui")
         paths = _section(raw, "paths")
         sandbox_raw = _section(raw, "sandbox")
+        web_search = _section(raw, "web_search")
         if "protected_workspace_paths" in sandbox_raw:
             raise ValueError(
                 "sandbox.protected_workspace_paths was removed; move skills to "
@@ -190,6 +193,9 @@ class Settings:
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
             ui_timezone=timezone_name,
+            tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
+                web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
+            ),
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -387,7 +393,10 @@ def _grouped_llm_profiles(
             profiles.append(ModelProfile(
                 id=f"{source}/{name}",
                 model=model_name.strip(),
-                api_key=_model_text(inherited("api_key"), field_name=f"{field}.api_key", default="sk-local"),
+                api_key=_optional_secret(
+                    _model_text(inherited("api_key"), field_name=f"{field}.api_key", default="sk-local"),
+                    field_name=f"{field}.api_key",
+                ) or "sk-local",
                 base_url=_model_text(inherited("base_url"), field_name=f"{field}.base_url", default="http://localhost:8000/v1"),
                 input=_model_inputs(inherited("input"), field_name=f"{field}.input"),
                 provider=_model_provider(inherited("provider"), field_name=f"{field}.provider"),
@@ -410,6 +419,24 @@ def _model_text(value: Any, *, field_name: str, default: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+_ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def _optional_secret(value: Any, *, field_name: str) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string or null")
+    secret = value.strip()
+    match = _ENV_REFERENCE.fullmatch(secret)
+    if match:
+        variable = match.group(1)
+        secret = os.environ.get(variable, "").strip()
+        if not secret:
+            raise ValueError(f"{field_name} references missing environment variable {variable}")
+    return secret
 
 
 def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:

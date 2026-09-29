@@ -23,6 +23,34 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.ui_timezone == "Asia/Shanghai"
 
 
+def test_secret_environment_references_and_tavily_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_API_KEY", "model-secret")
+    monkeypatch.setenv("YAML_TAVILY_KEY", "yaml-secret")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    data = {
+        "llm": {"default": "local/test", "models": {"local": {
+            "api_key": "${MODEL_API_KEY}", "models": {"test": {}},
+        }}},
+        "web_search": {"tavily_api_key": "${YAML_TAVILY_KEY}"},
+    }
+    settings = Settings.from_mapping(data)
+    assert settings.llm_api_key == "model-secret"
+    assert settings.tavily_api_key == "yaml-secret"
+    monkeypatch.setenv("TAVILY_API_KEY", "env-secret")
+    assert Settings.from_mapping(data).tavily_api_key == "env-secret"
+
+
+def test_missing_secret_reference_reports_field_without_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MISSING_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="web_search.tavily_api_key references missing environment variable MISSING_API_KEY"):
+        Settings.from_mapping({"web_search": {"tavily_api_key": "${MISSING_API_KEY}"}})
+    with pytest.raises(ValueError, match="llm.models.local.models.test.api_key references missing environment variable MISSING_API_KEY"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"api_key": "${MISSING_API_KEY}", "models": {"test": {}}},
+        }}})
+
+
 def test_ui_timezone_can_be_configured_and_invalid_names_fail(tmp_path: Path) -> None:
     settings = Settings.from_mapping({"ui": {"timezone": "Asia/Tokyo"}})
     assert settings.ui_timezone == "Asia/Tokyo"

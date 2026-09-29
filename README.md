@@ -2,7 +2,7 @@
 
 面向 Linux / WSL2 的本地沙箱 Coding Agent，安装后运行 `deep-agent` 即可使用。
 
-在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批。自定义副作用工具需要显式配置审批规则。
+在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、按需搜索公开 Web、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批。自定义副作用工具需要显式配置审批规则。
 
 ![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/os-Linux%20%2F%20WSL2-FCC624?logo=linux&logoColor=black)
@@ -33,6 +33,7 @@
 ## Features
 
 - **工作区工具** — `ls` / `read` / `write` / `edit` / `glob` / `grep` / `delete` 访问 `/workspace`；用户 Skills 可在只读 `/skills` 下读取
+- **公开 Web 搜索** — 配置 Tavily 密钥后提供 `web_search`；只返回带 URL 的相关摘要，不授予沙箱命令联网权限
 - **沙箱执行** — 默认隔离网络；`execute(network=true)` 使用宿主网络，可访问互联网、localhost 和局域网
 - **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`）
 - **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
@@ -179,7 +180,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 | 切换模型 | `Ctrl+P` / `Alt+P` |
 | 粘贴图片 | `Ctrl+V` / `Alt+V` |
 | 展开或收起工具详情 / Thinking | `Ctrl+O` / `Ctrl+T` |
-| 审查即将批准的 edit/write/delete | `Ctrl+R` |
+| 查看 edit/write/delete 的完整改动 | `Ctrl+R` |
 | 重开 pending 交互 | `F2` |
 | 取回未应用的 steering | `Alt+Up` |
 | 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
@@ -187,6 +188,10 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 输入 `/` 时显示命令候选，按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
 
 探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
+
+`web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write` 新建文件时显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
+
+工具失败时显示灰色圆点、`Failed (exit N)`、具体命令或工具目标，以及简短错误；`Ctrl+O` 展开完整输出。探索组在标题中统计失败数，并额外列出最近的失败项。`execute` 显示命令的真实退出码；没有进程退出码的工具错误以约定的 `exit 1` 显示。搜索超时但返回部分结果时只提示结果不完整，不计为失败。
 
 底栏固定两行：首行左侧按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色，右侧显示 Git 分支与改动文件数（非 Git 目录显示 `⎇ no git`）；第二行左侧显示运行状态、执行模式、权限，右侧显示上下文占用。Git 状态每 5 秒后台刷新一次。窄终端优先保留右侧 Git 与上下文信息，左侧路径与模型先被截断。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
 
@@ -205,7 +210,7 @@ result = runner.invoke("列出 /workspace 下的文件")
 `on_event` 不含 ANSI 和终端宽度，HTTP / SSE 可以复用同一条 Runtime。
 `execute` 的 `tool_completed` 事件在 `result` 中携带 `exit_code`、`truncated`、`host_log_path`、`agent_log_path` 和 `termination_reason`；`content` 仍是发给模型的可读结果。
 
-默认工具包括文件、沙箱命令、人工输入和 `write_todos`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用；模型传输错误由 OpenAI SDK 最多重试两次。
+默认工具包括文件、沙箱命令、人工输入和 `write_todos`；配置 Tavily 密钥后另行注册 `web_search`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用；模型传输错误由 OpenAI SDK 最多重试两次。
 人工输入只使用 `request_human_input`：可传 `fields` 描述文本、布尔或选择题；恢复时用 `runner.submit_human_input({"text": "..."})`。审批用 `approve_tool` / `reject_tool`，暂停用 `continue_run`。旧工具 `handoff_to_human` 已移除，停在该工具调用上的旧会话恢复时会给出迁移错误。
 
 传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
@@ -286,6 +291,7 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 | `llm.models.<source>.models` | 必填 | 来源下的模型列表；来源名和模型名由用户自定义 |
 | `llm.models.<source>.models.<name>.model` | `<name>` | 实际 API 模型名；仅在模型键是别名时需要填写 |
 | `llm.models.<source>.api_key` | `sk-local` | 来源共用密钥；模型级可以覆盖 |
+| `web_search.tavily_api_key` | `null` | 私有配置中的 Tavily 密钥；`TAVILY_API_KEY` 环境变量优先 |
 | `llm.models.<source>.provider` | `qwen-responses` | 来源共用 `qwen-responses` 或 `openai-compatible`；模型级可以覆盖 |
 | `llm.models.<source>.stream_usage` | `false` | 流式 Chat Completions 请求附带 `stream_options.include_usage`；模型级可以覆盖 |
 | `llm.models.<source>.base_url` | `http://localhost:8000/v1` | 来源共用推理端点；模型级可以覆盖 |
@@ -299,6 +305,17 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 | `paths.config_dir` | `null` | 按键配置；默认 `~/.deep-agent` |
 
 按键覆盖：`~/.deep-agent/keybindings.json`。
+
+模型来源或模型级的 `api_key` 以及 `web_search.tavily_api_key` 都支持完整的 `${变量名}` 引用。引用的环境变量缺失时启动会报告配置错误；其他配置字段不做环境变量替换。真实密钥应放在本机私有配置或环境变量中，不要提交到仓库。
+
+设置 Tavily 密钥后，Agent 会获得 `web_search`，用于查找公开网页上的最新资料、新闻及外部事实；未设置时不会注册该工具。工具通过宿主机向固定的 Tavily Search 接口发起请求，20 秒超时，返回排名摘要和 URL，不抓取完整网页，也不会给 `execute` 开放网络。可在 `~/.deep-agent/config.yaml` 中加入：
+
+```yaml
+web_search:
+  tavily_api_key: ${TAVILY_API_KEY}
+```
+
+也可以只设置 `TAVILY_API_KEY`，无需添加 YAML 字段。若两者均有值，直接设置的 `TAVILY_API_KEY` 优先；使用上面的 `${TAVILY_API_KEY}` 写法时必须设置该环境变量。`web_search` 的参数为 `query`、`max_results`（1–20）、`topic`（`general` 或 `news`）、`time_range`（`day`、`week`、`month`、`year`）和 `include_domains`。结果仅是摘要；未搜到不代表资料不存在。
 
 `execute` 输出超限时，完整日志保存到当前工作区的 `.deep-agent/logs/exec/`。最终工具结果同时给出宿主机真实路径和 Agent 可用文件工具读取的 `/workspace/.deep-agent/logs/exec/...` 路径。建议在自己的项目 `.gitignore` 中加入 `.deep-agent/`；程序不会修改项目的忽略规则。
 父 shell 退出后，如果后台进程仍占有输出管道，`execute` 会继续收集数据，直到管道关闭或连续 100 毫秒没有新输出；后台进程在此后写出的内容不会进入本次工具结果。
@@ -324,6 +341,8 @@ python -m build
 ```
 
 `pyproject.toml` 是依赖声明的唯一维护入口。`requirements.lock` 是目前 Python 3.12 开发环境的冻结快照；升级依赖后在干净环境安装 `.[dev]`，再更新快照并运行测试。
+
+使用 pipx 安装过本项目时，修改源码后在项目根目录运行 `pipx install --force .`，再重启 CLI；已有进程不会自动加载新工具。
 
 测试不打真模型。对着本地端点做流式冒烟：
 

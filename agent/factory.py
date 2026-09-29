@@ -1,6 +1,7 @@
 # Assembly entry: create_deep_agent() only. Do not fork Deep Agents core.
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -38,6 +39,7 @@ from agent.permission import (
 from agent.sandbox import ExecutionMode, SKILLS_ROOT, WorkspaceCompositeBackend, select_backend
 from agent.tools.execute import build_execute_tool
 from agent.tools.human_input import build_human_input_tools
+from agent.tools.web_search import build_web_search_tool
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"]
 DEFAULT_SYSTEM_PROMPT = (
@@ -56,6 +58,7 @@ class AgentSpec:
     skills: tuple[str, ...] | None = None
     backend: BackendProtocol | None = None
     sandbox: SandboxConfig | None = None
+    web_search_api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -111,6 +114,8 @@ def build_agent(
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
     tools = [*build_human_input_tools(), *spec.tools]
+    if spec.web_search_api_key:
+        tools.append(build_web_search_tool(spec.web_search_api_key))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
@@ -181,6 +186,7 @@ def create_agent(
         skills=tuple(skills) if skills is not None else None,
         backend=backend,
         sandbox=sandbox_config or cfg.sandbox,
+        web_search_api_key=os.environ.get("TAVILY_API_KEY") or cfg.tavily_api_key,
     )
     permission = permission_mode_from_interrupt_on(interrupt_on) if interrupt_on is not None else PermissionMode.ASK
     effective_interrupt_on = interrupt_on

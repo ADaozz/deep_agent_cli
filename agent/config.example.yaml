@@ -18,6 +18,7 @@ llm:
   default: local/qwen-plus
   models:
     local:
+      # A literal key or a complete environment reference such as ${MODEL_API_KEY}.
       api_key: sk-local
       base_url: http://localhost:8000/v1
       provider: qwen-responses
@@ -33,7 +34,7 @@ llm:
     # --- Aliyun Bailian Qwen Token Plan (compatible-mode endpoint) ---
     # Uncomment this group and set default: token-plan/auto to start with Token Plan.
     # token-plan:
-    #   api_key: sk-your-token-plan-key
+    #   api_key: ${TOKEN_PLAN_API_KEY}
     #   base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     #   provider: openai-compatible
     #   stream_usage: true
@@ -45,6 +46,11 @@ llm:
     #       input: [text, image]
     #     qwen3.8-flash:
     #       input: [text, image]
+
+web_search:
+  # Optional. TAVILY_API_KEY overrides this value; omit both to hide web_search.
+  # This field also accepts a literal key in your private ~/.deep-agent/config.yaml.
+  tavily_api_key: null
 
 sandbox:
   # Host directory mapped to /workspace. "." = the directory you start the TUI from (cwd).
