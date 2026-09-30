@@ -8,6 +8,8 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
+from agent.tools.human_interaction import ensure_other_option
+
 
 @dataclass
 class InteractionController:
@@ -22,6 +24,8 @@ class InteractionController:
     index: int = 0
     option_index: int = 0
     values: dict[str, Any] = field(default_factory=dict)
+    custom_entry: bool = False
+    custom_values: dict[str, str] = field(default_factory=dict)
     error: str = ""
     tool_call_ids: list[str] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
@@ -38,6 +42,8 @@ class InteractionController:
                     {"value": False, "label": "No", "description": ""},
                     {"value": True, "label": "Yes", "description": ""},
                 ]
+            elif field.get("type") in {"single_select", "multi_select"}:
+                field["options"] = ensure_other_option(field.get("options") or [])
         return cls(
             kind="human",
             title=str(payload.get("title") or "Input required"),
@@ -98,22 +104,33 @@ class InteractionController:
 
     @property
     def accepts_text(self) -> bool:
-        return str(self.current.get("type")) in {"text", "textarea"}
+        return self.custom_entry or str(self.current.get("type")) in {"text", "textarea"}
 
     def move(self, delta: int) -> None:
+        if self.custom_entry:
+            return
         options = self.current.get("options") or []
         if options:
             self.option_index = (self.option_index + delta) % len(options)
 
     def toggle(self) -> None:
-        if self.current.get("type") != "multi_select":
+        if self.custom_entry or self.current.get("type") != "multi_select":
             return
         options = self.current.get("options") or []
         if not options:
             return
         field_id = str(self.current.get("id") or "field")
         selected = list(self.values.get(field_id) or [])
-        value = str(options[self.option_index].get("value"))
+        option = options[self.option_index]
+        if option.get("allowsCustomText"):
+            if field_id in self.custom_values:
+                custom = self.custom_values.pop(field_id)
+                selected.pop(len(selected) - 1 - selected[::-1].index(custom))
+                self.values[field_id] = selected
+            else:
+                self.custom_entry = True
+            return
+        value = str(option.get("value"))
         selected.remove(value) if value in selected else selected.append(value)
         self.values[field_id] = selected
 
@@ -122,12 +139,35 @@ class InteractionController:
         field_id = str(field.get("id") or f"field_{self.index}")
         field_type = str(field.get("type") or "text")
         options = field.get("options") or []
-        if field_type in {"text", "textarea"}:
+        if self.custom_entry:
+            custom = text.strip()
+            if not custom:
+                self.error = "Enter a custom answer."
+                return False
+            self.custom_entry = False
+            self.custom_values[field_id] = custom
+            self.error = ""
+            if field_type == "multi_select":
+                selected = list(self.values.get(field_id) or [])
+                selected.append(custom)
+                self.values[field_id] = selected
+                return False
+            value: Any = custom
+        elif field_type in {"text", "textarea"}:
             value: Any = text.strip()
         elif field_type == "multi_select":
+            if options and options[self.option_index].get("allowsCustomText") and field_id not in self.custom_values:
+                self.custom_entry = True
+                self.error = ""
+                return False
             value = self.values.get(field_id) or []
         elif options:
-            raw_value = options[self.option_index].get("value")
+            option = options[self.option_index]
+            if option.get("allowsCustomText"):
+                self.custom_entry = True
+                self.error = ""
+                return False
+            raw_value = option.get("value")
             value = raw_value if field_type == "boolean" else str(raw_value or "")
         else:
             value = text.strip()
@@ -156,11 +196,15 @@ class InteractionController:
             parts.append(Text("Impact:\n" + "\n".join(f"• {item}" for item in self.impact), style="yellow"))
         field = self.current
         parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {field.get('label') or field.get('id')}", style="bold"))
-        options = field.get("options") or []
+        options = [] if self.custom_entry else field.get("options") or []
         selected = self.values.get(str(field.get("id") or "")) or []
         for idx, option in enumerate(options):
             pointer = "→" if idx == self.option_index else " "
-            mark = "[x]" if option.get("value") in selected else "[ ]" if field.get("type") == "multi_select" else ""
+            if option.get("allowsCustomText"):
+                checked = str(field.get("id") or "") in self.custom_values
+            else:
+                checked = option.get("value") in selected
+            mark = "[x]" if checked else "[ ]" if field.get("type") == "multi_select" else ""
             description = option.get("description") or ""
             style = "bold cyan" if idx == self.option_index else ""
             label = f"{pointer} {mark} {option.get('label')}  {description}".rstrip()
@@ -174,14 +218,17 @@ class InteractionController:
                 parts.append(Text(label, style=style))
         if self.error:
             parts.append(Text(self.error, style="red"))
-        hint = (
-            "↑↓ select  Enter confirm  Esc back"
-            if self.kind == "model" and self.values.get("source")
-            else "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"
-            if self.kind in {"approval", "human", "pause"} and options
-            else "↑↓ select  Enter confirm  Esc cancel"
-            if options
-            else "Enter submit  Ctrl+J newline  Esc cancel"
-        )
+        if self.custom_entry:
+            parts.append(Text("Other: enter your answer", style="cyan"))
+        if self.custom_entry:
+            hint = "Enter submit  Ctrl+J newline  Esc back"
+        elif self.kind == "model" and self.values.get("source"):
+            hint = "↑↓ select  Enter confirm  Esc back"
+        elif self.kind in {"approval", "human", "pause"} and options:
+            hint = "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"
+        elif options:
+            hint = "↑↓ select  Enter confirm  Esc cancel"
+        else:
+            hint = "Enter submit  Ctrl+J newline  Esc cancel"
         parts.append(Text(hint, style="dim"))
         return Group(*parts)

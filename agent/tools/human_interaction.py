@@ -72,18 +72,21 @@ def _normalize_field(item: Any, index: int) -> dict[str, Any]:
     if field_type not in FIELD_TYPES:
         field_type = "text"
     field_id = str(raw.get("id") or f"field_{index}").strip() or f"field_{index}"
+    options = _normalize_options(raw.get("options"))
+    if field_type in {"single_select", "multi_select"}:
+        options = ensure_other_option(options)
     return {
         "id": field_id,
         "type": field_type,
         "label": str(raw.get("label") or field_id),
         "required": bool(raw.get("required")),
         "placeholder": str(raw.get("placeholder") or ""),
-        "options": _normalize_options(raw.get("options")),
+        "options": options,
     }
 
 
-def _normalize_options(options: Any) -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
+def _normalize_options(options: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
     if not isinstance(options, list):
         return result
     for item in options:
@@ -97,5 +100,20 @@ def _normalize_options(options: Any) -> list[dict[str, str]]:
             "value": value,
             "label": label,
             "description": str(item.get("description") or ""),
+            **({"allowsCustomText": True} if item.get("allowsCustomText") else {}),
         })
+    return result
+
+
+def ensure_other_option(options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expose one custom answer choice without colliding with supplied values."""
+    result = [dict(option) for option in options if not (
+        option.get("allowsCustomText") or
+        str(option.get("label", "")).strip().lower() in {"other", "other:", "其他", "其他：", "其它", "其它："}
+    )]
+    used = {str(option.get("value")) for option in result}
+    marker = "__other__"
+    while marker in used:
+        marker += "_"
+    result.append({"value": marker, "label": "Other:", "description": "", "allowsCustomText": True})
     return result

@@ -40,6 +40,7 @@ from agent.permission import (
 from agent.sandbox import ExecutionMode, SKILLS_ROOT, WorkspaceCompositeBackend, select_backend
 from agent.tools.execute import build_execute_tool
 from agent.tools.human_input import build_human_input_tools
+from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
 from agent.tools.web_search import build_web_search_tool
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"]
@@ -135,6 +136,7 @@ def build_agent(
         tools=tools,
         system_prompt=prompt,
         middleware=[
+            RuntimeConfigGateMiddleware(run_controller.has_pending_config),
             PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
             RecoveryContextMiddleware(),
             SteeringMiddleware(run_controller),

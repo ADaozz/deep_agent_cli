@@ -133,6 +133,7 @@ class InterruptKind(StrEnum):
     PAUSED = "paused"
     WAITING_HUMAN = "waiting_human"
     WAITING_CONFIRMATION = "waiting_confirmation"
+    RUNTIME_CONFIG_BOUNDARY = "runtime_config_boundary"
 
 
 class UnknownInterruptError(ValueError):
@@ -207,6 +208,9 @@ class AgentRunner:
         self._busy = False
         self._operation_lock = Lock()
         self._permission_mode = PermissionMode.ASK
+        self._pending_config_lock = Lock()
+        self._pending_model_id: str | None = None
+        self._pending_permission_mode: PermissionMode | None = None
         self._resume_context: RecoveryContext | None = None
         self._closed = False
         self._close_completed = False
@@ -271,6 +275,12 @@ class AgentRunner:
             thread_id, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,
         )
+        if self.session_store is not None:
+            saved = self.session_store.get(self.thread_id)
+            if saved is not None:
+                self._pending_model_id = saved.pending_model_id
+                self._pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
+        self.control.set_pending_config_check(self._has_pending_runtime_config)
 
         self.state_path = (
             self.session_store.path if self.session_store is not None
@@ -305,6 +315,106 @@ class AgentRunner:
             return self.settings.get_profile(self._current_model_id)
         except KeyError:
             return self.settings.active_profile
+
+    def pending_model(self) -> ModelProfile | None:
+        with self._pending_config_lock:
+            model_id = self._pending_model_id
+        if model_id is None or self.settings is None:
+            return None
+        try:
+            return self.settings.get_profile(model_id)
+        except KeyError:
+            return None
+
+    def pending_permission_mode(self) -> PermissionMode | None:
+        with self._pending_config_lock:
+            return self._pending_permission_mode
+
+    def _has_pending_runtime_config(self) -> bool:
+        with self._pending_config_lock:
+            return self._pending_model_id is not None or self._pending_permission_mode is not None
+
+    def _save_pending_config(self) -> None:
+        if self.session_store is not None:
+            self.session_store.set_pending_config(
+                self.thread_id, model_id=self._pending_model_id,
+                permission_mode=self._pending_permission_mode.value if self._pending_permission_mode else None,
+            )
+
+    def request_model_change(self, id_or_prefix: str) -> ModelProfile:
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        self._require_active_session()
+        if self.settings is None:
+            raise RuntimeError("Model switching requires Settings with llm.models")
+        profile = self.settings.get_profile(id_or_prefix)
+        with self._pending_config_lock:
+            self._pending_model_id = profile.id if profile.id != self._current_model_id else None
+            self._save_pending_config()
+        return profile
+
+    def request_permission_change(self, mode: PermissionMode | str) -> PermissionMode:
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        self._require_active_session()
+        if isinstance(mode, str):
+            parsed = parse_permission_mode(mode)
+            if parsed is None:
+                raise ValueError(f"Unknown permission mode: {mode}")
+            mode = parsed
+        if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
+            raise ValueError(allow_mode_unavailable_reason(self.prepared.execution_mode))
+        with self._pending_config_lock:
+            self._pending_permission_mode = mode if mode is not self._permission_mode else None
+            self._save_pending_config()
+        return mode
+
+    def _apply_pending_runtime_config(self, handler: RunEventHandler | None = None) -> None:
+        failures: list[str] = []
+        with self._pending_config_lock:
+            model_id = self._pending_model_id
+            mode = self._pending_permission_mode
+            if model_id is None and mode is None:
+                return
+            profile = None
+            if model_id is not None:
+                try:
+                    if self.settings is None:
+                        raise KeyError(model_id)
+                    profile = self.settings.get_profile(model_id)
+                except KeyError:
+                    failures.append(f"Pending model {model_id} is unavailable")
+                    model_id = None
+            if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
+                failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
+                mode = None
+            try:
+                if model_id is not None or mode is not None:
+                    target_mode = mode or self._permission_mode
+                    chat = build_chat_model(profile, attachment_store=self.attachment_store) if profile else self._chat_model
+                    self._rebuild_prepared(model=chat, permission_mode=target_mode)
+            except Exception as exc:
+                failures.append(str(exc))
+                model_id = None
+                mode = None
+            if profile is not None:
+                if model_id is not None:
+                    self._current_model_id = profile.id
+            if mode is not None:
+                self._permission_mode = mode
+            self._pending_model_id = None
+            self._pending_permission_mode = None
+            if self.session_store is not None:
+                self.session_store.touch(self.thread_id, model_id=self._current_model_id, permission_mode=self._permission_mode.value)
+            self._save_pending_config()
+        for failure in failures:
+            _emit(handler or self.on_event, RunEvent(type="runtime_config_failed", content=failure, is_error=True))
+        if model_id is not None or mode is not None:
+            _emit(handler or self.on_event, RunEvent(
+                type="runtime_config_applied",
+                result={"model_id": self._current_model_id, "permission_mode": self._permission_mode.value,
+                        "model_changed": model_id is not None, "permission_changed": mode is not None},
+            ))
 
     def supports_input(self, kind: InputKind) -> bool:
         profile = self.current_model()
@@ -605,7 +715,8 @@ class AgentRunner:
         by in-memory updates only — is the commit point.
         """
         assert self._runtime is not None
-        previous = (self._chat_model, self._current_model_id, self._permission_mode)
+        previous = (self._chat_model, self._current_model_id, self._permission_mode,
+                    self._pending_model_id, self._pending_permission_mode)
         plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
         try:
             snapshot = self.load_session(info.id)
@@ -624,10 +735,12 @@ class AgentRunner:
                 permission_mode=self._permission_mode.value,
             )
         except Exception:
-            old_model, old_id, old_mode = previous
+            old_model, old_id, old_mode, old_pending_model, old_pending_mode = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
             self._current_model_id = old_id
             self._permission_mode = old_mode
+            self._pending_model_id = old_pending_model
+            self._pending_permission_mode = old_pending_mode
             if lease is not None:
                 lease.release()
             raise
@@ -637,6 +750,18 @@ class AgentRunner:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
             self._runtime.bind(snapshot.info.id)
+        self._pending_model_id = info.pending_model_id
+        self._pending_permission_mode = parse_permission_mode(info.pending_permission_mode or "")
+        if self._pending_model_id and self.settings is not None:
+            try:
+                self.settings.get_profile(self._pending_model_id)
+            except KeyError:
+                snapshot.notices.append(f"Pending model {self._pending_model_id} is unavailable; switch cancelled.")
+                self._pending_model_id = None
+        if self._pending_permission_mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
+            snapshot.notices.append("Pending allow permission is unavailable here; switch cancelled.")
+            self._pending_permission_mode = None
+        self._save_pending_config()
         self.control.clear_pause()
         self.control.set_defer_steering(bool(snapshot.interrupt_kind))
         snapshot.notices.extend(plan.notices)
@@ -667,6 +792,8 @@ class AgentRunner:
         self.control.clear_pause()
         self.control.set_defer_steering(False)
         self._runtime.clear_pending()
+        self._pending_model_id = None
+        self._pending_permission_mode = None
         if self.session_store is None:
             thread_id = f"cli-{uuid4()}"
             self._runtime.adopt_new(thread_id)
@@ -768,6 +895,11 @@ class AgentRunner:
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
         self._require_active_session()
+        current_interrupt = self.current_interrupt()
+        if current_interrupt is not None and current_interrupt.kind is InterruptKind.RUNTIME_CONFIG_BOUNDARY:
+            raise RuntimeError("Pending runtime config recovery must resume before new input")
+        if current_interrupt is None:
+            self._apply_pending_runtime_config(on_event)
         refs = tuple(image_refs)
         if refs and not self.supports_input("image"):
             raise ValueError("The current model does not declare image input support")
@@ -926,6 +1058,15 @@ class AgentRunner:
             self.session_store.touch(self.thread_id, last_run_status=StopReason.PENDING)
         return self._stream(Command(resume=value), on_delta=on_delta, on_event=on_event)
 
+    @_exclusive_operation
+    def resume_runtime_config(
+        self, *, on_delta: DeltaHandler | None = None, on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        self._require_active_session()
+        self._require_interrupt(InterruptKind.RUNTIME_CONFIG_BOUNDARY, "resume_runtime_config")
+        self._apply_pending_runtime_config(on_event)
+        return self._resume(True, on_delta=on_delta, on_event=on_event)
+
     def current_interrupt(self) -> InterruptState | None:
         return interrupt_kind_from_state(self.prepared.graph, self._thread_config())
 
@@ -999,6 +1140,9 @@ class AgentRunner:
 
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
+            while result.status == "runtime_config_boundary":
+                self._apply_pending_runtime_config(event_handler)
+                result = self._stream_once(Command(resume=True), config, run_control, event_handler)
             # Consume queued input at the same run boundary for every client.
             while result.status == "completed" and not self.control.cancel_requested:
                 text = self.control.pop_steering()
@@ -1011,12 +1155,16 @@ class AgentRunner:
                 self._seen_tool_calls.clear()
                 self._todo_call_ids.clear()
                 turn_started = time.monotonic()
+                self._apply_pending_runtime_config(event_handler)
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)]},
                     config,
                     run_control,
                     event_handler,
                 )
+                while result.status == "runtime_config_boundary":
+                    self._apply_pending_runtime_config(event_handler)
+                    result = self._stream_once(Command(resume=True), config, run_control, event_handler)
             if result.status == "completed":
                 _emit(event_handler, RunEvent(type="run_completed", content=result.output))
                 emit_turn_completed(result.output)
@@ -1066,6 +1214,8 @@ class AgentRunner:
                 for node, update in chunk.items():
                     if node != "__interrupt__":
                         continue
+                    if any(item.get("type") == "runtime_config_boundary" for item in interrupt_payloads(update)):
+                        return RunResult(status="runtime_config_boundary")
                     interrupt = classify_interrupt(
                         update, self.prepared.graph, self._thread_config(),
                     )
@@ -1256,6 +1406,8 @@ def classify_interrupt(
             return InterruptState(InterruptKind.WAITING_HUMAN, payload)
         if kind == "pause":
             return InterruptState(InterruptKind.PAUSED, payload)
+        if kind == "runtime_config_boundary":
+            return InterruptState(InterruptKind.RUNTIME_CONFIG_BOUNDARY, payload)
         if is_valid_hitl_interrupt(payload):
             pending = resolve_pending_tool_calls(interrupts, graph, config)
             return InterruptState(InterruptKind.WAITING_CONFIRMATION, payload, tuple(pending))

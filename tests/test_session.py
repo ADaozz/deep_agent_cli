@@ -63,7 +63,26 @@ def test_legacy_catalog_migrates_once_and_derives_status(tmp_path: Path) -> None
         assert (info.status, info.last_run_status, info.model_id) == ("waiting", StopReason.DEFERRED, "model-a")
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(session_catalog)")}
         assert "status" not in columns
+        assert {"pending_model_id", "pending_permission_mode"} <= columns
         store.close()
+
+
+def test_existing_catalog_adds_pending_columns(tmp_path: Path) -> None:
+    db = tmp_path / "old-current.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, model_id TEXT, "
+        "permission_mode TEXT, last_run_status TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+    store = SessionStore(db)
+    info = store.create_session()
+    store.set_pending_config(info.id, model_id="beta", permission_mode="allow")
+    assert store.get(info.id).pending_model_id == "beta"
+    assert store.get(info.id).pending_permission_mode == "allow"
+    store.close()
 
 
 def test_runner_rejects_a_second_checkpointer_for_persistent_session(tmp_path: Path) -> None:

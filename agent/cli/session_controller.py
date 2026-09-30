@@ -73,6 +73,7 @@ class SessionController:
         app.state.clear()
         app.state.attachments.clear()
         app.interaction = None
+        app._deferred_config_interaction = None
         app._reviewing = False
         app._transcript_anchor = None
         app._renderer.clear()
@@ -142,6 +143,7 @@ class SessionController:
         app.state.load_transcript(snapshot.transcript)
         app.state.todos = list(snapshot.todos)
         app.interaction = None
+        app._deferred_config_interaction = None
         app._reviewing = False
         app.state.add_system(
             f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
@@ -181,6 +183,7 @@ class SessionController:
         self._wait_target = target_id
         self._wait_cancelled = False
         app.interaction = None
+        app._deferred_config_interaction = None
         app.state.add_system(
             f"Session {target_id[:8]} is open in another window; waiting for it to be released."
         )

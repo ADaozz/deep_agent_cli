@@ -10,6 +10,7 @@ import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage
 from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.document import Document
 from prompt_toolkit.output import DummyOutput
 
 from agent.cli.app import CliApplication
@@ -138,6 +139,69 @@ def test_custom_approval_survives_permission_round_trip() -> None:
         assert runner.prepared.interrupt_on == {}
         runner.set_permission_mode("ask")
         assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+
+
+def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() -> None:
+    messages = [
+        AIMessage(content="", tool_calls=[{"id": "old-write", "name": "write_file",
+                                          "args": {"file_path": "/workspace/old.txt", "content": "old"}}]),
+        AIMessage(content="", tool_calls=[{"id": "new-write", "name": "write_file",
+                                          "args": {"file_path": "/workspace/new.txt", "content": "new"}}]),
+        AIMessage(content="done"),
+    ]
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(prepared=create_agent(model=scripted_model(messages)), thread_id="deferred-allow")
+        waiting = runner.invoke("write")
+        assert waiting.status == "waiting_confirmation"
+        runner.request_permission_change("allow")
+        assert runner.permission_mode() is PermissionMode.ASK
+        assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-write"
+        events = []
+        resumed = runner.approve_tool("old-write", on_event=events.append)
+    assert resumed.status == "completed"
+    assert resumed.output == "done"
+    assert runner.permission_mode() is PermissionMode.ALLOW
+    assert runner.pending_permission_mode() is None
+    assert [event.type for event in events].count("runtime_config_applied") == 1
+    assert [event.tool_call_id for event in events if event.type == "tool_completed"] == ["old-write", "new-write"]
+
+
+def test_cli_allow_queue_prompt_preserves_old_approval() -> None:
+    async def scenario() -> None:
+        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+            runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("old-execute"))))
+            waiting = runner.invoke("run")
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                app._handle_result(waiting)
+                app._finish_interaction(cancelled=True)
+                await app.select_permission("allow")
+                assert app.interaction is not None and app.interaction.kind == "permission_confirm"
+                assert app.interaction.accept("ALLOW")
+                app._finish_interaction()
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.pending_permission_mode() is PermissionMode.ALLOW
+                assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-execute"
+                assert any("Existing approval remains under ask; press F2" in getattr(block, "content", "")
+                           for block in app.state.blocks)
+
+    asyncio.run(scenario())
+
+
+def test_permission_argument_completion_follows_available_modes() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        complete = lambda value: list(app.slash_completer.get_completions(Document(value), None))
+        assert [item.text for item in complete("/permission ")] == ["ask"]
+        assert complete("/permission al") == []
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        sandboxed = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
+        with create_pipe_input() as pipe:
+            app = CliApplication(sandboxed, input=pipe, output=DummyOutput())
+            values = list(app.slash_completer.get_completions(Document("/permission al"), None))
+            assert [item.text for item in values] == ["allow"]
+            assert values[0].start_position == -2
 
 
 def test_set_permission_mode_rejected_while_busy() -> None:

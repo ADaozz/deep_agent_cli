@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     updated_at TEXT NOT NULL,
     model_id TEXT,
     permission_mode TEXT,
+    pending_model_id TEXT,
+    pending_permission_mode TEXT,
     last_run_status TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
@@ -61,6 +63,8 @@ class SessionInfo:
     status: SessionStatus
     model_id: str | None = None
     permission_mode: str | None = None
+    pending_model_id: str | None = None
+    pending_permission_mode: str | None = None
     last_run_status: StopReason = StopReason.PENDING
 
 
@@ -170,37 +174,40 @@ class SessionStore:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
-            if "status" not in columns:
-                self._conn.commit()
-                return
-            model = "model_id" if "model_id" in columns else "NULL"
-            permission = "permission_mode" if "permission_mode" in columns else "NULL"
-            last = "last_run_status" if "last_run_status" in columns else "NULL"
-            reason = (
-                f"CASE WHEN {last} IN ('pending', 'stop', 'error', 'aborted', 'deferred') THEN {last} "
-                "WHEN status = 'completed' OR status IN ('length', 'tool_use') THEN 'stop' "
-                "WHEN status = 'cancelled' THEN 'aborted' "
-                "WHEN status = 'failed' THEN 'error' "
-                "WHEN status IN ('waiting', 'interrupted') THEN 'deferred' "
-                "ELSE 'pending' END"
-            )
-            self._conn.execute(
-                "CREATE TABLE session_catalog_new ("
-                "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, "
-                "updated_at TEXT NOT NULL, model_id TEXT, permission_mode TEXT, "
-                "last_run_status TEXT NOT NULL)"
-            )
-            self._conn.execute(
-                "INSERT INTO session_catalog_new "
-                "(id, title, created_at, updated_at, model_id, permission_mode, last_run_status) "
-                f"SELECT id, title, created_at, updated_at, {model}, {permission}, {reason} "
-                "FROM session_catalog"
-            )
-            self._conn.execute("DROP TABLE session_catalog")
-            self._conn.execute("ALTER TABLE session_catalog_new RENAME TO session_catalog")
-            self._conn.execute(
-                "CREATE INDEX session_catalog_updated_idx ON session_catalog (updated_at DESC)"
-            )
+            if "status" in columns:
+                model = "model_id" if "model_id" in columns else "NULL"
+                permission = "permission_mode" if "permission_mode" in columns else "NULL"
+                last = "last_run_status" if "last_run_status" in columns else "NULL"
+                reason = (
+                    f"CASE WHEN {last} IN ('pending', 'stop', 'error', 'aborted', 'deferred') THEN {last} "
+                    "WHEN status = 'completed' OR status IN ('length', 'tool_use') THEN 'stop' "
+                    "WHEN status = 'cancelled' THEN 'aborted' "
+                    "WHEN status = 'failed' THEN 'error' "
+                    "WHEN status IN ('waiting', 'interrupted') THEN 'deferred' "
+                    "ELSE 'pending' END"
+                )
+                self._conn.execute(
+                    "CREATE TABLE session_catalog_new ("
+                    "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, "
+                    "updated_at TEXT NOT NULL, model_id TEXT, permission_mode TEXT, "
+                    "pending_model_id TEXT, pending_permission_mode TEXT, last_run_status TEXT NOT NULL)"
+                )
+                self._conn.execute(
+                    "INSERT INTO session_catalog_new "
+                    "(id, title, created_at, updated_at, model_id, permission_mode, last_run_status) "
+                    f"SELECT id, title, created_at, updated_at, {model}, {permission}, {reason} "
+                    "FROM session_catalog"
+                )
+                self._conn.execute("DROP TABLE session_catalog")
+                self._conn.execute("ALTER TABLE session_catalog_new RENAME TO session_catalog")
+                self._conn.execute(
+                    "CREATE INDEX session_catalog_updated_idx ON session_catalog (updated_at DESC)"
+                )
+            else:
+                if "pending_model_id" not in columns:
+                    self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_model_id TEXT")
+                if "pending_permission_mode" not in columns:
+                    self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_permission_mode TEXT")
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -275,10 +282,20 @@ class SessionStore:
             )
             self._conn.commit()
 
+    def set_pending_config(
+        self, session_id: str, *, model_id: str | None, permission_mode: str | None,
+    ) -> None:
+        with self.checkpointer.lock:
+            self._conn.execute(
+                "UPDATE session_catalog SET pending_model_id = ?, pending_permission_mode = ?, updated_at = ? WHERE id = ?",
+                (model_id, permission_mode, _utc_now().isoformat(), session_id),
+            )
+            self._conn.commit()
+
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status "
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode "
                 "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -287,7 +304,7 @@ class SessionStore:
     def get(self, session_id: str) -> SessionInfo | None:
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode FROM session_catalog WHERE id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -303,7 +320,7 @@ class SessionStore:
             return exact
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status FROM session_catalog WHERE id LIKE ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode FROM session_catalog WHERE id LIKE ?",
                 (f"{prefix}%",),
             ).fetchall()
         if len(rows) != 1:
@@ -319,6 +336,7 @@ def _session_info(row: Any) -> SessionInfo:
     return SessionInfo(
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
         status=_status_for_reason(reason), model_id=row[4], permission_mode=row[5], last_run_status=reason,
+        pending_model_id=row[7], pending_permission_mode=row[8],
     )
 
 

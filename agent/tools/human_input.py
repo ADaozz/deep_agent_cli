@@ -165,6 +165,7 @@ def _request_description() -> str:
         "fields / recommendation / impact 必须传原生 JSON 结构，不要序列化成字符串。"
         "有可选项时必须用 single_select 或 multi_select，选项写进该字段的 options，"
         "不要把选项写成 question 里的 Markdown 列表。"
+        "选择题会自动附加 Other: 自定义输入选项，无需自行提供。"
         "question 只保留简短题干。"
         "recommendation 与 impact 可选。这不是工具权限确认。"
     )

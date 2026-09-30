@@ -41,7 +41,7 @@
 - **转录区跟随** — 停留在底部时持续显示新输出；上滚后保留阅读位置，并提供可点击的回到底部提示
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
 - **后续任务** — `Alt+Enter` 排入 Runtime 队列，当前任务完成后由 `AgentRunner` 接续执行
-- **多模型** — YAML 按来源分组；`/model` 先选来源再选模型，`Ctrl+P` 循环切换。切换会重建 graph，会话保留
+- **多模型** — YAML 按来源分组；`/model` 先选来源再选模型，`Ctrl+P` 循环切换。切换在下一次模型推理前生效，会话保留
 - **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
 - **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
 - **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
@@ -135,7 +135,7 @@ llm:
 
 `llm.default` 必须明确指定已配置的 `来源/模型`，例如 `token-plan/auto`。`local`、`token-plan` 和模型键都是自定义名称；模型键默认也是发给 API 的模型名，需要别名时在模型项内写 `model:`。配置只接受 `llm.models.<来源>.models.<模型>` 结构；旧版 `llm.model`、扁平 `llm.models.<模型>` 以及放在 `llm` 顶层的端点或密钥字段都会报错。缺少默认模型、字段无效或 YAML 语法错误时，启动会指出配置文件及错误位置，不会默默切换模型。
 
-`/model` 先选来源，再选来源下的模型；在模型列表按 `Esc` 返回来源列表。`/model token-plan` 可直接打开该来源，`/model token-plan/auto` 可直接切换。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
+`/model` 先选来源，再选来源下的模型；在模型列表按 `Esc` 返回来源列表。`/model token-plan` 可直接打开该来源，`/model token-plan/auto` 可请求切换。`/model` 和 `/permission` 会先显示排队提示，在当前模型调用、已生成工具调用及其审批完成后，于下一次模型推理前生效并再次提示。已有 `ask` 审批仍需按 `F2` 批准或拒绝，`/permission allow` 不会自动批准旧调用。待切换配置按会话保存，重启后仍有效；底栏和 `/status` 显示当前值与 pending 值。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
 
 ### Resume
 
@@ -159,7 +159,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 /resume a1b2             按 id 前缀切换 session
 /model                   先选来源，再选模型
 /model token-plan        打开 Token Plan 模型列表
-/model token-plan/auto   直接切换模型
+/model token-plan/auto   请求在下一次模型推理前切换
 /compact                 达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
 /permission ask|allow   # allow 仅 SANDBOXED 且开放沙箱网络；UNSANDBOXED / CUSTOM 只有 ask
 /image clipboard | <path> | clear
@@ -172,7 +172,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 | 操作 | 按键 |
 |------|------|
 | 提交；运行中注入 steering | `Enter` |
-| 命令候选 | 输入 `/` 后用方向键选择，`Tab` / `Enter` 填入，再按 `Enter` 执行 |
+| 命令候选 | 输入 `/` 后用方向键选择，`Tab` / `Enter` 填入，再按 `Enter` 执行；`/model ` 和 `/permission ` 也会补全参数 |
 | 换行 | `Ctrl+J` |
 | 排到本轮结束后再问 | `Alt+Enter` |
 | 上滚时回到底部；再次按下执行当前界面的取消操作 | `Esc`；也可点击 `↓ Back to bottom · esc` |
@@ -185,7 +185,7 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 | 取回未应用的 steering | `Alt+Up` |
 | 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
 
-输入 `/` 时显示命令候选，按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
+输入 `/` 时显示命令候选；输入 `/model ` 时补全已配置的来源与模型 ID，输入 `/permission ` 时补全当前环境可用的 `ask`、`allow`。按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
 
 探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
 
@@ -211,7 +211,7 @@ result = runner.invoke("列出 /workspace 下的文件")
 `execute` 的 `tool_completed` 事件在 `result` 中携带 `exit_code`、`truncated`、`host_log_path`、`agent_log_path` 和 `termination_reason`；`content` 仍是发给模型的可读结果。
 
 默认工具包括文件、沙箱命令、人工输入和 `write_todos`；配置 Tavily 密钥后另行注册 `web_search`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用；模型传输错误由 OpenAI SDK 最多重试两次。
-人工输入只使用 `request_human_input`：可传 `fields` 描述文本、布尔或选择题；恢复时用 `runner.submit_human_input({"text": "..."})`。审批用 `approve_tool` / `reject_tool`，暂停用 `continue_run`。旧工具 `handoff_to_human` 已移除，停在该工具调用上的旧会话恢复时会给出迁移错误。
+人工输入只使用 `request_human_input`：可传 `fields` 描述文本、布尔或选择题；每道选择题自动提供 `Other:` 自定义输入，单选回传自定义文本，多选将其加入结果列表；恢复时用 `runner.submit_human_input({"text": "..."})`。审批用 `approve_tool` / `reject_tool`，暂停用 `continue_run`。旧工具 `handoff_to_human` 已移除，停在该工具调用上的旧会话恢复时会给出迁移错误。
 
 传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
 

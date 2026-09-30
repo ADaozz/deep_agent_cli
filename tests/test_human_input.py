@@ -28,7 +28,9 @@ def test_explicit_fields_and_question_are_preserved() -> None:
     assert payload["question"] == question
     assert payload["fields"][0]["id"] == "scope"
     assert payload["fields"][0]["type"] == "single_select"
-    assert [option["value"] for option in payload["fields"][0]["options"]] == ["department", "global"]
+    assert [option["value"] for option in payload["fields"][0]["options"][:2]] == ["department", "global"]
+    assert payload["fields"][0]["options"][-1]["label"] == "Other:"
+    assert payload["fields"][0]["options"][-1]["allowsCustomText"] is True
     assert payload["blocking"] is True
 
 
@@ -36,6 +38,21 @@ def test_plain_question_gets_one_text_field() -> None:
     payload = normalize_interaction_request(reason="缺少信息", question="请提供目标目录")
     assert len(payload["fields"]) == 1
     assert payload["fields"][0]["type"] == "text"
+    assert payload["fields"][0]["options"] == []
+
+
+def test_choice_other_is_deduplicated_and_uses_collision_free_marker() -> None:
+    payload = normalize_interaction_request(reason="r", question="q", fields=[{
+        "id": "choices", "type": "multi_select", "options": [
+            {"value": "__other__", "label": "Literal marker"},
+            {"value": "custom", "label": "Other"},
+        ],
+    }])
+    options = payload["fields"][0]["options"]
+    assert len(options) == 2
+    assert options[0]["value"] == "__other__"
+    assert options[1]["value"] != "__other__"
+    assert options[1]["allowsCustomText"] is True
 
 
 def test_human_response_requires_values() -> None:

@@ -37,6 +37,16 @@ class RunController:
         self._active_tools: dict[str, ToolCancelContext] = {}
         self._defer_steering = False
         self._on_control_event = on_control_event
+        self._pending_config_check: Callable[[], bool] = lambda: False
+
+    def set_pending_config_check(self, check: Callable[[], bool]) -> None:
+        with self._lock:
+            self._pending_config_check = check
+
+    def has_pending_config(self) -> bool:
+        with self._lock:
+            check = self._pending_config_check
+        return check()
 
     def begin_run(self) -> RunControl:
         with self._lock:

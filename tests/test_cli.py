@@ -1998,6 +1998,45 @@ def test_human_interaction_collects_select_and_text_fields() -> None:
     assert controller.values == {"scope": "global", "note": "later"}
 
 
+def test_human_interaction_other_single_and_multi_select() -> None:
+    controller = InteractionController.human({"fields": [
+        {"id": "scope", "type": "single_select", "required": True,
+         "options": [{"value": "local", "label": "Local"}]},
+        {"id": "features", "type": "multi_select", "required": True,
+         "options": [{"value": "search", "label": "Search"}]},
+    ]})
+    controller.move(1)
+    assert controller.accept() is False
+    assert controller.accepts_text
+    assert controller.accept("  ") is False
+    assert controller.error == "Enter a custom answer."
+    assert controller.accept("regional") is False
+    assert controller.values["scope"] == "regional"
+    assert not controller.accepts_text
+    controller.toggle()
+    controller.move(1)
+    controller.toggle()
+    assert controller.accepts_text
+    assert controller.accept("analytics") is False
+    assert controller.accept() is True
+    assert controller.values == {"scope": "regional", "features": ["search", "analytics"]}
+
+
+def test_human_interaction_other_multi_select_can_be_removed() -> None:
+    controller = InteractionController.human({"fields": [{
+        "id": "features", "type": "multi_select", "required": True,
+        "options": [{"value": "search", "label": "Search"}],
+    }]})
+    controller.move(1)
+    controller.toggle()
+    assert controller.accept("analytics") is False
+    controller.toggle()
+    assert controller.values["features"] == []
+    controller.move(-1)
+    assert controller.accept() is False
+    assert controller.error == "This field is required."
+
+
 def test_approval_defaults_to_reject_and_escape_is_safe() -> None:
     controller = InteractionController.approval([{
         "toolCallId": "call-write", "name": "write_file",

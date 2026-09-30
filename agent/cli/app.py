@@ -7,7 +7,7 @@ from functools import partial
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -101,8 +101,16 @@ def model_display_name(profile: ModelProfile) -> str:
 
 
 class SlashCompleter(Completer):
-    def __init__(self, commands: tuple[Command, ...]) -> None:
+    def __init__(
+        self,
+        commands: tuple[Command, ...],
+        *,
+        model_profiles: Callable[[], list[ModelProfile]] | None = None,
+        permission_modes: Callable[[], list[str]] | None = None,
+    ) -> None:
         self.commands = commands
+        self.model_profiles = model_profiles or (lambda: [])
+        self.permission_modes = permission_modes or (lambda: [])
         self.accepted_text: str | None = None
 
     @staticmethod
@@ -123,9 +131,15 @@ class SlashCompleter(Completer):
 
     def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
         before = document.text_before_cursor
-        if "\n" in before or not before.startswith("/") or " " in before:
+        if "\n" in before or not before.startswith("/"):
             return
         if before == self.accepted_text:
+            return
+        if " " in before:
+            name, arg = before[1:].split(" ", 1)
+            if " " in arg:
+                return
+            yield from self._argument_completions(name, arg)
             return
         prefix = before[1:].lower()
         candidates = []
@@ -139,6 +153,25 @@ class SlashCompleter(Completer):
                 start_position=-len(before),
                 display_meta=command.description,
             )
+
+    def _argument_completions(self, name: str, arg: str) -> Iterator[Completion]:
+        candidates: list[tuple[str, str]] = []
+        if name == "model":
+            profiles = self.model_profiles()
+            sources = list(dict.fromkeys(profile.id.split("/", 1)[0]
+                                         for profile in profiles if "/" in profile.id))
+            candidates.extend((source, "Model source") for source in sources)
+            candidates.extend((profile.id, f"Model: {model_display_name(profile)}") for profile in profiles)
+        elif name == "permission":
+            descriptions = {"ask": "Require approval for tools", "allow": "Auto-approve tools (SANDBOXED, HIGH RISK)"}
+            candidates.extend((mode, descriptions[mode]) for mode in self.permission_modes())
+        ranked = []
+        for index, (value, description) in enumerate(candidates):
+            rank = self._rank(value.lower(), arg.lower())
+            if rank is not None:
+                ranked.append((rank, index, value, description))
+        for _, _, value, description in sorted(ranked):
+            yield Completion(value, start_position=-len(arg), display_meta=description)
 
 
 class _ScrollableTextControl(FormattedTextControl):
@@ -261,6 +294,7 @@ class CliApplication:
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
         self.keymap = Keymap.load(keymap_path)
         self.interaction: InteractionController | None = None
+        self._deferred_config_interaction: InteractionController | None = None
         self.sessions = SessionController(self)
         self._reviewing = False
         self.clipboard = ClipboardAdapter()
@@ -279,7 +313,11 @@ class CliApplication:
         self._git_summary = GitSummary()
         self._git_task: asyncio.Task[None] | None = None
 
-        self.slash_completer = SlashCompleter(self.commands)
+        self.slash_completer = SlashCompleter(
+            self.commands,
+            model_profiles=self.runner.list_models,
+            permission_modes=lambda: ["ask", "allow"] if self._allow_available() else ["ask"],
+        )
         self.buffer = Buffer(
             multiline=True,
             history=InMemoryHistory(),
@@ -521,10 +559,31 @@ class CliApplication:
 
     def _switch_model(self, id_or_prefix: str) -> ModelProfile:
         previous = self.runner.current_model()
-        profile = self.runner.switch_model(id_or_prefix)
-        if previous is None or previous.id != profile.id:
-            self.state.usage.clear()
+        profile = self.runner.request_model_change(id_or_prefix)
+        if self.runner.pending_model() is None:
+            notice = f"Pending model switch cancelled; model remains {model_display_name(profile)}."
+        else:
+            before = model_display_name(previous) if previous else "fixed model"
+            notice = f"Model switch queued: {before} → {model_display_name(profile)}. Current work uses {before}."
+        interrupt = self.runner.current_interrupt()
+        if interrupt is not None and interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
+            notice += " Existing approval still requires approve or reject; press F2 to return."
+        self.state.add_system(notice)
+        self.set_status(notice)
         return profile
+
+    def _request_permission_mode(self, mode: PermissionMode) -> None:
+        before = self.runner.permission_mode()
+        self.runner.request_permission_change(mode)
+        if self.runner.pending_permission_mode() is None:
+            notice = f"Pending permission switch cancelled; permission remains {before.value}."
+        else:
+            notice = f"Permission switch queued: {before.value} → {mode.value}. Current work uses {before.value}."
+        interrupt = self.runner.current_interrupt()
+        if interrupt is not None and interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
+            notice += " Existing approval remains under ask; press F2 to approve or reject."
+        self.state.add_system(notice)
+        self.set_status(notice)
 
     def show_help(self) -> None:
         commands = "\n".join(
@@ -546,11 +605,17 @@ class CliApplication:
         mode = prepared.execution_mode.value
         tool_count = len(prepared.exposed_tool_names) + len(prepared.filesystem_tools) + 3
         model = self.runner.current_model()
+        pending_model = self.runner.pending_model()
         model_line = (
-            f"Model: {model_display_name(model)}\nInputs: {', '.join(model.input)}\n"
+            f"Model: {model_display_name(model)}"
+            + (f" → {model_display_name(pending_model)} (pending)" if pending_model else "")
+            + f"\nInputs: {', '.join(model.input)}\n"
             if model is not None else "Model: (fixed)\n"
         )
         perm = permission_mode_label(self.runner.permission_mode())
+        pending_permission = self.runner.pending_permission_mode()
+        if pending_permission is not None:
+            perm += f" → {pending_permission.value} (pending)"
         self.state.add_system(
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
@@ -599,9 +664,6 @@ class CliApplication:
         self.sessions.apply_snapshot(snapshot)
 
     async def select_model(self, arg: str = "") -> None:
-        if self.state.running:
-            self.set_status("Cancel the active run before switching models")
-            return
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status())
             return
@@ -625,8 +687,9 @@ class CliApplication:
                     self._show_model_choices(arg.strip(), profiles)
                     return
                 profile = self._switch_model(arg.strip())
-                self.state.add_system(f"Switched model to {model_display_name(profile)}")
-                self.set_status(f"Model: {model_display_name(profile)}")
+                return
+            if self.state.running:
+                self.set_status("Use /model <id> while a run is active")
                 return
             if any("/" in item.id for item in profiles):
                 self._show_model_sources(profiles)
@@ -734,9 +797,6 @@ class CliApplication:
             self.set_status("Compaction failed")
 
     async def select_permission(self, arg: str = "") -> None:
-        if self.state.running:
-            self.set_status("Cancel the active run before changing permission mode")
-            return
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status())
             return
@@ -754,6 +814,9 @@ class CliApplication:
                 )
                 return
             await self._apply_permission_mode(mode)
+            return
+        if self.state.running:
+            self.set_status("Use /permission ask|allow while a run is active")
             return
         current = self.runner.permission_mode()
         options = [
@@ -801,17 +864,15 @@ class CliApplication:
                 error=True,
             )
             return
-        if mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW:
+        if (mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW
+                and self.runner.pending_permission_mode() is not PermissionMode.ALLOW):
             self._begin_allow_permission_confirm()
             return
         try:
-            applied = self.runner.set_permission_mode(mode)
+            self._request_permission_mode(mode)
         except (RuntimeError, ValueError) as exc:
             self.state.add_system(str(exc), error=True)
             return
-        label = permission_mode_label(applied)
-        self.state.add_system(f"Permission mode: {label}")
-        self.set_status(f"Permission: {applied.value}")
 
     def _begin_allow_permission_confirm(self) -> None:
         self.interaction = InteractionController(
@@ -830,9 +891,6 @@ class CliApplication:
         self.application.invalidate()
 
     def cycle_model(self, *, delta: int = 1) -> None:
-        if self.state.running:
-            self.set_status("Cancel the active run before switching models")
-            return
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status())
             return
@@ -851,7 +909,7 @@ class CliApplication:
                 label = model_display_name(current or profiles[0])
                 self.set_status(f"Only one model configured: {label}")
             return
-        current = self.runner.current_model()
+        current = self.runner.pending_model() or self.runner.current_model()
         current_id = current.id if current else profiles[0].id
         index = next((i for i, item in enumerate(profiles) if item.id == current_id), 0)
         nxt = profiles[(index + delta) % len(profiles)]
@@ -860,8 +918,6 @@ class CliApplication:
         except (KeyError, RuntimeError) as exc:
             self.state.add_system(str(exc), error=True)
             return
-        self.state.add_system(f"Switched model to {model_display_name(profile)}")
-        self.set_status(f"Model: {model_display_name(profile)}")
         self.application.invalidate()
 
     def _restore_queued_to_editor(self, buffer: Any) -> list[str]:
@@ -1017,10 +1073,16 @@ class CliApplication:
         queue = f" · queued {pending}" if pending else ""
         mode = self.runner.prepared.execution_mode.value
         perm = self.runner.permission_mode().value
+        pending_permission = self.runner.pending_permission_mode()
+        if pending_permission is not None:
+            perm += f"→{pending_permission.value}(pending)"
         spinner = " ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 11] if self.state.running else ""
         width = self._width()
         model = self.runner.current_model()
         model_label = model_display_name(model) if model is not None else "fixed model"
+        pending_model = self.runner.pending_model()
+        if pending_model is not None:
+            model_label += f"→{model_display_name(pending_model)} (pending)"
         resume_id = self.runner.thread_id[:8]
         context = format_context_usage(self.state.usage, self.runner.context_window())
         # Row 1: workspace · model · resume on the left, git on the right.
@@ -1156,7 +1218,7 @@ class CliApplication:
         @kb.add(" ", filter=interaction_active)
         def interaction_toggle(event) -> None:  # type: ignore[no-untyped-def]
             assert self.interaction
-            if self.interaction.current.get("type") == "multi_select":
+            if self.interaction.current.get("type") == "multi_select" and not self.interaction.accepts_text:
                 self.interaction.toggle()
             else:
                 event.current_buffer.insert_text(" ")
@@ -1168,13 +1230,20 @@ class CliApplication:
         @kb.add("s-tab", filter=interaction_active)
         def interaction_previous(event) -> None:  # type: ignore[no-untyped-def]
             assert self.interaction
+            if self.interaction.custom_entry:
+                self.interaction.custom_entry = False
+                self.interaction.error = ""
+                event.current_buffer.reset()
+                return
             if self.interaction.index > 0:
                 self.interaction.index -= 1
                 self.interaction.option_index = 0
                 previous = self.interaction.values.get(str(self.interaction.current.get("id") or ""), "")
-                if isinstance(previous, str):
+                if self.interaction.accepts_text and isinstance(previous, str):
                     event.current_buffer.text = previous
                     event.current_buffer.cursor_position = len(previous)
+                else:
+                    event.current_buffer.reset()
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
@@ -1190,6 +1259,11 @@ class CliApplication:
                 self.sessions.cancel_wait()
             elif self._reviewing:
                 self._close_review()
+            elif self.interaction is not None and self.interaction.custom_entry:
+                self.interaction.custom_entry = False
+                self.interaction.error = ""
+                event.current_buffer.reset()
+                self.application.invalidate()
             elif self.interaction is not None:
                 self._finish_interaction(cancelled=True)
             elif self._compacting:
@@ -1485,6 +1559,17 @@ class CliApplication:
 
     def _apply_event(self, event: RunEvent) -> None:
         self.state.apply(event)
+        if event.type == "runtime_config_applied" and isinstance(event.result, dict):
+            changes = []
+            if event.result.get("model_changed"):
+                self.state.usage.clear()
+                model = self.runner.current_model()
+                changes.append(f"model: {model_display_name(model) if model else event.result['model_id']}")
+            if event.result.get("permission_changed"):
+                changes.append(f"permission: {event.result['permission_mode']}")
+            self.state.add_system("Runtime config applied: " + "; ".join(changes))
+        elif event.type == "runtime_config_failed":
+            self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
@@ -1492,7 +1577,14 @@ class CliApplication:
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")
         if result.status in {"waiting_confirmation", "waiting_human", "paused"}:
+            if self.interaction is not None and self.interaction.kind == "permission_confirm":
+                self._deferred_config_interaction = self.interaction
+                self.interaction = None
             self._reopen_pending_interaction()
+        elif self._deferred_config_interaction is not None:
+            self.interaction = self._deferred_config_interaction
+            self._deferred_config_interaction = None
+            self.set_status("Type ALLOW to confirm · Esc cancel")
         self.application.invalidate()
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
@@ -1543,8 +1635,6 @@ class CliApplication:
             except (KeyError, RuntimeError) as exc:
                 self.state.add_system(str(exc), error=True)
                 return
-            self.state.add_system(f"Switched model to {model_display_name(profile)}")
-            self.set_status(f"Model: {model_display_name(profile)}")
             return
         if interaction.kind == "permission":
             if cancelled:
@@ -1563,16 +1653,15 @@ class CliApplication:
                     error=True,
                 )
                 return
-            if mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW:
+            if (mode is PermissionMode.ALLOW and self.runner.permission_mode() is not PermissionMode.ALLOW
+                    and self.runner.pending_permission_mode() is not PermissionMode.ALLOW):
                 self._begin_allow_permission_confirm()
                 return
             try:
-                applied = self.runner.set_permission_mode(mode)
+                self._request_permission_mode(mode)
             except (RuntimeError, ValueError) as exc:
                 self.state.add_system(str(exc), error=True)
                 return
-            self.state.add_system(f"Permission mode: {permission_mode_label(applied)}")
-            self.set_status(f"Permission: {applied.value}")
             return
         if interaction.kind == "permission_confirm":
             if cancelled:
@@ -1589,12 +1678,10 @@ class CliApplication:
                 self.set_status("Permission: ask")
                 return
             try:
-                applied = self.runner.set_permission_mode(PermissionMode.ALLOW)
+                self._request_permission_mode(PermissionMode.ALLOW)
             except (RuntimeError, ValueError) as exc:
                 self.state.add_system(str(exc), error=True)
                 return
-            self.state.add_system(f"Permission mode: {permission_mode_label(applied)}")
-            self.set_status(f"Permission: {applied.value}")
             return
         if cancelled and interaction.kind in {"pause", "approval", "human"}:
             self._dismiss_pending_interrupt(interaction.kind)
@@ -1657,6 +1744,12 @@ class CliApplication:
                 self.state.add_system("No pending interaction")
                 self.set_status("No pending interaction")
             return False
+        if interrupt.kind is InterruptKind.RUNTIME_CONFIG_BOUNDARY:
+            self.state.add_system("Completing a pending runtime config switch before the next model call.")
+            self._start_run("", resume_call=partial(
+                self.runner.resume_runtime_config, on_event=self._on_event_thread,
+            ))
+            return True
         if interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
             self.interaction = InteractionController.approval(list(interrupt.pending_tools))
             self.set_status("Waiting for input")
