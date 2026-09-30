@@ -26,8 +26,9 @@ from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
@@ -50,6 +51,7 @@ from agent.cli.commands import Command, command_table
 from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
+from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.previews import is_mutation_tool, normalize_file_mutation
 from agent.cli.rendering import (
     RenderedUnit,
@@ -175,6 +177,27 @@ class SlashCompleter(Completer):
             yield Completion(value, start_position=-len(arg), display_meta=description)
 
 
+def _iter_selection_marks(fragments: Any, left: float, right: float) -> Iterator[tuple[Any, str, bool]]:
+    """Yield ``(fragment, char, marked)`` for cells overlapping ``[left, right)``.
+
+    Zero-width characters (combining marks, ZWJ, variation selectors) share the
+    cell of the preceding character, so they follow its marked state instead of
+    being judged on their own empty span.
+    """
+    column = 0
+    previous = False
+    for fragment in fragments:
+        if "[ZeroWidthEscape]" in fragment[0]:
+            yield fragment, fragment[1], False
+            continue
+        for char in fragment[1]:
+            width = max(0, get_cwidth(char))
+            marked = previous if width == 0 else column < right and column + width > left
+            yield fragment, char, marked
+            previous = marked
+            column += width
+
+
 class _ScrollableTextControl(FormattedTextControl):
     """Formatted text that consumes clicks and routes wheel events to the transcript."""
 
@@ -261,6 +284,35 @@ class _EditorScrollControl(BufferControl):
         return super().mouse_handler(mouse_event)
 
 
+class _PastedContentProcessor(Processor):
+    """Style the visible placeholder without changing editor text or cursor offsets."""
+
+    def __init__(self, draft: PastedContentDraft) -> None:
+        self._draft = draft
+
+    def apply_transformation(self, transformation_input: TransformationInput) -> Transformation:
+        fragments = transformation_input.fragments
+        plain = "".join(fragment[1] for fragment in fragments)
+        ranges = [
+            (index, index + len(label))
+            for label in self._draft.labels
+            if (index := plain.find(label)) >= 0
+        ]
+        if not ranges:
+            return Transformation(fragments)
+        styled = []
+        index = 0
+        for fragment in fragments:
+            style, text, *rest = fragment
+            for char in text:
+                char_style = style + " class:pasted-content" if any(
+                    start <= index < end for start, end in ranges
+                ) else style
+                styled.append((char_style, char, *rest))
+                index += 1
+        return Transformation(styled)
+
+
 class _TranscriptWindow(Window):
     """Transcript viewport whose scroll offset is authoritative, not cursor-derived.
 
@@ -323,6 +375,7 @@ class CliApplication:
         self._selection_dragging = False
         self._selection_edge = 0
         self._selection_edge_x = 0
+        self._selection_scroll_step = 0
         self._selection_scroll_handle: asyncio.TimerHandle | None = None
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
@@ -341,6 +394,7 @@ class CliApplication:
             completer=self.slash_completer,
             complete_while_typing=True,
         )
+        self._pasted_content = PastedContentDraft()
         self.transcript_control = _TranscriptControl(
             document=self._transcript_document,
             cursor=self._transcript_cursor,
@@ -370,6 +424,7 @@ class CliApplication:
         self.editor_control = _EditorScrollControl(
             buffer=self.buffer, focusable=True, on_scroll=self.scroll_transcript,
             on_select_outside=self._select_below_transcript,
+            input_processors=[_PastedContentProcessor(self._pasted_content)],
         )
         self.bindings = self._create_bindings()
 
@@ -480,6 +535,8 @@ class CliApplication:
             mouse_support=Condition(lambda: not self._exiting),
             style=Style.from_dict({
                 "editor": "bg:#303030 #ffffff",
+                "pasted-content": "bg:#245c38 #e8ffe8",
+                "transcript-selection": "bg:#264f78 #ffffff noreverse",
                 "footer": "#858585",
                 "footer-workspace": "ansigreen",
                 "footer-resume-id": "ansicyan",
@@ -1076,19 +1133,54 @@ class CliApplication:
         self.application.invalidate()
 
     def _select_transcript(self, event: Any) -> None:
-        position = (event.position.y, event.position.x)
-        if event.event_type is MouseEventType.MOUSE_DOWN and event.button is MouseButton.LEFT:
+        # prompt_toolkit's Window already maps the click to (document row,
+        # character index); only the index still needs converting to cells.
+        row = event.position.y
+        self._update_selection(row, self._selection_column(row, event.position.x), event.event_type, event.button)
+
+    def _selection_column(self, row: int, index: int) -> int:
+        document = self._transcript_document()
+        if not 0 <= row < document.line_count:
+            return index
+        column = 0
+        remaining = index
+        for fragment in document.get_line(row):
+            if "[ZeroWidthEscape]" in fragment[0]:
+                continue
+            for char in fragment[1]:
+                if remaining <= 0:
+                    return column
+                column += max(0, get_cwidth(char))
+                remaining -= 1
+        return column
+
+    def _update_selection(self, row: int, column: int, event_type: Any, button: Any) -> None:
+        position = (row, column)
+        if event_type is MouseEventType.MOUSE_DOWN and button is MouseButton.LEFT:
             self._stop_selection_scroll()
             self._selection_start = self._selection_end = position
             self._selection_dragging = True
-        elif event.event_type is MouseEventType.MOUSE_MOVE and self._selection_dragging:
-            self._selection_end = position
-            top = self.transcript_top()
-            bottom = top + self.transcript_viewport_rows() - 1
-            edge = -1 if position[0] <= top else (1 if position[0] >= bottom else 0)
-            self._selection_edge_x = position[1]
-            self._set_selection_edge(edge)
-        elif event.event_type is MouseEventType.MOUSE_UP and self._selection_dragging:
+            # Reinforce mouse reporting so IDE terminals drop their native
+            # selection overlay instead of stacking it on ours.
+            try:
+                self.application.output.enable_mouse_support()
+            except Exception:  # noqa: BLE001
+                pass
+        elif event_type is MouseEventType.MOUSE_MOVE and self._selection_dragging:
+            if button is MouseButton.NONE:
+                # The MOUSE_UP never arrived (released outside the terminal window
+                # or over a control without a selection handler). Plain motion must
+                # not keep dragging, or the 1003 any-motion events spin the UI.
+                self._selection_dragging = False
+                self._stop_selection_scroll()
+            else:
+                self._selection_end = position
+                top = self.transcript_top()
+                bottom = top + self.transcript_viewport_rows() - 1
+                edge = -1 if position[0] <= top else (1 if position[0] >= bottom else 0)
+                self._selection_edge_x = position[1]
+                self._set_selection_edge(edge)
+        elif event_type is MouseEventType.MOUSE_UP and self._selection_dragging:
             self._selection_end = position
             self._selection_dragging = False
             self._stop_selection_scroll()
@@ -1105,36 +1197,37 @@ class CliApplication:
         }:
             return False
         bottom = self.transcript_top() + self.transcript_viewport_rows() - 1
-        self._select_transcript(MouseEvent(
-            position=Point(x=event.position.x, y=bottom),
-            event_type=event.event_type,
-            button=event.button,
-            modifiers=event.modifiers,
-        ))
+        self._update_selection(bottom, event.position.x, event.event_type, event.button)
         return True
 
     def _set_selection_edge(self, edge: int) -> None:
+        if edge != self._selection_edge:
+            self._selection_scroll_step = 0
         self._selection_edge = edge
         if edge == 0:
             self._stop_selection_scroll()
         elif self._selection_scroll_handle is None:
-            self._selection_scroll_handle = asyncio.get_running_loop().call_later(0.08, self._scroll_selection_edge)
+            # Scroll immediately, then keep accelerating while the pointer stays
+            # pinned to the viewport edge.
+            self._scroll_selection_edge()
 
     def _scroll_selection_edge(self) -> None:
         self._selection_scroll_handle = None
         if not self._selection_dragging or not self._selection_edge:
             return
         previous = self.transcript_top()
-        self.scroll_transcript(self._selection_edge)
+        self._selection_scroll_step = min(12, max(3, self._selection_scroll_step + 1))
+        self.scroll_transcript(self._selection_edge * self._selection_scroll_step)
         current = self.transcript_top()
         if current == previous:
             return
         row = current if self._selection_edge < 0 else current + self.transcript_viewport_rows() - 1
         self._selection_end = (row, self._selection_edge_x)
-        self._selection_scroll_handle = asyncio.get_running_loop().call_later(0.08, self._scroll_selection_edge)
+        self._selection_scroll_handle = asyncio.get_running_loop().call_later(0.04, self._scroll_selection_edge)
 
     def _stop_selection_scroll(self) -> None:
         self._selection_edge = 0
+        self._selection_scroll_step = 0
         if self._selection_scroll_handle is not None:
             self._selection_scroll_handle.cancel()
             self._selection_scroll_handle = None
@@ -1148,42 +1241,35 @@ class CliApplication:
     def _selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
         if self._selection_start is None or self._selection_end is None:
             return None
-        return min(self._selection_start, self._selection_end), max(self._selection_start, self._selection_end)
+        start, end = sorted((self._selection_start, self._selection_end))
+        return (start, end) if start != end else None
+
+    def _selection_span(self, row: int, bounds: tuple[tuple[int, int], tuple[int, int]]) -> tuple[float, float]:
+        # The cell under the pointer is part of the selection: clicks right of a
+        # line's text resolve to its last character, which must still be copied.
+        left = bounds[0][1] if row == bounds[0][0] else 0
+        right = bounds[1][1] + 1 if row == bounds[1][0] else float("inf")
+        return left, right
 
     def _selected_transcript_line(self, row: int, fragments: Any) -> Any:
         bounds = self._selection_bounds()
         if bounds is None or not bounds[0][0] <= row <= bounds[1][0]:
             return fragments
-        left = bounds[0][1] if row == bounds[0][0] else 0
-        right = bounds[1][1] if row == bounds[1][0] else float("inf")
-        selected = []
-        column = 0
-        for fragment in fragments:
-            style, text, *rest = fragment
-            for char in text:
-                width = max(0, get_cwidth(char))
-                marked = column < right and column + width > left
-                selected.append((f"{style} reverse" if marked else style, char, *rest))
-                column += width
-        return selected
+        left, right = self._selection_span(row, bounds)
+        return [
+            (f"{style} class:transcript-selection" if marked else style, char, *rest)
+            for (style, _text, *rest), char, marked in _iter_selection_marks(fragments, left, right)
+        ]
 
     def _selected_transcript_text(self) -> str:
         bounds = self._selection_bounds()
-        if bounds is None or bounds[0] == bounds[1]:
+        if bounds is None:
             return ""
         document = self._transcript_document()
         lines = []
         for row in range(bounds[0][0], min(bounds[1][0], document.line_count - 1) + 1):
-            left = bounds[0][1] if row == bounds[0][0] else 0
-            right = bounds[1][1] if row == bounds[1][0] else float("inf")
-            column = 0
-            chars = []
-            for fragment in document.get_line(row):
-                for char in fragment[1]:
-                    width = max(0, get_cwidth(char))
-                    if column < right and column + width > left:
-                        chars.append(char)
-                    column += width
+            left, right = self._selection_span(row, bounds)
+            chars = [char for _, char, marked in _iter_selection_marks(document.get_line(row), left, right) if marked]
             lines.append("".join(chars).rstrip())
         return "\n".join(lines).strip("\n")
 
@@ -1381,6 +1467,7 @@ class CliApplication:
                 self.interaction.custom_entry = False
                 self.interaction.error = ""
                 event.current_buffer.reset()
+                self._pasted_content.clear()
                 return
             if self.interaction.index > 0:
                 self.interaction.index -= 1
@@ -1391,12 +1478,14 @@ class CliApplication:
                     event.current_buffer.cursor_position = len(previous)
                 else:
                     event.current_buffer.reset()
+                    self._pasted_content.clear()
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
             if self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
                 self.slash_completer.accepted_text = None
                 event.current_buffer.reset()
+                self._pasted_content.clear()
                 self.application.invalidate()
             elif self.transcript_away_from_bottom():
                 self.follow_transcript()
@@ -1410,6 +1499,7 @@ class CliApplication:
                 self.interaction.custom_entry = False
                 self.interaction.error = ""
                 event.current_buffer.reset()
+                self._pasted_content.clear()
                 self.application.invalidate()
             elif self.interaction is not None:
                 self._finish_interaction(cancelled=True)
@@ -1434,6 +1524,7 @@ class CliApplication:
                 self.exit()
                 return
             event.current_buffer.reset()
+            self._pasted_content.clear()
             self.state.attachments.clear()
             self._last_ctrl_c = now
             self.set_status("Input cleared · press Ctrl+C again to exit")
@@ -1497,12 +1588,21 @@ class CliApplication:
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status())
             return
-        text = self.buffer.text.strip()
+        displayed = self.buffer.text.strip()
+        text = self._pasted_content.expand(displayed)
+        if self._pasted_content.has_invalid_marker(displayed):
+            self.state.add_system(
+                "A pasted-content marker was edited or truncated. "
+                "Restore the marker or re-paste the content before submitting.",
+                error=True,
+            )
+            self.set_status("Edited pasted-content marker")
+            return
         if self.interaction is not None:
             was_text = self.interaction.accepts_text
             complete = self.interaction.accept(text)
             if was_text or complete:
-                self.buffer.reset(append_to_history=bool(text))
+                self._reset_submitted_buffer(text)
             if complete:
                 self._finish_interaction()
             self.application.invalidate()
@@ -1512,7 +1612,7 @@ class CliApplication:
         if self._compacting:
             self.set_status("Wait for compaction to finish")
             return
-        if text.startswith("/") and "\n" not in text:
+        if not self._pasted_content.has_blocks and text.startswith("/") and "\n" not in text:
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
             return
@@ -1520,7 +1620,7 @@ class CliApplication:
             if self.state.attachments:
                 self.set_status("Wait for the active run before sending images")
                 return
-            self.buffer.reset(append_to_history=bool(text))
+            self._reset_submitted_buffer(text)
             if queue_mode == "followUp":
                 self.runner.follow_up(text)
                 self.set_status("Follow-up queued")
@@ -1529,8 +1629,17 @@ class CliApplication:
                 self.set_status("Steering queued")
             self.application.invalidate()
             return
-        self.buffer.reset(append_to_history=bool(text))
+        self._reset_submitted_buffer(text)
         self._start_run(text, image_refs=tuple(self.state.attachments))
+
+    def _reset_submitted_buffer(self, expanded_text: str) -> None:
+        if self._pasted_content.has_blocks:
+            if expanded_text:
+                self.buffer.history.append_string(expanded_text)
+            self.buffer.reset(append_to_history=False)
+        else:
+            self.buffer.reset(append_to_history=bool(expanded_text))
+        self._pasted_content.clear()
 
     async def _dispatch_command(self, text: str) -> None:
         name, _, arg = text[1:].partition(" ")
@@ -1620,8 +1729,8 @@ class CliApplication:
         )
 
     async def _attach_path(self, value: str) -> bool:
-        if not self.runner.supports_input("image"):
-            self.set_status("Current model does not support image input")
+        if not self.runner.supports_next_input("image"):
+            self.set_status("Current or pending model does not support image input")
             return False
         if len(self.state.attachments) >= MAX_IMAGES_PER_MESSAGE:
             self.set_status(f"A message can contain at most {MAX_IMAGES_PER_MESSAGE} images")
@@ -1644,17 +1753,17 @@ class CliApplication:
                 path = windows_path_to_wsl(trimmed)
                 looks_like_image = path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
                 if path.is_file() and looks_like_image:
-                    if self.runner.supports_input("image"):
+                    if self.runner.supports_next_input("image"):
                         asyncio.create_task(self._attach_pasted_path(trimmed, payload))
                         return
-                    self.set_status("Image path pasted as text: current model does not support images")
+                    self.set_status("Image path pasted as text: current or pending model does not support images")
             except (OSError, ClipboardError):
                 pass
-        self.buffer.insert_text(payload)
+        self.buffer.insert_text(self._pasted_content.display(payload))
 
     async def _attach_pasted_path(self, value: str, original_payload: str) -> None:
         if not await self._attach_path(value):
-            self.buffer.insert_text(original_payload)
+            self.buffer.insert_text(self._pasted_content.display(original_payload))
             self.application.invalidate()
 
     async def _paste_clipboard(self, *, images_only: bool = False) -> None:
@@ -1663,14 +1772,14 @@ class CliApplication:
             if images_only:
                 self.set_status("Clipboard does not contain an image")
                 return
-            self.buffer.insert_text(content.text)
+            self._handle_pasted_text(content.text)
             self.application.invalidate()
             return
         if isinstance(content, ClipboardUnavailable):
             self.set_status(content.reason)
             return
-        if not self.runner.supports_input("image"):
-            self.set_status("Current model does not support image input")
+        if not self.runner.supports_next_input("image"):
+            self.set_status("Current or pending model does not support image input")
             return
         if isinstance(content, ClipboardFiles):
             attached = 0

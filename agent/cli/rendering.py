@@ -42,6 +42,7 @@ from agent.config import DEFAULT_UI_TIMEZONE
 
 # Non-file output folding stays in the renderer.
 EXECUTE_TAIL_LINES = 4
+THINKING_TAIL_LINES = 5
 
 EXPLORE_PREVIEW_LIMIT = 5
 EXPLORE_FAILURE_PREVIEW_LIMIT = 3
@@ -436,8 +437,15 @@ def _message(block: MessageBlock, thinking_collapsed: bool) -> list[Any]:
         items.append(Padding(Group(*content), (1, 1, 1, 1), style=style))
     elif block.kind == "assistant":
         if block.thinking:
-            value = "Thinking…" if thinking_collapsed else block.thinking
-            items.append(Padding(Markdown(value), (1, 1, 0, 1), style="italic #888888"))
+            lines = block.thinking.splitlines() or [block.thinking]
+            if thinking_collapsed and len(lines) > THINKING_TAIL_LINES:
+                hidden = len(lines) - THINKING_TAIL_LINES
+                lines = [
+                    f"… {hidden} earlier thinking lines hidden · Ctrl+T to expand",
+                    *lines[-THINKING_TAIL_LINES:],
+                ]
+            body = [Text(line, style="italic #888888") for line in lines]
+            items.append(Padding(Group(*body), (1, 1, 0, 1)))
         if block.content:
             items.append(Padding(Markdown(block.content), (1, 1, 0, 1)))
     elif block.kind == "error":

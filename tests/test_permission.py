@@ -131,13 +131,17 @@ def test_custom_interrupt_mapping_is_applied() -> None:
 def test_custom_approval_survives_permission_round_trip() -> None:
     with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         prepared = create_agent(
-            model=scripted_model([AIMessage(content="done")]),
+            model=scripted_model([AIMessage(content="a"), AIMessage(content="b")]),
             interrupt_on={"lookup_docs": True},
         )
         runner = AgentRunner(prepared=prepared)
         runner.set_permission_mode("allow")
+        assert runner.pending_permission_mode() is PermissionMode.ALLOW
+        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+        assert runner.invoke("x").status == "completed"
         assert runner.prepared.interrupt_on == {}
         runner.set_permission_mode("ask")
+        assert runner.invoke("y").status == "completed"
         assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
 
 
@@ -204,15 +208,30 @@ def test_permission_argument_completion_follows_available_modes() -> None:
             assert values[0].start_position == -2
 
 
-def test_set_permission_mode_rejected_while_busy() -> None:
-    runner = AgentRunner(
-        model=scripted_model([AIMessage(content="ok")]),
-        backend=StateBackend(),
-        thread_id="perm-busy",
-    )
+def test_set_permission_mode_queues_while_busy() -> None:
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
     with runner._operation_lock:
-        with pytest.raises(RuntimeError, match="active operation"):
-            runner.set_permission_mode(PermissionMode.ALLOW)
+        mode = runner.set_permission_mode(PermissionMode.ALLOW)
+    assert mode is PermissionMode.ALLOW
+    assert runner.permission_mode() is PermissionMode.ASK
+    assert runner.pending_permission_mode() is PermissionMode.ALLOW
+
+
+def test_set_permission_mode_deferred_keeps_pending_approval_recoverable() -> None:
+    messages = _execute_messages("old-legacy")
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(prepared=create_agent(model=scripted_model(messages)), thread_id="legacy-allow")
+    assert runner.invoke("run").status == "waiting_confirmation"
+    runner.set_permission_mode("allow")
+    assert runner.permission_mode() is PermissionMode.ASK
+    assert runner.pending_permission_mode() is PermissionMode.ALLOW
+    assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-legacy"
+    resumed = runner.approve_tool("old-legacy")
+    assert resumed.status == "completed"
+    assert resumed.output == "done"
+    assert runner.permission_mode() is PermissionMode.ALLOW
+    assert runner.pending_permission_mode() is None
 
 
 def _execute_messages(call_id: str, *, network: bool = False, final: str = "done") -> list[AIMessage]:
@@ -488,13 +507,18 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
             assert "network" in app.interaction.question.lower()
             assert app.interaction.accept("ALLOW")
             app._finish_interaction()
-            assert app.runner.permission_mode() is PermissionMode.ALLOW
+            assert app.runner.permission_mode() is PermissionMode.ASK
+            assert app.runner.pending_permission_mode() is PermissionMode.ALLOW
             assert app.interaction is None
             assert any(
-                "network" in getattr(block, "content", "") for block in app.state.blocks
+                "Permission switch queued" in getattr(block, "content", "") for block in app.state.blocks
             )
 
     asyncio.run(scenario())
+    resumed = runner.invoke("continue")
+    assert resumed.status == "completed"
+    assert runner.permission_mode() is PermissionMode.ALLOW
+    assert runner.pending_permission_mode() is None
 
 
 def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:

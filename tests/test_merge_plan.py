@@ -5,6 +5,7 @@ import asyncio
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from deepagents.backends import StateBackend
@@ -34,7 +35,7 @@ from agent.tools.examples import build_example_tools
 from agent.runner import AgentRunner
 from agent.sandbox import ExecutionMode
 from agent.session import SessionStore, StopReason
-from tests.conftest import ScriptedToolModel, scripted_model
+from tests.conftest import ScriptedToolModel, profiled_scripted, scripted_model
 
 
 def _settings(workspace: Path) -> Settings:
@@ -70,6 +71,9 @@ def test_spec_rebuild_keeps_static_inputs_and_rereads_project_instructions(
     assert "custom_lookup" in prepared.exposed_tool_names
     (tmp_path / "AGENTS.md").write_text("规则二", encoding="utf-8")
     runner.switch_model("beta")
+    with patch("agent.runner.build_chat_model",
+               side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
+        assert runner.invoke("rebuild").status == "completed"
     assert "model-b" in runner.prepared.system_prompt
     assert "规则二" in runner.prepared.system_prompt
     assert "规则一" not in runner.prepared.system_prompt
@@ -92,6 +96,9 @@ def test_configured_instructions_reach_runner_and_create_agent(tmp_path: Path) -
                          backend=StateBackend(), settings=settings)
     assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
     runner.switch_model("beta")
+    with patch("agent.runner.build_chat_model",
+               side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
+        assert runner.invoke("switch").status == "completed"
     assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
     prepared = create_agent(model=scripted_model([AIMessage(content="unused")]),
                             backend=StateBackend(), settings=settings)
@@ -120,6 +127,10 @@ def test_legacy_catalog_migrates_and_resume_restores_model(tmp_path: Path) -> No
                          settings=settings, session_store=store)
     thread = runner.thread_id
     runner.switch_model("beta")
+    assert store.get(thread).pending_model_id == "beta"
+    with patch("agent.runner.build_chat_model",
+               side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
+        assert runner.invoke("apply").status == "completed"
     assert store.get(thread).model_id == "beta"
     store.close()
     reopened = SessionStore(db)
@@ -294,6 +305,8 @@ def test_resume_restores_saved_allow_when_sandbox_is_available(
                          settings=_settings(tmp_path), session_store=store)
     thread = runner.thread_id
     runner.set_permission_mode("allow")
+    assert store.get(thread).pending_permission_mode == "allow"
+    assert runner.invoke("go").status == "completed"
     assert store.get(thread).permission_mode == "allow"
     store.close()
     reopened = SessionStore(db)

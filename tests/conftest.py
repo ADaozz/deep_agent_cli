@@ -23,6 +23,17 @@ def scripted_model(messages: list[AIMessage]) -> ScriptedToolModel:
     return ScriptedToolModel(messages=iterator)
 
 
+def profiled_scripted(messages: list[AIMessage], profile: Any) -> ScriptedToolModel:
+    """Scripted model carrying the identity build_chat_model would produce for a profile."""
+    model = scripted_model(messages)
+    object.__setattr__(model, "model_name", profile.model)
+    if profile.context_window > 0:
+        base = dict(getattr(model, "profile", None) or {})
+        base["max_input_tokens"] = profile.context_window
+        object.__setattr__(model, "profile", base)
+    return model
+
+
 def graph_tool_names(graph: Any) -> set[str]:
     names: set[str] = set()
     nodes = getattr(graph, "nodes", {}) or {}

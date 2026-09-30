@@ -17,7 +17,7 @@ from agent.config import ModelProfile, Settings
 from agent.runner import AgentRunner
 from agent.runner import RunEvent
 from agent.session import SessionStore
-from tests.conftest import scripted_model
+from tests.conftest import profiled_scripted, scripted_model
 
 
 def _settings_two_models() -> Settings:
@@ -43,7 +43,7 @@ def _settings_grouped_models() -> Settings:
     }})
 
 
-def test_switch_model_keeps_thread_and_rebuilds_graph() -> None:
+def test_switch_model_defers_rebuild_until_next_invoke() -> None:
     settings = _settings_two_models()
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="ok")]),
@@ -58,8 +58,35 @@ def test_switch_model_keeps_thread_and_rebuilds_graph() -> None:
     profile = runner.switch_model("be")
     assert profile.id == "beta"
     assert runner.thread_id == thread
+    assert runner.prepared.graph is graph_before
+    assert runner.current_model().model == "model-a"
+    assert runner.pending_model().id == "beta"
+    with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="ok")])):
+        assert runner.invoke("hello").status == "completed"
     assert runner.prepared.graph is not graph_before
     assert runner.current_model().model == "model-b"
+    assert runner.pending_model() is None
+
+
+def test_switch_model_deferred_keeps_pending_approval_recoverable() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="", tool_calls=[{
+            "id": "old-write", "name": "write_file",
+            "args": {"file_path": "/workspace/old.txt", "content": "old"},
+        }]), AIMessage(content="done")]),
+        backend=StateBackend(), settings=_settings_two_models(),
+    )
+    assert runner.invoke("write").status == "waiting_confirmation"
+    profile = runner.switch_model("beta")
+    assert profile.id == "beta"
+    assert runner.current_model().id == "alpha"
+    assert runner.pending_model().id == "beta"
+    assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-write"
+    with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="done")])):
+        resumed = runner.approve_tool("old-write")
+    assert resumed.status == "completed"
+    assert resumed.output == "done"
+    assert runner.current_model().id == "beta"
 
 
 def test_deferred_model_switch_waits_for_old_tool_then_uses_new_model() -> None:
@@ -176,10 +203,13 @@ def test_switch_model_updates_deepagents_compaction_window() -> None:
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(), settings=settings,
     )
-    for model_id, window in (("large", 1_000_000), ("small", 128_000)):
-        runner.switch_model(model_id)
-        assert runner.prepared.model.profile["max_input_tokens"] == window
-        assert compute_summarization_defaults(runner.prepared.model)["trigger"] == ("fraction", 0.85)
+    with patch("agent.runner.build_chat_model",
+               side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
+        for model_id, window in (("large", 1_000_000), ("small", 128_000)):
+            runner.switch_model(model_id)
+            assert runner.invoke("go").status == "completed"
+            assert runner.prepared.model.profile["max_input_tokens"] == window
+            assert compute_summarization_defaults(runner.prepared.model)["trigger"] == ("fraction", 0.85)
 
 
 def test_switch_model_keeps_in_memory_checkpoint() -> None:
@@ -193,9 +223,15 @@ def test_switch_model_keeps_in_memory_checkpoint() -> None:
     assert runner.prepared.checkpointer is saver
     state = runner.prepared.graph.get_state(runner._thread_config())
     assert [message.content for message in state.values["messages"]][-2:] == ["keep this", "remembered"]
+    with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="after")])):
+        assert runner.invoke("again").status == "completed"
+    assert runner.current_model().id == "beta"
+    assert runner.prepared.checkpointer is saver
+    state = runner.prepared.graph.get_state(runner._thread_config())
+    assert [message.content for message in state.values["messages"]][:2] == ["keep this", "remembered"]
 
 
-def test_switch_model_rejected_while_busy() -> None:
+def test_switch_model_queues_while_busy() -> None:
     settings = _settings_two_models()
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="ok")]),
@@ -204,8 +240,10 @@ def test_switch_model_rejected_while_busy() -> None:
         thread_id="busy-model",
     )
     with runner._operation_lock:
-        with pytest.raises(RuntimeError, match="active operation"):
-            runner.switch_model("beta")
+        profile = runner.switch_model("beta")
+    assert profile.id == "beta"
+    assert runner.current_model().id == "alpha"
+    assert runner.pending_model().id == "beta"
 
 
 def test_cli_model_prefix_switch() -> None:

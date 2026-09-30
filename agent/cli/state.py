@@ -60,7 +60,7 @@ class CliState:
     todos: list[dict[str, str]] = field(default_factory=list)
     running: bool = False
     status: str = "Ready"
-    thinking_collapsed: bool = False
+    thinking_collapsed: bool = True
     tools_expanded: bool = False
     # Held by reference, not index: app-side filtering of `blocks` would
     # otherwise silently redirect stream deltas into an unrelated block.

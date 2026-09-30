@@ -420,6 +420,11 @@ class AgentRunner:
         profile = self.current_model()
         return kind == "text" if profile is None else profile.supports_input(kind)
 
+    def supports_next_input(self, kind: InputKind) -> bool:
+        """Capability of the model the next inference will use, pending switch included."""
+        profile = self.pending_model() or self.current_model()
+        return kind == "text" if profile is None else profile.supports_input(kind)
+
     def context_window(self) -> int:
         """Configured context window in tokens; 0 when the profile does not declare one."""
         profile = self.current_model()
@@ -498,48 +503,16 @@ class AgentRunner:
             self.session_store.touch(self.thread_id, last_run_status=StopReason.STOP)
         return CompactResult(status, used, window, message)
 
-    @_exclusive_operation
     def switch_model(self, id_or_prefix: str) -> ModelProfile:
-        if self.settings is None:
-            raise RuntimeError("Model switching requires Settings with llm.models")
-        self._require_active_session()
-        profile = self.settings.get_profile(id_or_prefix)
-        if profile.id == self._current_model_id:
-            return profile
-        self._rebuild_prepared(model=build_chat_model(
-            profile, attachment_store=self.attachment_store,
-        ))
-        self._current_model_id = profile.id
-        if self.session_store is not None:
-            self.session_store.touch(self.thread_id, model_id=profile.id)
-        return profile
+        """Deferred model switch, applied at the next safe boundary."""
+        return self.request_model_change(id_or_prefix)
 
     def permission_mode(self) -> PermissionMode:
         return self._permission_mode
 
-    @_exclusive_operation
     def set_permission_mode(self, mode: PermissionMode | str) -> PermissionMode:
-        self._require_active_session()
-        if isinstance(mode, str):
-            parsed = parse_permission_mode(mode)
-            if parsed is None:
-                raise ValueError(f"Unknown permission mode: {mode}")
-            mode = parsed
-        if mode is self._permission_mode:
-            return mode
-        if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
-            raise ValueError(allow_mode_unavailable_reason(self.prepared.execution_mode))
-        model = self._chat_model
-        if self.settings is not None:
-            model = build_chat_model(
-                self.settings.get_profile(self._current_model_id),
-                attachment_store=self.attachment_store,
-            )
-        self._rebuild_prepared(model=model, permission_mode=mode)
-        self._permission_mode = mode
-        if self.session_store is not None:
-            self.session_store.touch(self.thread_id, permission_mode=mode.value)
-        return mode
+        """Deferred permission switch, applied at the next safe boundary."""
+        return self.request_permission_change(mode)
 
     def _rebuild_prepared(
         self,
@@ -857,7 +830,7 @@ class AgentRunner:
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
-        if images and not self.supports_input("image"):
+        if images and not self.supports_next_input("image"):
             raise ValueError("The current model does not declare image input support")
         if len(images) > MAX_IMAGES_PER_MESSAGE:
             raise ValueError(f"A message can contain at most {MAX_IMAGES_PER_MESSAGE} images")
@@ -901,7 +874,7 @@ class AgentRunner:
         if current_interrupt is None:
             self._apply_pending_runtime_config(on_event)
         refs = tuple(image_refs)
-        if refs and not self.supports_input("image"):
+        if refs and not self.supports_next_input("image"):
             raise ValueError("The current model does not declare image input support")
         if len(refs) > MAX_IMAGES_PER_MESSAGE:
             raise ValueError(f"A message can contain at most {MAX_IMAGES_PER_MESSAGE} images")
@@ -927,7 +900,7 @@ class AgentRunner:
         )
 
     def store_image(self, image: ImageAttachment) -> ImageAttachmentRef:
-        if not self.supports_input("image"):
+        if not self.supports_next_input("image"):
             raise ValueError("The current model does not declare image input support")
         return self.attachment_store.put(image)
 

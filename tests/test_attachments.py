@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event, Thread
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
@@ -73,6 +74,34 @@ def test_refs_are_builtin_checkpoint_data_and_transcript_keeps_images(tmp_path: 
     message = HumanMessage(content="look", additional_kwargs={ATTACHMENT_META_KEY: [raw]})
     transcript = messages_to_transcript([message])
     assert transcript[0].attachments == (ref,)
+
+
+def test_pending_model_switch_unlocks_image_input() -> None:
+    settings = Settings(
+        llm_profiles=(
+            ModelProfile("text", "model-a"),
+            ModelProfile("vision", "model-b", input=("text", "image")),
+        ),
+        llm_default="text",
+    )
+    initial = scripted_model([AIMessage(content="unused")])
+    object.__setattr__(initial, "materializes_attachment_refs", True)
+    runner = AgentRunner(
+        model=initial, backend=StateBackend(), settings=settings, thread_id="pending-vision",
+    )
+    assert not runner.supports_input("image")
+    assert not runner.supports_next_input("image")
+    runner.switch_model("vision")
+    assert not runner.supports_input("image")
+    assert runner.supports_next_input("image")
+    ref = runner.store_image(_image())
+    fake = scripted_model([AIMessage(content="done")])
+    object.__setattr__(fake, "materializes_attachment_refs", True)
+    with patch("agent.runner.build_chat_model", return_value=fake):
+        result = runner.invoke_with_attachment_refs("look", image_refs=(ref,))
+    assert result.status == "completed"
+    assert runner.current_model().id == "vision"
+    assert runner.supports_input("image")
 
 
 def test_workspace_gc_keeps_checkpoint_refs_and_deletes_orphans(tmp_path: Path) -> None:

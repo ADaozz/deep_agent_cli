@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from agent.cli.gitinfo import GitSummary, parse_status
 from agent.cli.interactions import InteractionController
-from agent.cli.clipboard import ClipboardImage
+from agent.cli.clipboard import ClipboardImage, ClipboardText
 from agent.cli.app import (
     FOOTER_LINES,
     CliApplication,
@@ -46,6 +46,7 @@ from agent.cli.rendering import (
     render_transcript,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock, touch
+from agent.cli.pasted_content import PASTED_CONTENT_MIN_CHARS
 from agent.config import Settings
 from agent.config import ModelProfile
 from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
@@ -398,6 +399,27 @@ def test_cli_state_updates_streaming_block_in_place() -> None:
     assert len(assistants) == 1
     assert assistants[0].thinking == "first"
     assert assistants[0].content == "hello world"
+
+
+def test_thinking_collapses_to_latest_five_lines_by_default() -> None:
+    lines = [f"think {index}" for index in range(8)]
+    state = CliState(blocks=[MessageBlock(kind="assistant", thinking="\n".join(lines), content="done")])
+    collapsed = _plain(render_transcript(state, 100))
+    assert "… 3 earlier thinking lines hidden · Ctrl+T to expand" in collapsed
+    assert "think 0" not in collapsed and "think 2" not in collapsed
+    assert all(f"think {index}" in collapsed for index in range(3, 8))
+
+    state.thinking_collapsed = False
+    expanded = _plain(render_transcript(state, 100))
+    assert "earlier thinking lines hidden" not in expanded
+    assert all(f"think {index}" in expanded for index in range(8))
+
+    short = CliState(blocks=[MessageBlock(
+        kind="assistant", thinking="\n".join(f"short {index}" for index in range(5)), content="",
+    )])
+    short_view = _plain(render_transcript(short, 100))
+    assert "earlier thinking lines hidden" not in short_view
+    assert all(f"short {index}" in short_view for index in range(5))
 
 
 def test_explore_tools_collapse_into_summary() -> None:
@@ -2293,11 +2315,12 @@ def test_drag_selection_scrolls_history_and_copies_selected_text(monkeypatch) ->
 
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1))
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, bottom))
+            assert app.transcript_top() >= 3
             for _ in range(5):
                 app._scroll_selection_edge()
-            assert app.transcript_top() == 5
+            assert app.transcript_top() >= 15
             assert app._selection_end is not None and app._selection_end[0] > bottom
-            assert "reverse" in str(app._selected_transcript_line(1, app._transcript_document().get_line(1)))
+            assert "transcript-selection" in str(app._selected_transcript_line(1, app._transcript_document().get_line(1)))
             app.editor_control.mouse_handler(mouse(MouseEventType.MOUSE_UP, 0))
             await asyncio.sleep(0.01)
             assert app.state.status == "Selection copied to clipboard"
@@ -2308,6 +2331,124 @@ def test_drag_selection_scrolls_history_and_copies_selected_text(monkeypatch) ->
     assert "历史" in copied[0]
     assert "filler line" in copied[0]
     assert "\n" in copied[0]
+
+
+def _selection_app(lines: list[str]) -> CliApplication:
+    from agent.cli.rendering import RenderedUnit, TranscriptDocument
+
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="select-columns",
+    )
+    app = CliApplication(runner, output=DummyOutput())
+    unit = RenderedUnit([("", "\n".join(lines))], len(lines))
+    document = TranscriptDocument((unit,), (0,), unit.line_count)
+    app._transcript_document = lambda: document  # type: ignore[method-assign]
+    return app
+
+
+def _drag(app: CliApplication, start: tuple[int, int], end: tuple[int, int]) -> str:
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    def mouse(kind, row, index):  # type: ignore[no-untyped-def]
+        return MouseEvent(
+            position=Point(x=index, y=row), event_type=kind,
+            button=MouseButton.LEFT, modifiers=frozenset(),
+        )
+
+    app._select_transcript(mouse(MouseEventType.MOUSE_DOWN, *start))
+    app._selection_end = (end[0], app._selection_column(end[0], end[1]))
+    return app._selected_transcript_text()
+
+
+def test_selection_maps_character_index_to_cells_after_wide_characters() -> None:
+    app = _selection_app(["历史 filler line"])
+    # prompt_toolkit reports character indexes: "f" is index 3 but cell 5.
+    assert app._selection_column(0, 3) == 5
+    assert _drag(app, (0, 3), (0, 8)) == "filler"
+    styled = app._selected_transcript_line(0, app._transcript_document().get_line(0))
+    marked = "".join(text for style, text, *_ in styled if "transcript-selection" in style)
+    assert marked == "filler"
+
+
+def test_selection_keeps_zero_width_characters_with_their_base() -> None:
+    app = _selection_app(["ae\u0301x"])
+    # "e\u0301" is one cell: the combining accent must travel with the "e".
+    assert _drag(app, (0, 0), (0, 1)) == "ae\u0301"
+    styled = app._selected_transcript_line(0, app._transcript_document().get_line(0))
+    marks = {text: "transcript-selection" in style for style, text, *_ in styled}
+    assert marks == {"a": True, "e": True, "\u0301": True, "x": False}
+    # "x" follows the accent at index 3 but sits in cell 2.
+    assert app._selection_column(0, 3) == 2
+
+
+def test_selection_includes_last_character_of_each_line() -> None:
+    app = _selection_app(["first", "second line"])
+    # Clicking right of the text resolves to the last character's index.
+    assert _drag(app, (0, 0), (1, 10)) == "first\nsecond line"
+
+
+def test_selection_rows_are_document_rows_after_scrolling() -> None:
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    def scenario(app: CliApplication) -> None:
+        app.scroll_transcript_to(40)
+        _paint(app)
+        app.application.layout.update_parents_relations()
+        renderer = app.application.renderer
+        where = renderer._last_screen.visible_windows_to_write_positions[app.transcript_window]
+        handler = renderer.mouse_handlers.mouse_handlers[where.ypos][where.xpos]
+        with set_app(app.application):
+            handler(MouseEvent(
+                position=Point(x=where.xpos, y=where.ypos), event_type=MouseEventType.MOUSE_DOWN,
+                button=MouseButton.LEFT, modifiers=frozenset(),
+            ))
+        assert app._selection_start is not None and app._selection_start[0] == 40
+
+    _with_painted_app("select-document-rows", scenario)
+
+
+def test_drag_selection_stops_when_release_is_lost_outside_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    async def driver() -> None:
+        runner = AgentRunner(
+            model=scripted_model([AIMessage(content="unused")]),
+            backend=StateBackend(), thread_id="drag-lost-up",
+        )
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            for index in range(40):
+                app.state.add_system(f"历史 filler line {index}")
+            _paint(app)
+            app.scroll_transcript_to(0)
+            _paint(app)
+            bottom = app.transcript_viewport_rows() - 1
+
+            def mouse(kind, row, button):  # type: ignore[no-untyped-def]
+                return MouseEvent(
+                    position=Point(x=1, y=row), event_type=kind,
+                    button=button, modifiers=frozenset(),
+                )
+
+            app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1, MouseButton.LEFT))
+            app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, bottom, MouseButton.LEFT))
+            assert app._selection_dragging is True
+            assert app._selection_scroll_handle is not None
+            # Release happened outside the terminal: MOUSE_UP never arrives and the
+            # next plain motion (1003 any-motion tracking) carries no button.
+            app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, 2, MouseButton.NONE))
+            assert app._selection_dragging is False
+            assert app._selection_scroll_handle is None
+            assert app._selection_edge == 0
+            # Later plain motion must not extend the selection or re-arm autoscroll.
+            frozen_end = app._selection_end
+            app.editor_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, 0, MouseButton.NONE))
+            assert app._selection_end == frozen_end
+            assert app._selection_scroll_handle is None
+
+    asyncio.run(driver())
 
 
 def test_transcript_scroll_down_moves_viewport_back() -> None:
@@ -3052,6 +3193,113 @@ def test_image_path_paste_stays_text_for_text_model(tmp_path) -> None:
             app._handle_pasted_text(str(image_path))
             assert app.buffer.text == str(image_path)
             assert "pasted as text" in app.state.status
+
+    asyncio.run(scenario())
+
+
+def test_long_paste_displays_block_but_submits_full_text() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="long-paste",
+    )
+    pasted = "内容" * PASTED_CONTENT_MIN_CHARS
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.buffer.complete_while_typing = lambda: False
+            submitted: list[str] = []
+            app._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
+            app.buffer.insert_text("请检查 ")
+            app._handle_pasted_text(pasted)
+            app.buffer.insert_text(" 谢谢")
+            assert app.buffer.text == f"请检查 [Pasted Content {len(pasted)} chars] 谢谢"
+            with set_app(app.application):
+                line = app.editor_control.create_content(80, 10).get_line(0)
+            assert any("class:pasted-content" in fragment[0] for fragment in line)
+            app._submit_buffer("steer")
+            assert submitted == [f"请检查 {pasted} 谢谢"]
+            assert app.buffer.text == ""
+            assert not app._pasted_content.has_blocks
+            assert f"请检查 {pasted} 谢谢" in app.buffer.history.get_strings()
+
+    asyncio.run(scenario())
+
+
+def test_edited_paste_marker_blocks_submit_until_restored() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="edited-paste",
+    )
+    pasted = "内容" * PASTED_CONTENT_MIN_CHARS
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.buffer.complete_while_typing = lambda: False
+            submitted: list[str] = []
+            app._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
+            app._handle_pasted_text(pasted)
+            app.buffer.text = f"[Pasted Content {len(pasted) + 1} chars]"
+            app._submit_buffer("steer")
+            assert submitted == []
+            assert app.buffer.text == f"[Pasted Content {len(pasted) + 1} chars]"
+            assert any(
+                "marker was edited or truncated" in getattr(block, "content", "")
+                for block in app.state.blocks
+            )
+            app.buffer.text = f"[Pasted Content {len(pasted)} chars]"
+            app._submit_buffer("steer")
+            assert submitted == [pasted]
+
+    asyncio.run(scenario())
+
+
+def test_attach_gate_considers_pending_vision_model(tmp_path) -> None:
+    image_path = tmp_path / "shot.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    settings = Settings(
+        llm_profiles=(
+            ModelProfile("text", "model-a"),
+            ModelProfile("vision", "model-b", input=("text", "image")),
+        ),
+        llm_default="text",
+    )
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="attach-gate", settings=settings,
+    )
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            assert not await app._attach_path(str(image_path))
+            assert "Current or pending model does not support image input" in app.state.status
+            runner.switch_model("vision")
+            assert await app._attach_path(str(image_path))
+            assert [ref.filename for ref in app.state.attachments] == ["shot.png"]
+            app._io_executor.shutdown(wait=True)
+
+    asyncio.run(scenario())
+
+
+def test_long_clipboard_text_uses_same_compact_paste_path() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="clipboard-long-paste",
+    )
+    pasted = "长" * PASTED_CONTENT_MIN_CHARS
+
+    class FakeClipboard:
+        def inspect(self):  # type: ignore[no-untyped-def]
+            return ClipboardText(pasted)
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.buffer.complete_while_typing = lambda: False
+            app.clipboard = FakeClipboard()  # type: ignore[assignment]
+            await app._paste_clipboard()
+            assert app.buffer.text == f"[Pasted Content {len(pasted)} chars]"
+            assert app._pasted_content.expand(app.buffer.text) == pasted
+            app._io_executor.shutdown(wait=True)
 
     asyncio.run(scenario())
 
