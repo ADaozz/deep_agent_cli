@@ -5,10 +5,10 @@ import httpx
 import langchain_openai.chat_models.base as lc_base
 import openai
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_openai import ChatOpenAI
 
-from agent.llm import QwenChatOpenAI, normalize_qwen_responses_event
+from agent.llm import QwenChatOpenAI, TokenPlanChatOpenAI, normalize_qwen_responses_event
 
 
 def _convert(event: object):
@@ -167,6 +167,57 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
     assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
     assert "messages" in compatible._get_request_payload([HumanMessage(content="hello")])
     assert compatible.use_responses_api is False
+
+
+def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+
+    model = build_chat_model(ModelProfile(
+        "plan/auto", "auto", provider="openai-compatible",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    ))
+    assert isinstance(model, TokenPlanChatOpenAI)
+    chunk = model._convert_chunk_to_generation_chunk({
+        "choices": [{"delta": {"role": "assistant", "reasoning_content": "先分析"}}],
+    }, AIMessageChunk, None)
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning_content"] == "先分析"
+
+    result = model._create_chat_result({
+        "model": "auto",
+        "choices": [{"message": {
+            "role": "assistant", "content": "答案", "reasoning_content": "先分析",
+        }, "finish_reason": "stop"}],
+    })
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning_content"] == "先分析"
+    from agent.stream import StreamDeltaCallback, reasoning_text
+
+    assert reasoning_text(message) == "先分析"
+    deltas: list[tuple[str, str]] = []
+    callback = StreamDeltaCallback(lambda kind, text: deltas.append((kind, text)))
+    callback.on_llm_start({})
+    callback.on_llm_new_token("", chunk=chunk)
+    assert deltas == [("reasoning", "先分析")]
+    payload = model._get_request_payload([HumanMessage(content="问题"), message, HumanMessage(content="继续")])
+    assert payload["messages"][1]["reasoning_content"] == "先分析"
+
+
+def test_token_plan_profile_uses_reasoning_adapter_only_for_token_plan_host() -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+
+    token_plan = build_chat_model(ModelProfile(
+        "plan/auto", "auto", provider="openai-compatible",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    ))
+    generic = build_chat_model(ModelProfile(
+        "generic/auto", "auto", provider="openai-compatible",
+        base_url="https://example.com/v1",
+    ))
+    assert isinstance(token_plan, TokenPlanChatOpenAI)
+    assert type(generic) is ChatOpenAI
 
 
 @pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])

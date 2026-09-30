@@ -4,11 +4,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 import base64
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import langchain_openai.chat_models.base as _lc_base
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from langchain_core.messages.content import create_image_block, create_text_block
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr, model_validator
 
@@ -300,6 +301,54 @@ def chat_openai(
     return client
 
 
+class TokenPlanChatOpenAI(ChatOpenAI):
+    """Preserve Token Plan's nonstandard Chat Completions reasoning field."""
+
+    def _convert_chunk_to_generation_chunk(
+        self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        generation = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info,
+        )
+        if generation is None or not isinstance(generation.message, AIMessageChunk):
+            return generation
+        choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+        if choices:
+            reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation
+
+    def _create_chat_result(
+        self, response: Any, generation_info: dict | None = None,
+    ) -> ChatResult:
+        result = super()._create_chat_result(response, generation_info)
+        data = response if isinstance(response, dict) else response.model_dump()
+        for generation, choice in zip(result.generations, data.get("choices") or [], strict=False):
+            reasoning = (choice.get("message") or {}).get("reasoning_content")
+            if isinstance(generation.message, AIMessage) and isinstance(reasoning, str) and reasoning:
+                generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return result
+
+    def _get_request_payload(
+        self, input_: Any, *, stop: list[str] | None = None, **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if "messages" in payload:
+            source = self._convert_input(input_).to_messages()
+            for original, outbound in zip(source, payload["messages"], strict=False):
+                if isinstance(original, AIMessage):
+                    reasoning = original.additional_kwargs.get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        outbound["reasoning_content"] = reasoning
+        return payload
+
+
+def _is_token_plan_url(base_url: str) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    return host.startswith("token-plan.") and host.endswith(".maas.aliyuncs.com")
+
+
 def build_chat_model(
     profile: ModelProfile,
     *,
@@ -318,7 +367,8 @@ def build_chat_model(
     elif profile.provider == "openai-compatible":
         import httpx
 
-        model = ChatOpenAI(
+        model_type = TokenPlanChatOpenAI if _is_token_plan_url(profile.base_url) else ChatOpenAI
+        model = model_type(
             model=profile.model,
             api_key=profile.api_key,
             base_url=profile.base_url,

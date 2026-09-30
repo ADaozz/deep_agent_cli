@@ -322,7 +322,7 @@ web_search:
 `execute` 输出超限时，完整日志保存到当前工作区的 `.deep-agent/logs/exec/`。最终工具结果同时给出宿主机真实路径和 Agent 可用文件工具读取的 `/workspace/.deep-agent/logs/exec/...` 路径。建议在自己的项目 `.gitignore` 中加入 `.deep-agent/`；程序不会修改项目的忽略规则。
 父 shell 退出后，如果后台进程仍占有输出管道，`execute` 会继续收集数据，直到管道关闭或连续 100 毫秒没有新输出；后台进程在此后写出的内容不会进入本次工具结果。
 
-`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 使用普通 `ChatOpenAI`，固定走 Chat Completions，百炼 Token Plan 的 compatible-mode 端点走这一条。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
+`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 固定走 Chat Completions。百炼 Token Plan 的 compatible-mode 端点使用专用适配器保留流式和非流式响应中的 `reasoning_content`，供思考区展示及会话恢复，并在后续请求中透传已有思考内容；其他兼容端点仍使用普通 `ChatOpenAI`。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
 
 每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
 
