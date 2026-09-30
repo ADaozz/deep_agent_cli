@@ -70,6 +70,7 @@ class SessionController:
         except RuntimeError as exc:
             app.state.add_system(str(exc), error=True)
             return
+        app.clear_transcript_selection()
         app.state.clear()
         app.state.attachments.clear()
         app.interaction = None
@@ -140,6 +141,7 @@ class SessionController:
 
     def apply_snapshot(self, snapshot: Any) -> None:
         app = self._app
+        app.clear_transcript_selection()
         app.state.load_transcript(snapshot.transcript)
         app.state.todos = list(snapshot.todos)
         app.interaction = None

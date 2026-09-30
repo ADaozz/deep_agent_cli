@@ -45,6 +45,7 @@ async def _help(app: "CliApplication", _arg: str) -> None:
 
 
 async def _clear(app: "CliApplication", _arg: str) -> None:
+    app.clear_transcript_selection()
     app.state.clear()
     app.set_status("Transcript cleared; agent context was preserved")
 

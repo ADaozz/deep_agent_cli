@@ -2262,6 +2262,54 @@ def test_tui_mouse_scroll_updates_transcript_anchor() -> None:
     _with_painted_app("mouse-scroll", scenario)
 
 
+def test_drag_selection_scrolls_history_and_copies_selected_text(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from prompt_toolkit.mouse_events import MouseEventType
+
+    copied: list[str] = []
+    monkeypatch.setattr(
+        "agent.cli.app.copy_to_clipboard",
+        lambda content, **_kwargs: copied.append(content) or "test",
+    )
+
+    async def driver() -> None:
+        runner = AgentRunner(
+            model=scripted_model([AIMessage(content="unused")]),
+            backend=StateBackend(), thread_id="drag-select",
+        )
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            for index in range(80):
+                app.state.add_system(f"历史 filler line {index}")
+            _paint(app)
+            app.scroll_transcript_to(0)
+            _paint(app)
+            bottom = app.transcript_viewport_rows() - 1
+
+            def mouse(kind, row):  # type: ignore[no-untyped-def]
+                return MouseEvent(
+                    position=Point(x=1, y=row), event_type=kind,
+                    button=MouseButton.LEFT, modifiers=frozenset(),
+                )
+
+            app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1))
+            app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, bottom))
+            for _ in range(5):
+                app._scroll_selection_edge()
+            assert app.transcript_top() == 5
+            assert app._selection_end is not None and app._selection_end[0] > bottom
+            assert "reverse" in str(app._selected_transcript_line(1, app._transcript_document().get_line(1)))
+            app.editor_control.mouse_handler(mouse(MouseEventType.MOUSE_UP, 0))
+            await asyncio.sleep(0.01)
+            assert app.state.status == "Selection copied to clipboard"
+            assert app._selection_scroll_handle is None
+
+    asyncio.run(driver())
+    assert len(copied) == 1
+    assert "历史" in copied[0]
+    assert "filler line" in copied[0]
+    assert "\n" in copied[0]
+
+
 def test_transcript_scroll_down_moves_viewport_back() -> None:
     """Scrolling down used to be a no-op: prompt_toolkit clamped to the old offset."""
     from prompt_toolkit.mouse_events import MouseEventType

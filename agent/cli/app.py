@@ -27,7 +27,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UICo
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
@@ -43,6 +43,7 @@ from agent.cli.clipboard import (
     ClipboardImage,
     ClipboardText,
     ClipboardUnavailable,
+    copy_to_clipboard,
     windows_path_to_wsl,
 )
 from agent.cli.commands import Command, command_table
@@ -177,11 +178,14 @@ class SlashCompleter(Completer):
 class _ScrollableTextControl(FormattedTextControl):
     """Formatted text that consumes clicks and routes wheel events to the transcript."""
 
-    def __init__(self, *args: Any, on_scroll: Any = None, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, on_scroll: Any = None, on_select_outside: Any = None, **kwargs: Any) -> None:
         self._on_scroll = on_scroll
+        self._on_select_outside = on_select_outside
         super().__init__(*args, **kwargs)
 
     def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if self._on_select_outside is not None and self._on_select_outside(mouse_event):
+            return None
         if self._on_scroll is not None:
             if mouse_event.event_type is MouseEventType.SCROLL_UP:
                 self._on_scroll(-3)
@@ -209,15 +213,17 @@ class _BackToBottomControl(_ScrollableTextControl):
 class _TranscriptControl(UIControl):
     """Expose cached transcript lines to prompt_toolkit without splitting them again."""
 
-    def __init__(self, document: Any, cursor: Any, on_scroll: Any) -> None:
+    def __init__(self, document: Any, cursor: Any, on_scroll: Any, on_select: Any, selected_line: Any) -> None:
         self._document = document
         self._cursor = cursor
         self._on_scroll = on_scroll
+        self._on_select = on_select
+        self._selected_line = selected_line
 
     def create_content(self, width: int, height: int) -> UIContent:
         document = self._document()
         return UIContent(
-            get_line=document.get_line,
+            get_line=lambda row: self._selected_line(row, document.get_line(row)),
             line_count=document.line_count,
             cursor_position=self._cursor(),
             show_cursor=False,
@@ -231,17 +237,22 @@ class _TranscriptControl(UIControl):
             self._on_scroll(-3)
         elif mouse_event.event_type is MouseEventType.SCROLL_DOWN:
             self._on_scroll(3)
+        elif mouse_event.event_type in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP}:
+            self._on_select(mouse_event)
         return None
 
 
 class _EditorScrollControl(BufferControl):
     """Input box: wheel scrolls the transcript instead of the empty editor."""
 
-    def __init__(self, *args: Any, on_scroll: Any = None, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, on_scroll: Any = None, on_select_outside: Any = None, **kwargs: Any) -> None:
         self._on_scroll = on_scroll
+        self._on_select_outside = on_select_outside
         super().__init__(*args, **kwargs)
 
     def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        if self._on_select_outside is not None and self._on_select_outside(mouse_event):
+            return None
         if self._on_scroll is not None and mouse_event.event_type in {
             MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN,
         }:
@@ -307,6 +318,12 @@ class CliApplication:
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
+        self._selection_start: tuple[int, int] | None = None
+        self._selection_end: tuple[int, int] | None = None
+        self._selection_dragging = False
+        self._selection_edge = 0
+        self._selection_edge_x = 0
+        self._selection_scroll_handle: asyncio.TimerHandle | None = None
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
         self._git = GitProbe(self._workspace())
@@ -328,24 +345,31 @@ class CliApplication:
             document=self._transcript_document,
             cursor=self._transcript_cursor,
             on_scroll=self.scroll_transcript,
+            on_select=self._select_transcript,
+            selected_line=self._selected_transcript_line,
         )
         self.interaction_control = _ScrollableTextControl(
             text=self._interaction_text, focusable=False, on_scroll=self.scroll_transcript,
+            on_select_outside=self._select_below_transcript,
         )
         self.attachment_control = _ScrollableTextControl(
             text=self._attachment_text, focusable=False, on_scroll=self.scroll_transcript,
+            on_select_outside=self._select_below_transcript,
         )
         self.footer_control = _ScrollableTextControl(
             text=self._footer_text, focusable=False, on_scroll=self.scroll_transcript,
+            on_select_outside=self._select_below_transcript,
         )
         self.back_to_bottom_control = _BackToBottomControl(
             text="↓ Back to bottom · esc",
             focusable=False,
             on_scroll=self.scroll_transcript,
             on_click=self.follow_transcript,
+            on_select_outside=self._select_below_transcript,
         )
         self.editor_control = _EditorScrollControl(
             buffer=self.buffer, focusable=True, on_scroll=self.scroll_transcript,
+            on_select_outside=self._select_below_transcript,
         )
         self.bindings = self._create_bindings()
 
@@ -595,6 +619,7 @@ class CliApplication:
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
             "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · "
+            "Mouse drag selects and copies across history · "
             "Ctrl+V/Alt+V paste image/text · "
             "Ctrl+C clear/exit · Ctrl+D exit\n\n"
             f"Commands\n{commands}"
@@ -939,6 +964,7 @@ class CliApplication:
         return restored_parts
 
     def _apply_session_snapshot(self, snapshot: Any) -> None:
+        self.clear_transcript_selection()
         self.state.load_transcript(snapshot.transcript)
         self.state.todos = list(snapshot.todos)
         self.interaction = None
@@ -959,6 +985,7 @@ class CliApplication:
         if self._exiting:
             return
         self._exiting = True
+        self._stop_selection_scroll()
         # Stop mouse reports before prompt_toolkit leaves the alternate screen.
         # Otherwise motion generated during shutdown can reach the shell.
         self.application.output.disable_mouse_support()
@@ -1047,6 +1074,126 @@ class CliApplication:
         nxt = min(maximum, max(0, row))
         self._transcript_anchor = None if nxt >= maximum else nxt
         self.application.invalidate()
+
+    def _select_transcript(self, event: Any) -> None:
+        position = (event.position.y, event.position.x)
+        if event.event_type is MouseEventType.MOUSE_DOWN and event.button is MouseButton.LEFT:
+            self._stop_selection_scroll()
+            self._selection_start = self._selection_end = position
+            self._selection_dragging = True
+        elif event.event_type is MouseEventType.MOUSE_MOVE and self._selection_dragging:
+            self._selection_end = position
+            top = self.transcript_top()
+            bottom = top + self.transcript_viewport_rows() - 1
+            edge = -1 if position[0] <= top else (1 if position[0] >= bottom else 0)
+            self._selection_edge_x = position[1]
+            self._set_selection_edge(edge)
+        elif event.event_type is MouseEventType.MOUSE_UP and self._selection_dragging:
+            self._selection_end = position
+            self._selection_dragging = False
+            self._stop_selection_scroll()
+            selected = self._selected_transcript_text()
+            if selected:
+                asyncio.create_task(self._copy_selection(selected))
+        else:
+            return
+        self.application.invalidate()
+
+    def _select_below_transcript(self, event: Any) -> bool:
+        if not self._selection_dragging or event.event_type not in {
+            MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP,
+        }:
+            return False
+        bottom = self.transcript_top() + self.transcript_viewport_rows() - 1
+        self._select_transcript(MouseEvent(
+            position=Point(x=event.position.x, y=bottom),
+            event_type=event.event_type,
+            button=event.button,
+            modifiers=event.modifiers,
+        ))
+        return True
+
+    def _set_selection_edge(self, edge: int) -> None:
+        self._selection_edge = edge
+        if edge == 0:
+            self._stop_selection_scroll()
+        elif self._selection_scroll_handle is None:
+            self._selection_scroll_handle = asyncio.get_running_loop().call_later(0.08, self._scroll_selection_edge)
+
+    def _scroll_selection_edge(self) -> None:
+        self._selection_scroll_handle = None
+        if not self._selection_dragging or not self._selection_edge:
+            return
+        previous = self.transcript_top()
+        self.scroll_transcript(self._selection_edge)
+        current = self.transcript_top()
+        if current == previous:
+            return
+        row = current if self._selection_edge < 0 else current + self.transcript_viewport_rows() - 1
+        self._selection_end = (row, self._selection_edge_x)
+        self._selection_scroll_handle = asyncio.get_running_loop().call_later(0.08, self._scroll_selection_edge)
+
+    def _stop_selection_scroll(self) -> None:
+        self._selection_edge = 0
+        if self._selection_scroll_handle is not None:
+            self._selection_scroll_handle.cancel()
+            self._selection_scroll_handle = None
+
+    def clear_transcript_selection(self) -> None:
+        self._stop_selection_scroll()
+        self._selection_dragging = False
+        self._selection_start = self._selection_end = None
+        self.application.invalidate()
+
+    def _selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if self._selection_start is None or self._selection_end is None:
+            return None
+        return min(self._selection_start, self._selection_end), max(self._selection_start, self._selection_end)
+
+    def _selected_transcript_line(self, row: int, fragments: Any) -> Any:
+        bounds = self._selection_bounds()
+        if bounds is None or not bounds[0][0] <= row <= bounds[1][0]:
+            return fragments
+        left = bounds[0][1] if row == bounds[0][0] else 0
+        right = bounds[1][1] if row == bounds[1][0] else float("inf")
+        selected = []
+        column = 0
+        for fragment in fragments:
+            style, text, *rest = fragment
+            for char in text:
+                width = max(0, get_cwidth(char))
+                marked = column < right and column + width > left
+                selected.append((f"{style} reverse" if marked else style, char, *rest))
+                column += width
+        return selected
+
+    def _selected_transcript_text(self) -> str:
+        bounds = self._selection_bounds()
+        if bounds is None or bounds[0] == bounds[1]:
+            return ""
+        document = self._transcript_document()
+        lines = []
+        for row in range(bounds[0][0], min(bounds[1][0], document.line_count - 1) + 1):
+            left = bounds[0][1] if row == bounds[0][0] else 0
+            right = bounds[1][1] if row == bounds[1][0] else float("inf")
+            column = 0
+            chars = []
+            for fragment in document.get_line(row):
+                for char in fragment[1]:
+                    width = max(0, get_cwidth(char))
+                    if column < right and column + width > left:
+                        chars.append(char)
+                    column += width
+            lines.append("".join(chars).rstrip())
+        return "\n".join(lines).strip("\n")
+
+    async def _copy_selection(self, content: str) -> None:
+        try:
+            await self._run_blocking(copy_to_clipboard, content, output=self.application.output)
+        except ClipboardError as exc:
+            self.set_status(f"Could not copy selection: {exc}")
+        else:
+            self.set_status("Selection copied to clipboard")
 
     def _transcript_document(self) -> TranscriptDocument:
         if self._reviewing:
