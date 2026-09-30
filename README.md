@@ -187,6 +187,8 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 
 输入 `/` 时显示命令候选；输入 `/model ` 时补全已配置的来源与模型 ID，输入 `/permission ` 时补全当前环境可用的 `ask`、`allow`。按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
 
+运行中按 `Enter` 提交的 steering 会在下一次工具调用开始前交给 Agent：如果模型返回时已有新输入排队，先取消这批尚未进入审批或执行的调用，再带着新输入重新推理。已经进入审批的调用仍需按原权限处理；已经开始的工具会先完成。`Alt+Enter` 提交的 follow-up 则在当前任务结束后开始新一轮。
+
 探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
 
 `web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write_file` 根据执行前的文件状态显示 `Create /path` 或 `Wrote /path`；连续创建多个文件合并为 `Create N files`，按 `Ctrl+O` 展开完整文件列表。覆盖写入预览显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在写入预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
