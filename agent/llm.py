@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 import base64
 from typing import Any, ClassVar
-from urllib.parse import urlparse
 
 import langchain_openai.chat_models.base as _lc_base
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
@@ -277,6 +276,7 @@ def chat_openai(
     base_url: str,
     streaming: bool = True,
     attachment_store: AttachmentStore | None = None,
+    reasoning_effort: str | None = None,
 ) -> QwenChatOpenAI:
     # Ignore ALL_PROXY/HTTP_PROXY from the shell (common WSL/SOCKS setups break
     # localhost gateways and require optional httpx[socks]).
@@ -290,8 +290,7 @@ def chat_openai(
         max_retries=2,
         use_responses_api=True,
         output_version="responses/v1",
-        reasoning={"effort": "low"},
-        extra_body={"enable_thinking": True},
+        **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
         http_socket_options=(),
         http_client=httpx.Client(trust_env=False),
         http_async_client=httpx.AsyncClient(trust_env=False),
@@ -301,8 +300,8 @@ def chat_openai(
     return client
 
 
-class TokenPlanChatOpenAI(ChatOpenAI):
-    """Preserve Token Plan's nonstandard Chat Completions reasoning field."""
+class ReasoningChatOpenAI(ChatOpenAI):
+    """Preserve compatible providers' Chat Completions reasoning field."""
 
     def _convert_chunk_to_generation_chunk(
         self, chunk: dict, default_chunk_class: type, base_generation_info: dict | None,
@@ -344,9 +343,8 @@ class TokenPlanChatOpenAI(ChatOpenAI):
         return payload
 
 
-def _is_token_plan_url(base_url: str) -> bool:
-    host = (urlparse(base_url).hostname or "").lower()
-    return host.startswith("token-plan.") and host.endswith(".maas.aliyuncs.com")
+# Backwards-compatible name for existing integrations.
+TokenPlanChatOpenAI = ReasoningChatOpenAI
 
 
 def build_chat_model(
@@ -354,8 +352,11 @@ def build_chat_model(
     *,
     streaming: bool = True,
     attachment_store: AttachmentStore | None = None,
+    reasoning_effort: str | None = None,
 ) -> ChatOpenAI:
     """Build the template chat client from a ModelProfile."""
+    if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
+        raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
     if profile.provider == "qwen-responses":
         model = chat_openai(
             model=profile.model,
@@ -363,12 +364,12 @@ def build_chat_model(
             base_url=profile.base_url,
             streaming=streaming,
             attachment_store=attachment_store,
+            reasoning_effort=reasoning_effort,
         )
     elif profile.provider == "openai-compatible":
         import httpx
 
-        model_type = TokenPlanChatOpenAI if _is_token_plan_url(profile.base_url) else ChatOpenAI
-        model = model_type(
+        model = ReasoningChatOpenAI(
             model=profile.model,
             api_key=profile.api_key,
             base_url=profile.base_url,
@@ -376,6 +377,7 @@ def build_chat_model(
             stream_usage=profile.stream_usage,
             max_retries=2,
             use_responses_api=False,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
             http_socket_options=(),
             http_client=httpx.Client(trust_env=False),
             http_async_client=httpx.AsyncClient(trust_env=False),

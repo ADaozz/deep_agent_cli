@@ -26,7 +26,7 @@ def command_table() -> tuple[Command, ...]:
         Command("new", "Start a new persistent session thread", _new),
         Command("session", "Show current session information", _session),
         Command("resume", "List sessions with content (/resume or /resume <id-prefix>)", _resume),
-        Command("model", "Select a model (/model or /model <id-prefix>)", _model),
+        Command("model", "Select source, model, and reasoning effort (/model or /model <id-prefix>)", _model),
         Command("compact", "Summarize older conversation when context permits", _compact),
         Command("image", "Attach an image (/image <path|clipboard>, /image, /image clear)", _image),
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),

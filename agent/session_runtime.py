@@ -7,6 +7,7 @@ models stay with AgentRunner, which coordinates through these primitives.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from threading import Event
 from typing import Any, Callable
 from uuid import uuid4
@@ -35,6 +36,7 @@ class RestorePlan:
 
     model_id: str
     permission_mode: PermissionMode
+    reasoning_effort: str = "default"
     notices: tuple[str, ...] = ()
 
 
@@ -47,12 +49,13 @@ class SessionRuntime:
         session_store: SessionStore | None,
         checkpointer: Any | None,
         settings: Settings | None,
+        persist_on_first_message: bool = False,
     ) -> None:
         self._store = session_store
         self._settings = settings
-        self._in_process_locks = (
-            None if session_store is not None else InProcessSessionLockManager(checkpointer)
-        )
+        self._in_process_locks = InProcessSessionLockManager(checkpointer)
+        self._persist_on_first_message = persist_on_first_message
+        self._draft: SessionInfo | None = None
         self._thread_id: str | None = None
         self._lease: SessionLeaseLike | None = None
         self._pending_switch: str | None = None
@@ -77,6 +80,8 @@ class SessionRuntime:
         self, thread_id: str | None, *, model_id: str, permission_mode: str,
     ) -> str:
         """Resolve or create the first thread, then take its lease."""
+        if self._store is not None and thread_id is None and self._persist_on_first_message:
+            return self.create_new(model_id=model_id, permission_mode=permission_mode).id
         if self._store is None:
             target = thread_id or f"cli-{uuid4()}"
         elif thread_id is None:
@@ -96,6 +101,8 @@ class SessionRuntime:
         return target
 
     def try_acquire(self, thread_id: str) -> SessionLeaseLike | None:
+        if self._draft is not None and self._draft.id == thread_id:
+            return self._in_process_locks.try_acquire(thread_id)
         if self._store is not None:
             return self._store.try_acquire_session(thread_id)
         assert self._in_process_locks is not None
@@ -117,6 +124,8 @@ class SessionRuntime:
         previous = self._lease
         self._thread_id = thread_id
         self._lease = lease
+        if self._draft is not None and self._draft.id != thread_id:
+            self._draft = None
         self._pending_switch = None
         if previous is not None:
             previous.release()
@@ -157,6 +166,41 @@ class SessionRuntime:
         self._abort_wait.set()
         self.release()
 
+    def create_new(self, *, model_id: str, permission_mode: str, title: str = "") -> SessionInfo:
+        """Own a blank draft without a catalog row or persistent lock file."""
+        if self._store is not None and not self._persist_on_first_message:
+            info = self._store.create_session(model_id=model_id, permission_mode=permission_mode, title=title)
+            self.adopt_new(info.id)
+            return info
+        now = datetime.now(timezone.utc)
+        identifier = str(uuid4()) if self._store is not None else f"cli-{uuid4()}"
+        info = SessionInfo(id=identifier, title=title or "New session", created_at=now,
+                           updated_at=now, status="running", model_id=model_id,
+                           permission_mode=permission_mode)
+        lease = self._in_process_locks.try_acquire(info.id)
+        if lease is None:
+            raise SessionLockBusyError(f"Session {info.id} is already open in another window")
+        self.adopt(info.id, lease)
+        self._draft = info
+        return info
+
+    def persist_for_message(self, *, model_id: str, permission_mode: str, reasoning_effort: str) -> None:
+        """Promote a draft before the graph can write its first checkpoint."""
+        if self._store is None or self._draft is None:
+            return
+        draft = self._draft
+        lease = self._store.try_acquire_session(draft.id)
+        if lease is None:
+            raise SessionLockBusyError(f"Session {draft.id} is already open in another window")
+        try:
+            self._store.create_session(session_id=draft.id, title=draft.title, model_id=model_id,
+                                       permission_mode=permission_mode, reasoning_effort=reasoning_effort)
+        except Exception:
+            lease.release()
+            raise
+        self.adopt(draft.id, lease)
+        self._draft = None
+
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         if self._store is None:
             return []
@@ -188,6 +232,13 @@ class SessionRuntime:
                 profile = self._settings.get_profile(info.model_id)
             except KeyError:
                 notices.append(f"Saved model {info.model_id} is unavailable; using {profile.id}.")
+        effort = info.reasoning_effort
+        if profile is None or info.model_id != profile.id or (
+            effort != "default" and effort not in profile.reasoning_efforts
+        ):
+            if effort != "default":
+                notices.append(f"Saved reasoning effort {effort} is unavailable; using default.")
+            effort = "default"
         mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
         if mode is PermissionMode.ALLOW and not allow_mode_available(execution_mode):
             mode = PermissionMode.ASK
@@ -195,6 +246,7 @@ class SessionRuntime:
         return RestorePlan(
             model_id=profile.id if profile is not None else "",
             permission_mode=mode,
+            reasoning_effort=effort,
             notices=tuple(notices),
         )
 

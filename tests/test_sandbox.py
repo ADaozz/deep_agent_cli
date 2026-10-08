@@ -364,6 +364,7 @@ def test_workspace_execute_reaches_model_tool_schema(tmp_path: Path, monkeypatch
     assert bound_names and "execute" in bound_names[-1]
 
 
+@pytest.mark.sandbox
 def test_real_bubblewrap_workspace_isolation_when_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -374,7 +375,7 @@ def test_real_bubblewrap_workspace_isolation_when_available(
     if executable is None:
         if os.environ.get("REQUIRE_BWRAP_TEST"):
             pytest.fail("bubblewrap is required in CI")
-        pytest.skip("bubblewrap is not installed")
+        pytest.skip("UNSUPPORTED SANDBOX ENVIRONMENT [not_installed]: bubblewrap is not installed")
     home = tmp_path / "home"
     skills = home / ".deep-agent" / "skills"
     skills.mkdir(parents=True)
@@ -388,7 +389,7 @@ def test_real_bubblewrap_workspace_isolation_when_available(
     except SandboxUnavailableError as exc:
         if os.environ.get("REQUIRE_BWRAP_TEST"):
             pytest.fail(str(exc))
-        pytest.skip(str(exc))
+        pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}")
     result = selected.backend.execute(
         "test \"$(pwd)\" = /workspace && "
         "test \"$(id -u)\" = \"$(( $(stat -c %u .) ))\" && "
@@ -399,3 +400,30 @@ def test_real_bubblewrap_workspace_isolation_when_available(
     assert result.exit_code == 0, result.output
     assert (workspace / "proof.txt").read_text() == "ok"
     assert (skills / "SKILL.md").read_text() == "protected"
+
+
+@pytest.mark.parametrize("output,kind,expected", [
+    ("bwrap: Creating new namespace failed: Operation not permitted", "namespace_restricted", "AppArmor"),
+    ("bwrap: No permissions to create new namespace", "namespace_restricted", "userns"),
+    ("bwrap: loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted", "namespace_restricted", "seccomp"),
+    ("bwrap: Can't find source path /missing", "preflight_failed", "workspace/mount paths"),
+])
+def test_preflight_diagnostics_fail_closed(tmp_path, monkeypatch, output, kind, expected):
+    monkeypatch.setattr(BubblewrapBackend, "execute", lambda *_args, **_kwargs: SimpleNamespace(exit_code=1, output=output))
+    config = replace(config_for(tmp_path), bwrap_path="/bin/true")
+    with pytest.raises(SandboxUnavailableError) as error:
+        select_backend(config)
+    assert error.value.kind == kind
+    assert output in str(error.value)
+    assert expected in str(error.value)
+    if kind == "namespace_restricted":
+        assert "sudo journalctl" in str(error.value)
+        assert "sysctl" in str(error.value)
+        assert "sudo apt install" not in str(error.value)
+
+
+def test_missing_bwrap_has_installation_diagnostic(tmp_path):
+    with pytest.raises(SandboxUnavailableError) as error:
+        select_backend(config_for(tmp_path))
+    assert error.value.kind == "not_installed"
+    assert "sudo apt install bubblewrap" in str(error.value)

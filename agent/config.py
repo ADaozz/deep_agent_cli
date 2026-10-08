@@ -51,6 +51,7 @@ class ModelProfile:
     context_window: int = 0
     source: str = ""
     stream_usage: bool = False
+    reasoning_efforts: tuple[str, ...] = ()
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -357,7 +358,7 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
 
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
-    legacy_fields = {"model", "api_key", "base_url", "input", "provider", "context_window", "source", "stream_usage"}
+    legacy_fields = {"model", "api_key", "base_url", "input", "provider", "context_window", "source", "stream_usage", "reasoning_efforts"}
     unsupported = legacy_fields.intersection(llm)
     if unsupported:
         field = sorted(unsupported)[0]
@@ -378,6 +379,7 @@ def _grouped_llm_profiles(
         source = source_key.strip()
         if not isinstance(group, Mapping) or not isinstance(group.get("models"), Mapping) or not group["models"]:
             raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
+        _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
                 raise ValueError(f"llm.models.{source}.models keys must be non-empty strings containing no slash")
@@ -401,6 +403,7 @@ def _grouped_llm_profiles(
                 input=_model_inputs(inherited("input"), field_name=f"{field}.input"),
                 provider=_model_provider(inherited("provider"), field_name=f"{field}.provider"),
                 context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
+                reasoning_efforts=_model_reasoning_efforts(inherited("reasoning_efforts"), field_name=f"{field}.reasoning_efforts"),
                 source=source,
                 stream_usage=_model_stream_usage(inherited("stream_usage"), field_name=f"{field}.stream_usage"),
             ))
@@ -462,6 +465,19 @@ def _model_provider(value: Any, *, field_name: str) -> Literal["qwen-responses",
     if provider not in {"qwen-responses", "openai-compatible"}:
         raise ValueError(f"{field_name} must be qwen-responses or openai-compatible")
     return provider  # type: ignore[return-value]
+
+
+def _model_reasoning_efforts(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() or item != item.strip() or item == "default"
+        for item in value
+    ):
+        raise ValueError(f"{field_name} must be a list of non-empty strings excluding default")
+    if len(set(value)) != len(value):
+        raise ValueError(f"{field_name} contains duplicate reasoning efforts")
+    return tuple(value)
 
 
 def _model_stream_usage(value: Any, *, field_name: str) -> bool:

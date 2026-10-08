@@ -36,12 +36,12 @@
 - **公开 Web 搜索** — 配置 Tavily 密钥后提供 `web_search`；只返回带 URL 的相关摘要，不授予沙箱命令联网权限
 - **沙箱执行** — 默认隔离网络；`execute(network=true)` 使用宿主网络，可访问互联网、localhost 和局域网；allow 模式下所有 `execute` 默认使用宿主网络
 - **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`），开启后 `execute` 默认开放宿主网络
-- **持久会话** — 每个工作区一份 SQLite，`/resume` 恢复最近线程，checkpoint 是恢复依据
+- **持久会话** — 每个工作区一份 SQLite；首次发送消息才保存新会话，`/resume` 选择恢复已有会话
 - **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
 - **转录区跟随** — 停留在底部时持续显示新输出；上滚后保留阅读位置，并提供可点击的回到底部提示
 - **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
 - **后续任务** — `Alt+Enter` 排入 Runtime 队列，当前任务完成后由 `AgentRunner` 接续执行
-- **多模型** — YAML 按来源分组；`/model` 先选来源再选模型，`Ctrl+P` 循环切换。切换在下一次模型推理前生效，会话保留
+- **多模型** — YAML 按来源分组；`/model` 依次选择来源、模型、思考强度，`Ctrl+P` 循环切换。空闲时立即生效，有任务或中断时在安全边界生效，会话保留
 - **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
 - **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
 - **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
@@ -61,16 +61,32 @@
 
 ### Install
 
-推荐使用独立环境安装：
+Ubuntu 24.04 / WSL2 Ubuntu 24.04 可使用系统 Python 3.12。先安装 pipx、venv 和 Bubblewrap，并检查解释器版本：
 
 ```bash
-pipx install deep-agent-cli
+sudo apt update
+sudo apt install python3 python3-venv pipx bubblewrap
+python3 -c 'import sys; assert sys.version_info >= (3, 12), "需要 Python 3.12+"; print(sys.version)'
+pipx ensurepath
+# 重新打开终端，让 ~/.local/bin 进入 PATH。
+pipx install --python python3 deep-agent-cli
+deep-agent --version
 ```
 
-也可以：
+旧版 Ubuntu 的系统 Python 可能低于 3.12。可升级到 Ubuntu 24.04，或按 [Python 官方安装说明](https://docs.python.org/3/using/unix.html) 安装 3.12/3.13 到独立目录，再指定解释器：
 
 ```bash
-pip install deep-agent-cli
+pipx install --python /absolute/path/to/python3.13 deep-agent-cli
+```
+
+不要覆盖发行版依赖的 `/usr/bin/python3`。pipx 安装说明见 [pipx 官方文档](https://pipx.pypa.io/latest/how-to/install-pipx.html)。
+
+也可使用虚拟环境：
+
+```bash
+python3 -m venv ~/.venvs/deep-agent
+~/.venvs/deep-agent/bin/python -m pip install deep-agent-cli
+~/.venvs/deep-agent/bin/deep-agent --help
 ```
 
 ### Start
@@ -80,7 +96,41 @@ cd ~/projects/my-app
 deep-agent
 ```
 
-首次运行会生成配置模板并退出。编辑 `~/.deep-agent/config.yaml` 的模型端点和 API key 后，再运行 `deep-agent`。当前不支持原生 Windows 或 macOS 沙箱。
+首次运行会生成配置模板并退出，即使输入来自管道也可初始化。有配置后，TUI 要求 stdin 和 stdout 都是交互终端；`echo hi | deep-agent` 会明确报错并以退出码 2 退出，不创建运行会话。`--help`、`resume --help` 和 `--version` 不读取配置、不启动沙箱或模型。编辑 `~/.deep-agent/config.yaml` 的模型端点和 API key 后，再运行 `deep-agent`。当前不支持原生 Windows 或 macOS 沙箱。
+
+进入 TUI 后，新会话先保留在内存中，首次发送消息时才保存。只启动、切换模型或退出，不会新增空会话记录或会话锁文件；已有工作区的 SQLite 文件仍可被打开。
+
+### Ubuntu / WSL2 troubleshooting
+
+先在不改系统策略的情况下运行：
+
+```bash
+command -v bwrap
+python3 examples/sandbox_probe.py --require-sandbox  # 在已安装依赖的源码检出中运行
+sysctl kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces
+sudo aa-status
+sudo journalctl -k -g 'apparmor|DENIED|userns'
+```
+
+未安装 bwrap 时安装 `bubblewrap`；已安装却出现 `Operation not permitted` / namespace 权限错误时，应检查 AppArmor、userns 和容器 seccomp 策略。普通预检失败应检查挂载路径、权限、`/bin/sh` 及超时。WSL1、原生 Windows/macOS 和禁止 namespace 的容器不能提供本项目要求的沙箱；WSL 用户在 Windows 中运行 `wsl -l -v` 确认版本为 2，必要时用 `wsl --set-version <发行版名称> 2` 转换。
+
+Ubuntu 24.04 开始限制无特定授权的 user namespace，详见 [Ubuntu 官方发行说明](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)。优先检查发行版已有的 bwrap profile；若缺少授权，由管理员给**实际 bwrap 可执行文件**配置专属 profile。例如路径为 `/usr/bin/bwrap` 且没有现有 profile 与之匹配时，创建 `/etc/apparmor.d/deep-agent-bwrap`：
+
+```text
+abi <abi/4.0>,
+include <tunables/global>
+profile deep-agent-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+```
+
+```bash
+sudo apparmor_parser -r /etc/apparmor.d/deep-agent-bwrap
+```
+
+这是针对该可执行文件的 userns 例外，会影响通过该文件启动的所有 bwrap 调用；它不是额外的文件访问隔离策略，工作区隔离仍由 Bubblewrap 完成。已有发行版 profile 时，应调整其本地 override，避免添加相同路径的冲突 profile；也可使用管理员拥有的独立 bwrap 副本并只给该路径授权。不要给 Python 或整个用户目录通配授权，也不默认关闭全局 AppArmor/userns 保护。删除自定义 profile 时先运行 `sudo apparmor_parser -R /etc/apparmor.d/deep-agent-bwrap`，再删除该文件。
+
+若日志没有 AppArmor 拒绝记录，可能是容器、seccomp 或内核不支持所需 namespace，上述 profile 不会解决这些限制。程序默认拒绝启动隔离失败的沙箱；只有明确配置 `sandbox.allow_unsandboxed: true` 或交互输入 `UNSANDBOXED` 才授权宿主执行。沙箱测试被跳过表示当前环境未验证隔离能力，不代表兼容。
 
 ### Configure
 
@@ -126,16 +176,42 @@ llm:
       provider: openai-compatible
       stream_usage: true
       context_window: 1m
+      reasoning_efforts: [none, low, medium, xhigh]  # Qwen3.8 的档位
       models:
         auto:                   # 由 Token Plan 侧自动路由
           input: [text]
+          reasoning_efforts: []  # 未确认 auto 的枚举，清除来源配置，只提供 default
         qwen3.8-max:
           input: [text, image]
+          # 省略 reasoning_efforts，继承来源的枚举。
+        glm-5.3:
+          input: [text]
+          reasoning_efforts: [low, high, max]  # 完整覆盖来源枚举，不支持关闭思考
 ```
 
 `llm.default` 必须明确指定已配置的 `来源/模型`，例如 `token-plan/auto`。`local`、`token-plan` 和模型键都是自定义名称；模型键默认也是发给 API 的模型名，需要别名时在模型项内写 `model:`。配置只接受 `llm.models.<来源>.models.<模型>` 结构；旧版 `llm.model`、扁平 `llm.models.<模型>` 以及放在 `llm` 顶层的端点或密钥字段都会报错。缺少默认模型、字段无效或 YAML 语法错误时，启动会指出配置文件及错误位置，不会默默切换模型。
 
-`/model` 先选来源，再选来源下的模型；在模型列表按 `Esc` 返回来源列表。`/model token-plan` 可直接打开该来源，`/model token-plan/auto` 可请求切换。`/model` 和 `/permission` 会先显示排队提示，在当前模型调用、已生成工具调用及其审批完成后，于下一次模型推理前生效并再次提示。已有 `ask` 审批仍需按 `F2` 批准或拒绝，`/permission allow` 不会自动批准旧调用。待切换配置按会话保存，重启后仍有效；底栏和 `/status` 显示当前值与 pending 值。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
+### 模型与推理强度
+
+`/model` 依次选择来源、具体模型、思考强度；第三段确认后统一提交，`Esc` 逐段返回。模型列表直接显示实际 API 模型名，例如 `qwen3.5-plus`；命令参数仍使用 YAML 中的 `来源/模型键`。`/model token-plan` 直接打开该来源，`/model token-plan/qwen3.8-max` 直接进入强度选择。底栏按 `来源 · 模型 · 强度` 显示，例如 `token-plan · qwen3.8-max · medium`。
+
+`reasoning_efforts` 由用户按实际模型、端点和 API 协议配置：
+
+- 有非空枚举时，菜单只显示该枚举，不添加 `default`；选择其他模型时默认定位到枚举第一项。
+- 未配置或枚举为空时，菜单只有 `default`，请求不传强度参数。`default` 使用服务端默认行为，不代表关闭思考。
+- 来源级枚举由子模型继承；子模型声明的枚举完整覆盖，显式 `null` 或 `[]` 清除继承。
+- `none` 只有在实际 API 支持时才能加入枚举；它用于关闭思考，`low` 仍然会思考。不要把 `default` 写进枚举。
+
+| provider | 强度参数 |
+|---|---|
+| `openai-compatible` | Chat Completions 的 `reasoning_effort` |
+| `qwen-responses` | Responses 的 `reasoning.effort` |
+
+两种协议的可选值可能不同。例如，百炼 DeepSeek V4.1 Flash 的 Chat Completions 文档列出 `low/high/max`，关闭思考使用 `enable_thinking=false`；Responses 则明确支持 `none/low/high/max`。本项目只通过 effort 控制强度，因此当前 Chat Completions 配置不加入未经文档确认的 `none`。详见 [Chat 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[Responses 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses) 和 [GLM 参数](https://help.aliyun.com/zh/model-studio/glm)。其他厂商模板见 [config.example.yaml](agent/config.example.yaml)。
+
+空闲且无中断时，模型切换立即生效，提示为 `Model: 来源 · 模型 · 强度`。任务执行中或有未完成的审批/暂停中断时才排队，提示为 `Model queued: …`；旧调用与工具流程完成后，在下一次模型推理前生效。`/permission` 在同样的安全边界生效。已有 `ask` 审批仍需按 `F2` 批准或拒绝，`/permission allow` 不会自动批准旧调用。
+
+已持久化会话保存当前及待切换配置，恢复该会话时继续使用；尚未发送消息的新会话只在内存中保存选择。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
 
 ### Resume
 
@@ -146,6 +222,8 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 
 源码仓库中也可运行 `python -m agent.cli.main`。没有 `bwrap` 时默认拒绝启动；交互式终端只有输入 `UNSANDBOXED` 才会降级到宿主执行。
 
+直接运行 `deep-agent` 开始新会话；要继续之前的对话，使用上述 `resume` 命令或 TUI 中的 `/resume`。恢复只加载已有状态，不自动调用模型。`/new` 同样先创建内存中的会话，首次发送消息后才持久化。反复启动、退出或执行 `/new` 不会积累新的空记录；旧版本留下的空记录不会自动清理。
+
 ## Usage
 
 进入交互会话后，普通文本就是任务。以 `/` 开头是命令。
@@ -153,13 +231,13 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 ```text
 /help                    命令与快捷键
 /status                  工作区、沙箱、权限、session
-/session                 当前线程、创建/更新时间与 SQLite 路径
-/new                     开一条新线程
+/session                 当前线程与 SQLite 路径；已保存会话显示创建/更新时间
+/new                     新建会话，首次发送消息后保存
 /resume                  列出有内容的会话并选择恢复
 /resume a1b2             按 id 前缀切换 session
-/model                   先选来源，再选模型
+/model                   依次选择来源、模型、思考强度
 /model token-plan        打开 Token Plan 模型列表
-/model token-plan/auto   请求在下一次模型推理前切换
+/model token-plan/auto   选择思考强度，确认后提交切换
 /compact                 达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
 /permission ask|allow   # allow 仅 SANDBOXED 且开放沙箱网络；UNSANDBOXED / CUSTOM 只有 ask
 /image clipboard | <path> | clear
@@ -195,6 +273,8 @@ deep-agent resume 01a08aae-...   # 按 id 恢复
 运行中按 `Enter` 提交的 steering 会在下一次工具调用开始前交给 Agent：如果模型返回时已有新输入排队，先取消这批尚未进入审批或执行的调用，再带着新输入重新推理。已经进入审批的调用仍需按原权限处理；已经开始的工具会先完成。`Alt+Enter` 提交的 follow-up 则在当前任务结束后开始新一轮。
 
 探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
+
+底栏的 Git 状态在后台刷新，首次探测期间显示 `⎇ checking git`。Git 未安装、探测报错或超时分别显示 `git unavailable`、`git error`、`git timeout`；只有确认当前目录不属于仓库时才显示 `⎇ no git`。探测允许最长 10 秒，适用于 Git 状态扫描较慢的工作区；超时后保留已识别的分支名。
 
 `web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write_file` 根据执行前的文件状态显示 `Create /path` 或 `Wrote /path`；连续创建多个文件合并为 `Create N files`，按 `Ctrl+O` 展开完整文件列表。覆盖写入预览显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在写入预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
 
@@ -300,6 +380,7 @@ CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-age
 | `llm.models.<source>.api_key` | `sk-local` | 来源共用密钥；模型级可以覆盖 |
 | `web_search.tavily_api_key` | `null` | 私有配置中的 Tavily 密钥；`TAVILY_API_KEY` 环境变量优先 |
 | `llm.models.<source>.provider` | `qwen-responses` | 来源共用 `qwen-responses` 或 `openai-compatible`；模型级可以覆盖 |
+| `llm.models.<source>.reasoning_efforts` | `[]` | 推理强度枚举；子模型省略时继承，声明时完整覆盖，`null`/`[]` 清除；非空时 CLI 仅显示枚举，空时仅显示 `default` |
 | `llm.models.<source>.stream_usage` | `false` | 流式 Chat Completions 请求附带 `stream_options.include_usage`；模型级可以覆盖 |
 | `llm.models.<source>.base_url` | `http://localhost:8000/v1` | 来源共用推理端点；模型级可以覆盖 |
 | `llm.models.<source>.models.<name>.input` | `[text]` | 图片模型写成 `[text, image]` |
@@ -327,11 +408,11 @@ web_search:
 `execute` 输出超限时，完整日志保存到当前工作区的 `.deep-agent/logs/exec/`。最终工具结果同时给出宿主机真实路径和 Agent 可用文件工具读取的 `/workspace/.deep-agent/logs/exec/...` 路径。建议在自己的项目 `.gitignore` 中加入 `.deep-agent/`；程序不会修改项目的忽略规则。
 父 shell 退出后，如果后台进程仍占有输出管道，`execute` 会继续收集数据，直到管道关闭或连续 100 毫秒没有新输出；后台进程在此后写出的内容不会进入本次工具结果。
 
-`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 固定走 Chat Completions。百炼 Token Plan 的 compatible-mode 端点使用专用适配器保留流式和非流式响应中的 `reasoning_content`，供思考区展示及会话恢复，并在后续请求中透传已有思考内容；其他兼容端点仍使用普通 `ChatOpenAI`。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
+`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 固定走 Chat Completions，使用 `ReasoningChatOpenAI` 保留兼容端点流式和非流式响应中的 `reasoning_content`，供思考区展示及会话恢复，并在后续请求中透传已有思考内容。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
 
 每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
 
-LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
+CLI 启动及 `/new` 创建的新会话先保留在内存中，首次提交消息后才写入会话目录并取得持久化锁；未发送消息就退出或恢复其他会话，不留下空会话记录。历史空记录不会自动删除。LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
 
 同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 和 `deep-agent resume <id>` 启动恢复都会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；库调用者同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。会话切换的提交点在完成全部图与 catalog 读取之后，中途失败会回滚到原会话；`steer` / `follow_up` 在脱离会话或 Runner 关闭后会被拒绝。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
 
@@ -340,7 +421,8 @@ LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `sess
 ## Development
 
 ```bash
-python3.12 -m venv .venv
+python3 -c 'import sys; assert sys.version_info >= (3, 12), "需要 Python 3.12+"'
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
@@ -351,10 +433,31 @@ python -m build
 
 使用 pipx 安装过本项目时，修改源码后在项目根目录运行 `pipx install --force .`，再重启 CLI；已有进程不会自动加载新工具。
 
-测试不打真模型。对着本地端点做流式冒烟：
+自动回归不调用真实模型。`python -m pytest` 包含本地模拟 OpenAI Chat Completions HTTP 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。可单独运行 `python -m pytest -m integration`；它需要允许监听 `127.0.0.1`。实际隔离能力测试需要可用 bwrap，`REQUIRE_BWRAP_TEST=1 python -m pytest` 将缺失能力视为失败。CI 分别验证 Python 3.12 / 3.13，并保存未放宽 AppArmor 的 Ubuntu 环境诊断报告，不把 skipped 测试当成兼容证明。
+
+真实模型冒烟由用户主动运行，会使用配置中的 API Key 并消耗额度，不进入默认 pytest 或自动 CI：
 
 ```bash
-python examples/stream_smoke.py
+python examples/e2e_live_smoke.py --help
+python examples/e2e_live_smoke.py --model token-plan/qwen3.8-flash
+# 默认创建并清理临时工作区/会话；指定 --workspace 时必须是空目录。
+# 需要外网工具测试时额外传 --network。
+python examples/sandbox_probe.py --require-sandbox
+```
+
+`stream_smoke.py` 是 **Qwen Responses 思考流** 专用验证，不是通用模型连通性测试。配置的活动模型必须使用 `provider: qwen-responses`，端点须支持 Responses，并使用会输出思考内容的 Qwen 模型；脚本的 `--effort` 必须来自 YAML 的有效枚举且不能是 `none`。默认不指定强度时，要求服务端默认开启思考。Chat Completions、关闭思考的模型或只有回答流的模型不满足其验收条件：
+
+```bash
+python examples/stream_smoke.py --effort low
+```
+
+库函数 `create_agent()` 不会自动读取 `~/.deep-agent/config.yaml`，未传 `settings` 时使用 `Settings()` 的代码默认值。CLI 则先初始化配置，再通过 `Settings.load()` 读取文件。库调用如需与 CLI 一致，应显式加载：
+
+```python
+from agent import create_agent
+from agent.config import Settings
+
+prepared = create_agent(settings=Settings.load())
 ```
 
 ## Roadmap

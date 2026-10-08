@@ -2,29 +2,36 @@ name: tests
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install and enable Bubblewrap
+          python-version: ${{ matrix.python }}
+      - name: Install Bubblewrap and executable-specific AppArmor permission
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get install -y bubblewrap apparmor
+          bash .github/scripts/enable-ci-bwrap.sh
       - name: Install package and test tools
         run: python -m pip install -e ".[dev]"
-      - name: Run tests
+      - name: Require actual sandbox support
+        run: python examples/sandbox_probe.py --require-sandbox --report sandbox-report.json
+      - name: Run automatic regression including local HTTP integration
         env:
           REQUIRE_BWRAP_TEST: "1"
         run: python -m pytest -q --tb=short -o faulthandler_timeout=30
@@ -37,8 +44,58 @@ jobs:
           python -m venv /tmp/deep-agent-wheel-test
           /tmp/deep-agent-wheel-test/bin/pip install dist/*.whl
           /tmp/deep-agent-wheel-test/bin/deep-agent --help
+          /tmp/deep-agent-wheel-test/bin/deep-agent --version
           mkdir -p /tmp/deep-agent-wheel-home /tmp/deep-agent-wheel-work
           cd /tmp/deep-agent-wheel-work
           HOME=/tmp/deep-agent-wheel-home /tmp/deep-agent-wheel-test/bin/deep-agent
           test -s /tmp/deep-agent-wheel-home/.deep-agent/config.yaml
           test -d /tmp/deep-agent-wheel-home/.deep-agent/skills
+          set +e
+          echo hi | HOME=/tmp/deep-agent-wheel-home /tmp/deep-agent-wheel-test/bin/deep-agent 2> /tmp/deep-agent-wheel-stderr
+          code=$?
+          set -e
+          test "$code" -eq 2
+          ! grep -q Traceback /tmp/deep-agent-wheel-stderr
+          test ! -e /tmp/deep-agent-wheel-home/.deep-agent/sessions
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandbox-python-${{ matrix.python }}
+          path: sandbox-report.json
+
+  ubuntu-default-policy:
+    # No sysctl edits or custom AppArmor profile in this job.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install packaged Bubblewrap with stock security policy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          python -m pip install -e ".[dev]"
+      - name: Record supported or unsupported environment explicitly
+        run: |
+          python examples/sandbox_probe.py --report sandbox-stock-policy.json
+          python - <<'PY'
+          import json, os
+          report = json.load(open('sandbox-stock-policy.json'))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('### Stock Ubuntu policy\n\n' + report['status'] + '\n\n' + report['detail'] + '\n')
+          if report['supported']:
+              import subprocess
+              subprocess.run(['python', '-m', 'pytest', 'tests/test_sandbox.py', '-m', 'sandbox', '-q'],
+                             env={**os.environ, 'REQUIRE_BWRAP_TEST': '1'}, check=True)
+          elif report['category'] != 'namespace_restricted':
+              raise SystemExit('Unexpected environment failure: ' + report['category'])
+          PY
+      - name: Regression for fail-closed namespace diagnostics
+        run: python -m pytest tests/test_sandbox.py tests/test_bootstrap.py -q -m 'not sandbox'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ubuntu-stock-policy
+          path: sandbox-stock-policy.json

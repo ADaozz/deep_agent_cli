@@ -227,7 +227,8 @@ def test_set_permission_mode_deferred_keeps_pending_approval_recoverable() -> No
     assert runner.permission_mode() is PermissionMode.ASK
     assert runner.pending_permission_mode() is PermissionMode.ALLOW
     assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-legacy"
-    resumed = runner.approve_tool("old-legacy")
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        resumed = runner.approve_tool("old-legacy")
     assert resumed.status == "completed"
     assert resumed.output == "done"
     assert runner.permission_mode() is PermissionMode.ALLOW
@@ -278,10 +279,13 @@ def _sandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> Agen
     config = SandboxConfig(workspace=tmp_path)
     try:
         selected = select_backend(config)
-    except SandboxUnavailableError:
-        pytest.skip("bubblewrap sandbox unavailable")
+    except SandboxUnavailableError as exc:
+        import os
+        if os.environ.get("REQUIRE_BWRAP_TEST"):
+            pytest.fail(str(exc))
+        pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}")
     if selected.mode is not ExecutionMode.SANDBOXED:
-        pytest.skip("bubblewrap sandbox unavailable")
+        pytest.fail("Expected sandbox isolation; no fallback is permitted in this test")
     runner = AgentRunner(
         model=scripted_model(messages),
         sandbox_config=config,
@@ -291,6 +295,7 @@ def _sandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> Agen
     return runner
 
 
+@pytest.mark.sandbox
 def test_sandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
     runner = _sandboxed_runner(tmp_path, _execute_messages("ex-sb-ask"), thread_id="sb-ask-off")
     waiting = runner.invoke("run")
@@ -301,6 +306,7 @@ def test_sandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> Non
     assert resumed.status == "completed"
 
 
+@pytest.mark.sandbox
 def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
     runner = _sandboxed_runner(
         tmp_path, _execute_messages("ex-sb-net", network=True, final="online"), thread_id="sb-ask-net",
@@ -317,6 +323,7 @@ def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
     assert resumed.output == "online"
 
 
+@pytest.mark.sandbox
 def test_sandboxed_allow_execute_without_network_runs(tmp_path: Path) -> None:
     runner = _sandboxed_runner(tmp_path, _execute_messages("ex-sb-allow"), thread_id="sb-allow-off")
     runner.set_permission_mode(PermissionMode.ALLOW)
@@ -324,6 +331,7 @@ def test_sandboxed_allow_execute_without_network_runs(tmp_path: Path) -> None:
     assert result.status == "completed"
 
 
+@pytest.mark.sandbox
 def test_sandboxed_allow_execute_with_network_runs(tmp_path: Path) -> None:
     runner = _sandboxed_runner(
         tmp_path, _execute_messages("ex-sb-allow-net", network=True, final="online"), thread_id="sb-allow-net",
@@ -493,6 +501,7 @@ def test_cli_permission_selector_locked_when_not_sandboxed() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.sandbox
 def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
     runner = _sandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="cli-perm-allow")
 
@@ -521,6 +530,7 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
     assert runner.pending_permission_mode() is None
 
 
+@pytest.mark.sandbox
 def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:
     runner = _sandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="cli-perm-wrong")
 

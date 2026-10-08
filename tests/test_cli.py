@@ -2647,9 +2647,9 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         footer = "".join(fragment[1] for fragment in app._footer_text())
         lines = footer.splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · footer-m")
-        assert lines[0].rstrip().endswith("⎇ no git")
-        assert "default ·" not in lines[0]
+        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-m")
+        assert lines[0].rstrip().endswith("⎇ checking git")
+        assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
         assert "Ready" in lines[1]
 
@@ -2666,11 +2666,11 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypa
         monkeypatch.setattr(app, "_width", lambda: 140)
         fragments = list(app._footer_text())
         first_line = "".join(value for _, value in fragments).splitlines()[0]
-        assert first_line.startswith(f" {app._workspace()} · qwen3.5-plus · footer-c")
-        assert first_line.rstrip().endswith("⎇ no git")
+        assert first_line.startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-c")
+        assert first_line.rstrip().endswith("⎇ checking git")
         assert any(style == "class:footer-workspace" and str(app._workspace()) in value for style, value in fragments)
         assert ("class:footer-resume-id", "footer-c") in fragments
-        assert ("class:footer-model", "qwen3.5-plus") in fragments
+        assert ("class:footer-model", "qwen3.5-plus · default") in fragments
         for label, color in (
             ("footer-workspace", "ansigreen"),
             ("footer-resume-id", "ansicyan"),
@@ -2689,8 +2689,8 @@ def test_footer_keeps_the_right_side_in_narrow_terminal(monkeypatch) -> None:
         monkeypatch.setattr(app, "_width", lambda: 20)
         lines = "".join(value for _, value in app._footer_text()).splitlines()
         # The right side wins in a narrow terminal; the left side truncates.
-        assert lines[0].rstrip().endswith("⎇ no git")
-        assert "narrow-r" in lines[0]
+        assert lines[0].rstrip().endswith("⎇ checking git")
+        assert "narr" in lines[0]
         assert len(lines[0]) <= 20
         assert len(lines[1]) <= 20
 
@@ -2734,7 +2734,7 @@ def test_footer_hides_context_meter_without_a_configured_window(monkeypatch) -> 
         app.state.apply(RunEvent(type="usage", result={"total_tokens": 500}))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · footer-u")
+        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-u")
         assert "Context" not in lines[1]
 
 
@@ -2752,9 +2752,10 @@ def test_footer_places_context_on_status_line_when_git_unavailable() -> None:
     )
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app._git_summary = GitSummary()
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert "auto · token-plan" in lines[0]
+        assert "token-plan · auto · default" in lines[0]
         assert lines[0].rstrip().endswith("⎇ no git")
         assert lines[1].rstrip().endswith("1.0m Context")
 

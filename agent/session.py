@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     permission_mode TEXT,
     pending_model_id TEXT,
     pending_permission_mode TEXT,
+    reasoning_effort TEXT NOT NULL DEFAULT 'default',
+    pending_reasoning_effort TEXT,
     last_run_status TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
@@ -65,6 +67,8 @@ class SessionInfo:
     permission_mode: str | None = None
     pending_model_id: str | None = None
     pending_permission_mode: str | None = None
+    reasoning_effort: str = "default"
+    pending_reasoning_effort: str | None = None
     last_run_status: StopReason = StopReason.PENDING
 
 
@@ -208,6 +212,11 @@ class SessionStore:
                     self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_model_id TEXT")
                 if "pending_permission_mode" not in columns:
                     self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_permission_mode TEXT")
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
+            if "reasoning_effort" not in columns:
+                self._conn.execute("ALTER TABLE session_catalog ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'default'")
+            if "pending_reasoning_effort" not in columns:
+                self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_reasoning_effort TEXT")
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -237,6 +246,7 @@ class SessionStore:
     def create_session(
         self, *, title: str = "", session_id: str | None = None,
         model_id: str | None = None, permission_mode: str = "ask",
+        reasoning_effort: str = "default",
     ) -> SessionInfo:
         now = _utc_now()
         info = SessionInfo(
@@ -247,12 +257,13 @@ class SessionStore:
             status="running",
             model_id=model_id,
             permission_mode=permission_mode,
+            reasoning_effort=reasoning_effort,
         )
         with self.checkpointer.lock:
             self._conn.execute(
-                "INSERT INTO session_catalog (id, title, created_at, updated_at, model_id, permission_mode, last_run_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO session_catalog (id, title, created_at, updated_at, model_id, permission_mode, last_run_status, reasoning_effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (info.id, info.title, info.created_at.isoformat(), info.updated_at.isoformat(),
-                 info.model_id, info.permission_mode, info.last_run_status.value),
+                 info.model_id, info.permission_mode, info.last_run_status.value, info.reasoning_effort),
             )
             self._conn.commit()
         return info
@@ -265,37 +276,40 @@ class SessionStore:
         model_id: str | None = None,
         permission_mode: str | None = None,
         last_run_status: StopReason | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         now = _utc_now().isoformat()
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT title, model_id, permission_mode, last_run_status FROM session_catalog WHERE id = ?", (session_id,),
+                "SELECT title, model_id, permission_mode, last_run_status, reasoning_effort FROM session_catalog WHERE id = ?", (session_id,),
             ).fetchone()
             if row is None:
                 return
             new_title = title if title is not None else row[0]
             self._conn.execute(
-                "UPDATE session_catalog SET title = ?, updated_at = ?, model_id = ?, permission_mode = ?, last_run_status = ? WHERE id = ?",
+                "UPDATE session_catalog SET title = ?, updated_at = ?, model_id = ?, permission_mode = ?, last_run_status = ?, reasoning_effort = ? WHERE id = ?",
                 (new_title, now, model_id if model_id is not None else row[1],
                  permission_mode if permission_mode is not None else row[2],
-                 last_run_status.value if last_run_status is not None else row[3], session_id),
+                 last_run_status.value if last_run_status is not None else row[3],
+                 reasoning_effort if reasoning_effort is not None else row[4], session_id),
             )
             self._conn.commit()
 
     def set_pending_config(
         self, session_id: str, *, model_id: str | None, permission_mode: str | None,
+        reasoning_effort: str | None = None,
     ) -> None:
         with self.checkpointer.lock:
             self._conn.execute(
-                "UPDATE session_catalog SET pending_model_id = ?, pending_permission_mode = ?, updated_at = ? WHERE id = ?",
-                (model_id, permission_mode, _utc_now().isoformat(), session_id),
+                "UPDATE session_catalog SET pending_model_id = ?, pending_permission_mode = ?, pending_reasoning_effort = ?, updated_at = ? WHERE id = ?",
+                (model_id, permission_mode, reasoning_effort, _utc_now().isoformat(), session_id),
             )
             self._conn.commit()
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode "
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort "
                 "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -304,7 +318,7 @@ class SessionStore:
     def get(self, session_id: str) -> SessionInfo | None:
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode FROM session_catalog WHERE id = ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort FROM session_catalog WHERE id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -320,7 +334,7 @@ class SessionStore:
             return exact
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode FROM session_catalog WHERE id LIKE ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort FROM session_catalog WHERE id LIKE ?",
                 (f"{prefix}%",),
             ).fetchall()
         if len(rows) != 1:
@@ -337,6 +351,7 @@ def _session_info(row: Any) -> SessionInfo:
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
         status=_status_for_reason(reason), model_id=row[4], permission_mode=row[5], last_run_status=reason,
         pending_model_id=row[7], pending_permission_mode=row[8],
+        reasoning_effort=row[9], pending_reasoning_effort=row[10],
     )
 
 

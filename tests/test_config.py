@@ -425,14 +425,14 @@ def test_context_window_rejects_nonsense(tmp_path: Path) -> None:
         Settings.load(path)
 
 
-def test_provider_selects_plain_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
+def test_provider_selects_compatible_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         "llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: openai-compatible\n      models:\n        compatible:\n          model: local\n",
         encoding="utf-8",
     )
     model = build_chat_model(Settings.load(path).active_profile)
-    assert type(model) is ChatOpenAI
+    assert isinstance(model, ChatOpenAI)
     assert model.use_responses_api is False
     path.write_text("llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: unknown\n      models:\n        compatible: {}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="provider"):
@@ -501,3 +501,31 @@ def test_invalid_bool_raises(tmp_path: Path) -> None:
     path.write_text(_MODEL_YAML + "sandbox:\n  allow_unsandboxed: maybe\n", encoding="utf-8")
     with pytest.raises(ValueError, match="allow_unsandboxed"):
         Settings.load(path)
+
+
+def test_reasoning_efforts_inherit_replace_and_clear() -> None:
+    settings = Settings.from_mapping({"llm": {"default": "local/inherit", "models": {
+        "local": {"reasoning_efforts": ["none", "low", "high"], "models": {
+            "inherit": {}, "override": {"reasoning_efforts": ["high", "max"]},
+            "empty": {"reasoning_efforts": []}, "null": {"reasoning_efforts": None},
+        }}, "other": {"models": {"plain": {}}},
+    }}})
+    assert settings.get_profile("local/inherit").reasoning_efforts == ("none", "low", "high")
+    assert settings.get_profile("local/override").reasoning_efforts == ("high", "max")
+    for name in ("local/empty", "local/null", "other/plain"):
+        assert settings.get_profile(name).reasoning_efforts == ()
+
+
+@pytest.mark.parametrize("value", ["low", True, [""], [1], ["default"], ["low", "low"], [" low "]])
+def test_invalid_reasoning_efforts(value) -> None:
+    with pytest.raises(ValueError, match="reasoning_efforts"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"models": {"test": {"reasoning_efforts": value}}},
+        }}})
+
+
+def test_invalid_group_efforts_are_checked_even_when_model_overrides() -> None:
+    with pytest.raises(ValueError, match="llm.models.local.reasoning_efforts"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"reasoning_efforts": "low", "models": {"test": {"reasoning_efforts": []}}},
+        }}})

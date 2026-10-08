@@ -2,7 +2,9 @@
 """Installed entry point for the interactive Deep Agent CLI."""
 from __future__ import annotations
 
+import argparse
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from dataclasses import replace
 from prompt_toolkit import PromptSession
 from prompt_toolkit.validation import Validator
@@ -29,6 +31,7 @@ def create_runner(settings: Settings) -> AgentRunner:
             sandbox_config=settings.sandbox,
             session_store=session_store,
             enable_sessions=True,
+            persist_on_first_message=True,
             workspace=settings.sandbox.workspace,
         )
     except SandboxUnavailableError as exc:
@@ -43,6 +46,7 @@ def create_runner(settings: Settings) -> AgentRunner:
             sandbox_config=replace(settings.sandbox, allow_unsandboxed=True),
             session_store=session_store,
             enable_sessions=True,
+            persist_on_first_message=True,
             workspace=settings.sandbox.workspace,
         )
     return runner
@@ -66,15 +70,28 @@ def _confirm_unsandboxed(error: str) -> None:
         raise SystemExit("Startup cancelled.") from exc
 
 
+def package_version() -> str:
+    try:
+        return version("deep-agent-cli")
+    except PackageNotFoundError:
+        return "unknown (source checkout; install the package to read its version)"
+
+
 def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:
-    if not argv:
-        return None, False
-    if argv[0] in {"-h", "--help"}:
-        print("Usage: deep-agent [resume [session-id]]")
-        raise SystemExit(0)
-    if argv[0] != "resume" or len(argv) > 2:
-        raise SystemExit(f"Unknown command: {argv[0]}\nUsage: deep-agent [resume [session-id]]")
-    return (argv[1] if len(argv) > 1 else None), True
+    parser = argparse.ArgumentParser(
+        prog="deep-agent",
+        description="Interactive sandboxed coding agent for Linux and WSL2 (Python 3.12+).",
+        epilog=("First launch creates ~/.deep-agent/config.yaml and exits. Configure your model "
+                "endpoint and key, then launch from your project in an interactive terminal. "
+                "DEEP_AGENT_CONFIG selects an alternate config outside the workspace. "
+                "Sandboxing requires working Bubblewrap; UNSANDBOXED fallback requires explicit authorization."),
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {package_version()}")
+    commands = parser.add_subparsers(dest="command", title="commands")
+    resume = commands.add_parser("resume", help="Resume a saved session or open the session picker")
+    resume.add_argument("session_id", nargs="?", help="Session ID or unique prefix; omit to select interactively")
+    args = parser.parse_args(argv)
+    return getattr(args, "session_id", None), args.command == "resume"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -86,6 +103,10 @@ def main(argv: list[str] | None = None) -> None:
             "Edit the model endpoint and API key in the config, then run deep-agent again."
         )
         return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("deep-agent requires an interactive terminal (TTY) for stdin and stdout. "
+              "Run it directly in a terminal; piped input/output is not supported.", file=sys.stderr)
+        raise SystemExit(2)
     try:
         settings = Settings.load()
     except (ConfigError, FileNotFoundError) as exc:

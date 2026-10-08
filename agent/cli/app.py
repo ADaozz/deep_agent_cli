@@ -100,7 +100,7 @@ def format_context_usage(usage: dict[str, int], window: int) -> str:
 
 def model_display_name(profile: ModelProfile) -> str:
     """Include the configured source when two providers expose the same model."""
-    return f"{profile.model} · {profile.source}" if profile.source else profile.model
+    return f"{profile.source} · {profile.model}" if profile.source else profile.model
 
 
 class SlashCompleter(Completer):
@@ -380,7 +380,7 @@ class CliApplication:
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
         self._git = GitProbe(self._workspace())
-        self._git_summary = GitSummary()
+        self._git_summary = self._git.summary
         self._git_task: asyncio.Task[None] | None = None
 
         self.slash_completer = SlashCompleter(
@@ -561,20 +561,19 @@ class CliApplication:
             self.runner.on_event = self._on_event_thread
 
     def run(self) -> None:
-        def capture_loop() -> None:
-            self._loop = asyncio.get_running_loop()
-            self._start_git_watch()
-            self.sessions.schedule_start(self._loop)
-
-        with self._capture_filesystem_warnings():
-            self.application.run(pre_run=capture_loop)
+        asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._start_git_watch()
-        with self._capture_filesystem_warnings():
-            await self.sessions.start()
-            await self.application.run_async()
+        try:
+            with self._capture_filesystem_warnings():
+                await self.sessions.start()
+                await self.application.run_async()
+        finally:
+            self.sessions.notify_exit()
+            await self._stop_git_watch()
+            self._io_executor.shutdown(wait=False, cancel_futures=True)
 
     @contextmanager
     def _capture_filesystem_warnings(self) -> Iterator[None]:
@@ -621,6 +620,19 @@ class CliApplication:
                 self.application.invalidate()
             await asyncio.sleep(REFRESH_SECONDS)
 
+    async def _stop_git_watch(self) -> None:
+        task = self._git_task
+        if task is None:
+            return
+        try:
+            if not task.done():
+                task.cancel()
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._git_task = None
+
     def continue_session_message(self) -> str | None:
         if not self.runner.thread_has_content():
             return None
@@ -638,17 +650,23 @@ class CliApplication:
         self.state.status = text
         self.application.invalidate()
 
-    def _switch_model(self, id_or_prefix: str) -> ModelProfile:
-        previous = self.runner.current_model()
-        profile = self.runner.request_model_change(id_or_prefix)
-        if self.runner.pending_model() is None:
-            notice = f"Pending model switch cancelled; model remains {model_display_name(profile)}."
-        else:
-            before = model_display_name(previous) if previous else "fixed model"
-            notice = f"Model switch queued: {before} → {model_display_name(profile)}. Current work uses {before}."
+    def _switch_model(self, id_or_prefix: str, *, reasoning_effort: str | None = None) -> ModelProfile:
+        profile = self.runner.request_model_change(id_or_prefix, reasoning_effort=reasoning_effort)
         interrupt = self.runner.current_interrupt()
+        if not self.state.running and interrupt is None:
+            events: list[RunEvent] = []
+            self.runner._apply_pending_runtime_config(events.append)
+            for event in events:
+                self._apply_event(event, announce=False)
+            if any(event.type == "runtime_config_failed" for event in events):
+                self.set_status("Model switch failed")
+                return profile
+        if self.runner.pending_model() is None and self.runner.pending_reasoning_effort() is None:
+            notice = f"Model: {model_display_name(profile)} · {self.runner.reasoning_effort()}"
+        else:
+            notice = f"Model queued: {model_display_name(profile)} · {self.runner.pending_reasoning_effort() or self.runner.reasoning_effort()}"
         if interrupt is not None and interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
-            notice += " Existing approval still requires approve or reject; press F2 to return."
+            notice += " · F2: pending approval"
         self.state.add_system(notice)
         self.set_status(notice)
         return profile
@@ -689,11 +707,14 @@ class CliApplication:
         model = self.runner.current_model()
         pending_model = self.runner.pending_model()
         model_line = (
-            f"Model: {model_display_name(model)}"
+            f"Model: {model_display_name(model)} · reasoning: {self.runner.reasoning_effort()}"
             + (f" → {model_display_name(pending_model)} (pending)" if pending_model else "")
             + f"\nInputs: {', '.join(model.input)}\n"
             if model is not None else "Model: (fixed)\n"
         )
+        pending_effort = self.runner.pending_reasoning_effort()
+        if pending_effort is not None:
+            model_line += f"Reasoning: {self.runner.reasoning_effort()} → {pending_effort} (pending)\n"
         perm = permission_mode_label(self.runner.permission_mode())
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
@@ -709,7 +730,7 @@ class CliApplication:
         store = self.runner.session_store
         model = self.runner.current_model()
         model_line = (
-            f"Model: {model_display_name(model)}\n" if model is not None else ""
+            f"Model: {model_display_name(model)} · reasoning: {self.runner.reasoning_effort()}\n" if model is not None else ""
         )
         if store is None:
             self.state.add_system(
@@ -763,21 +784,22 @@ class CliApplication:
             )
             return
         try:
+            if self.state.running:
+                self.set_status("Finish the current run before selecting a model")
+                return
             if arg.strip():
                 groups = {item.id.split("/", 1)[0] for item in profiles if "/" in item.id}
                 if arg.strip() in groups:
                     self._show_model_choices(arg.strip(), profiles)
                     return
-                profile = self._switch_model(arg.strip())
-                return
-            if self.state.running:
-                self.set_status("Use /model <id> while a run is active")
+                profile = self.runner.settings.get_profile(arg.strip())
+                self._show_reasoning_choices(profile, profile.source)
                 return
             if any("/" in item.id for item in profiles):
                 self._show_model_sources(profiles)
                 return
             self._show_model_choices("", profiles)
-        except (KeyError, RuntimeError) as exc:
+        except (KeyError, RuntimeError, ValueError) as exc:
             self.state.add_system(str(exc), error=True)
 
     def _show_model_sources(self, profiles: list[ModelProfile]) -> None:
@@ -806,11 +828,11 @@ class CliApplication:
         current_id = current.id if current else ""
         options = []
         for item in profiles:
-            name = item.id.split("/", 1)[1] if source else model_display_name(item)
+            name = item.model if source else model_display_name(item)
             options.append({
                 "value": item.id,
                 "label": name + (" · current" if item.id == current_id else ""),
-                "description": item.model if source and name != item.model else "",
+                "description": "",
             })
         self.interaction = InteractionController(
             kind="model", title=f"Select model · {source}" if source else "Select model",
@@ -822,6 +844,29 @@ class CliApplication:
                 self.interaction.option_index = index
                 break
         self.set_status("Select a model · Enter confirm · Esc back" if source else "Select a model · Enter confirm · Esc cancel")
+        self.application.invalidate()
+
+    def _show_reasoning_choices(self, profile: ModelProfile, source: str = "") -> None:
+        current = self.runner.current_model()
+        current_effort = self.runner.reasoning_effort() if current and current.id == profile.id else None
+        selected = current_effort or "default"
+        pending = self.runner.pending_model() or current
+        if pending and pending.id == profile.id and self.runner.pending_reasoning_effort() is not None:
+            selected = self.runner.pending_reasoning_effort()
+        efforts = list(profile.reasoning_efforts) or ["default"]
+        self.interaction = InteractionController(
+            kind="model_reasoning", title=f"Reasoning effort · {model_display_name(profile)}",
+            question="Choose reasoning effort",
+            values={"model": profile.id, "source": source},
+            fields=[{"id": "effort", "type": "single_select", "label": "Reasoning effort",
+                     "required": True, "options": [
+                         {"value": effort, "label": effort + (" · current" if effort == current_effort else ""),
+                          "description": "Use model default" if effort == "default" else ""}
+                         for effort in efforts
+                     ]}],
+        )
+        self.interaction.option_index = efforts.index(selected) if selected in efforts else 0
+        self.set_status("Select reasoning effort · Enter confirm · Esc back")
         self.application.invalidate()
 
     async def compact_command(self, arg: str = "") -> None:
@@ -1050,9 +1095,6 @@ class CliApplication:
         self.sessions.notify_exit()
         if self.state.running:
             self.runner.request_cancel()
-        if self._git_task is not None:
-            self._git_task.cancel()
-            self._git_task = None
         self._io_executor.shutdown(wait=False, cancel_futures=True)
         self.application.exit()
 
@@ -1313,9 +1355,13 @@ class CliApplication:
         width = self._width()
         model = self.runner.current_model()
         model_label = model_display_name(model) if model is not None else "fixed model"
+        model_label += f" · {self.runner.reasoning_effort()}"
         pending_model = self.runner.pending_model()
+        pending_effort = self.runner.pending_reasoning_effort()
         if pending_model is not None:
-            model_label += f"→{model_display_name(pending_model)} (pending)"
+            model_label += f" → {model_display_name(pending_model)} · {pending_effort or 'default'} (pending)"
+        elif pending_effort is not None:
+            model_label += f" → {pending_effort} (pending)"
         resume_id = self.runner.thread_id[:8]
         context = format_context_usage(self.state.usage, self.runner.context_window())
         # Row 1: workspace · model · resume on the left, git on the right.
@@ -1813,17 +1859,21 @@ class CliApplication:
         else:
             self._apply_event(event)
 
-    def _apply_event(self, event: RunEvent) -> None:
+    def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
         self.state.apply(event)
         if event.type == "runtime_config_applied" and isinstance(event.result, dict):
             changes = []
             if event.result.get("model_changed"):
                 self.state.usage.clear()
                 model = self.runner.current_model()
-                changes.append(f"model: {model_display_name(model) if model else event.result['model_id']}")
+                changes.append(f"Model: {model_display_name(model) if model else event.result['model_id']} · {event.result['reasoning_effort']}")
+            elif event.result.get("reasoning_changed"):
+                model = self.runner.current_model()
+                changes.append(f"Model: {model_display_name(model) if model else event.result['model_id']} · {event.result['reasoning_effort']}")
             if event.result.get("permission_changed"):
                 changes.append(f"permission: {event.result['permission_mode']}")
-            self.state.add_system("Runtime config applied: " + "; ".join(changes))
+            if announce:
+                self.state.add_system("; ".join(changes))
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
         self.application.invalidate()
@@ -1887,10 +1937,31 @@ class CliApplication:
                 self.state.add_system("No model selected", error=True)
                 return
             try:
-                profile = self._switch_model(model_id)
-            except (KeyError, RuntimeError) as exc:
+                self._show_reasoning_choices(
+                    self.runner.settings.get_profile(model_id),
+                    str(interaction.values.get("source") or ""),
+                )
+            except (KeyError, RuntimeError, ValueError) as exc:
                 self.state.add_system(str(exc), error=True)
+            return
+        if interaction.kind == "model_reasoning":
+            source = str(interaction.values.get("source") or "")
+            if cancelled:
+                self._show_model_choices(source, self.runner.list_models())
+                model_id = interaction.values["model"]
+                for index, option in enumerate(self.interaction.fields[0]["options"]):
+                    if option["value"] == model_id:
+                        self.interaction.option_index = index
+                        break
                 return
+            self.interaction = None
+            try:
+                self._switch_model(
+                    str(interaction.values["model"]),
+                    reasoning_effort=str(interaction.values.get("effort") or "default"),
+                )
+            except (KeyError, RuntimeError, ValueError) as exc:
+                self.state.add_system(str(exc), error=True)
             return
         if interaction.kind == "permission":
             if cancelled:

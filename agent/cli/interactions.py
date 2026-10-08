@@ -208,14 +208,19 @@ class InteractionController:
             description = option.get("description") or ""
             style = "bold cyan" if idx == self.option_index else ""
             label = f"{pointer} {mark} {option.get('label')}  {description}".rstrip()
+            label_text = Text(label, style=style)
+            option_label = str(option.get("label") or "")
+            if option_label.endswith(" · current"):
+                marker_start = len(f"{pointer} {mark} ") + len(option_label) - len("· current")
+                label_text.stylize("bold bright_cyan", marker_start, marker_start + len("· current"))
             if right_label := option.get("right_label"):
                 row = Table.grid(expand=True, padding=(0, 1))
                 row.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
                 row.add_column(width=len(str(right_label)), justify="right", no_wrap=True)
-                row.add_row(Text(label, style=style), Text(str(right_label), style=style))
+                row.add_row(label_text, Text(str(right_label), style=style))
                 parts.append(row)
             else:
-                parts.append(Text(label, style=style))
+                parts.append(label_text)
         if self.error:
             parts.append(Text(self.error, style="red"))
         if self.custom_entry:

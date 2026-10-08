@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Live E2E smoke: slash commands + permission gates + sandboxed coding task.
 
-Usage:
-  cd templates/deep-agent
-  .venv/bin/python examples/e2e_live_smoke.py
+Usage (opt-in; uses real API tokens):
+  python examples/e2e_live_smoke.py --model source/model
+  python examples/e2e_live_smoke.py --workspace /empty/scratch --network
 
 Configuration is loaded from ~/.deep-agent/config.yaml (or DEEP_AGENT_CONFIG).
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
-import os
+import tempfile
+from contextlib import ExitStack
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +32,6 @@ from agent.permission import PermissionMode, allow_mode_available  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
-from agent.cli.main import create_runner  # noqa: E402
 
 
 CODING_PROMPT = """在 /workspace 创建 hello_lib.py：函数 greet(name) 返回 "Hello, {name}!"。
@@ -113,22 +114,33 @@ async def run_slash_suite(app: CliApplication, runner: AgentRunner, report: Repo
         "/session",
         runner.thread_id[:8] in session_text and ("sqlite" in session_text.lower() or "Session:" in session_text),
     )
+    seed = runner.invoke("只回复 smoke-ready，不调用工具。")
+    report.add("live model response", seed.status == "completed" and bool(seed.output))
     old_thread = runner.thread_id
 
     app.state.add_system("marker-before-clear")
     await _cmd(app, "/clear")
     report.add("/clear", not any("marker-before-clear" in getattr(b, "content", "") for b in app.state.blocks))
 
-    await _cmd(app, "/model qwen3.6-flash")
-    report.add("/model qwen3.6-flash", (runner.current_model() or type("X", (), {"id": ""})()).id == "qwen3.6-flash")
-    await _cmd(app, "/model qwen-plus")
-    report.add("/model qwen-plus", (runner.current_model() or type("X", (), {"id": ""})()).id == "qwen-plus")
+    original = runner.current_model()
+    profiles = runner.list_models()
+    target = next((item for item in profiles if item.id != original.id), original)
+    for profile in (target, original):
+        await _cmd(app, f"/model {profile.id}")
+        picker = app.interaction
+        report.add(f"/model {profile.id} reasoning picker", picker is not None and picker.kind == "model_reasoning")
+        if picker is not None and picker.kind == "model_reasoning":
+            picker.accept("")
+            app._finish_interaction()
+            runner._apply_pending_runtime_config()
+            report.add(f"/model {profile.id} applied", runner.current_model().id == profile.id)
 
     app.cycle_model(delta=1)
-    after_fwd = runner.current_model().id if runner.current_model() else ""
+    forward = runner.pending_model() or runner.current_model()
+    runner._apply_pending_runtime_config()
     app.cycle_model(delta=-1)
-    after_back = runner.current_model().id if runner.current_model() else ""
-    report.add("cycle_model ±1", after_fwd == "qwen3.6-flash" and after_back == "qwen-plus", detail=f"{after_fwd}->{after_back}")
+    runner._apply_pending_runtime_config()
+    report.add("cycle_model ±1", runner.current_model().id == original.id, detail=f"{forward.id}->{original.id}")
 
     await _cmd(app, "/permission ask")
     report.add("/permission ask", runner.permission_mode() is PermissionMode.ASK)
@@ -144,9 +156,11 @@ async def run_slash_suite(app: CliApplication, runner: AgentRunner, report: Repo
         if app.interaction and app.interaction.kind == "permission_confirm":
             app.interaction.accept("ALLOW")
             app._finish_interaction()
+        runner._apply_pending_runtime_config()
         report.add("/permission allow ALLOW", runner.permission_mode() is PermissionMode.ALLOW)
 
         await _cmd(app, "/permission ask")
+        runner._apply_pending_runtime_config()
         report.add("/permission back to ask", runner.permission_mode() is PermissionMode.ASK)
     else:
         report.add(
@@ -213,7 +227,7 @@ def _invoke_with_retry(
     return last
 
 
-def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report) -> None:
+def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report, *, network: bool = False) -> None:
     runner.set_permission_mode(PermissionMode.ASK)
 
     waiting = _invoke_with_retry(
@@ -235,6 +249,10 @@ def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report) -
             resumed.status == "completed" and path.is_file() and "e2e-ask-ok" in path.read_text(encoding="utf-8"),
             detail=f"status={resumed.status} exists={path.is_file()}",
         )
+
+    if not network:
+        print("Network tool checks not requested (enable with --network).", flush=True)
+        return
 
     waiting_net = _invoke_with_retry(
         runner, NETWORK_PROMPT, expect_status="waiting_confirmation", label="ask network execute interrupt", report=report,
@@ -316,69 +334,59 @@ def run_coding_suite(runner: AgentRunner, workspace: Path, report: Report) -> No
         report.add("coding result status", result.status == "completed", detail=result.status)
 
 
-async def async_main() -> int:
-    e2e_root = (ROOT / ".e2e-workspace").resolve()
-    if config_env := os.environ.get("DEEP_AGENT_CONFIG"):
-        os.environ["DEEP_AGENT_CONFIG"] = str(Path(config_env).expanduser().resolve())
-    # workspace: . follows cwd — pin to the isolated e2e tree.
-    os.chdir(e2e_root)
+async def async_main(args: argparse.Namespace) -> int:
     settings = Settings.load()
-    workspace = settings.sandbox.workspace
-    print(f"workspace={workspace}", flush=True)
-    print(f"config={settings.source_path}", flush=True)
-    if workspace != e2e_root:
-        print(f"expected workspace={e2e_root}", file=sys.stderr)
-        return 2
-    config_dir = settings.config_dir or default_config_dir()
-    require_keybindings_outside_workspace(config_dir, workspace)
-
+    if args.model:
+        settings = replace(settings, llm_default=settings.get_profile(args.model).id)
     report = Report()
-    try:
-        runner = create_runner(settings)
-    except SandboxUnavailableError as exc:
-        print(f"Sandbox unavailable: {exc}", file=sys.stderr)
-        return 2
-    except Exception as exc:  # noqa: BLE001
-        print(f"Failed to create runner: {exc}", file=sys.stderr)
-        traceback.print_exc()
-        return 2
-
-    with create_pipe_input() as pipe:
-        app = CliApplication(runner, config_dir=config_dir, input=pipe, output=DummyOutput())
-        await run_slash_suite(app, runner, report)
-
-    # Fresh runner thread for tool suites so slash /new noise does not confuse state.
-    store = SessionStore.for_workspace(workspace, override=settings.state_path)
-    tool_runner = AgentRunner(
-        settings=settings,
-        sandbox_config=settings.sandbox,
-        session_store=store,
-        enable_sessions=True,
-        workspace=workspace,
-    )
-    print("\n--- permission / network ---", flush=True)
-    run_permission_suite(tool_runner, workspace, report)
-
-    print("\n--- coding ---", flush=True)
-    code_runner = AgentRunner(
-        settings=settings,
-        sandbox_config=settings.sandbox,
-        session_store=store,
-        enable_sessions=True,
-        workspace=workspace,
-    )
-    run_coding_suite(code_runner, workspace, report)
-
-    failed = report.failed
-    print("\n======== SUMMARY ========", flush=True)
-    print(f"passed={len(report.checks) - len(failed)} failed={len(failed)} total={len(report.checks)}", flush=True)
-    for item in failed:
-        print(f"  FAIL {item.name}: {item.detail}", flush=True)
-    return 1 if failed else 0
+    with ExitStack() as resources:
+        if args.workspace:
+            workspace = args.workspace.expanduser().resolve()
+            workspace.mkdir(parents=True, exist_ok=True)
+            if any(workspace.iterdir()):
+                print("E2E workspace must be empty; omit --workspace for an isolated temporary directory.", file=sys.stderr)
+                return 2
+        else:
+            workspace = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="deep-agent-live-work-")))
+        state_root = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="deep-agent-live-state-")))
+        settings = replace(settings, sandbox=replace(settings.sandbox, workspace=workspace, allow_unsandboxed=False),
+                           state_path=state_root / "sessions.sqlite3")
+        config_dir = settings.config_dir or default_config_dir()
+        require_keybindings_outside_workspace(config_dir, workspace)
+        print(f"workspace={workspace} config={settings.source_path} model={settings.active_profile.id}", flush=True)
+        store = SessionStore(settings.state_path)
+        resources.callback(store.close)
+        def make_runner():
+            runner = AgentRunner(settings=settings, sandbox_config=settings.sandbox, session_store=store, workspace=workspace)
+            resources.callback(runner.close)
+            return runner
+        try:
+            runner = make_runner()
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, config_dir=config_dir, input=pipe, output=DummyOutput())
+                resources.callback(app._io_executor.shutdown, wait=True)
+                await run_slash_suite(app, runner, report)
+            print("\n--- permission / optional network ---", flush=True)
+            run_permission_suite(make_runner(), workspace, report, network=args.network)
+            print("\n--- coding ---", flush=True)
+            run_coding_suite(make_runner(), workspace, report)
+        except SandboxUnavailableError as exc:
+            print(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}", file=sys.stderr)
+            return 2
+        failed = report.failed
+        print(f"\npassed={len(report.checks) - len(failed)} failed={len(failed)} total={len(report.checks)}", flush=True)
+        for item in failed:
+            print(f"  FAIL {item.name}: {item.detail}", flush=True)
+        return 1 if failed else 0
 
 
-def main() -> int:
-    return asyncio.run(async_main())
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Opt-in live model smoke; uses real API tokens and an isolated workspace.")
+    parser.add_argument("--model", help="Configured source/model ID or unique prefix (defaults to llm.default)")
+    parser.add_argument("--workspace", type=Path, help="Empty scratch directory; default creates and removes a temporary workspace")
+    parser.add_argument("--network", action="store_true", help="Also run external network tool checks against example.com")
+    args = parser.parse_args(argv)
+    return asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":

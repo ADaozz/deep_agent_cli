@@ -66,7 +66,11 @@ class ExecutionMode(StrEnum):
 
 
 class SandboxUnavailableError(RuntimeError):
-    """Raised when sandboxing is unavailable and unsafe fallback was not authorized."""
+    """Unavailable sandbox with a machine-readable diagnostic category."""
+
+    def __init__(self, message: str, *, kind: str = "preflight_failed") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass
@@ -313,10 +317,11 @@ def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelec
     workspace = _validate_config(config)
     validated = replace(config, workspace=workspace)
     executable = _resolve_executable(validated.bwrap_path)
+    kind = "not_installed"
     reason = (
-        "Bubblewrap is required but `bwrap` was not found.\n"
-        "Ubuntu / Debian: sudo apt install bubblewrap\n"
-        "deep-agent currently supports Linux and WSL2"
+        f"Bubblewrap executable {validated.bwrap_path!r} was not found.\n"
+        "Ubuntu / Debian: sudo apt install bubblewrap; then check command -v bwrap.\n"
+        "deep-agent sandboxing supports Linux and WSL2; WSL1 and native Windows/macOS are unsupported."
     )
     if executable:
         candidate = BubblewrapBackend(validated, executable=executable)
@@ -327,17 +332,41 @@ def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelec
         )
         if probe.exit_code == 0:
             return BackendSelection(_workspace_backend(candidate), ExecutionMode.SANDBOXED)
-        reason = f"bubblewrap preflight failed: {probe.output}"
+        kind, reason = _preflight_diagnostic(probe.output, probe.exit_code)
     if not validated.allow_unsandboxed:
         raise SandboxUnavailableError(
-            f"{reason}. Install bubblewrap or set sandbox.allow_unsandboxed: true "
-            "in ~/.deep-agent/config.yaml."
+            f"{reason}\nSandboxing remains required. Only explicit sandbox.allow_unsandboxed: true "
+            "or the CLI UNSANDBOXED confirmation authorizes host execution.", kind=kind,
         )
     warning = f"{UNSANDBOXED_WARNING} Reason: {reason}"
     warnings.warn(warning, RuntimeWarning, stacklevel=2)
     LOG.warning(warning)
     fallback = UnsandboxedShellBackend(validated)
     return BackendSelection(_workspace_backend(fallback), ExecutionMode.UNSANDBOXED, warning)
+
+
+def _preflight_diagnostic(output: str, exit_code: int | None) -> tuple[str, str]:
+    detail = f"bubblewrap preflight failed (exit code {exit_code}): {output}"
+    lowered = output.lower()
+    restricted = any(token in lowered for token in (
+        "operation not permitted", "permission denied", "no permissions to create",
+        "unprivileged user namespaces are not enabled",
+    ))
+    if restricted:
+        return "namespace_restricted", (
+            f"{detail}\nNamespace permissions are restricted; installed bwrap alone is insufficient.\n"
+            "Inspect: sysctl kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces\n"
+            "Inspect AppArmor denials: sudo journalctl -k -g 'apparmor|DENIED|userns'\n"
+            "On Ubuntu, inspect sudo aa-status and the bwrap profile under /etc/apparmor.d/. "
+            "Use the executable-specific userns profile described in README (Ubuntu/WSL2 troubleshooting); "
+            "do not globally disable AppArmor. Containers may instead need namespace/seccomp policy changes "
+            "by their administrator; WSL1 is unsupported."
+        )
+    return "preflight_failed", (
+        f"{detail}\nCheck sandbox.bwrap_path, workspace/mount paths and permissions, "
+        "available /bin/sh, and probe timeout. Run the same bwrap preflight in your terminal "
+        "and inspect its output before changing isolation settings."
+    )
 
 
 def _workspace_backend(backend: SandboxBackendProtocol) -> WorkspaceCompositeBackend:

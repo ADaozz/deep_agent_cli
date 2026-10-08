@@ -260,19 +260,66 @@ def test_cli_model_prefix_switch() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.state.apply(RunEvent(type="usage", result={"total_tokens": 50_000}))
             await app.select_model("beta")
-            assert app.runner.current_model().id == "alpha"
-            assert app.runner.pending_model().id == "beta"
-            assert app.state.usage["total_tokens"] == 50_000
-            assert any("Model switch queued" in getattr(block, "content", "") for block in app.state.blocks)
-            app.show_status()
-            assert any("model-a → model-b (pending)" in getattr(block, "content", "") for block in app.state.blocks)
+            assert app.interaction.kind == "model_reasoning"
+            assert app.runner.pending_model() is None
+            assert app.interaction.accept("") is True
             with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="new")])):
-                assert runner.invoke("hello", on_event=app._apply_event).output == "new"
+                app._finish_interaction()
+            assert app.runner.current_model().id == "beta"
+            assert app.runner.pending_model() is None
+            assert app.state.usage == {}
+            assert app.state.status == "Model: model-b · default"
+            app.show_status()
+            assert "pending" not in app.state.status.lower()
+            assert runner.invoke("hello", on_event=app._apply_event).output == "new"
             assert app.runner.current_model().id == "beta"
             assert app.state.usage == {}
-            assert any("Runtime config applied: model: model-b" in getattr(block, "content", "") for block in app.state.blocks)
+            assert any("Model: model-b · default" == getattr(block, "content", "") for block in app.state.blocks)
 
     asyncio.run(scenario())
+
+
+def test_cli_idle_switch_preserves_pending_approval() -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="", tool_calls=[{
+            "id": "cli-write", "name": "write_file",
+            "args": {"file_path": "/note.txt", "content": "once"},
+        }])]), backend=StateBackend(), settings=_settings_two_models(),
+    )
+    try:
+        assert runner.invoke("write").status == "waiting_confirmation"
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            with patch("agent.runner.build_chat_model") as build:
+                app._switch_model("beta")
+                build.assert_not_called()
+            assert runner.current_model().id == "alpha"
+            assert runner.pending_model().id == "beta"
+            assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "cli-write"
+            assert app.state.status == "Model queued: model-b · default · F2: pending approval"
+            with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="done")])):
+                result = runner.approve_tool("cli-write", on_event=app._apply_event)
+            assert result.status == "completed"
+            assert runner.current_model().id == "beta"
+            assert any(getattr(block, "content", "") == "Model: model-b · default" for block in app.state.blocks)
+    finally:
+        runner.close()
+
+
+def test_cli_idle_switch_failure_keeps_current_model() -> None:
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_settings_two_models())
+    try:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            with patch("agent.runner.build_chat_model", side_effect=RuntimeError("build failed")):
+                app._switch_model("beta")
+            assert runner.current_model().id == "alpha"
+            assert runner.pending_model() is None
+            assert app.state.status == "Model switch failed"
+            assert any("build failed" in getattr(block, "content", "") for block in app.state.blocks)
+            assert not any(getattr(block, "content", "") == "Model: model-b · default" for block in app.state.blocks)
+    finally:
+        runner.close()
 
 
 def test_model_argument_completion_lists_sources_and_model_ids() -> None:
@@ -332,8 +379,8 @@ def test_cli_model_picker_distinguishes_model_sources() -> None:
             assert app.interaction is not None
             labels = [option["label"] for option in app.interaction.current["options"]]
             assert labels == [
-                "qwen3.6-flash · Local gateway · current",
-                "qwen3.6-flash · Token Plan",
+                "Local gateway · qwen3.6-flash · current",
+                "Token Plan · qwen3.6-flash",
             ]
 
     asyncio.run(scenario())
@@ -364,10 +411,15 @@ def test_cli_grouped_model_picker_selects_source_then_model_and_goes_back() -> N
             app.interaction.option_index = 1
             assert app.interaction.accept("") is True
             app._finish_interaction()
+            assert app.interaction.kind == "model_reasoning"
+            assert runner.pending_model() is None
+            assert [item["value"] for item in app.interaction.current["options"]] == ["default"]
+            assert app.interaction.accept("") is True
+            app._finish_interaction()
             assert app.interaction is None
-            assert runner.current_model().id == "token-plan/auto"
-            assert runner.pending_model().id == "token-plan/qwen3.8-max"
-            assert runner.context_window() == 1_000_000
+            assert runner.current_model().id == "token-plan/qwen3.8-max"
+            assert runner.pending_model() is None
+            assert runner.context_window() == 128_000
 
     asyncio.run(scenario())
 
@@ -383,15 +435,19 @@ def test_cli_model_source_arg_opens_group_and_full_id_switches() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             await app.select_model("local")
             assert app.interaction is not None and app.interaction.kind == "model"
-            assert [item["label"] for item in app.interaction.current["options"]] == ["qwen-plus"]
-            assert app.interaction.current["options"][0]["description"] == "qwen3.5-plus"
+            assert [item["label"] for item in app.interaction.current["options"]] == ["qwen3.5-plus"]
+            assert app.interaction.current["options"][0]["description"] == ""
             app._finish_interaction(cancelled=True)
             assert app.interaction is not None and app.interaction.kind == "model_source"
             app._finish_interaction(cancelled=True)
             assert app.interaction is None
             await app.select_model("local/qwen-plus")
-            assert runner.current_model().id == "token-plan/auto"
-            assert runner.pending_model().id == "local/qwen-plus"
+            assert app.interaction.kind == "model_reasoning"
+            assert runner.pending_model() is None
+            assert app.interaction.accept("") is True
+            app._finish_interaction()
+            assert runner.current_model().id == "local/qwen-plus"
+            assert runner.pending_model() is None
 
     asyncio.run(scenario())
 
@@ -411,8 +467,15 @@ def test_cli_model_queued_while_running() -> None:
             app.state.running = True
             await app.select_model("beta")
             assert app.runner.current_model().id == "alpha"
+            assert app.runner.pending_model() is None
+            assert app.interaction is None
+            assert "Finish the current run" in app.state.status
+            with patch("agent.runner.build_chat_model") as build:
+                app.cycle_model(delta=1)
+                build.assert_not_called()
+            assert app.runner.current_model().id == "alpha"
             assert app.runner.pending_model().id == "beta"
-            assert "switch queued" in app.state.status
+            assert app.state.status == "Model queued: model-b · default"
 
     asyncio.run(scenario())
 
@@ -429,8 +492,194 @@ def test_cli_ctrl_p_cycles_model() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         assert app.runner.current_model().id == "alpha"
         app.cycle_model(delta=1)
-        assert app.runner.pending_model().id == "beta"
+        assert app.runner.current_model().id == "beta"
+        assert app.runner.pending_model() is None
         app.cycle_model(delta=1)
         assert app.runner.pending_model() is None
+        assert app.runner.current_model().id == "alpha"
         app.cycle_model(delta=-1)
-        assert app.runner.pending_model().id == "beta"
+        assert app.runner.current_model().id == "beta"
+        assert app.runner.pending_model() is None
+
+
+def _reasoning_settings() -> Settings:
+    return Settings.from_mapping({"llm": {"default": "local/alpha", "models": {
+        "local": {"reasoning_efforts": ["none", "low", "high"], "models": {
+            "alpha": {}, "beta": {"reasoning_efforts": ["low", "max"]},
+        }},
+    }}})
+
+
+def test_cli_three_steps_back_cancel_and_atomic_confirm() -> None:
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings())
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.select_model()
+            assert app.interaction.kind == "model_source"
+            app.interaction.accept("")
+            app._finish_interaction()
+            app.interaction.option_index = 1
+            app.interaction.accept("")
+            app._finish_interaction()
+            assert app.interaction.kind == "model_reasoning"
+            assert [item["value"] for item in app.interaction.current["options"]] == ["low", "max"]
+            assert [item["label"] for item in app.interaction.current["options"]] == ["low", "max"]
+            assert app.interaction.option_index == 0
+            assert runner.pending_model() is None
+            app._finish_interaction(cancelled=True)
+            assert app.interaction.kind == "model"
+            assert app.interaction.option_index == 1
+            app._finish_interaction(cancelled=True)
+            assert app.interaction.kind == "model_source"
+            app._finish_interaction(cancelled=True)
+            assert app.interaction is None
+            assert runner.pending_model() is None
+            await app.select_model("local/beta")
+            app.interaction.option_index = 1
+            app.interaction.accept("")
+            app._finish_interaction()
+            assert runner.pending_model() is None
+            assert runner.pending_reasoning_effort() is None
+            assert runner.current_model().id == "local/beta"
+            assert runner.reasoning_effort() == "max"
+            await app.select_model("local/beta")
+            assert app.interaction.option_index == 1
+            assert [item["label"] for item in app.interaction.current["options"]] == ["low", "max · current"]
+            app._finish_interaction(cancelled=True)
+            app._finish_interaction(cancelled=True)
+            app._finish_interaction(cancelled=True)
+            await app.select_model("local/alpha")
+            assert app.interaction.option_index == 0
+            assert [item["value"] for item in app.interaction.current["options"]] == ["none", "low", "high"]
+            assert [item["label"] for item in app.interaction.current["options"]] == ["none", "low", "high"]
+    try:
+        asyncio.run(scenario())
+    finally:
+        runner.close()
+
+
+def test_same_model_effort_changes_default_and_failure_rollback() -> None:
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings())
+    try:
+        original = runner.prepared
+        runner.request_model_change("local/alpha", reasoning_effort="low")
+        assert runner.pending_model() is None
+        assert runner._has_pending_runtime_config()
+        assert runner.prepared is original
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])) as build:
+            runner._apply_pending_runtime_config()
+        assert build.call_args.kwargs["reasoning_effort"] == "low"
+        assert runner.reasoning_effort() == "low"
+        runner.request_model_change("local/alpha", reasoning_effort="default")
+        assert runner.pending_reasoning_effort() == "default"
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])) as build:
+            runner._apply_pending_runtime_config()
+        assert build.call_args.kwargs["reasoning_effort"] is None
+        assert runner.reasoning_effort() == "default"
+        before = runner.prepared
+        events = []
+        runner.request_model_change("local/beta", reasoning_effort="max")
+        with patch("agent.runner.build_chat_model", side_effect=RuntimeError("unavailable")):
+            runner._apply_pending_runtime_config(events.append)
+        assert runner.prepared is before
+        assert runner.current_model().id == "local/alpha"
+        assert runner.reasoning_effort() == "default"
+        assert not runner._has_pending_runtime_config()
+        assert events[0].type == "runtime_config_failed"
+        with pytest.raises(ValueError, match="Unsupported reasoning effort"):
+            runner.request_model_change("local/beta", reasoning_effort="none")
+        assert not runner._has_pending_runtime_config()
+    finally:
+        runner.close()
+
+
+def test_effort_persistence_new_session_same_model_restore_and_restart(tmp_path: Path) -> None:
+    path = tmp_path / "efforts.sqlite3"
+    store = SessionStore(path)
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings(), session_store=store)
+    first = runner.thread_id
+    with patch("agent.runner.build_chat_model", return_value=scripted_model([])) as build:
+        runner.request_model_change("local/alpha", reasoning_effort="high")
+        runner._apply_pending_runtime_config()
+        assert store.get(first).reasoning_effort == "high"
+        second = runner.new_session().id
+        assert runner.reasoning_effort() == "default"
+        assert store.get(second).reasoning_effort == "default"
+        runner.switch_session(first)
+        assert runner.reasoning_effort() == "high"
+        assert build.call_args.kwargs["reasoning_effort"] == "high"
+        runner.switch_session(second)
+        assert runner.reasoning_effort() == "default"
+        runner.switch_session(first)
+    runner.request_model_change("local/alpha", reasoning_effort="default")
+    assert store.get(first).pending_reasoning_effort == "default"
+    runner.close()
+    store.close()
+
+    store = SessionStore(path)
+    with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+        runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings(), session_store=store, thread_id=first)
+        assert runner.reasoning_effort() == "high"
+        assert runner.pending_reasoning_effort() == "default"
+        runner._apply_pending_runtime_config()
+        assert runner.reasoning_effort() == "default"
+        assert store.get(first).pending_reasoning_effort is None
+    runner.close()
+    store.close()
+
+
+def test_switching_models_does_not_remember_previous_effort() -> None:
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings())
+    try:
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+            runner.request_model_change("local/alpha", reasoning_effort="high")
+            runner._apply_pending_runtime_config()
+            runner.request_model_change("local/beta")
+            runner._apply_pending_runtime_config()
+            assert runner.reasoning_effort() == "default"
+            runner.request_model_change("local/alpha")
+            runner._apply_pending_runtime_config()
+            assert runner.reasoning_effort() == "default"
+    finally:
+        runner.close()
+
+
+def test_restore_invalid_saved_effort_and_pending_effort(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "invalid.sqlite3")
+    info = store.create_session(model_id="local/beta")
+    store.touch(info.id, reasoning_effort="none")
+    store.set_pending_config(info.id, model_id=None, permission_mode=None, reasoning_effort="high")
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings(), session_store=store)
+    try:
+        runner.switch_session(info.id)
+        assert runner.reasoning_effort() == "default"
+        events = []
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+            runner._apply_pending_runtime_config(events.append)
+        assert runner.reasoning_effort() == "default"
+        assert any(event.type == "runtime_config_failed" for event in events)
+        assert store.get(info.id).reasoning_effort == "default"
+    finally:
+        runner.close()
+        store.close()
+
+
+def test_old_pending_model_without_effort_resets_to_default(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "old-pending.sqlite3")
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings(), session_store=store)
+    try:
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+            runner.request_model_change("local/alpha", reasoning_effort="high")
+            runner._apply_pending_runtime_config()
+        runner._pending_model_id = "local/beta"
+        runner._pending_reasoning_effort = None
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])) as build:
+            runner._apply_pending_runtime_config()
+        assert runner.current_model().id == "local/beta"
+        assert runner.reasoning_effort() == "default"
+        assert build.call_args.kwargs["reasoning_effort"] is None
+    finally:
+        runner.close()
+        store.close()

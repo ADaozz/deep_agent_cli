@@ -6,12 +6,13 @@ background and the UI only ever reads the last known summary.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 REFRESH_SECONDS = 5.0
-TIMEOUT_SECONDS = 2.0
+TIMEOUT_SECONDS = 10.0
 
 _NO_BRANCH_PREFIX = "No commits yet on "
 
@@ -23,8 +24,12 @@ class GitSummary:
     branch: str = ""
     changed: int = 0
     available: bool = False
+    error: str = ""
 
     def label(self) -> str:
+        if self.error:
+            detail = f"{self.branch} · {self.error}" if self.available else self.error
+            return f"⎇ {detail}"
         if not self.available:
             return ""
         state = f"{self.changed} changed" if self.changed else "clean"
@@ -56,29 +61,46 @@ class GitProbe:
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
-        self.summary = GitSummary()
+        self.summary = GitSummary(error="checking git")
 
     async def refresh(self) -> GitSummary:
         process: asyncio.subprocess.Process | None = None
+        spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
         try:
-            process = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_task(asyncio.create_subprocess_exec(
                 "git", "status", "--porcelain", "--branch",
                 cwd=str(self.workspace),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=TIMEOUT_SECONDS)
-            self.summary = (
-                parse_status(stdout.decode("utf-8", "replace"))
-                if process.returncode == 0 else GitSummary()
-            )
-        except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
-            self.summary = GitSummary()
+                stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"},
+            ))
+            # Cancellation during spawn must not lose ownership of the child.
+            process = await asyncio.shield(spawn)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=TIMEOUT_SECONDS)
+            if process.returncode == 0:
+                self.summary = parse_status(stdout.decode("utf-8", "replace"))
+            elif "not a git repository" in stderr.decode("utf-8", "replace").lower():
+                self.summary = GitSummary()
+            else:
+                self.summary = replace(self.summary, error="git error")
+        except TimeoutError:
+            self.summary = replace(self.summary, error="git timeout")
+        except FileNotFoundError:
+            self.summary = replace(self.summary, error="git unavailable")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            self.summary = replace(self.summary, error="git error")
         finally:
-            if process is not None and process.returncode is None:
+            if process is None and spawn is not None:
                 try:
-                    process.kill()
-                except ProcessLookupError:
+                    process = await spawn
+                except (OSError, ValueError, subprocess.SubprocessError):
                     pass
-                await process.wait()
+            if process is not None:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                # wait() alone does not drain/close subprocess pipe transports.
+                await process.communicate()
         return self.summary

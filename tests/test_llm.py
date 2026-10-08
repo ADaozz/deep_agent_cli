@@ -163,7 +163,7 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
     qwen = build_chat_model(ModelProfile("qwen", "qwen3.5-plus"))
     compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", provider="openai-compatible"))
     assert isinstance(qwen, ChatOpenAI)
-    assert type(compatible) is ChatOpenAI
+    assert isinstance(compatible, TokenPlanChatOpenAI)
     assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
     assert "messages" in compatible._get_request_payload([HumanMessage(content="hello")])
     assert compatible.use_responses_api is False
@@ -204,7 +204,7 @@ def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
     assert payload["messages"][1]["reasoning_content"] == "先分析"
 
 
-def test_token_plan_profile_uses_reasoning_adapter_only_for_token_plan_host() -> None:
+def test_compatible_profiles_preserve_reasoning_for_all_hosts() -> None:
     from agent.config import ModelProfile
     from agent.llm import build_chat_model
 
@@ -217,7 +217,7 @@ def test_token_plan_profile_uses_reasoning_adapter_only_for_token_plan_host() ->
         base_url="https://example.com/v1",
     ))
     assert isinstance(token_plan, TokenPlanChatOpenAI)
-    assert type(generic) is ChatOpenAI
+    assert isinstance(generic, TokenPlanChatOpenAI)
 
 
 @pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])
@@ -238,3 +238,32 @@ def test_configured_context_window_drives_deepagents_compaction(provider: str) -
 
     unknown = build_chat_model(ModelProfile("unknown", "qwen3.5-plus", provider=provider))
     assert compute_summarization_defaults(unknown)["trigger"] == ("tokens", 170_000)
+
+
+@pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])
+@pytest.mark.parametrize("effort", [None, "none", "low", "max"])
+def test_reasoning_effort_request_payload(provider, effort) -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    from langchain_core.messages import HumanMessage
+
+    profile = ModelProfile("test", "test", provider=provider, reasoning_efforts=("none", "low", "max"))
+    client = build_chat_model(profile, reasoning_effort=effort)
+    payload = client._get_request_payload([HumanMessage(content="hello")])
+    assert "enable_thinking" not in payload.get("extra_body", {})
+    if effort is None:
+        assert "reasoning" not in payload
+        assert "reasoning_effort" not in payload
+    elif provider == "qwen-responses":
+        assert payload["reasoning"] == {"effort": effort}
+        assert "reasoning_effort" not in payload
+    else:
+        assert payload["reasoning_effort"] == effort
+        assert "reasoning" not in payload
+
+
+def test_unconfigured_reasoning_effort_is_rejected() -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    with pytest.raises(ValueError, match="Unsupported reasoning effort"):
+        build_chat_model(ModelProfile("test", "test"), reasoning_effort="none")

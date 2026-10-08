@@ -23,6 +23,9 @@ llm:
       base_url: http://localhost:8000/v1
       provider: qwen-responses
       stream_usage: false
+      # Available reasoning efforts; when empty, the CLI only offers default (omit API parameters).
+      # Set the values accepted by this endpoint; omitted model fields inherit this list.
+      reasoning_efforts: []
       models:
         qwen-plus:
           model: qwen3.5-plus
@@ -31,21 +34,71 @@ llm:
         qwen3.6-flash:
           input: [text, image]
           context_window: 1m
-    # --- Aliyun Bailian Qwen Token Plan (compatible-mode endpoint) ---
-    # Uncomment this group and set default: token-plan/auto to start with Token Plan.
+          reasoning_efforts: null  # Explicit null or [] clears inherited efforts.
+    # --- Aliyun Bailian: Qwen Chat Completions ---
+    # https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
+    # Uncomment a group, export its key, and update llm.default to source/model.
+    # bailian:
+    #   api_key: ${DASHSCOPE_API_KEY}
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    #   provider: openai-compatible
+    #   stream_usage: true
+    #   reasoning_efforts: [none, low, medium, xhigh]
+    #   models:
+    #     qwen3.8-flash: {}  # Inherits the group list.
+    #     qwen3.8-max: {}
+    #     glm-5.3:
+    #       reasoning_efforts: [low, high, max]  # Replaces the group list; no none.
+    #
+    # --- Aliyun Bailian: Responses API ---
+    # https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses
+    # bailian-responses:
+    #   api_key: ${DASHSCOPE_API_KEY}
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    #   provider: qwen-responses
+    #   reasoning_efforts: [none, low, medium, xhigh]
+    #   models:
+    #     qwen3.8-flash: {}
+    #     qwen3.8-max: {}
+    #
+    # --- Aliyun Bailian Token Plan ---
+    # Confirm supported efforts for your Token Plan endpoint before filling the list.
     # token-plan:
     #   api_key: ${TOKEN_PLAN_API_KEY}
     #   base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
     #   provider: openai-compatible
     #   stream_usage: true
-    #   context_window: 1m
+    #   reasoning_efforts: []
     #   models:
-    #     auto:
-    #       input: [text]
-    #     qwen3.8-max:
-    #       input: [text, image]
-    #     qwen3.8-flash:
-    #       input: [text, image]
+    #     auto: {}
+    #     qwen3.8-flash: {}
+    #     qwen3.8-max: {}
+    #
+    # --- DeepSeek official Chat Completions ---
+    # https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
+    # deepseek:
+    #   api_key: ${DEEPSEEK_API_KEY}
+    #   base_url: https://api.deepseek.com/v1
+    #   provider: openai-compatible
+    #   reasoning_efforts: [none, low, high, max]
+    #   models:
+    #     deepseek-flash: {}
+    #
+    # --- Zhipu official Chat Completions ---
+    # https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
+    # zhipu:
+    #   api_key: ${ZHIPU_API_KEY}
+    #   base_url: https://open.bigmodel.cn/api/paas/v4
+    #   provider: openai-compatible
+    #   reasoning_efforts: [low, high, max]
+    #   models:
+    #     glm-5.3: {}
+    #
+    # Effort lists depend on model, protocol, and endpoint; maintain them from provider docs.
+    # Child models inherit omitted fields, replace declared lists, and clear with null or [].
+    # default is a CLI-only option: do not put it in reasoning_efforts.
+    # Responses sends reasoning.effort; Chat Completions sends reasoning_effort.
+
 
 web_search:
   # Optional. TAVILY_API_KEY overrides this value; omit both to hide web_search.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deep-agent-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "A sandboxed coding agent CLI for Linux and WSL2"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,6 +14,7 @@ classifiers = [
   "Environment :: Console",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development",
 ]
 dependencies = [

@@ -17,6 +17,69 @@ from agent.session import SessionStore, StopReason, messages_to_transcript, sett
 from tests.conftest import scripted_model
 
 
+def test_draft_restarts_and_new_sessions_do_not_persist(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "draft.sqlite3")
+    identifiers = set()
+    try:
+        for _ in range(3):
+            runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store,
+                                 persist_on_first_message=True)
+            try:
+                identifiers.add(runner.thread_id)
+                identifiers.add(runner.new_session().id)
+                assert runner.list_sessions() == []
+                assert store.get(runner.thread_id) is None
+                assert not runner.thread_has_content()
+            finally:
+                runner.close()
+        assert len(identifiers) == 6
+        assert store.list_sessions() == []
+        assert not list(tmp_path.glob("*.locks/*.lock"))
+        assert store.checkpointer.get_tuple({"configurable": {"thread_id": runner.thread_id}}) is None
+    finally:
+        store.close()
+
+
+def test_draft_first_message_persists_config_once_and_can_resume(tmp_path: Path) -> None:
+    from unittest.mock import patch
+    from agent.config import ModelProfile, Settings
+    settings = Settings(llm_profiles=(ModelProfile("local/test", "test", reasoning_efforts=("low",)),),
+                        llm_default="local/test")
+    store = SessionStore(tmp_path / "first-message.sqlite3")
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store,
+                         settings=settings, persist_on_first_message=True)
+    identifier = runner.thread_id
+    try:
+        runner.request_model_change("local/test", reasoning_effort="low")
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="one"), AIMessage(content="two")])):
+            runner._apply_pending_runtime_config()
+        assert store.get(identifier) is None
+        assert runner.invoke("first message").status == "completed"
+        info = store.get(identifier)
+        assert info.title == "first message"
+        assert info.model_id == "local/test" and info.reasoning_effort == "low"
+        assert len(store.list_sessions()) == 1
+        assert not store.try_acquire_session(identifier)
+        assert runner.invoke("second message").status == "completed"
+        assert len(store.list_sessions()) == 1
+    finally:
+        runner.close()
+    resumed = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store,
+                          settings=settings, persist_on_first_message=True)
+    try:
+        draft_id = resumed.thread_id
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+            snapshot = resumed.switch_session(identifier)
+        assert snapshot.info.id == identifier
+        assert resumed.reasoning_effort() == "low"
+        assert store.get(draft_id) is None
+        assert len(store.list_sessions()) == 1
+        assert not store.try_acquire_session(identifier)
+    finally:
+        resumed.close()
+        store.close()
+
+
 def test_workspace_state_path_is_isolated(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("DEEP_AGENT_STATE_PATH", raising=False)
     a = workspace_state_path(tmp_path / "a")
@@ -63,7 +126,9 @@ def test_legacy_catalog_migrates_once_and_derives_status(tmp_path: Path) -> None
         assert (info.status, info.last_run_status, info.model_id) == ("waiting", StopReason.DEFERRED, "model-a")
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(session_catalog)")}
         assert "status" not in columns
-        assert {"pending_model_id", "pending_permission_mode"} <= columns
+        assert {"pending_model_id", "pending_permission_mode", "reasoning_effort", "pending_reasoning_effort"} <= columns
+        assert info.reasoning_effort == "default"
+        assert info.pending_reasoning_effort is None
         store.close()
 
 
@@ -307,3 +372,24 @@ def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     assert timed_out[0].is_error
     assert timed_out[0].status == "error"
     assert timed_out[0].exit_code == 124
+
+
+def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path) -> None:
+    path = tmp_path / "catalog.sqlite3"
+    store = SessionStore(path)
+    info = store.create_session(model_id="alpha")
+    store.touch(info.id, reasoning_effort="low")
+    store.set_pending_config(info.id, model_id="beta", permission_mode=None, reasoning_effort="default")
+    store.close()
+    store = SessionStore(path)
+    try:
+        for restored in (store.get(info.id), store.resolve_prefix(info.id[:8]), store.list_sessions()[0]):
+            assert restored.reasoning_effort == "low"
+            assert restored.pending_reasoning_effort == "default"
+            assert restored.pending_model_id == "beta"
+        store.touch(info.id, title="renamed")
+        assert store.get(info.id).reasoning_effort == "low"
+        store.set_pending_config(info.id, model_id=None, permission_mode=None)
+        assert store.get(info.id).pending_reasoning_effort is None
+    finally:
+        store.close()

@@ -190,6 +190,7 @@ class AgentRunner:
         on_event: RunEventHandler | None = None,
         session_store: SessionStore | None = None,
         enable_sessions: bool = False,
+        persist_on_first_message: bool = False,
         workspace: Path | None = None,
         settings: Settings | None = None,
         model_id: str | None = None,
@@ -209,6 +210,8 @@ class AgentRunner:
         self._operation_lock = Lock()
         self._permission_mode = PermissionMode.ASK
         self._pending_config_lock = Lock()
+        self._reasoning_effort = "default"
+        self._pending_reasoning_effort: str | None = None
         self._pending_model_id: str | None = None
         self._pending_permission_mode: PermissionMode | None = None
         self._resume_context: RecoveryContext | None = None
@@ -270,6 +273,7 @@ class AgentRunner:
         self._runtime = SessionRuntime(
             session_store=self.session_store, checkpointer=self._checkpointer,
             settings=self.settings,
+            persist_on_first_message=persist_on_first_message,
         )
         self._runtime.acquire_initial(
             thread_id, model_id=self._current_model_id,
@@ -278,6 +282,15 @@ class AgentRunner:
         if self.session_store is not None:
             saved = self.session_store.get(self.thread_id)
             if saved is not None:
+                plan = self._runtime.restore_plan(saved, execution_mode=self.prepared.execution_mode)
+                try:
+                    self._apply_restore_plan(plan)
+                except Exception:
+                    self._runtime.release()
+                    raise
+                for notice in plan.notices:
+                    _emit(self.on_event, RunEvent(type="runtime_config_failed", content=notice))
+                self._pending_reasoning_effort = saved.pending_reasoning_effort
                 self._pending_model_id = saved.pending_model_id
                 self._pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
         self.control.set_pending_config_check(self._has_pending_runtime_config)
@@ -332,16 +345,27 @@ class AgentRunner:
 
     def _has_pending_runtime_config(self) -> bool:
         with self._pending_config_lock:
-            return self._pending_model_id is not None or self._pending_permission_mode is not None
+            return (self._pending_model_id is not None or self._pending_permission_mode is not None
+                    or self._pending_reasoning_effort is not None)
 
     def _save_pending_config(self) -> None:
         if self.session_store is not None:
             self.session_store.set_pending_config(
                 self.thread_id, model_id=self._pending_model_id,
+                reasoning_effort=self._pending_reasoning_effort,
                 permission_mode=self._pending_permission_mode.value if self._pending_permission_mode else None,
             )
 
-    def request_model_change(self, id_or_prefix: str) -> ModelProfile:
+    def reasoning_effort(self) -> str:
+        return self._reasoning_effort
+
+    def pending_reasoning_effort(self) -> str | None:
+        with self._pending_config_lock:
+            return self._pending_reasoning_effort
+
+    def request_model_change(
+        self, id_or_prefix: str, *, reasoning_effort: str | None = None,
+    ) -> ModelProfile:
         if self._closed:
             raise RuntimeError("Runner is closed")
         self._require_active_session()
@@ -349,7 +373,15 @@ class AgentRunner:
             raise RuntimeError("Model switching requires Settings with llm.models")
         profile = self.settings.get_profile(id_or_prefix)
         with self._pending_config_lock:
+            effort = reasoning_effort if reasoning_effort is not None else (
+                self._reasoning_effort if profile.id == self._current_model_id else "default"
+            )
+            if effort != "default" and effort not in profile.reasoning_efforts:
+                raise ValueError(f"Unsupported reasoning effort for {profile.id}: {effort}")
             self._pending_model_id = profile.id if profile.id != self._current_model_id else None
+            self._pending_reasoning_effort = effort if (
+                self._pending_model_id is not None or effort != self._reasoning_effort
+            ) else None
             self._save_pending_config()
         return profile
 
@@ -374,45 +406,70 @@ class AgentRunner:
         with self._pending_config_lock:
             model_id = self._pending_model_id
             mode = self._pending_permission_mode
-            if model_id is None and mode is None:
+            effort = self._pending_reasoning_effort
+            if model_id is None and mode is None and effort is None:
                 return
-            profile = None
+            profile = self.current_model()
             if model_id is not None:
                 try:
                     if self.settings is None:
                         raise KeyError(model_id)
                     profile = self.settings.get_profile(model_id)
+                    # Pending switches saved before effort support use the new model's default.
+                    if effort is None:
+                        effort = "default"
                 except KeyError:
                     failures.append(f"Pending model {model_id} is unavailable")
                     model_id = None
+                    effort = None
+            if effort is not None and effort != "default" and (
+                profile is None or effort not in profile.reasoning_efforts
+            ):
+                failures.append(f"Pending reasoning effort {effort} is unavailable; using default")
+                effort = "default"
             if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
                 failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
                 mode = None
+            previous = self.prepared, self._chat_model
             try:
-                if model_id is not None or mode is not None:
+                if model_id is not None or mode is not None or effort is not None:
                     target_mode = mode or self._permission_mode
-                    chat = build_chat_model(profile, attachment_store=self.attachment_store) if profile else self._chat_model
+                    target_effort = effort if effort is not None else self._reasoning_effort
+                    chat = self._chat_model
+                    if profile is not None and (model_id is not None or effort is not None):
+                        chat = build_chat_model(
+                            profile, attachment_store=self.attachment_store,
+                            reasoning_effort=None if target_effort == "default" else target_effort,
+                        )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
+                    if self.session_store is not None:
+                        self.session_store.touch(
+                            self.thread_id, model_id=profile.id if model_id is not None else self._current_model_id,
+                            permission_mode=target_mode.value, reasoning_effort=target_effort,
+                        )
             except Exception as exc:
+                self.prepared, self._chat_model = previous
                 failures.append(str(exc))
                 model_id = None
                 mode = None
-            if profile is not None:
-                if model_id is not None:
-                    self._current_model_id = profile.id
+                effort = None
+            if model_id is not None:
+                self._current_model_id = profile.id
             if mode is not None:
                 self._permission_mode = mode
+            if effort is not None:
+                self._reasoning_effort = effort
             self._pending_model_id = None
             self._pending_permission_mode = None
-            if self.session_store is not None:
-                self.session_store.touch(self.thread_id, model_id=self._current_model_id, permission_mode=self._permission_mode.value)
+            self._pending_reasoning_effort = None
             self._save_pending_config()
         for failure in failures:
             _emit(handler or self.on_event, RunEvent(type="runtime_config_failed", content=failure, is_error=True))
-        if model_id is not None or mode is not None:
+        if model_id is not None or mode is not None or effort is not None:
             _emit(handler or self.on_event, RunEvent(
                 type="runtime_config_applied",
                 result={"model_id": self._current_model_id, "permission_mode": self._permission_mode.value,
+                        "reasoning_effort": self._reasoning_effort, "reasoning_changed": effort is not None,
                         "model_changed": model_id is not None, "permission_changed": mode is not None},
             ))
 
@@ -525,6 +582,7 @@ class AgentRunner:
         if chat is None and self.settings is not None:
             chat = build_chat_model(
                 self.settings.get_profile(self._current_model_id),
+                reasoning_effort=None if self._reasoning_effort == "default" else self._reasoning_effort,
                 attachment_store=self.attachment_store,
             )
         self.prepared = build_agent(
@@ -689,7 +747,8 @@ class AgentRunner:
         """
         assert self._runtime is not None
         previous = (self._chat_model, self._current_model_id, self._permission_mode,
-                    self._pending_model_id, self._pending_permission_mode)
+                    self._pending_model_id, self._pending_permission_mode,
+                    self._reasoning_effort, self._pending_reasoning_effort)
         plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
         try:
             snapshot = self.load_session(info.id)
@@ -705,15 +764,17 @@ class AgentRunner:
             refreshed = self._runtime.get(info.id)
             self.session_store.touch(
                 info.id, model_id=self._current_model_id,
-                permission_mode=self._permission_mode.value,
+                permission_mode=self._permission_mode.value, reasoning_effort=self._reasoning_effort,
             )
         except Exception:
-            old_model, old_id, old_mode, old_pending_model, old_pending_mode = previous
+            old_model, old_id, old_mode, old_pending_model, old_pending_mode, old_effort, old_pending_effort = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
             self._current_model_id = old_id
             self._permission_mode = old_mode
             self._pending_model_id = old_pending_model
             self._pending_permission_mode = old_pending_mode
+            self._reasoning_effort = old_effort
+            self._pending_reasoning_effort = old_pending_effort
             if lease is not None:
                 lease.release()
             raise
@@ -723,6 +784,7 @@ class AgentRunner:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
             self._runtime.bind(snapshot.info.id)
+        self._pending_reasoning_effort = info.pending_reasoning_effort
         self._pending_model_id = info.pending_model_id
         self._pending_permission_mode = parse_permission_mode(info.pending_permission_mode or "")
         if self._pending_model_id and self.settings is not None:
@@ -731,6 +793,7 @@ class AgentRunner:
             except KeyError:
                 snapshot.notices.append(f"Pending model {self._pending_model_id} is unavailable; switch cancelled.")
                 self._pending_model_id = None
+                self._pending_reasoning_effort = None
         if self._pending_permission_mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
             snapshot.notices.append("Pending allow permission is unavailable here; switch cancelled.")
             self._pending_permission_mode = None
@@ -742,19 +805,21 @@ class AgentRunner:
         return snapshot
 
     def _apply_restore_plan(self, plan: RestorePlan) -> None:
-        if (
-            self.settings is not None
-            and plan.model_id
-            and plan.model_id != self._current_model_id
+        if self.settings is not None and plan.model_id and (
+            plan.model_id != self._current_model_id or plan.reasoning_effort != self._reasoning_effort
         ):
             profile = self.settings.get_profile(plan.model_id)
             self._rebuild_prepared(
-                model=build_chat_model(profile, attachment_store=self.attachment_store),
+                model=build_chat_model(
+                    profile, attachment_store=self.attachment_store,
+                    reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
+                ),
                 permission_mode=plan.permission_mode,
             )
             self._current_model_id = profile.id
         elif plan.permission_mode is not self._permission_mode:
             self._rebuild_prepared(permission_mode=plan.permission_mode)
+        self._reasoning_effort = plan.reasoning_effort
         self._permission_mode = plan.permission_mode
 
     @_exclusive_operation
@@ -764,28 +829,18 @@ class AgentRunner:
         self._resume_context = None
         self.control.clear_pause()
         self.control.set_defer_steering(False)
+        if self._reasoning_effort != "default" and self.settings is not None:
+            self._apply_restore_plan(RestorePlan(
+                model_id=self._current_model_id, permission_mode=self._permission_mode,
+            ))
         self._runtime.clear_pending()
+        self._pending_reasoning_effort = None
         self._pending_model_id = None
         self._pending_permission_mode = None
-        if self.session_store is None:
-            thread_id = f"cli-{uuid4()}"
-            self._runtime.adopt_new(thread_id)
-            now = datetime.now(timezone.utc)
-            return SessionInfo(
-                id=self.thread_id,
-                title=title or "New session",
-                created_at=now,
-                updated_at=now,
-                status="running",
-                model_id=self._current_model_id,
-                permission_mode=self._permission_mode.value,
-            )
-        info = self.session_store.create_session(
+        return self._runtime.create_new(
             title=title, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,
         )
-        self._runtime.adopt_new(info.id)
-        return info
 
     def close(self) -> None:
         """Forbid new operations, drain an active run, then drop the lease.
@@ -889,6 +944,10 @@ class AgentRunner:
         if self._resume_context is not None:
             self._resume_context.armed = True
         if self.session_store is not None:
+            self._runtime.persist_for_message(
+                model_id=self._current_model_id, permission_mode=self._permission_mode.value,
+                reasoning_effort=self._reasoning_effort,
+            )
             title = text.strip().splitlines()[0][:80] if text.strip() else None
             self.session_store.touch(self.thread_id, title=title,
                                      last_run_status=StopReason.PENDING)

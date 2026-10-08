@@ -2,6 +2,7 @@
 """Live Qwen Responses reasoning/text stream smoke through AgentRunner.on_delta."""
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -15,7 +16,10 @@ from agent.factory import create_agent  # noqa: E402
 from agent.runner import AgentRunner  # noqa: E402
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--effort", help="Configured reasoning effort; omit for API default (none is not valid for this smoke)")
+    args = parser.parse_args(argv)
     events: list[tuple[str, str]] = []
 
     def on_delta(kind: str, text: str) -> None:
@@ -29,17 +33,27 @@ def main() -> int:
         print(f"[{label} +{extra_len} chars] {text[-80:]!r}", flush=True)
 
     settings = Settings.load()
-    model = build_chat_model(settings.active_profile)
+    if settings.active_profile.provider != "qwen-responses":
+        parser.error("stream_smoke requires a Qwen Responses profile (provider: qwen-responses)")
+    if args.effort == "none":
+        parser.error("stream_smoke requires thinking; effort none disables it")
+    if args.effort is not None and args.effort not in settings.active_profile.reasoning_efforts:
+        parser.error("--effort must be declared in the model's effective reasoning_efforts")
+    model = build_chat_model(settings.active_profile, reasoning_effort=args.effort)
     runner = AgentRunner(
         prepared=create_agent(
             model=model,
+            settings=settings,
             instructions="只用一两句话直接回答，不要调用任何工具。",
             skills=[],
         ),
         thread_id="stream-smoke",
         on_delta=on_delta,
     )
-    result = runner.invoke("用一句话解释什么是 LangGraph interrupt。")
+    try:
+        result = runner.invoke("用一句话解释什么是 LangGraph interrupt。")
+    finally:
+        runner.close()
     print(f"\nstatus={result.status}")
     print(f"output={result.output!r}")
     kinds = {kind for kind, _ in events}
