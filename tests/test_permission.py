@@ -318,7 +318,7 @@ def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
     assert call["name"] == "execute"
     assert network_requested(call.get("args") or {})
     ui = InteractionController.approval([call])
-    assert "NETWORK" in ui.question
+    assert "Network: ON" in ui.question
     resumed = runner.approve_tool("ex-sb-net")
     assert resumed.status == "completed"
     assert resumed.output == "online"
@@ -442,7 +442,7 @@ def test_approval_ui_mentions_declared_network() -> None:
         "name": "execute",
         "args": {"command": "curl example.com", "network": True},
     }])
-    assert "NETWORK" in interaction.question
+    assert "Network: ON" in interaction.question
     assert len(interaction.fields[0]["options"]) == 2
     labels = {opt["label"] for opt in interaction.fields[0]["options"]}
     assert labels == {"Reject", "Run"}
@@ -517,12 +517,19 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
             assert "network" in app.interaction.question.lower()
             assert app.interaction.accept("ALLOW")
             app._finish_interaction()
-            assert app.runner.permission_mode() is PermissionMode.ASK
-            assert app.runner.pending_permission_mode() is PermissionMode.ALLOW
+            assert app.runner.permission_mode() is PermissionMode.ALLOW
+            assert app.runner.pending_permission_mode() is None
             assert app.interaction is None
-            assert any(
-                "Permission switch queued" in getattr(block, "content", "") for block in app.state.blocks
-            )
+            assert "perm:allow" in "".join(text for _, text in app._footer_text())
+            app.show_status()
+            assert "pending" not in getattr(app.state.blocks[-1], "content", "").lower()
+            await app.select_permission("ask")
+            assert runner.permission_mode() is PermissionMode.ASK
+            assert runner.pending_permission_mode() is None
+            assert "perm:ask" in "".join(text for _, text in app._footer_text())
+            await app.select_permission("allow")
+            assert app.interaction.accept("ALLOW")
+            app._finish_interaction()
 
     asyncio.run(scenario())
     resumed = runner.invoke("continue")
@@ -546,3 +553,129 @@ def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:
             assert any("ALLOW not enabled" in getattr(block, "content", "") for block in app.state.blocks)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("network,label", [(None, "OFF (default)"), (False, "OFF"), (True, "ON")])
+def test_approval_execute_network_summary(network, label) -> None:
+    args = {"command": "python -m pytest tests/ -q", "api_key": "must-not-render"}
+    if network is not None:
+        args["network"] = network
+    ui = InteractionController.approval([{"name": "execute", "args": args}])
+    assert f"Network: {label}" in ui.question
+    assert "Tool: execute" in ui.question
+    assert "Command: python -m pytest tests/ -q" in ui.question
+    assert "must-not-render" not in ui.question
+    assert "declared capabilities" not in ui.question
+    assert ui.accept() and ui.values["approved"] == "reject"
+
+
+def test_approval_multiple_tools_truncation_and_redaction() -> None:
+    ui = InteractionController.approval([
+        {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
+        {"toolCallId": "b", "name": "execute", "args": {"command": "curl -H 'Authorization: Bearer private-value' site"}},
+        {"toolCallId": "c", "name": "write_file", "args": {"content": "private-file-content"}},
+    ])
+    assert ui.tool_call_ids == ["a", "b", "c"]
+    assert "truncated" in ui.question and "Ctrl+O" in ui.question
+    assert "private-value" not in ui.question
+    assert "private-file-content" not in ui.question
+    assert "Tool: write_file" in ui.question
+    assert ui.option_index == 0
+
+
+@pytest.mark.parametrize("busy", ["running", "locked"])
+def test_cli_permission_change_defers_while_busy(busy) -> None:
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
+        try:
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                app.state.running = busy == "running"
+                if busy == "locked":
+                    runner._operation_lock.acquire()
+                try:
+                    app._request_permission_mode(PermissionMode.ALLOW)
+                finally:
+                    if busy == "locked":
+                        runner._operation_lock.release()
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.pending_permission_mode() is PermissionMode.ALLOW
+                assert "queued" in app.state.status
+        finally:
+            runner.close()
+
+
+def test_cli_idle_permission_failure_keeps_original(monkeypatch) -> None:
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
+        try:
+            original = runner.prepared
+            def fail(**kwargs):
+                raise RuntimeError("rebuild failed")
+            monkeypatch.setattr(runner, "_rebuild_prepared", fail)
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                app._request_permission_mode(PermissionMode.ALLOW)
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.prepared is original
+                assert runner.pending_permission_mode() is None
+                assert "failed" in app.state.status
+                assert any("rebuild failed" in getattr(b, "content", "") for b in app.state.blocks)
+        finally:
+            runner.close()
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.ALLOW])
+def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
+    from agent.session import SessionStore
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                         sandbox_config=SandboxConfig(workspace=tmp_path), session_store=store)
+    thread_id = runner.thread_id
+    try:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._request_permission_mode(PermissionMode.ALLOW)
+            app._request_permission_mode(mode)
+        assert store.get(thread_id).permission_mode == mode.value
+        assert store.get(thread_id).pending_permission_mode is None
+    finally:
+        runner.close()
+    restored = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+                           sandbox_config=SandboxConfig(workspace=tmp_path), session_store=store,
+                           thread_id=thread_id)
+    try:
+        assert restored.permission_mode() is mode
+        assert restored.pending_permission_mode() is None
+    finally:
+        restored.close()
+        store.close()
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit_file", "delete"])
+@pytest.mark.parametrize("key", ["file_path", "path"])
+def test_approval_file_tool_shows_only_target(tool, key) -> None:
+    args = {key: "/workspace/report.md", "content": "private contents",
+            "old_string": "private old text", "new_string": "private new text"}
+    ui = InteractionController.approval([{"toolCallId": "file-1", "name": tool, "args": args}])
+    assert f"Tool: {tool}" in ui.question
+    assert "Target: /workspace/report.md" in ui.question
+    assert "private" not in ui.question
+    assert ui.tool_call_ids == ["file-1"]
+    assert ui.option_index == 0
+    assert ui.accept() and ui.values["approved"] == "reject"
+
+
+def test_approval_file_targets_bound_and_redact_summary() -> None:
+    ui = InteractionController.approval([
+        {"name": "write_file", "args": {"file_path": "/workspace/" + "x" * 400}},
+        {"name": "edit_file", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
+        {"name": "delete", "args": {"file_path": "/workspace/api_key=private-value"}},
+        {"name": "delete", "args": {}},
+    ])
+    assert "truncated; Ctrl+O" in ui.question
+    assert "\x1b" not in ui.question
+    assert "private-value" not in ui.question
+    assert "[redacted: target may contain credentials]" in ui.question
+    assert "Target: <not supplied>" in ui.question

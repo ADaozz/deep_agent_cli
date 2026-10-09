@@ -1,0 +1,27 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_real_pty_allow_playwright_flow ______________________
+
+tmp_path = PosixPath('/tmp/deep-agent-pty-pw-test/test_real_pty_allow_playwright0')
+
+    @pytest.mark.playwright
+    def test_real_pty_allow_playwright_flow(tmp_path):
+        from tests.test_playwright_sandbox import _prerequisites
+        _prerequisites(tmp_path)  # Explicit prerequisite skip occurs in parent, never after launch failure.
+        tui = Tui(tmp_path, playwright=True)
+        try:
+            tui.wait(lambda s: s['status'] == 'Ready')
+            tui.send('/permission allow\r')
+            tui.wait(lambda s: s['interaction'] == 'permission_confirm')
+            tui.send('ALLOW\r')
+            tui.wait(lambda s: s['permission'] == 'allow' and s['pending'] is None)
+            tui.send('run Playwright browser flow\r')
+            state = tui.wait(lambda s: len(s['tools']) == 4 and s['tools'][-1]['exit_code'] is not None, timeout=60)
+>           assert all(t['exit_code'] == 0 and not t['is_error'] for t in state['tools'])
+E           assert False
+E            +  where False = all(<generator object test_real_pty_allow_playwright_flow.<locals>.<genexpr> at 0x7f2f09ed5220>)
+
+tests/test_tui_pty.py:222: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_tui_pty.py::test_real_pty_allow_playwright_flow - assert False
+1 failed in 13.43s

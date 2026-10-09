@@ -1,0 +1,16 @@
+{
+  "os": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "python": "3.12.14",
+  "tools": {
+    "bwrap": "/usr/bin/bwrap",
+    "tmux": null,
+    "Xvfb": null,
+    "node": "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "npm": "/opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/npm",
+    "google-chrome": null,
+    "chromium": "/usr/bin/chromium"
+  },
+  "system_node": false,
+  "DISPLAY_set": false,
+  "historical_UX_artifacts": "not present in original git tree"
+}

@@ -1,0 +1,66 @@
+{
+  "archive": "raw-captures.tar.gz",
+  "archive_sha256": "07a6f23613e7a012ecc902a72f4a4eecb8c873cb92a35ff7af8dd46e1942cca6",
+  "files": [
+    {
+      "member": "live-image-terminal.txt",
+      "bytes": 6055,
+      "sha256": "76450428027c4b1eb33401701643be4cb5294e25295a78f216f9e80b404923b5"
+    },
+    {
+      "member": "live-playwright-terminal.txt",
+      "bytes": 249749,
+      "sha256": "2817ec690d1ef4af899d01a550463e568bb51389768d18013ef8afcd0b1a80c9"
+    },
+    {
+      "member": "pty/image-test_real_png_pty_attach_submi0.txt",
+      "bytes": 5065,
+      "sha256": "0e24d2337f9da7889841bc08b4ad62d9bb5223de7e3689fb63e33eb0e384b6e0"
+    },
+    {
+      "member": "pty/image-test_real_png_pty_attach_submi1.txt",
+      "bytes": 5105,
+      "sha256": "3a16aa8adb0fd63a9fc89091e47ea0202c59bd921a1c7f31e49e4c9d00d86df2"
+    },
+    {
+      "member": "pty/image-test_real_png_pty_attach_submi2.txt",
+      "bytes": 5177,
+      "sha256": "083e39b7bf43fef351a24a2652d295db2cc1425a2678a27d276801125891a4e8"
+    },
+    {
+      "member": "pty/image-test_real_pty_native_clipboard0.txt",
+      "bytes": 3247,
+      "sha256": "b15896ccd1474ca04ac565333aa2ca4b8f310cbcd796f6bccbca41c9fb01be4d"
+    },
+    {
+      "member": "pty/test_real_pty_allow_playwright0.txt",
+      "bytes": 19446,
+      "sha256": "ca606a680d240673d98e722cc5945a71e02983baf03d7f348ae7d713c129f99e"
+    },
+    {
+      "member": "pty/test_real_pty_completion_permi0.txt",
+      "bytes": 17712,
+      "sha256": "ef58ce9c0d9e7cdc0484895d84489a382fdb6a7ace4153e4a5bcbbd8aaed69eb"
+    },
+    {
+      "member": "pty/test_real_pty_ctrl_c_window_0_0.txt",
+      "bytes": 3216,
+      "sha256": "8ecf611edd7268cf5129fa085ffeae48f71052389432004d37ed2130e4ddda22"
+    },
+    {
+      "member": "pty/test_real_pty_ctrl_c_window_0_1.txt",
+      "bytes": 3304,
+      "sha256": "c2cef0c84511a6ff344dfe2ea855a199b699e278db3312e44585491844c871e6"
+    },
+    {
+      "member": "pty/test_real_pty_ctrl_c_window_1_0.txt",
+      "bytes": 3702,
+      "sha256": "288c33e2c502065848b237079da7b17cdcec96f681b761633979ccb242470e7c"
+    },
+    {
+      "member": "pytest.xml",
+      "bytes": 106163,
+      "sha256": "7ba8e1c0ac0dcdcaf8f1f643e80a6d0d36e1fa38d336e0b10a6753c7dc583662"
+    }
+  ]
+}

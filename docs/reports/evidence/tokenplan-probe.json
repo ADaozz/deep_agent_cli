@@ -1,0 +1,8 @@
+{
+  "endpoint": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "model": "auto",
+  "http_status": 200,
+  "status": "PASS",
+  "returned_model": "auto",
+  "has_response": true
+}

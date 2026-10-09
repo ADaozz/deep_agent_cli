@@ -1,0 +1,21 @@
+{
+  "image_file": "tests/fixtures/browser-page.png",
+  "bytes": 7111,
+  "sha256": "87c970316696f626293222a3f50a5fef5fee3f4a0d5058af217fc729c5097596",
+  "IHDR": [
+    1280,
+    720,
+    8,
+    2,
+    0,
+    0,
+    0
+  ],
+  "is_wsl": false,
+  "powershell": null,
+  "wslpath": null,
+  "native_clipboard_inspect": "ClipboardUnavailable(reason='Image clipboard paste is currently supported on WSL; use /image <path>')",
+  "native_bitmap_clipboard_status": "BLOCKED",
+  "local_regression": "217 passed",
+  "production_changes_in_this_followup": false
+}

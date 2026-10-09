@@ -1,0 +1,37 @@
+{
+  "image_file": "tests/fixtures/browser-page.png",
+  "source_bytes": 7111,
+  "source_sha256": "87c970316696f626293222a3f50a5fef5fee3f4a0d5058af217fc729c5097596",
+  "model": "token-plan/auto",
+  "mode": "real PTY + bracketed image-file-path paste + real Qwen",
+  "native_bitmap_clipboard_status": "BLOCKED: not WSL; no Windows PowerShell clipboard",
+  "attached_metadata": {
+    "type": "deep-agent/image-attachment-ref",
+    "version": 1,
+    "id": "img_56251a3092674f7fbe47f52937eee911",
+    "filename": "browser-page.png",
+    "mime_type": "image/png",
+    "size": 7111,
+    "storage_key": "87c970316696f626293222a3f50a5fef5fee3f4a0d5058af217fc729c5097596.png"
+  },
+  "request_sent_before_submit": false,
+  "transcript": "\u53ea\u6839\u636e\u8fd9\u5f20\u56fe\u7247\uff0c\u5199\u51fa\u5de6\u4e0a\u89d2\u9ed1\u8272\u5927\u5b57\u7684\u82f1\u6587\u539f\u6587\u3002\u4e0d\u8981\u8c03\u7528\u4efb\u4f55\u5de5\u5177\uff0c\u4e0d\u8981\u731c\u6d4b\u6587\u4ef6\u540d\uff0c\u53ea\u56de\u590d\u56fe\u4e2d\u7684\u6587\u5b57\u3002\npersistent\n",
+  "tool_count": 0,
+  "pending_images_after_success": 0,
+  "wire_requests": [
+    {
+      "requested_model": "auto",
+      "image_count": 1,
+      "image_metadata": [
+        {
+          "mime": "image/png",
+          "bytes": 7111,
+          "sha256": "87c970316696f626293222a3f50a5fef5fee3f4a0d5058af217fc729c5097596",
+          "matches_source": true
+        }
+      ],
+      "http_status": 200
+    }
+  ],
+  "status": "PASS"
+}

@@ -1,0 +1,41 @@
+workspace=/tmp/deep-agent-live-work-w_q3s349 config=/tmp/deep-agent-live-relay.yaml model=token-plan/auto
+[PASS] /help
+[PASS] /status SANDBOXED —  idle
+Model: token-plan · auto · reasoning: default
+Inputs: text
+Permission: ask (side-effect tools, every execute and web search require approval)
+Thread: 8111
+[PASS] execution_mode — SANDBOXED
+[PASS] /session
+[PASS] live model response
+[PASS] /clear
+[PASS] /model token-plan/auto reasoning picker
+[PASS] /model token-plan/auto applied
+[PASS] /model token-plan/auto reasoning picker
+[PASS] /model token-plan/auto applied
+[PASS] cycle_model ±1 — token-plan/auto->token-plan/auto
+[PASS] /permission ask
+[PASS] /permission allow wrong token
+[PASS] /permission allow ALLOW
+[PASS] /permission back to ask
+[PASS] /compact unavailable
+[PASS] /pause
+[PASS] /new — 81114000->05a3a22e
+[PASS] /resume — now=81114000 want=81114000
+
+--- permission / optional network ---
+[PASS] ask write_file interrupt — status=waiting_confirmation 3.4s
+[PASS] ask write pending name — ['write_file']
+[PASS] ask write_file approve — status=completed exists=True
+Network tool checks not requested (enable with --network).
+
+--- coding ---
+[PASS] coding invoke completed — status=completed 34.3s
+[PASS] coding hello_lib.py
+[PASS] coding test_hello_lib.py
+[PASS] coding unittest exit 0 — code=0 out='et.test_greet_is_idempotent) ... ok\ntest_greet_returns_expected_message (test_hello_lib.TestGreet.test_greet_returns_expected_message) ... ok\n\n----------------------------------------------------------------------\nRan 3 tests in 0.000s\n\nOK\n'
+[PASS] coding result status — completed
+
+passed=27 failed=0 total=27
+
+Process exit code: 0

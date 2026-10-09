@@ -1,0 +1,48 @@
+workspace=/tmp/deep-agent-live-work-kqr93uzu config=/tmp/deep-agent-live.yaml model=token-plan/auto
+[PASS] /help
+[PASS] /status SANDBOXED —  idle
+Model: token-plan · auto · reasoning: default
+Inputs: text
+Permission: ask (side-effect tools, every execute and web search require approval)
+Thread: cbfa
+[PASS] execution_mode — SANDBOXED
+[PASS] /session
+[FAIL] live model response
+[PASS] /clear
+[PASS] /model token-plan/auto reasoning picker
+[PASS] /model token-plan/auto applied
+[PASS] /model token-plan/auto reasoning picker
+[PASS] /model token-plan/auto applied
+[PASS] cycle_model ±1 — token-plan/auto->token-plan/auto
+[PASS] /permission ask
+[PASS] /permission allow wrong token
+[PASS] /permission allow ALLOW
+[PASS] /permission back to ask
+[PASS] /compact unavailable
+[PASS] /pause
+[PASS] /new — cbfaa991->2b7747b7
+[PASS] /resume — now=cbfaa991 want=cbfaa991
+
+--- permission / optional network ---
+  retry ask write_file interrupt: got failed, output=''
+[FAIL] ask write_file interrupt — want=waiting_confirmation got=failed output=''
+Network tool checks not requested (enable with --network).
+
+--- coding ---
+  retry coding invoke completed: got failed, output=''
+[FAIL] coding invoke completed — want=completed got=failed output=''
+[FAIL] coding hello_lib.py
+[FAIL] coding test_hello_lib.py
+[FAIL] coding unittest exit 0 — missing files
+[FAIL] coding result status — failed
+
+passed=18 failed=7 total=25
+  FAIL live model response:
+  FAIL ask write_file interrupt: want=waiting_confirmation got=failed output=''
+  FAIL coding invoke completed: want=completed got=failed output=''
+  FAIL coding hello_lib.py:
+  FAIL coding test_hello_lib.py:
+  FAIL coding unittest exit 0: missing files
+  FAIL coding result status: failed
+
+Process exit code: 1

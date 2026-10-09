@@ -1,0 +1,77 @@
+........................................................................ [ 10%]
+........................................................................ [ 21%]
+........................................................................ [ 32%]
+....................................................................F... [ 43%]
+........................................................................ [ 53%]
+........................................................................ [ 64%]
+...........F............s............................................... [ 75%]
+........................................................................ [ 86%]
+.......F................................................................ [ 97%]
+....................                                                     [100%]
+=================================== FAILURES ===================================
+____ test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint _____
+
+    def test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint() -> None:
+        configured = limits(thinking_tail_lines=3)
+        short = MessageBlock(kind="assistant", thinking="一\n二\n三")
+        text = plain(_capture(_message(short, True, configured)[0], 80))
+        assert "Thinking" in text and "hidden" not in text
+        long = MessageBlock(kind="assistant", thinking="首行\n" + "很长的思考正文" * 20)
+        text = plain(_capture(_message(long, True, limits(thinking_tail_lines=1))[0], 30))
+        assert "Thinking" in text
+        # 中文长行折成显示行，隐藏提示本身保持单行。
+>       assert "… 11 earlier thinking" in text
+E       AssertionError: assert '… 11 earlier thinking' in '                                                                                \n Thinking                          ...nking lines hidden · Ctrl+T to expand                         \n   的思考正文很长的思考正文很长的思考正文很长的思考正文                         '
+
+tests/test_display_limits.py:54: AssertionError
+____________________________ test_network_isolation ____________________________
+
+backend = <agent.sandbox.WorkspaceCompositeBackend object at 0x7fd1790a2690>
+
+    def test_network_isolation(backend) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        probe = (
+            "python3 -c \"import socket; s = socket.create_connection(('127.0.0.1', %d), timeout=2); "
+            "print('connected')\"" % port
+        )
+        interfaces = "tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' '"
+        try:
+            offline = run(backend, probe)
+            assert offline.exit_code != 0
+>           assert "connected" not in offline.output
+E           assert 'connected' not in 'Traceback (...Exit code: 1'
+E
+E             'connected' is contained here:
+E               ); print('connected')
+E                                      ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E                 File "/usr/lib/python3.13/socket.py", line 864, in create_connection
+E                   raise exceptions[0]
+E                 File "/usr/lib/python3.13/socket.py", line 849, in create_connection...
+E
+E             ...Full output truncated (5 lines hidden), use '-vv' to show
+
+tests/test_persistent_sandbox.py:235: AssertionError
+___ test_skill_block_style_survives_wrapping_and_ordinary_text_is_unchanged ____
+
+    def test_skill_block_style_survives_wrapping_and_ordinary_text_is_unchanged():
+        """技能标签自动折行后保留样式，普通正文和代码不受影响。"""
+        draft = SkillDraft()
+        payload = draft.expand(draft.display("playwright-cli", "/skills/playwright-cli/SKILL.md"))
+        rendered = _capture(_message(MessageBlock(kind="user", content=payload), True)[0], 20)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
+        assert "[Skill:playwright-cli]" in "".join(plain.split())
+>       assert rendered.count("48;2;37;75;112") >= 2
+E       AssertionError: assert 1 >= 2
+E        +  where 1 = <built-in method count of str object at 0x359927e0>('48;2;37;75;112')
+E        +    where <built-in method count of str object at 0x359927e0> = '\x1b[37;48;2;48;48;48m                                                                                \x1b[0m\n\x1b[3...\x1b[0m\n\x1b[37;48;2;48;48;48m                                                                                \x1b[0m'.count
+
+tests/test_skills.py:316: AssertionError
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_playwright_sandbox.py:36: Playwright prerequisites missing: bwrap and playwright-cli must be on PATH
+FAILED tests/test_display_limits.py::test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint
+FAILED tests/test_persistent_sandbox.py::test_network_isolation - assert 'con...
+FAILED tests/test_skills.py::test_skill_block_style_survives_wrapping_and_ordinary_text_is_unchanged
+3 failed, 664 passed, 1 skipped in 50.85s

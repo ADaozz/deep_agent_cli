@@ -1,0 +1,45 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_cancel_drains_already_produced_pipe_output ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-agent/pytest-11/test_cancel_drains_already_pro0')
+
+    def test_cancel_drains_already_produced_pipe_output(tmp_path: Path) -> None:
+        chunks: list[str] = []
+        controller = RunController()
+        controller.begin_run()
+        ctx = controller.open_tool_context(tool_name="execute", tool_call_id="drain-cancel")
+        block = "B" * 65536
+        script = tmp_path / "writer.py"
+        script.write_text(
+            "import sys, time\n"
+            "sys.stdout.write('PREFIX\\n')\n"
+            f"sys.stdout.write({block!r})\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+
+        def emit(_id: str, text: str, _stream: str) -> None:
+            chunks.append(text)
+            if "PREFIX" in "".join(chunks):
+                controller.cancel()
+
+        set_cancel_context(ctx)
+        set_output_emitter(emit)
+        try:
+            result = _unsandboxed(tmp_path, max_output_bytes=200_000).execute(f"python3 {script}")
+        finally:
+            controller.close_tool_context(ctx)
+            set_cancel_context(None)
+            set_output_emitter(None)
+        streamed = "".join(chunks)
+        assert result.exit_code == 130
+>       assert block in result.output
+E       AssertionError: assert 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB...BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' in 'PREFIX\n\nCancelled by user.'
+E        +  where 'PREFIX\n\nCancelled by user.' = LocalExecuteResponse(output='PREFIX\n\nCancelled by user.', exit_code=130, truncated=False, host_log_path=None, agent_log_path=None, log_error=None, termination_reason='cancelled', max_output_bytes=200000).output
+
+tests/test_streaming_cancel.py:290: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_streaming_cancel.py::test_cancel_drains_already_produced_pipe_output
+1 failed in 1.61s

@@ -1,0 +1,40 @@
+{
+  "branch": "fix/v0.1.4-regressions",
+  "unmodified_files": {
+    "agent/sandbox.py": true,
+    "agent/sandbox_pool.py": true,
+    "agent/runner.py": true,
+    "agent/permission.py": true,
+    "agent/config.example.yaml": false,
+    "pyproject.toml": true,
+    ".gitignore": true
+  },
+  "offline_unshare_ipc": true,
+  "online_unshare_ipc": true,
+  "offline_unshare_net": true,
+  "online_unshare_net": false,
+  "tokenplan_key_literal_matches": 0,
+  "diff_check_pass": true,
+  "commits_created": true,
+  "pushed": false,
+  "released": false,
+  "report_links_valid": true,
+  "final_pytest": "702 passed, 0 failed, 0 skipped (118.70s)",
+  "official_skill_copy_identical": true,
+  "image_followup": {
+    "targeted_regression": "217 passed, 0 failed, 0 skipped",
+    "live_qwen_image": "PASS",
+    "native_wsl_clipboard": "BLOCKED",
+    "production_code_modified": false
+  },
+  "baseline_head": "a3c52d8286b412f6e7df039cd6bf9e93c7d18495",
+  "inspection_head": "db1f5a72be4bc77fdb5d0b4752eef17bda429832",
+  "inspection_phase": "before fifth commit and authorized push/PR; publication state is a snapshot",
+  "review_followup": {
+    "config_template": "comment-only CLI install command correction",
+    "production_change": "file approval target summaries only",
+    "raw_evidence": "lossless compressed archive with member SHA256 index",
+    "full_702_run": "before review followup",
+    "targeted_regression": "268 passed, 0 failed, 0 skipped (22.73s)"
+  }
+}

@@ -138,7 +138,7 @@ sandbox:
   # Fixed env vars injected into the sandbox. PATH replaces the default, so keep the system dirs.
   # playwright-cli open uses /opt/google/chrome/chrome. Do not install Chrome with
   # `npx playwright install chrome` inside the sandbox; that command needs sudo apt-get.
-  # Chrome for Testing: on the host run `npx playwright install chromium`, then
+  # CLI-matched Chromium: on the host run `playwright-cli install-browser chromium`, then
   # `playwright-cli open --browser=chromium`. It uses PLAYWRIGHT_BROWSERS_PATH.
   env_set:
     PATH: /opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin

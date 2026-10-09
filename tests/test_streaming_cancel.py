@@ -256,21 +256,45 @@ def test_truncated_timeout_keeps_tail_and_captured_log(tmp_path: Path) -> None:
     assert "Agent path: /workspace/.deep-agent/logs/exec/" in result.output
 
 
-def test_cancel_drains_already_produced_pipe_output(tmp_path: Path) -> None:
+def test_cancel_drains_already_produced_pipe_output(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import signal
+    import subprocess
+
     chunks: list[str] = []
     controller = RunController()
     controller.begin_run()
     ctx = controller.open_tool_context(tool_name="execute", tool_call_id="drain-cancel")
-    block = "B" * 65536
+    # Fit the payload in the pipe, but leave bytes after the first 4096-byte read.
+    # Cancelling on PREFIX before the old 64KB write completed could kill the
+    # writer before the asserted bytes had ever been produced.
+    block = "B" * 6000
+    ready = tmp_path / "writer-ready"
     script = tmp_path / "writer.py"
     script.write_text(
-        "import sys, time\n"
+        "import sys, time\nfrom pathlib import Path\n"
         "sys.stdout.write('PREFIX\\n')\n"
         f"sys.stdout.write({block!r})\n"
         "sys.stdout.flush()\n"
+        f"Path({str(ready)!r}).touch()\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
+
+    popen = subprocess.Popen
+
+    def prefilled_process(*args, **kwargs):
+        process = popen(*args, **kwargs, pipesize=8192)
+        deadline = time.monotonic() + 3
+        while not ready.exists():
+            if process.poll() is not None or time.monotonic() >= deadline:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+                raise RuntimeError("writer did not prefill its output pipe")
+            time.sleep(0.005)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", prefilled_process)
 
     def emit(_id: str, text: str, _stream: str) -> None:
         chunks.append(text)

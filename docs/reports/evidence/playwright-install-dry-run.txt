@@ -1,0 +1,13 @@
+Chrome for Testing 155.0.8059.12 (playwright chromium v1247)
+  Install location:    /home/agent/.cache/ms-playwright/chromium-1247
+  Download url:        https://cdn.playwright.dev/builds/cft/155.0.8059.12/linux64/chrome-linux64.zip
+
+FFmpeg (playwright ffmpeg v1011)
+  Install location:    /home/agent/.cache/ms-playwright/ffmpeg-1011
+  Download url:        https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip
+  Download fallback 1: https://playwright.download.prss.microsoft.com/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip
+  Download fallback 2: https://cdn.playwright.dev/builds/ffmpeg/1011/ffmpeg-linux.zip
+
+Chrome Headless Shell 155.0.8059.12 (playwright chromium-headless-shell v1247)
+  Install location:    /home/agent/.cache/ms-playwright/chromium_headless_shell-1247
+  Download url:        https://cdn.playwright.dev/builds/cft/155.0.8059.12/linux64/chrome-headless-shell-linux64.zip

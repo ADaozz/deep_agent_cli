@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from rich.console import Group
@@ -9,6 +10,16 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.tools.human_interaction import ensure_other_option
+
+
+def _approval_summary(value: Any, kind: str = "command") -> str:
+    command = str(value or "<not supplied>")
+    # Do not add credential literals to the approval card. Full details remain
+    # in the existing tool block; arbitrary JSON arguments are never rendered here.
+    if re.search(r"(?i)(api[_-]?key|authorization|bearer\s|password|secret|token\s*[=:]|--token\b|\bsk-[\w.-]+)", command):
+        return f"[redacted: {kind} may contain credentials]"
+    command = " ".join("".join(c if c.isprintable() else " " for c in command).split())
+    return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
 
 
 @dataclass
@@ -59,21 +70,27 @@ class InteractionController:
     def approval(cls, calls: list[dict[str, Any]]) -> "InteractionController":
         from agent.network import network_requested
 
-        declared: list[str] = []
+        details: list[str] = []
         for call in calls:
-            name = str(call.get("name") or "tool")
+            name = " ".join(str(call.get("name") or "tool").split())[:80]
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
-            if name == "execute" and network_requested(args):
-                declared.append("HOST NETWORK (internet, localhost, LAN)")
-            elif name == "web_search":
-                declared.append("PUBLIC WEB SEARCH (Tavily)")
+            details.append(f"Tool: {name}")
+            if name == "execute":
+                if network_requested(args):
+                    details.append("Network: ON — allows access to host network (internet, localhost, LAN)")
+                else:
+                    details.append("Network: OFF" + (" (default)" if "network" not in args else ""))
+                details.append(f"Command: {_approval_summary(args.get('command'))}")
             elif name in {"write_file", "edit_file", "delete"}:
-                declared.append(name.upper())
-        caps = ", ".join(dict.fromkeys(declared)) if declared else "declared capabilities"
+                target = args.get("file_path") or args.get("path")
+                details.append(f"Target: {_approval_summary(target, kind='target')}")
+            elif name == "web_search":
+                details.append("Network: public web search via Tavily")
+        details.append("Run executes the listed tool calls. Reject denies them.")
         return cls(
             kind="approval",
             title="Approve tool call?",
-            question=f"Approve runs this call with its declared capabilities ({caps}).",
+            question="\n".join(details),
             fields=[{
                 "id": "approved", "type": "single_select", "label": "Decision", "required": True,
                 "options": [
