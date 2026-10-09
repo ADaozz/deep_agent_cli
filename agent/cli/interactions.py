@@ -65,6 +65,8 @@ class InteractionController:
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             if name == "execute" and network_requested(args):
                 declared.append("HOST NETWORK (internet, localhost, LAN)")
+            elif name == "web_search":
+                declared.append("PUBLIC WEB SEARCH (Tavily)")
             elif name in {"write_file", "edit_file", "delete"}:
                 declared.append(name.upper())
         caps = ", ".join(dict.fromkeys(declared)) if declared else "declared capabilities"

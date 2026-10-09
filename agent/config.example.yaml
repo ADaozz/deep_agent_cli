@@ -135,11 +135,31 @@ sandbox:
   max_output_bytes: 100000
   # Host env var names explicitly exposed to Agent commands.
   env_allowlist: []
-  # Fixed env vars injected into the sandbox (not read from the host).
-  env_set: {}
-  # Extra mounts: [{source: /host/path, destination: /sandbox/path}, ...]
-  extra_read_only_mounts: []
-  extra_read_write_mounts: []
+  # Fixed env vars injected into the sandbox. PATH replaces the default, so keep the system dirs.
+  # playwright-cli open uses /opt/google/chrome/chrome. Do not install Chrome with
+  # `npx playwright install chrome` inside the sandbox; that command needs sudo apt-get.
+  # Chrome for Testing: on the host run `npx playwright install chromium`, then
+  # `playwright-cli open --browser=chromium`. It uses PLAYWRIGHT_BROWSERS_PATH.
+  env_set:
+    PATH: /opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+  # optional: true skips a mount when its source directory does not exist.
+  # Replace the Node.js version with the directory under ~/.nvm/versions/node/.
+  extra_read_only_mounts:
+    - source: ~/.nvm/versions/node/v22.23.2
+      destination: /opt/node
+      optional: true
+    - source: ~/.cargo
+      destination: /opt/cargo
+      optional: true
+    - source: /opt/google
+      destination: /opt/google
+      optional: true
+  # Writable browser cache. Creates, updates, and deletes inside the sandbox change the host directory.
+  extra_read_write_mounts:
+    - source: ~/.cache/ms-playwright
+      destination: /opt/ms-playwright
+      optional: true
 
 paths:
   # SQLite session DB. null → ~/.deep-agent/sessions/<workspace-hash>.sqlite3

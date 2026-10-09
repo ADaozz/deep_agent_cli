@@ -2,21 +2,22 @@
 
 `deep-agent` 是一个在终端中运行的 Coding Agent，支持 Linux 和 WSL2。它把启动时所在的目录作为工作区，调用你配置的 OpenAI 兼容模型服务，并在 [Bubblewrap](https://github.com/containers/bubblewrap) 沙箱中执行命令。Agent 运行时基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建。
 
-当前版本 0.1.1，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
+当前版本 0.1.2，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
 
 ## 功能
 
 - **文件操作**：在工作区中列目录、读、写、编辑、搜索、删除文件。
 - **命令执行**：在 Bubblewrap 沙箱中运行 shell 命令，默认没有网络；输出实时显示。
-- **审批**：默认模式下，运行命令、写入、编辑、删除文件前都会请求你确认。
+- **审批**：默认 `ask` 模式下，每次运行命令、Web 搜索、写入、编辑、删除文件前都会请求你确认。
 - **会话**：按工作区保存在本地 SQLite 中，可以随时恢复。
 - **多模型**：在配置文件中定义多个模型，运行中切换模型和推理强度。支持 Chat Completions 和 Responses 两种接口。
-- **流式输出**：思考内容和回答都流式显示。
+- **流式输出**：思考内容和回答都流式显示；思考区默认保留按终端宽度折行后的末尾 5 行正文，`Ctrl+T` 展开。
 - **运行中干预**：任务执行时可以追加指令、排队后续任务或取消。
 - **图片输入**：向声明支持图片的模型发送图片。
 - **结构化提问**：Agent 需要你做决定时，会弹出单选、多选、是/否或文本输入。
 - **上下文压缩**：接近模型上下文窗口时自动摘要旧对话，也可以手动压缩。
-- **可选扩展**：配置 Tavily API key 后可以搜索公开网页；从 `~/.deep-agent/skills/` 加载 Skills；读取工作区根目录的 `AGENTS.md` 作为项目说明。
+- **技能**：从 `~/.deep-agent/skills/` 加载 Skills，通过 `/skill` 选择技能并附带任务说明，支持读取技能目录中的参考文件。
+- **可选扩展**：配置 Tavily API key 后可以搜索公开网页；读取工作区根目录的 `AGENTS.md` 作为项目说明。
 
 ## 运行要求
 
@@ -67,14 +68,24 @@ llm:
       api_key: ${MY_API_KEY}           # 也可以直接写密钥
       provider: openai-compatible      # 端点支持 Responses API 时可改为 qwen-responses
       stream_usage: true
+      reasoning_efforts: [none, low, medium, high]  # 来源级列表，见下文
       models:
         main:                          # 模型键，自定义
           model: your-model-name       # 发给服务端的模型名
           context_window: 128k
           input: [text]                # 支持图片时写 [text, image]
+        fast: {}                       # 省略的字段全部继承来源
+        other:
+          reasoning_efforts: [low, high]  # 写了就完整替换来源列表
 ```
 
-`provider` 未填写时默认为 `qwen-responses`（Responses API），只提供 Chat Completions 的服务需要显式写 `openai-compatible`。其他字段、推理强度和服务商示例见 [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/configuration.md)。
+模型按「来源」分组。来源下可以写的字段，模型项中也都可以写：模型项省略则继承来源，写了就覆盖。列表字段（`input`、`reasoning_efforts`）是整表替换，不是合并；`reasoning_efforts` 写成 `null` 或 `[]` 会清除继承。
+
+`provider` 未填写时默认为 `qwen-responses`（Responses API），只提供 Chat Completions 的服务需要显式写 `openai-compatible`。
+
+`reasoning_efforts` 需要按服务商文档填写，程序不会自动探测。常见取值包括 `none`、`low`、`medium`、`high`、`xhigh`、`max`，同一模型在不同端点上可能不同。列表非空时，`/model` 只显示这些值，默认选中第一项；空列表或未配置时只显示 `default`，请求不携带强度参数。`default` 是 CLI 选项，不能写进列表。`none` 仅在端点明确支持关闭思考时才写；`low` 仍然会思考。Chat Completions 发送 `reasoning_effort`，Responses API 发送 `reasoning.effort`。
+
+其他字段和服务商示例见 [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/configuration.md)。
 
 **3. 在项目目录中启动**
 
@@ -101,11 +112,14 @@ deep-agent resume 01a08aae   # 按 id 或前缀恢复
 | `/help` | 列出命令和快捷键 |
 | `/status` | 当前模型、权限模式、沙箱状态 |
 | `/model` | 选择模型和推理强度 |
+| `/skill` | 选择技能，在输入框插入技能名称块 |
 | `/permission ask\|allow` | 切换审批模式 |
 | `/resume`、`/new` | 切换到已有会话、新建会话 |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片 |
 | `/quit` | 退出 |
+
+输入 `/` 显示命令候选，按连续子串匹配，例如 `/elp` 匹配 `/help`，`/hlp` 不匹配。完整匹配和前缀匹配优先；方向键选择，`Tab` 或 `Enter` 填入，退格后重新计算候选。`/model ` 和 `/permission ` 的参数也支持补全。
 
 | 按键 | 作用 |
 |---|---|
@@ -121,14 +135,98 @@ deep-agent resume 01a08aae   # 按 id 或前缀恢复
 
 完整的命令、按键和界面行为见 [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)。
 
+## 使用 Skills
+
+每个技能放在 `~/.deep-agent/skills/` 下的独立目录中，入口文件为 `SKILL.md`。其 YAML 头部必须包含 `name` 和 `description`；技能列表显示 `name`，缺少有效元数据的目录会被跳过。
+
+### 安装示例：Playwright CLI
+
+准备好 Node.js 和 npm 后，在终端执行以下命令。先使用[微软官方 Playwright CLI](https://github.com/microsoft/playwright-cli#installing-skills) 的安装命令生成 Skill，再复制到本项目使用的目录：
+
+```bash
+mkdir -p ~/.deep-agent/skills
+cd ~/.deep-agent/skills
+
+# 如果还没安装 CLI
+npm install -g @playwright/cli@latest
+
+# 安装官方 Skill 到临时目录
+skill_tmp_dir="$(mktemp -d)"
+(cd "$skill_tmp_dir" && playwright-cli install --skills=agents)
+
+# 复制到 DeepAgent 的技能目录
+cp -a "$skill_tmp_dir/.agents/skills/playwright-cli" ~/.deep-agent/skills/
+
+# 清理临时目录
+rm -rf "$skill_tmp_dir"
+```
+
+验证安装：
+
+```bash
+ls -R ~/.deep-agent/skills/playwright-cli
+```
+
+安装后目录结构如下，`references/` 中的参考文档也能读取：
+
+```text
+~/.deep-agent/
+└── skills/
+    └── playwright-cli/
+        ├── SKILL.md
+        └── references/
+            ├── playwright-tests.md
+            ├── request-mocking.md
+            ├── running-code.md
+            ├── session-management.md
+            ├── storage-state.md
+            ├── test-generation.md
+            ├── tracing.md
+            ├── video-recording.md
+            ├── element-attributes.md
+            └── pr-attachments.md
+```
+
+### 在输入框中调用技能
+
+在 CLI 中输入 `/skill` 后回车，用上下键选择技能，再回车将 `[Skill: playwright-cli]` 插入输入框。此时可以直接回车调用，也可以追加说明后提交：
+
+```text
+[Skill: playwright-cli] 检查当前项目页面的登录流程，并记录截图。
+```
+
+选择时按 `Esc` 取消；完整删除输入框中的技能块即可取消本次技能调用。技能列表在每次打开时重新读取目录。发送后的聊天记录仍显示技能名称块和附带说明，恢复会话时也保持这一显示方式。
+
+技能目录以只读方式映射到 `/skills/`。DeepAgent 原生 SkillsMiddleware 加载技能名称和描述；提交时携带所选技能的名称及路径，由模型按需读取 `/skills/playwright-cli/SKILL.md` 和相关参考文件，技能正文不会整段展开到输入框中。
+
+加载技能只提供操作说明。工具链要在宿主机装好，再通过沙箱挂载暴露给命令。沙箱不能 `sudo` 或 `apt-get`，所以不要在里面执行 `npx playwright install chrome`。
+
+### 沙箱里的工具链
+
+首次启动时，[`agent/config.example.yaml`](agent/config.example.yaml) 会复制成 `~/.deep-agent/config.yaml`。其中的 `sandbox` 段已经是默认工具链配置：`PATH` 包含 Node.js 和 Cargo，并挂载下面这些目录。`optional: true` 的源目录在宿主机上不存在时会被跳过，不会阻止启动。
+
+| 宿主机路径 | 沙箱路径 | 权限 | 用途 |
+|---|---|---|---|
+| `~/.nvm/versions/node/v22.23.2` | `/opt/node` | 只读 | `node`、`npm`、`playwright-cli` |
+| `~/.cargo` | `/opt/cargo` | 只读 | Rust 工具链 |
+| `/opt/google` | `/opt/google` | 只读 | 系统 Chrome。`playwright-cli open` 使用 `/opt/google/chrome/chrome` |
+| `~/.cache/ms-playwright` | `/opt/ms-playwright` | 可写 | Chrome for Testing。环境变量 `PLAYWRIGHT_BROWSERS_PATH` 指向这里 |
+
+Node.js 版本以本机 `~/.nvm/versions/node/` 下的目录名为准，和模板不一致时改 `source`。其他装在 `~/.local`、`/opt` 或家目录里的程序同样处理：用 `readlink -f "$(command -v 工具名)"` 找到落在 `/usr`、`/bin`、`/lib` 之外的目录，按同样格式追加挂载，并把可执行文件所在目录加到 `PATH` 前面。`PATH` 会替换沙箱默认值，末尾保留 `/usr/local/bin:/usr/bin:/bin`。
+
+`playwright-cli open` 走系统 Chrome，不读浏览器缓存。没有系统 Chrome 时，在宿主机执行 `npx playwright install chromium`（先保证 `~/.cache/ms-playwright` 存在），沙箱里再用 `playwright-cli open --browser=chromium`。缓存目录可写，沙箱中的安装和删除会改宿主机上的同一目录；只使用已安装浏览器时，把该项改到 `extra_read_only_mounts`。下载浏览器的命令需要网络。
+
+已经存在的 `~/.deep-agent/config.yaml` 不会被模板覆盖。把模板里的 `sandbox.env_set` 和两个挂载列表合并进现有文件，保存后退出并重新启动 `deep-agent`。挂载规则见 [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)。
+
 ## 安全模型
 
 | | 行为 |
 |---|---|
 | 命令能访问的文件 | 工作区（读写，在沙箱中为 `/workspace`）、`~/.deep-agent/skills/`（只读）、系统的 `/usr`、`/bin`、`/lib`（只读）。家目录的其余部分不可见 |
 | 网络 | 命令默认无网络。模型可以为单条命令申请网络，此时它能访问互联网、`localhost` 和局域网 |
+| 沙箱复用 | 每个会话最多一个无网沙箱和一个有网沙箱，按需启动、跨命令复用（`/tmp` 和后台进程保留），会话结束时销毁。切换模型或权限模式不重建沙箱；`ask` / `allow` 只决定之后的命令要不要审批 |
 | 环境变量 | 只传入 `LANG`、`TERM` 等少量变量，其余需在配置中显式列出 |
-| `ask` 模式（默认） | 运行命令、写入、编辑、删除文件前需要确认 |
+| `ask` 模式（默认） | 每次运行命令、Web 搜索、写入、编辑、删除文件前需要确认 |
 | `allow` 模式 | 所有工具自动批准，所有命令都开放网络。仅在沙箱可用时可开启，开启时需输入 `ALLOW` |
 | 沙箱不可用 | 拒绝启动。只有在配置中设置 `sandbox.allow_unsandboxed: true`，或在启动提示中输入 `UNSANDBOXED`，命令才会以当前用户身份直接在宿主机上运行，此时只能使用 `ask` 模式 |
 

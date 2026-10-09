@@ -14,7 +14,9 @@ agent/factory.py       AgentSpec → create_deep_agent()，装配工具与中间
    ├── agent/llm.py        模型客户端（Chat Completions / Responses）
    ├── agent/tools/        execute、request_human_input、web_search
    ├── agent/middleware/   暂停、steering、取消、恢复说明、附件等
-   └── agent/sandbox.py    Bubblewrap / 宿主执行 backend 与路径路由
+   ├── agent/sandbox.py    Bubblewrap / 宿主执行 backend 与路径路由
+   ├── agent/sandbox_pool.py      按网络模式懒启动、复用的持久沙箱
+   └── agent/sandbox_worker.py    沙箱内的常驻命令 Worker（仅标准库）
    │
    ▼
 agent/session.py       SQLite：LangGraph checkpoint + session_catalog
@@ -60,7 +62,7 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 
 `WorkspaceCompositeBackend` 把 Agent 看到的路径路由到不同 backend：
 
-- `/workspace/` → `BubblewrapBackend`（或 `UnsandboxedShellBackend`）。文件操作由其 `FilesystemBackend` 父类在宿主进程中完成（`virtual_mode`，根目录为工作区）；`execute` 每次启动一个新的 bwrap 进程。
+- `/workspace/` → `BubblewrapBackend`（或 `UnsandboxedShellBackend`）。文件操作由其 `FilesystemBackend` 父类在宿主进程中完成（`virtual_mode`，根目录为工作区）；`execute` 交给 `SandboxPool`：按 `network` 取（或懒启动）对应的持久沙箱，由沙箱内的 Worker 为每条命令启动新的 shell。Pool 随 backend 在模型、权限切换的重建之间复用（切换不影响沙箱），由 `AgentRunner` 在会话切换和关闭时销毁。
 - `/skills/` → 只读的 `FilesystemBackend`，根目录为 `~/.deep-agent/skills/`。
 - 其他路径 → 一律返回权限错误。
 

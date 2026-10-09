@@ -129,6 +129,15 @@ def test_unsandboxed_fallback_reports_mode_and_limits_execution(tmp_path: Path) 
     assert timed_out.exit_code == 124
 
 
+def test_missing_required_mount_is_rejected(tmp_path: Path) -> None:
+    config = replace(
+        config_for(tmp_path, allow_unsandboxed=True),
+        extra_read_only_mounts=(BindMount(tmp_path / "missing", "/opt/missing"),),
+    )
+    with pytest.raises(ValueError, match="mount source does not exist"):
+        select_backend(config, check=False)
+
+
 def test_config_errors_do_not_trigger_unsafe_fallback(tmp_path: Path) -> None:
     config = replace(
         config_for(tmp_path, allow_unsandboxed=True),
@@ -427,3 +436,30 @@ def test_missing_bwrap_has_installation_diagnostic(tmp_path):
         select_backend(config_for(tmp_path))
     assert error.value.kind == "not_installed"
     assert "sudo apt install bubblewrap" in str(error.value)
+
+
+def test_worker_args_mount_worker_read_only_and_keep_isolation(tmp_path: Path) -> None:
+    from agent.sandbox import WORKER_SANDBOX_PATH, WORKER_SOURCE_PATH
+
+    backend = BubblewrapBackend(replace(config_for(tmp_path), bwrap_path="/bin/true"), executable="/bin/true")
+    offline = backend.worker_args(network=False)
+    joined = " ".join(offline)
+    assert f"--ro-bind {WORKER_SOURCE_PATH} {WORKER_SANDBOX_PATH}" in joined
+    assert offline[-3:] == ["-I", "-S", WORKER_SANDBOX_PATH]
+    assert "--unshare-net" in offline and "--unshare-pid" in offline and "--unshare-ipc" in offline
+    assert "--unshare-net" not in backend.worker_args(network=True)
+
+
+def test_extra_mount_cannot_replace_worker(tmp_path: Path) -> None:
+    config = replace(config_for(tmp_path), extra_read_only_mounts=(BindMount(tmp_path, "/run/deep-agent"),))
+    with pytest.raises(ValueError, match="sandbox worker"):
+        select_backend(config, check=False)
+
+
+def test_sandbox_start_failure_is_reported_not_run_on_host(tmp_path: Path) -> None:
+    backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/false"), check=False).backend
+    result = backend.execute("touch host-marker")
+    assert result.exit_code == 1
+    assert result.termination_reason == "spawn_error"
+    assert "sandbox failed to start" in result.output
+    assert not (tmp_path / "host-marker").exists()

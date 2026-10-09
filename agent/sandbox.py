@@ -36,6 +36,7 @@ from deepagents.backends.protocol import (
 )
 
 from agent.config import SAFE_INHERITED_ENV, BindMount, SandboxConfig, default_skills_dir
+from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxPool, SandboxStartError
 
 
 LOG = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ RUNTIME_FILES = (
 )
 NETWORK_FILES = ("/etc/hosts", "/etc/resolv.conf", "/etc/ssl")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+WORKER_SOURCE_PATH = Path(__file__).with_name("sandbox_worker.py")
+WORKER_SANDBOX_PATH = "/run/deep-agent/sandbox_worker.py"
+KILL_CONFIRM_SECONDS = 5.0
 UNSANDBOXED_WARNING = (
     "UNSANDBOXED MODE: bubblewrap is unavailable. Agent commands will run "
     "directly on the host with the current user's permissions."
@@ -66,7 +70,7 @@ class ExecutionMode(StrEnum):
 
 
 class SandboxUnavailableError(RuntimeError):
-    """Unavailable sandbox with a machine-readable diagnostic category."""
+    """沙箱不可用，并带有可机读的诊断类别。"""
 
     def __init__(self, message: str, *, kind: str = "preflight_failed") -> None:
         super().__init__(message)
@@ -75,7 +79,7 @@ class SandboxUnavailableError(RuntimeError):
 
 @dataclass
 class LocalExecuteResponse(ExecuteResponse):
-    """Execute result with local metadata for the UI's ToolMessage artifact."""
+    """execute 结果，附带 UI ToolMessage artifact 所需的本地元数据。"""
 
     host_log_path: str | None = None
     agent_log_path: str | None = None
@@ -95,7 +99,7 @@ _OUTSIDE_WORKSPACE_ERROR = "Permission denied: paths must be under /workspace or
 
 
 class _OutsideWorkspaceBackend(BackendProtocol):
-    """Non-persistent default route that rejects paths outside /workspace."""
+    """默认路由：拒绝 /workspace 与 /skills 之外的路径，不持久化。"""
 
     def ls(self, path: str) -> LsResult:
         return LsResult(entries=[])
@@ -139,7 +143,7 @@ class _OutsideWorkspaceBackend(BackendProtocol):
 
 
 class _ReadOnlySkillsBackend(FilesystemBackend):
-    """Expose application skills to file tools without write operations."""
+    """向文件工具暴露应用 Skills，禁止写入。"""
 
     def __init__(self, root: Path) -> None:
         super().__init__(root_dir=root, virtual_mode=True, max_file_size_mb=10)
@@ -160,7 +164,7 @@ class _ReadOnlySkillsBackend(FilesystemBackend):
 
 
 class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
-    """Expose workspace and read-only skills while delegating execution."""
+    """暴露工作区与只读 Skills，执行委托给底层 executor。"""
 
     def __init__(self, executor: SandboxBackendProtocol, *, skills_dir: Path | None) -> None:
         routes: dict[str, BackendProtocol] = {f"{SANDBOX_ROOT}/": executor}
@@ -207,7 +211,7 @@ def sandbox_environment(config: SandboxConfig, environ: dict[str, str] | None = 
 
 
 class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
-    """Filesystem backend with command execution isolated by bubblewrap."""
+    """文件系统 backend，命令执行由 Bubblewrap 隔离。"""
 
     def __init__(self, config: SandboxConfig, *, executable: str) -> None:
         workspace = _validate_config(config)
@@ -217,14 +221,30 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         self.executable = executable
         self._env = sandbox_environment(config)
         self._sandbox_id = f"bwrap-{uuid.uuid4().hex[:8]}"
+        self.pool = SandboxPool(lambda network: self.worker_args(network))
 
     @property
     def id(self) -> str:
         return self._sandbox_id
 
     def command_args(self, command: str, *, network: bool = False) -> list[str]:
+        """一次性 bwrap 调用：以 ``command`` 作为沙箱主进程。"""
         if not command or not isinstance(command, str):
             raise ValueError("command must be a non-empty string")
+        return [*self.sandbox_args(network=network), "/bin/sh", "-lc", command]
+
+    def worker_args(self, network: bool = False) -> list[str]:
+        """bwrap 调用：主进程为常驻命令 Worker。"""
+        python = _sandbox_python()
+        if python is None:
+            raise SandboxStartError(
+                "python3 is required inside the sandbox for the persistent command worker, "
+                f"but none was found under {FIXED_PATH} resolving into {', '.join(RUNTIME_PATHS)}"
+            )
+        mount = ["--ro-bind", str(WORKER_SOURCE_PATH), WORKER_SANDBOX_PATH]
+        return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
+
+    def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:
         args = [
             self.executable,
             "--die-with-parent",
@@ -257,10 +277,10 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
             args += _mount_args("--bind", mount)
         if self.skills_dir is not None:
             args += ["--ro-bind", str(self.skills_dir), SKILLS_ROOT]
-        args += ["--clearenv"]
+        args += [*(extra or ()), "--clearenv"]
         for name, value in sorted(self._env.items()):
             args += ["--setenv", name, value]
-        args += ["--chdir", SANDBOX_ROOT, "--", "/bin/sh", "-lc", command]
+        args += ["--chdir", SANDBOX_ROOT, "--"]
         return args
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -269,23 +289,29 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         from agent.network import get_execute_network
 
         effective_timeout = _effective_timeout(timeout, self.config.timeout_seconds)
-        return _run_process(
-            self.command_args(command, network=get_execute_network()),
-            timeout=effective_timeout,
-            max_output_bytes=self.config.max_output_bytes,
-            workspace=self.config.workspace,
-        )
+        pool = self.pool
+        try:
+            return pool.run(get_execute_network(), lambda sandbox: _run_in_sandbox(
+                pool, sandbox, command,
+                timeout=effective_timeout,
+                max_output_bytes=self.config.max_output_bytes,
+                workspace=self.config.workspace,
+            ))
+        except SandboxStartError as exc:
+            return LocalExecuteResponse(
+                f"Error: sandbox failed to start: {exc}", 1, False, termination_reason="spawn_error",
+            )
 
 
 class UnsandboxedShellBackend(LocalShellBackend):
-    """Explicitly authorized host execution with a sanitized, ephemeral environment."""
+    """经明确授权的宿主执行，使用净化后的临时环境。"""
 
     def __init__(self, config: SandboxConfig) -> None:
         workspace = _validate_config(config)
         super().__init__(
             root_dir=workspace,
             virtual_mode=True,
-            timeout=config.timeout_seconds or 120,  # Inert parent default; execute() uses our optional cap.
+            timeout=config.timeout_seconds or 120,  # 父类默认值不起作用；execute() 使用我们的可选上限。
             max_output_bytes=config.max_output_bytes,
             env={},
             inherit_env=False,
@@ -327,9 +353,13 @@ def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelec
         candidate = BubblewrapBackend(validated, executable=executable)
         if not check:
             return BackendSelection(_workspace_backend(candidate), ExecutionMode.SANDBOXED)
-        probe = candidate.execute(
-            "true", timeout=min(5, validated.timeout_seconds) if validated.timeout_seconds else 5,
-        )
+        try:
+            probe = candidate.execute(
+                "true", timeout=min(5, validated.timeout_seconds) if validated.timeout_seconds else 5,
+            )
+        finally:
+            # 预检不得在第一次真正的 execute 之前留下正在运行的沙箱。
+            candidate.pool.shutdown("preflight finished")
         if probe.exit_code == 0:
             return BackendSelection(_workspace_backend(candidate), ExecutionMode.SANDBOXED)
         kind, reason = _preflight_diagnostic(probe.output, probe.exit_code)
@@ -367,6 +397,13 @@ def _preflight_diagnostic(output: str, exit_code: int | None) -> tuple[str, str]
         "available /bin/sh, and probe timeout. Run the same bwrap preflight in your terminal "
         "and inspect its output before changing isolation settings."
     )
+
+
+def sandbox_pool_of(backend: BackendProtocol | None) -> SandboxPool | None:
+    """从（可能是组合的）backend 取出持久沙箱池。"""
+    executor = getattr(backend, "executor", backend)
+    pool = getattr(executor, "pool", None)
+    return pool if isinstance(pool, SandboxPool) else None
 
 
 def _workspace_backend(backend: SandboxBackendProtocol) -> WorkspaceCompositeBackend:
@@ -411,6 +448,18 @@ def _validate_config(config: SandboxConfig) -> Path:
     return workspace
 
 
+def _sandbox_python() -> str | None:
+    """解析到只读运行时挂载内的 python3。"""
+    for directory in FIXED_PATH.split(":"):
+        candidate = Path(directory) / "python3"
+        if not (candidate.is_file() and os.access(candidate, os.X_OK)):
+            continue
+        resolved = candidate.resolve()
+        if any(resolved.is_relative_to(root) for root in RUNTIME_PATHS):
+            return str(candidate)
+    return None
+
+
 def _resolve_executable(value: str) -> str | None:
     if not value.strip():
         raise ValueError("bwrap_path cannot be empty")
@@ -430,6 +479,9 @@ def _mount_args(flag: str, mount: BindMount) -> list[str]:
     protected = {PurePosixPath(SANDBOX_ROOT), PurePosixPath("/tmp"), PurePosixPath("/home/agent")}
     if destination in protected:
         raise ValueError(f"extra mount cannot replace protected destination: {destination}")
+    worker_dir = PurePosixPath(WORKER_SANDBOX_PATH).parent
+    if destination == worker_dir or worker_dir in destination.parents or destination in worker_dir.parents:
+        raise ValueError(f"extra mount conflicts with the sandbox worker: {destination}")
     if destination == PurePosixPath(SKILLS_ROOT) or PurePosixPath(SKILLS_ROOT) in destination.parents or destination in PurePosixPath(SKILLS_ROOT).parents:
         raise ValueError(f"extra mount conflicts with skills destination: {destination}")
     return [flag, str(source), str(destination)]
@@ -444,7 +496,7 @@ def _effective_timeout(requested: int | None, cap: int | None) -> int | None:
 
 
 def _create_exec_log(workspace: Path) -> tuple[int, int, str]:
-    """Create a private log below the workspace without following directory links."""
+    """在工作区下创建私有日志，不跟随目录符号链接。"""
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     directory_fd = os.open(workspace, directory_flags)
     try:
@@ -477,11 +529,10 @@ def _write_all(fd: int, data: bytes | bytearray) -> None:
 
 
 def _drop_partial_character_head(data: bytearray) -> None:
-    """Drop continuation bytes a window trim stranded at the head.
+    """丢掉窗口裁剪后留在头部的 UTF-8 续字节。
 
-    ``del data[:-max]`` can cut a multi-byte UTF-8 character in half; the
-    orphaned continuation bytes at the front would decode as U+FFFD in every
-    snapshot and in the final tail.
+    ``del data[:-max]`` 可能把多字节字符拦腰切断；头部残留的续字节会在每次
+    快照和最终尾巴里都解码成 U+FFFD。
     """
     head = 0
     while head < len(data) and (data[head] & 0xC0) == 0x80:
@@ -490,13 +541,153 @@ def _drop_partial_character_head(data: bytearray) -> None:
 
 
 def _decode_tail_snapshot(data: bytes) -> str:
-    """Decode a rolling tail without flashing split characters.
+    """解码滚动尾巴，避免把被截断的字符闪成乱码。
 
-    A non-final incremental decode keeps a trailing partial multi-byte
-    character buffered instead of replacing it with U+FFFD; the next chunk
-    completes it and the following snapshot shows it whole.
+    非最终的增量解码会把末尾不完整的多字节字符留在缓冲里，而不是立刻替换成
+    U+FFFD；下一块数据补全后，下一次快照就会显示完整字符。
     """
     return getincrementaldecoder("utf-8")(errors="replace").decode(data)
+
+
+class _OutputCollector:
+    """收集一条命令合并后的 stdout/stderr：流式推送、截断并写日志。"""
+
+    def __init__(self, *, tool_call_id: str, max_output_bytes: int, workspace_root: Path) -> None:
+        self.tool_call_id = tool_call_id
+        self.max_output_bytes = max_output_bytes
+        self.workspace_root = workspace_root
+        self.decoder: IncrementalDecoder = getincrementaldecoder("utf-8")(errors="replace")
+        self.tail_bytes = bytearray()
+        self.total_bytes = 0
+        self.truncated = False
+        self.log_fd: int | None = None
+        self.log_directory_fd: int | None = None
+        self.log_name: str | None = None
+        self.log_error: str | None = None
+
+    def _discard_log(self, exc: OSError) -> None:
+        self.log_error = f"{type(exc).__name__}: {exc}"
+        if self.log_fd is not None:
+            try:
+                os.close(self.log_fd)
+            except OSError:
+                pass
+            self.log_fd = None
+        if self.log_directory_fd is not None and self.log_name is not None:
+            try:
+                os.unlink(self.log_name, dir_fd=self.log_directory_fd)
+            except OSError:
+                pass
+
+    def append(self, raw: bytes) -> None:
+        if not raw:
+            return
+        max_output_bytes = self.max_output_bytes
+        remaining = max(0, max_output_bytes - self.total_bytes)
+        accepted = raw[:remaining] if remaining > 0 else b""
+        if accepted:
+            text = self.decoder.decode(accepted)
+            if text:
+                emit_tool_output(self.tool_call_id, text, stream="merged")
+        if not self.truncated and self.total_bytes + len(raw) > max_output_bytes:
+            self.truncated = True
+            if self.log_fd is None and self.log_error is None:
+                try:
+                    self.log_fd, self.log_directory_fd, self.log_name = _create_exec_log(self.workspace_root)
+                    _write_all(self.log_fd, self.tail_bytes)
+                    _write_all(self.log_fd, raw)
+                except OSError as exc:
+                    self._discard_log(exc)
+        elif self.log_fd is not None:
+            try:
+                _write_all(self.log_fd, raw)
+            except OSError as exc:
+                self._discard_log(exc)
+        self.total_bytes += len(raw)
+        self.tail_bytes.extend(raw)
+        if len(self.tail_bytes) > max_output_bytes:
+            del self.tail_bytes[:-max_output_bytes]
+            _drop_partial_character_head(self.tail_bytes)
+        if self.truncated:
+            # 每个分块都用最新字节替换有界内存视图；完整流继续写入工作区日志。
+            current_tail = _decode_tail_snapshot(bytes(self.tail_bytes))
+            emit_tool_output(self.tool_call_id, current_tail, stream="tail_snapshot")
+
+    def flush(self) -> None:
+        """刷新解码器，处理末尾不完整的多字节序列。"""
+        if not self.truncated:
+            tail = self.decoder.decode(b"", final=True)
+            if tail:
+                emit_tool_output(self.tool_call_id, tail, stream="merged")
+
+    def close(self) -> None:
+        if self.log_fd is not None:
+            try:
+                os.fsync(self.log_fd)
+                os.close(self.log_fd)
+                self.log_fd = None
+            except OSError as exc:
+                self._discard_log(exc)
+        if self.log_directory_fd is not None:
+            os.close(self.log_directory_fd)
+            self.log_directory_fd = None
+
+    def response(
+        self,
+        *,
+        exit_code: int,
+        timeout: int | None,
+        cancelled: bool = False,
+        timed_out: bool = False,
+        failure: str | None = None,
+    ) -> LocalExecuteResponse:
+        max_output_bytes = self.max_output_bytes
+        truncated = self.truncated
+        output = bytes(self.tail_bytes).decode("utf-8", errors="replace") if self.tail_bytes else ""
+        host_log_path: str | None = None
+        agent_log_path: str | None = None
+        if truncated:
+            detail = f"Output truncated: showing the last {max_output_bytes} bytes."
+            if self.log_error is not None:
+                detail += f"\nFull output could not be saved: {self.log_error}"
+            elif self.log_name is not None:
+                relative_log_path = Path(".deep-agent/logs/exec") / self.log_name
+                host_log_path = str(self.workspace_root / relative_log_path)
+                agent_log_path = f"{SANDBOX_ROOT}/{relative_log_path.as_posix()}"
+                detail += f"\nFull output saved to: {host_log_path}"
+                detail += f"\nAgent path: {agent_log_path}"
+            output = f"{output}\n\n[{detail}]"
+
+        result_metadata = {
+            "host_log_path": host_log_path,
+            "agent_log_path": agent_log_path,
+            "log_error": self.log_error,
+            "max_output_bytes": max_output_bytes,
+        }
+
+        if cancelled:
+            return LocalExecuteResponse(
+                f"{output.rstrip()}\n\nCancelled by user.".strip(), 130, truncated,
+                termination_reason="cancelled", **result_metadata,
+            )
+
+        if timed_out:
+            return LocalExecuteResponse(
+                f"{output.rstrip()}\n\nError: Command timed out after {timeout} seconds.".strip(),
+                124, truncated, termination_reason="timeout", **result_metadata,
+            )
+
+        if failure is not None:
+            return LocalExecuteResponse(
+                f"{output.rstrip()}\n\nError: {failure}".strip(), exit_code, truncated,
+                termination_reason="sandbox_lost", **result_metadata,
+            )
+
+        if not output:
+            output = "<no output>"
+        if exit_code:
+            output = f"{output.rstrip()}\n\nExit code: {exit_code}"
+        return LocalExecuteResponse(output, exit_code, truncated, **result_metadata)
 
 
 def _run_process(
@@ -534,17 +725,12 @@ def _run_process(
         ctx.register_process(process)
 
     deadline = time.monotonic() + timeout if timeout is not None else None
-    decoder: IncrementalDecoder = getincrementaldecoder("utf-8")(errors="replace")
-    tail_bytes = bytearray()
-    total_bytes = 0
-    truncated = False
     cancelled = False
     timed_out = False
-    log_fd: int | None = None
-    log_directory_fd: int | None = None
-    log_name: str | None = None
-    log_error: str | None = None
-    workspace_root = (workspace or cwd or Path.cwd()).resolve()
+    collector = _OutputCollector(
+        tool_call_id=tool_call_id, max_output_bytes=max_output_bytes,
+        workspace_root=(workspace or cwd or Path.cwd()).resolve(),
+    )
     post_exit_idle_since: float | None = None
 
     assert process.stdout is not None
@@ -552,57 +738,6 @@ def _run_process(
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-
-    def _discard_log(exc: OSError) -> None:
-        nonlocal log_fd, log_error
-        log_error = f"{type(exc).__name__}: {exc}"
-        if log_fd is not None:
-            try:
-                os.close(log_fd)
-            except OSError:
-                pass
-            log_fd = None
-        if log_directory_fd is not None and log_name is not None:
-            try:
-                os.unlink(log_name, dir_fd=log_directory_fd)
-            except OSError:
-                pass
-
-    def _append_chunk(raw: bytes) -> None:
-        nonlocal total_bytes, truncated
-        nonlocal log_fd, log_directory_fd, log_name, log_error
-        if not raw:
-            return
-        remaining = max(0, max_output_bytes - total_bytes)
-        accepted = raw[:remaining] if remaining > 0 else b""
-        if accepted:
-            text = decoder.decode(accepted)
-            if text:
-                emit_tool_output(tool_call_id, text, stream="merged")
-        if not truncated and total_bytes + len(raw) > max_output_bytes:
-            truncated = True
-            if log_fd is None and log_error is None:
-                try:
-                    log_fd, log_directory_fd, log_name = _create_exec_log(workspace_root)
-                    _write_all(log_fd, tail_bytes)
-                    _write_all(log_fd, raw)
-                except OSError as exc:
-                    _discard_log(exc)
-        elif log_fd is not None:
-            try:
-                _write_all(log_fd, raw)
-            except OSError as exc:
-                _discard_log(exc)
-        total_bytes += len(raw)
-        tail_bytes.extend(raw)
-        if len(tail_bytes) > max_output_bytes:
-            del tail_bytes[:-max_output_bytes]
-            _drop_partial_character_head(tail_bytes)
-        if truncated:
-            # Replace the bounded in-memory view with the latest bytes after
-            # every chunk. The full stream continues into the workspace log.
-            current_tail = _decode_tail_snapshot(bytes(tail_bytes))
-            emit_tool_output(tool_call_id, current_tail, stream="tail_snapshot")
 
     try:
         while True:
@@ -641,7 +776,7 @@ def _run_process(
                 except Exception:  # noqa: BLE001
                     chunk = b""
                 if chunk:
-                    _append_chunk(chunk)
+                    collector.append(chunk)
                     if stopping or process.poll() is not None:
                         post_exit_idle_since = time.monotonic()
                 else:
@@ -651,11 +786,7 @@ def _run_process(
                         pass
             if (cancelled or timed_out or process.poll() is not None) and not selector.get_map():
                 break
-        # Final decoder flush for partial multi-byte sequences.
-        if not truncated:
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                emit_tool_output(tool_call_id, tail, stream="merged")
+        collector.flush()
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
@@ -667,56 +798,104 @@ def _run_process(
         process.stderr.close()
         if ctx is not None:
             ctx.clear_process()
-        if log_fd is not None:
-            try:
-                os.fsync(log_fd)
-                os.close(log_fd)
-                log_fd = None
-            except OSError as exc:
-                _discard_log(exc)
-        if log_directory_fd is not None:
-            os.close(log_directory_fd)
+        collector.close()
 
-    output = bytes(tail_bytes).decode("utf-8", errors="replace") if tail_bytes else ""
-    host_log_path: str | None = None
-    agent_log_path: str | None = None
-    if truncated:
-        detail = f"Output truncated: showing the last {max_output_bytes} bytes."
-        if log_error is not None:
-            detail += f"\nFull output could not be saved: {log_error}"
-        elif log_name is not None:
-            relative_log_path = Path(".deep-agent/logs/exec") / log_name
-            host_log_path = str(workspace_root / relative_log_path)
-            agent_log_path = f"{SANDBOX_ROOT}/{relative_log_path.as_posix()}"
-            detail += f"\nFull output saved to: {host_log_path}"
-            detail += f"\nAgent path: {agent_log_path}"
-        output = f"{output}\n\n[{detail}]"
+    return collector.response(
+        exit_code=int(process.returncode or 0), timeout=timeout,
+        cancelled=cancelled or (ctx is not None and ctx.cancelled), timed_out=timed_out,
+    )
 
-    result_metadata = {
-        "host_log_path": host_log_path,
-        "agent_log_path": agent_log_path,
-        "log_error": log_error,
-        "max_output_bytes": max_output_bytes,
-    }
 
-    if cancelled or (ctx is not None and ctx.cancelled):
+def _run_in_sandbox(
+    pool: SandboxPool,
+    sandbox: PersistentSandbox,
+    command: str,
+    *,
+    timeout: int | None,
+    max_output_bytes: int,
+    workspace: Path,
+) -> ExecuteResponse:
+    """在持久沙箱里为一条命令启动新的 shell。
+
+    取消和超时只杀掉该命令的进程组。Worker 若未及时确认 kill，视为已损坏，
+    下一次 execute 会换新沙箱；本条命令不会重发。
+    """
+    ctx = get_cancel_context()
+    tool_call_id = ctx.tool_call_id if ctx is not None else ""
+    try:
+        handle = sandbox.start_command(command)
+    except SandboxLostError as exc:
+        pool.discard(sandbox, str(exc))
         return LocalExecuteResponse(
-            f"{output.rstrip()}\n\nCancelled by user.".strip(), 130, truncated,
-            termination_reason="cancelled", **result_metadata,
+            f"Error: sandbox is unavailable ({exc}). The command was not run.", 1, False,
+            termination_reason="sandbox_lost",
         )
+    if ctx is not None:
+        ctx.register_process(handle)
 
-    if timed_out:
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    cancelled = False
+    timed_out = False
+    kill_sent_at: float | None = None
+    exit_code = 0
+    failure: str | None = None
+    spawn_error: str | None = None
+    collector = _OutputCollector(
+        tool_call_id=tool_call_id, max_output_bytes=max_output_bytes, workspace_root=workspace,
+    )
+    try:
+        while True:
+            now = time.monotonic()
+            if kill_sent_at is None:
+                if ctx is not None and ctx.cancelled:
+                    cancelled = True
+                elif deadline is not None and now >= deadline:
+                    timed_out = True
+                if cancelled or timed_out:
+                    handle.kill()
+                    kill_sent_at = now
+            elif now - kill_sent_at >= KILL_CONFIRM_SECONDS:
+                pool.discard(sandbox, "sandbox worker did not confirm a command kill")
+                break
+            wait = 0.1
+            if deadline is not None and kill_sent_at is None:
+                wait = max(0.0, min(wait, deadline - now))
+            event = handle.next_event(wait)
+            if event is None:
+                continue
+            kind, payload = event
+            if kind == "out":
+                collector.append(payload)
+            elif kind == "exit":
+                exit_code = int(payload)
+                break
+            elif kind == "spawn_error":
+                spawn_error = str(payload)
+                break
+            else:
+                failure = (
+                    f"Sandbox worker stopped while this command was running ({payload}). "
+                    "The command was not retried; the next execute starts a fresh sandbox."
+                )
+                exit_code = 125
+                pool.discard(sandbox, str(payload))
+                break
+        collector.flush()
+    finally:
+        if ctx is not None:
+            ctx.clear_process()
+        handle.release()
+        collector.close()
+
+    if spawn_error is not None and not (cancelled or timed_out):
         return LocalExecuteResponse(
-            f"{output.rstrip()}\n\nError: Command timed out after {timeout} seconds.".strip(),
-            124, truncated, termination_reason="timeout", **result_metadata,
+            f"Error executing command ({spawn_error})", 1, False, termination_reason="spawn_error",
         )
-
-    if not output:
-        output = "<no output>"
-    exit_code = int(process.returncode or 0)
-    if exit_code:
-        output = f"{output.rstrip()}\n\nExit code: {exit_code}"
-    return LocalExecuteResponse(output, exit_code, truncated, **result_metadata)
+    return collector.response(
+        exit_code=exit_code, timeout=timeout,
+        cancelled=cancelled or (ctx is not None and ctx.cancelled and not timed_out),
+        timed_out=timed_out, failure=failure,
+    )
 
 
 def _kill_process_group_pid(pid: int | None) -> None:

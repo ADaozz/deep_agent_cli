@@ -35,6 +35,7 @@ class BindMount:
 
     source: Path
     destination: str
+    optional: bool = False
 
 
 @dataclass(frozen=True)
@@ -390,7 +391,10 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
             source_path = (base_dir / source_path).resolve()
         else:
             source_path = source_path.resolve()
-        mounts.append(BindMount(source=source_path, destination=str(destination)))
+        optional = _as_bool(item.get("optional", False), field_name=f"{field_name}[{index}].optional")
+        if optional and not source_path.exists():
+            continue
+        mounts.append(BindMount(source=source_path, destination=str(destination), optional=optional))
     return tuple(mounts)
 
 

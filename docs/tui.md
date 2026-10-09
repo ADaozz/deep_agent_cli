@@ -18,7 +18,7 @@ deep-agent --version
 
 ## 命令
 
-输入 `/` 显示候选，方向键选择，`Tab` 或 `Enter` 填入。`/model ` 和 `/permission ` 后面的参数也会补全。
+输入 `/` 显示候选，按连续子串匹配（例如 `/elp` 匹配 `/help`），完整匹配和前缀匹配优先。方向键选择，`Tab` 或 `Enter` 填入，退格后重新显示符合当前输入的候选。`/model ` 和 `/permission ` 后面的参数也按连续子串补全。
 
 | 命令 | 作用 |
 |---|---|
@@ -51,7 +51,7 @@ deep-agent --version
 | `Ctrl+R` | 查看 `write_file` / `edit_file` / `delete` 的完整改动 |
 | `Ctrl+P` / `Alt+P` | 切换到下一个 / 上一个模型 |
 | `Ctrl+V` / `Alt+V` | 粘贴图片或文本 |
-| `Ctrl+C` | 清空输入；0.5 秒内再按一次退出 |
+| `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；0.5 秒内再按一次退出 |
 | `Ctrl+D` | 退出 |
 | 滚轮、`PgUp` / `PgDn`、`Ctrl+Home` / `Ctrl+End` | 滚动转录区；`Ctrl+End` 回到底部并恢复跟随 |
 | 鼠标左键拖动 | 选择转录内容，松开后复制到系统剪贴板；拖到边缘会自动滚动 |
@@ -77,7 +77,7 @@ deep-agent --version
 
 - `ask` 模式下，需要审批的工具调用会弹出面板，选择 Run 或 Reject。
 - Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔。选择题自动附带 `Other:` 选项用于自定义输入。
-- 关掉面板后按 `F2` 重新打开。
+- 关掉面板后，待处理提示显示在原 Working 状态栏位置，不单独追加到聊天记录；按 `F2` 重新打开。
 
 ## 图片
 
@@ -97,7 +97,7 @@ deep-agent --version
 
 ## 显示
 
-- **思考区**：默认折叠，保留最后 5 行（`ui.thinking_tail_lines`），`Ctrl+T` 展开。
+- **思考区**：默认折叠，保留按当前终端宽度折行后的最后 5 行正文（`ui.thinking_tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
 - **命令输出**：实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并为 `Explored N items`。
 - **文件写入**：新建显示 `Create <路径>`，连续新建合并为 `Create N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
@@ -109,6 +109,7 @@ deep-agent --version
 ## 状态栏与底栏
 
 - 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、排队数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。
+- 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
 - 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。
 - 上下文占用 = 模型最近一次返回的 token usage / `context_window`。端点不返回 usage 时只显示窗口大小；`context_window` 为 0 时不显示。

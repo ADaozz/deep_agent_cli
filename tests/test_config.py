@@ -240,6 +240,33 @@ paths:
     assert settings.source_path == path.resolve()
 
 
+def test_optional_mount_is_skipped_when_source_is_missing(tmp_path: Path) -> None:
+    present = tmp_path / "present"
+    present.mkdir()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_only_mounts:
+    - source: {present}
+      destination: /opt/present
+      optional: true
+    - source: {tmp_path / "missing"}
+      destination: /opt/missing
+      optional: true
+    - source: {tmp_path / "required-missing"}
+      destination: /opt/required
+""",
+        encoding="utf-8",
+    )
+    mounts = Settings.load(config).sandbox.extra_read_only_mounts
+    assert [(mount.destination, mount.optional) for mount in mounts] == [
+        ("/opt/present", True),
+        ("/opt/required", False),
+    ]
+
+
 def test_sandbox_timeout_is_optional_and_must_be_positive(tmp_path: Path) -> None:
     config = tmp_path / "config.yaml"
     config.write_text(_MODEL_YAML + "sandbox:\n  timeout_seconds: null\n", encoding="utf-8")

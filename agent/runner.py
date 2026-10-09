@@ -34,6 +34,7 @@ from agent.attachments import (
 from agent.config import InputKind, ModelProfile, SandboxConfig, Settings
 from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
+from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
@@ -265,6 +266,7 @@ class AgentRunner:
             self._spec, initial_model, self._permission_mode, saver,
             self.control, self._pause_condition,
             interrupt_on_override=prepared.interrupt_on if prepared is not None else None,
+            backend_selection=prepared.backend_selection if prepared is not None else None,
         )
         self._checkpointer = self.prepared.checkpointer
         self._chat_model = initial_model
@@ -589,8 +591,19 @@ class AgentRunner:
             self._spec, chat, mode, self._checkpointer,
             self.control, self._pause_condition,
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
+            backend_selection=self.prepared.backend_selection,
         )
         self._chat_model = chat
+
+    @property
+    def sandbox_pool(self) -> SandboxPool | None:
+        """本 Runner 的 Agent 会话所持有的持久沙箱。"""
+        return self.prepared.sandbox_pool
+
+    def _end_sandbox_session(self, reason: str) -> None:
+        pool = self.sandbox_pool
+        if pool is not None:
+            pool.shutdown(reason)
 
     def request_pause(self) -> None:
         self.control.request_pause()
@@ -730,6 +743,7 @@ class AgentRunner:
                 return SessionSwitchResult(status="busy", target_id=info.id)
             # The old thread must accept no further operations while waiting.
             self._runtime.detach_for_wait(info.id)
+            self._end_sandbox_session("session switched")
             return SessionSwitchResult(status="busy", target_id=info.id)
         snapshot = self._load_and_commit_switch(info, lease)
         return SessionSwitchResult(status="switched", target_id=info.id, snapshot=snapshot)
@@ -780,6 +794,8 @@ class AgentRunner:
             raise
         if refreshed is not None:
             snapshot.info = refreshed
+        if snapshot.info.id != self._runtime.thread_id or lease is not None:
+            self._end_sandbox_session("session switched")
         if lease is not None:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
@@ -837,6 +853,7 @@ class AgentRunner:
         self._pending_reasoning_effort = None
         self._pending_model_id = None
         self._pending_permission_mode = None
+        self._end_sandbox_session("new session started")
         return self._runtime.create_new(
             title=title, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,
@@ -861,7 +878,9 @@ class AgentRunner:
         drained = self._operation_lock.acquire(timeout=CLOSE_DRAIN_SECONDS)
         if drained:
             self._operation_lock.release()
-        else:
+        # 卡住的命令不得在 close 之后继续占用沙箱，即便租约必须保留。
+        self._end_sandbox_session("agent session closed")
+        if not drained:
             raise RuntimeError(
                 "Runner close timed out with a run still active; the session "
                 "lease is kept until the run drains and close is retried"

@@ -118,7 +118,7 @@ web_search:
 
 也可以只设置环境变量 `TAVILY_API_KEY`；两者都有值时环境变量优先。两者都没有时不注册 `web_search` 工具。
 
-`web_search` 由 `deep-agent` 进程在宿主机上直接请求 `https://api.tavily.com/search`，超时 20 秒，不经过沙箱，也不会给 `execute` 开放网络。它只返回标题、URL 和摘要，不抓取完整网页。模型可用的参数：`query`、`max_results`（1–20，默认 5）、`topic`（`general` / `news`）、`time_range`（`day` / `week` / `month` / `year`）、`include_domains`。
+`web_search` 由 `deep-agent` 进程在宿主机上直接请求 `https://api.tavily.com/search`，超时 20 秒，不经过沙箱，也不会给 `execute` 开放网络。`ask` 模式下每次搜索都需先批准；拒绝时不会发送搜索请求。它只返回标题、URL 和摘要，不抓取完整网页。模型可用的参数：`query`、`max_results`（1–20，默认 5）、`topic`（`general` / `news`）、`time_range`（`day` / `week` / `month` / `year`）、`include_domains`。
 
 ## 沙箱（`sandbox`）
 
@@ -133,8 +133,10 @@ web_search:
 | `max_output_bytes` | `100000` | 单条命令保留的输出上限，超出部分写入日志文件 |
 | `env_allowlist` | `[]` | 允许传入沙箱的宿主环境变量名 |
 | `env_set` | `{}` | 固定注入沙箱的环境变量 |
-| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source: /host/path, destination: /sandbox/path}]` |
+| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过 |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上 |
+
+首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 会写入一组可选工具链挂载（Node.js、Cargo、系统 Chrome、Playwright 浏览器缓存）和对应的 `PATH`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖。
 
 `sandbox.protected_workspace_paths` 已移除，配置中出现时启动报错。
 
@@ -152,7 +154,7 @@ web_search:
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
-| `thinking_tail_lines` | `5` | 思考区折叠时保留的末尾行数 |
+| `thinking_tail_lines` | `5` | 思考区折叠时保留的末尾显示行数，按当前终端宽度折行后计算 |
 | `execute_tail_lines` | `4` | 命令输出折叠时保留的末尾行数 |
 | `tool_tail_lines` | `8` | 其他工具输出折叠时保留的末尾行数 |
 | `expanded_tool_lines` | `40` | 展开的普通工具输出最多显示的行数 |

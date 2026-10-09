@@ -1,4 +1,4 @@
-"""Per-execute NETWORK capability (physical gate via Bubblewrap netns)."""
+"""单次 execute 的 NETWORK 能力（由 Bubblewrap 网络命名空间物理门控）。"""
 from __future__ import annotations
 
 from contextvars import ContextVar
@@ -8,7 +8,7 @@ _EXECUTE_NETWORK: ContextVar[bool] = ContextVar("deep_agent_execute_network", de
 
 
 def network_requested(args: dict[str, Any] | None) -> bool:
-    """True when a tool call declares the NETWORK capability."""
+    """工具调用声明了 NETWORK 能力时为 True。"""
     if not args:
         return False
     value = args.get("network", False)
@@ -22,7 +22,7 @@ def get_execute_network() -> bool:
 
 
 def set_execute_network(enabled: bool):
-    """Set NETWORK for the current tool-call scope. Returns a reset token."""
+    """为当前工具调用设置 NETWORK。返回用于复位的 token。"""
     return _EXECUTE_NETWORK.set(bool(enabled))
 
 

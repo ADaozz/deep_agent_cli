@@ -7,7 +7,7 @@
 
 ## 执行模式
 
-启动时程序用 Bubblewrap 运行一次 `true` 作为预检，结果决定执行模式：
+启动时程序启动一次沙箱并运行 `true` 作为预检（随后立即销毁），结果决定执行模式：
 
 | 模式 | 条件 | 命令在哪里运行 |
 |---|---|---|
@@ -19,7 +19,7 @@
 
 ## 沙箱内可见的内容
 
-每条 `execute` 命令在一个新的 Bubblewrap 实例中运行：
+`execute` 命令运行在当前 Agent 会话的持久 Bubblewrap 沙箱中（见下文“沙箱生命周期”）：
 
 | 路径 | 内容 |
 |---|---|
@@ -32,20 +32,45 @@
 
 其他宿主路径（家目录其余部分、`/opt`、`/var` 等）不可见。安装在 `~/.local`、`~/.nvm`、`~/.cargo`、`/opt` 等位置的工具链在沙箱中找不到，需要通过 `sandbox.extra_read_only_mounts` 挂载，并在 `env_set` 中调整 `PATH`。
 
-额外挂载的限制：`source` 必须存在；`destination` 必须是沙箱内的绝对路径，不能是 `/workspace`、`/tmp`、`/home/agent`，也不能与 `/skills` 重叠。
+额外挂载的限制：`destination` 必须是沙箱内的绝对路径，不能是 `/workspace`、`/tmp`、`/home/agent`，也不能与 `/skills` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选挂载的源目录不存在时会被跳过。
 
 其他隔离设置：
 
-- 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出时沙箱进程随之结束。
+- 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
+- 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
 - 环境变量先清空，再设置 `PATH=/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。
 - 不限制 CPU、内存、磁盘或进程数。
+
+## 沙箱生命周期
+
+每个 Agent 会话最多有两个持久沙箱，都在第一次需要时才启动：
+
+| 沙箱 | 何时使用 | 网络 |
+|---|---|---|
+| 无网沙箱 | `network=false` 的 `execute` | `--unshare-net`，只有自己的 `lo` |
+| 有网沙箱 | `network=true` 或 `allow` 模式下的 `execute` | 共享宿主网络 |
+
+- 每次 `execute` 都启动一个新的 `/bin/sh -lc`：`cd`、shell 变量等状态不保留；保留的是沙箱环境本身——`/tmp`、`/home` 中的文件和后台进程（例如 `nohup cmd > log 2>&1 &`）在后续调用中仍然存在。
+- 两个沙箱只共享 `/workspace`（以及只读挂载）；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
+- 沙箱的主进程是一个常驻 Worker，宿主只通过它继承的管道下发命令。这个控制通道不出现在文件系统或网络中，Worker 本身设为不可 dump，沙箱内的进程不能通过 `/proc` 接管它；无网沙箱看不到有网沙箱的进程、`/tmp` 中的 socket，也连不上它的抽象 Unix socket（抽象 socket 随网络命名空间隔离）。
+- 取消和超时只杀掉当前命令的进程组（包括它启动的后台进程），沙箱继续可用。
+- Worker 异常退出时，正在执行的命令返回 `sandbox_lost` 错误，不会自动重试；下一次 `execute` 启动新的沙箱。
+- 沙箱无法启动时，`execute` 返回错误，不会改在宿主机上运行。
+- 切换会话（`/resume`、`/new`）、关闭会话或退出 CLI 时，两个沙箱及其中所有进程都被销毁。切换模型或权限模式不会重建沙箱。
+- `/status` 显示两个沙箱是否在运行。
 
 ## 网络
 
 - 默认使用 `--unshare-net`，命令没有网络。
-- 模型在调用 `execute` 时传 `network=true`，该条命令共享宿主网络命名空间，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。
-- `allow` 模式下，每条 `execute` 都共享宿主网络，单次调用无法关闭。
-- `web_search` 在宿主进程中运行，与沙箱网络无关。
+- 模型在调用 `execute` 时传 `network=true`，该条命令在有网沙箱中运行，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。
+- `allow` 模式下，每条 `execute` 都在有网沙箱中运行，单次调用无法关闭。
+
+两个沙箱都按需启动、会话内复用；权限模式只决定下一条命令要不要审批，不决定沙箱是否销毁。
+
+- `ask`：每条 `execute` 都要审批；`network=true` 走有网沙箱，`network=false` 走无网沙箱。
+- `allow`：自动批准，且每条 `execute` 都走有网沙箱。
+- 已经在跑的后台进程不受模式切换影响。需要停掉它们时，让 Agent 结束进程，或新建 / 关闭会话。
+- `web_search` 在宿主进程中运行，与沙箱网络无关；`ask` 模式下每次搜索均需审批。
 
 ## 文件工具
 
@@ -57,7 +82,7 @@
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`write_file`、`edit_file`、`delete` | 所有执行模式 |
+| `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete` | 所有执行模式 |
 | `allow` | 无；所有工具自动批准，所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
@@ -69,7 +94,7 @@
 - 输出实时显示在对应的工具块中。
 - 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果同时给出宿主路径和 Agent 可读的 `/workspace/.deep-agent/logs/exec/...` 路径。
 - 默认没有超时。设置 `sandbox.timeout_seconds` 后作为上限；超时返回退出码 124，取消返回 130。
-- 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或 100 毫秒内没有新输出为止；之后的输出不进入本次结果。
+- 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或 100 毫秒内没有新输出为止；之后的输出不进入本次结果，后台进程再写这些管道会收到 `SIGPIPE`。需要长期运行的后台进程应把输出重定向到文件。
 
 程序不会修改项目的 `.gitignore`。建议加入：
 

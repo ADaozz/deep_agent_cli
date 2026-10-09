@@ -62,7 +62,7 @@ class SessionController:
             app.set_status("Cancel the active run before starting a new session")
             return
         if self.waiting:
-            app.set_status(self.wait_status())
+            app.set_status(self.wait_status(), transient=False)
             return
         app._restore_queued_to_editor(app.buffer)
         try:
@@ -70,6 +70,7 @@ class SessionController:
         except RuntimeError as exc:
             app.state.add_system(str(exc), error=True)
             return
+        app._clear_skill_draft()
         app.clear_transcript_selection()
         app.state.clear()
         app.state.attachments.clear()
@@ -79,7 +80,7 @@ class SessionController:
         app._transcript_anchor = None
         app._renderer.clear()
         app.state.add_system(f"Started session {info.id}")
-        app.set_status("Ready")
+        app.set_status("Ready", transient=False)
 
     async def resume(self, arg: str = "") -> None:
         app = self._app
@@ -121,7 +122,7 @@ class SessionController:
                 "options": options,
             }],
         )
-        app.set_status("Select a session · Enter confirm · Esc cancel")
+        app.set_status("Select a session · Enter confirm · Esc cancel", transient=False)
         app.application.invalidate()
 
     def begin_switch(self, session_id: str) -> None:
@@ -141,6 +142,7 @@ class SessionController:
 
     def apply_snapshot(self, snapshot: Any) -> None:
         app = self._app
+        app._clear_skill_draft()
         app.clear_transcript_selection()
         app.state.load_transcript(snapshot.transcript)
         app.state.todos = list(snapshot.todos)
@@ -153,7 +155,7 @@ class SessionController:
         for notice in snapshot.notices:
             app.state.add_system(notice)
         if not app._reopen_pending_interaction(notify_missing=False):
-            app.set_status("Ready")
+            app.set_status("Ready", transient=False)
         app._transcript_anchor = None
         app._renderer.clear()
         app.state.usage = dict(app.runner.latest_usage())
@@ -161,7 +163,7 @@ class SessionController:
 
     def cancel_wait(self) -> None:
         self._wait_cancelled = True
-        self._app.set_status("Cancelling wait…")
+        self._app.set_status("Cancelling wait…", transient=False)
 
     def notify_exit(self) -> None:
         self._wait_cancelled = True
@@ -189,7 +191,7 @@ class SessionController:
         app.state.add_system(
             f"Session {target_id[:8]} is open in another window; waiting for it to be released."
         )
-        app.set_status(self.wait_status())
+        app.set_status(self.wait_status(), transient=False)
         self._wait_task = asyncio.create_task(self._wait_for_session(target_id))
         app.application.invalidate()
 
@@ -209,7 +211,7 @@ class SessionController:
         if snapshot is None:
             # Cancelled: the runner stays detached, so the picker (or /new) must
             # choose the next session explicitly.
-            app.set_status("Waiting cancelled · pick a session")
+            app.set_status("Waiting cancelled · pick a session", transient=False)
             await self.resume()
             return
         self.apply_snapshot(snapshot)

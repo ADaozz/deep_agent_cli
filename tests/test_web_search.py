@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -13,6 +14,8 @@ from agent.cli.rendering import _capture, _tool
 from agent.cli.state import ToolBlock
 from agent.factory import create_agent
 from agent.runner import AgentRunner
+from agent.permission import ASK_INTERRUPT_ON
+from agent.sandbox import BackendSelection, ExecutionMode
 from agent.tools.web_search import TAVILY_SEARCH_URL, build_web_search_tool
 from tests.conftest import scripted_model
 
@@ -138,6 +141,107 @@ def test_agent_hides_web_search_without_key(monkeypatch) -> None:
     direct = AgentRunner(model=scripted_model([AIMessage(content="done")]),
                          backend=StateBackend(), settings=settings)
     assert "web_search" not in direct.prepared.exposed_tool_names
+
+
+def test_ask_requires_approval_for_each_search(monkeypatch):
+    """每次搜索分别暂停，只有批准之后才发送对应的 HTTP 请求。"""
+    requests = _mock_tavily(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "search-1", "name": "web_search", "args": {"query": "first"}}]),
+        AIMessage(content="", tool_calls=[{"id": "search-2", "name": "web_search", "args": {"query": "second"}}]),
+        AIMessage(content="done"),
+    ]), backend=StateBackend())
+    waiting = runner.invoke("搜索两次")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["name"] == "web_search"
+    assert not requests
+    waiting = runner.approve_tool("search-1")
+    assert waiting.status == "waiting_confirmation"
+    assert waiting.pending_tool_calls[0]["toolCallId"] == "search-2"
+    assert len(requests) == 1
+    assert runner.approve_tool("search-2").status == "completed"
+    assert len(requests) == 2
+
+
+def test_rejected_search_sends_no_request(monkeypatch):
+    """拒绝搜索时不访问搜索服务。"""
+    requests = _mock_tavily(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "denied-search", "name": "web_search", "args": {"query": "x"}}]),
+        AIMessage(content="done"),
+    ]), backend=StateBackend())
+    assert runner.invoke("搜索").status == "waiting_confirmation"
+    assert runner.reject_tool("denied-search").status == "completed"
+    assert not requests
+
+
+def test_parallel_search_and_write_both_require_approval(monkeypatch):
+    """混合工具调用的审批列表必须包含搜索和写文件两个动作。"""
+    requests = _mock_tavily(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="", tool_calls=[
+            {"id": "parallel-search", "name": "web_search", "args": {"query": "x"}},
+            {"id": "parallel-write", "name": "write_file", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
+        ]),
+    ]), backend=StateBackend())
+    waiting = runner.invoke("搜索并写入")
+    assert waiting.status == "waiting_confirmation"
+    assert {item["name"] for item in waiting.pending_tool_calls} == {"web_search", "write_file"}
+    assert not requests
+
+
+def test_search_approval_returns_after_allow_to_ask_switch(monkeypatch):
+    """切回 ask 后恢复每次搜索的审批，allow 下继续自动执行。"""
+    requests = _mock_tavily(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "allow-search", "name": "web_search", "args": {"query": "first"}}]),
+            AIMessage(content="done"),
+            AIMessage(content="", tool_calls=[{"id": "ask-search", "name": "web_search", "args": {"query": "second"}}]),
+            AIMessage(content="done"),
+        ]))
+        runner.set_permission_mode("allow")
+        assert runner.invoke("搜索").status == "completed"
+        assert len(requests) == 1
+        runner.set_permission_mode("ask")
+        assert runner.invoke("再搜索").status == "waiting_confirmation"
+        assert len(requests) == 1
+        assert runner.approve_tool("ask-search").status == "completed"
+        assert len(requests) == 2
+
+
+def test_search_default_approval_cannot_be_overridden(monkeypatch):
+    """自定义审批配置不能关闭 ask 模式内置的搜索审批。"""
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    with pytest.raises(ValueError, match="default approval rule for web_search"):
+        create_agent(model=scripted_model([AIMessage(content="done")]), backend=StateBackend(),
+                     interrupt_on={"web_search": False})
+
+
+def test_old_search_policy_waits_for_other_tools_in_the_same_batch(monkeypatch):
+    """复现旧规则：搜索与写文件同批出现时，被写文件审批一起阻塞。"""
+    requests = _mock_tavily(monkeypatch)
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    old_policy = {name: rule for name, rule in ASK_INTERRUPT_ON.items() if name != "web_search"}
+    with patch("agent.factory.interrupt_on_for_mode", return_value=old_policy):
+        prepared = create_agent(model=scripted_model([
+            AIMessage(content="", tool_calls=[
+                {"id": "old-search", "name": "web_search", "args": {"query": "x"}},
+                {"id": "old-write", "name": "write_file", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
+            ]),
+            AIMessage(content="done"),
+        ]), backend=StateBackend())
+    runner = AgentRunner(prepared=prepared)
+    waiting = runner.invoke("搜索并写入")
+    assert waiting.status == "waiting_confirmation"
+    assert [item["name"] for item in waiting.pending_tool_calls] == ["write_file"]
+    assert not requests
+    assert runner.approve_tool("old-write").status == "completed"
+    assert len(requests) == 1
 
 
 def test_web_search_tui_collapses_to_result_count() -> None:

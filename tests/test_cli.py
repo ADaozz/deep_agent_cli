@@ -2096,11 +2096,15 @@ def test_escape_closes_interrupt_ui_without_resuming() -> None:
             app._finish_interaction(cancelled=True)
             assert app.interaction is None
             assert runner.current_interrupt().kind.value == "waiting_confirmation"
-            assert any("F2 to decide" in block.content for block in app.state.blocks)
+            assert not any("F2 to decide" in block.content for block in app.state.blocks)
+            assert app.state.status == "Approval still pending · F2 to decide"
+            assert app._status_visible()
+            assert "Approval still pending · F2 to decide" in "".join(value for _, value in app._status_text())
 
             app._reopen_pending_interaction()
             assert app.interaction is not None
             assert app.interaction.kind == "approval"
+            assert app.state.status == "Waiting for input"
 
             app._toggle_review()
             assert app._reviewing
@@ -2111,6 +2115,85 @@ def test_escape_closes_interrupt_ui_without_resuming() -> None:
     asyncio.run(scenario())
     runner.approve_tool = approve
     runner.reject_tool = reject
+
+
+@pytest.mark.parametrize("kind,label", [("approval", "Approval"), ("human", "Input"), ("pause", "Pause")])
+def test_dismissed_interrupt_hint_uses_working_status_position(kind, label) -> None:
+    """关闭面板只更新状态行，重复关闭也不向聊天记录追加提示。"""
+    def scenario(app: CliApplication) -> None:
+        original = list(app.state.blocks)
+        expected = f"{label} still pending · F2 to decide"
+        for _ in range(3):
+            app.state.running = True
+            app._dismiss_pending_interrupt(kind)
+            assert app.state.blocks == original
+            assert not app.state.running
+            fragments = app._status_text()
+            assert len(fragments) == 1
+            assert expected in fragments[0][1]
+        _paint(app)
+        screen = app.application.renderer._last_screen
+        columns = app.application.output.get_size().columns
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(columns))
+            for y in range(app.application.output.get_size().rows)
+        ]
+        assert sum(expected in row for row in rows) == 1
+        status_row = next(y for y, row in enumerate(rows) if expected in row)
+        assert "class:status" in screen.data_buffer[status_row][0].style
+        assert any("class:editor" in screen.data_buffer[y][0].style for y in range(status_row + 1, len(rows)))
+
+    _with_painted_app(f"dismiss-status-{kind}", scenario)
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_ctrl_c_dismisses_approval_to_status_and_f2_can_finish_decision(approve) -> None:
+    """实际按键验证关闭、F2 恢复及批准或拒绝后的正常执行。"""
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "status-write", "name": "write_file",
+                                              "args": {"file_path": "/workspace/status.txt", "content": "x"}}]),
+            AIMessage(content="done"),
+        ]), backend=StateBackend())
+        waiting = runner.invoke("write")
+        assert waiting.status == "waiting_confirmation"
+
+        async def wait_until(predicate) -> None:
+            for _ in range(300):
+                if predicate():
+                    return
+                await asyncio.sleep(0.01)
+            raise TimeoutError("审批状态未更新")
+
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._handle_result(waiting)
+            task = asyncio.create_task(app.run_async())
+            try:
+                await wait_until(lambda: app.application.is_running)
+                pipe.send_text("\x03")
+                await wait_until(lambda: app.interaction is None)
+                assert app.state.status == "Approval still pending · F2 to decide"
+                assert not any("still pending" in getattr(block, "content", "") for block in app.state.blocks)
+                assert runner.current_interrupt() is not None
+                pipe.send_text("\x1bOQ")
+                await wait_until(lambda: app.interaction is not None)
+                assert app.interaction.kind == "approval"
+                assert app.state.status == "Waiting for input"
+                if approve:
+                    pipe.send_text("\x1b[B")
+                    await wait_until(lambda: app.interaction.option_index == 1)
+                pipe.send_text("\r")
+                await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                assert runner.current_interrupt() is None
+                assert not app.state.running
+                assert "still pending" not in app.state.status
+                assert any(getattr(block, "content", "") == "done" for block in app.state.blocks)
+            finally:
+                app.exit()
+                await asyncio.wait_for(task, timeout=3)
+
+    asyncio.run(scenario())
 
 
 def test_f2_and_resume_without_interrupt_are_views_only() -> None:
@@ -2289,6 +2372,126 @@ def test_restored_submitted_human_answer_is_history_after_cancel(tmp_path) -> No
     finally:
         runner.close()
         store.close()
+
+
+def test_working_notice_expires_without_removing_transcript(monkeypatch) -> None:
+    """权限排队提示只在状态栏短暂显示，聊天记录和原工作状态保留。"""
+    from agent.permission import PermissionMode
+
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            try:
+                app.state.running = True
+                app.set_status("Working…  Esc to cancel", transient=False)
+                monkeypatch.setattr(runner, "request_permission_change", lambda mode: None)
+                monkeypatch.setattr(runner, "pending_permission_mode", lambda: PermissionMode.ALLOW)
+                app._request_permission_mode(PermissionMode.ALLOW)
+                notice = app.state.status
+                assert notice.startswith("Permission switch queued: ask → allow")
+                assert any(getattr(block, "content", "") == notice for block in app.state.blocks)
+                await asyncio.sleep(1.1)
+                assert app.state.status == "Working…  Esc to cancel"
+                assert any(getattr(block, "content", "") == notice for block in app.state.blocks)
+            finally:
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+def test_status_notices_replace_each_other_and_keep_new_events() -> None:
+    """连续提示共享原状态，新审批事件不会被旧提示的超时覆盖。"""
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            try:
+                app.set_status("Approval still pending · F2 to decide", transient=False)
+                app.set_status("Thinking: expanded")
+                await asyncio.sleep(0.6)
+                app.set_status("Tool output: expanded")
+                await asyncio.sleep(0.6)
+                assert app.state.status == "Tool output: expanded"
+                await asyncio.sleep(0.5)
+                assert app.state.status == "Approval still pending · F2 to decide"
+                app._apply_event(RunEvent(type="run_started"))
+                app._apply_event(RunEvent(type="steering_queued", content="继续", result={"mode": "steer", "id": "message"}))
+                assert app.state.status == "Steering queued"
+                await asyncio.sleep(1.1)
+                assert app.state.status == "Working…  Esc to cancel"
+                app.set_status("Model queued: next")
+                app.set_status("Waiting for input", transient=False)
+                await asyncio.sleep(1.1)
+                assert app.state.status == "Waiting for input"
+            finally:
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+def test_input_cleared_hint_expires_and_keeps_later_status() -> None:
+    """清空提示自动隐藏，并且不会在超时后覆盖后来开始的任务。"""
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.buffer.text = "未发送的文字"
+            app._pasted_content.display("甲" * 600)
+            app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
+            app.state.attachments.append(object())
+            original_blocks = list(app.state.blocks)
+            binding = next(item for item in app.bindings.bindings if item.keys == ("c-c",))
+
+            class Event:
+                current_buffer = app.buffer
+
+            binding.handler(Event())
+            assert app.buffer.text == ""
+            assert not app._pasted_content.has_blocks and not app._skill_draft.has_blocks
+            assert not app.state.attachments
+            assert app.state.blocks == original_blocks
+            assert "Input cleared" in "".join(value for _, value in app._status_text())
+            await asyncio.sleep(1.1)
+            assert app.state.status == "Ready"
+            assert not app._status_visible()
+            app._show_input_cleared_hint()
+            app._apply_event(RunEvent(type="run_started"))
+            await asyncio.sleep(1.1)
+            assert "Working" in "".join(value for _, value in app._status_text())
+            assert "Input cleared" not in app.state.status
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("running,status", [
+    (True, "Working…  Esc to cancel"),
+    (True, "Cancelling…"),
+    (False, "Approval still pending · F2 to decide"),
+])
+def test_clear_input_keeps_execution_and_pending_status(running, status) -> None:
+    """任务执行或审批等待时，Ctrl+C 清空草稿但不替换状态提示。"""
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.state.running = running
+            app.state.status = status
+            app.buffer.text = "未发送的文字"
+            binding = next(item for item in app.bindings.bindings if item.keys == ("c-c",))
+
+            class Event:
+                current_buffer = app.buffer
+
+            binding.handler(Event())
+            assert app.buffer.text == ""
+            assert app.state.status == status
+            assert app.state.running == running
+            assert "Input cleared" not in "".join(value for _, value in app._status_text())
+
+    asyncio.run(scenario())
 
 
 def test_double_ctrl_c_disables_mouse_before_leaving_full_screen() -> None:
@@ -2822,7 +3025,23 @@ def test_waiting_for_input_has_matching_divider_below_status() -> None:
         assert len([
             window for window in app.application.renderer._last_screen.visible_windows_to_write_positions
             if window.style == "class:interaction-divider"
-        ]) == 1
+        ]) == 2
+        app.interaction = InteractionController(
+            kind="skill", title="Select skill", question="Choose a skill",
+            fields=[{"id": "skill", "type": "single_select", "label": "Skill",
+                     "options": [{"value": "alpha", "label": "alpha"}]}],
+        )
+        app.state.status = "Select a skill · Enter confirm · Esc cancel"
+        _paint(app)
+        screen = app.application.renderer._last_screen
+        visible = screen.visible_windows_to_write_positions
+        assert app.interaction_divider_window in visible
+        assert app.interaction_bottom_divider_window in visible
+        assert visible[app.interaction_bottom_divider_window].ypos > visible[app.interaction_divider_window].ypos
+        app.interaction = None
+        app.state.status = "Ready"
+        _paint(app)
+        assert app.interaction_bottom_divider_window not in app.application.renderer._last_screen.visible_windows_to_write_positions
 
     _with_painted_app("waiting-input-divider", scenario)
 
@@ -3833,3 +4052,24 @@ def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
 
     asyncio.run(scenario())
     store.close()
+
+
+
+def test_status_reports_both_sandboxes(tmp_path) -> None:
+    from dataclasses import replace as dc_replace
+    from agent.config import SandboxConfig
+    from agent.sandbox import select_backend
+
+    config = dc_replace(SandboxConfig(workspace=tmp_path), bwrap_path="/bin/true")
+    backend = select_backend(config, check=False).backend
+    runner = AgentRunner(
+        prepared=create_agent(model=scripted_model([AIMessage(content="done")]), backend=backend, skills=[]),
+        thread_id="sandbox-status",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.show_status()
+        status = app.state.blocks[-1].content
+        assert "Offline sandbox: not started" in status
+        assert "Networked sandbox: not started" in status
+    runner.close()

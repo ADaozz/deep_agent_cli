@@ -37,7 +37,10 @@ from agent.permission import (
     PermissionMode, allow_mode_unavailable_reason, interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
 )
-from agent.sandbox import ExecutionMode, SKILLS_ROOT, WorkspaceCompositeBackend, select_backend
+from agent.sandbox import (
+    BackendSelection, ExecutionMode, SKILLS_ROOT, WorkspaceCompositeBackend, sandbox_pool_of, select_backend,
+)
+from agent.sandbox_pool import SandboxPool
 from agent.tools.execute import build_execute_tool
 from agent.tools.human_input import build_human_input_tools
 from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
@@ -79,6 +82,10 @@ class PreparedAgent:
     run_controller: RunController | None = None
     pause_condition: Callable[[], bool] = field(default=lambda: False)
     compact_middleware: SummarizationToolMiddleware | None = None
+    # 重建时复用，切换模型或权限模式时保留同一套沙箱。
+    backend_selection: BackendSelection | None = None
+    sandbox_pool: SandboxPool | None = None
+    skill_sources: tuple[str, ...] = ()
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -100,10 +107,12 @@ def build_agent(
     run_controller: RunController,
     should_pause: Callable[[], bool],
     interrupt_on_override: dict[str, Any] | None = None,
+    backend_selection: BackendSelection | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = spec.sandbox or SandboxConfig()
+    selected: BackendSelection | None = None
     if spec.backend is None:
-        selected = select_backend(sandbox_cfg)
+        selected = backend_selection or select_backend(sandbox_cfg)
         fs_backend = selected.backend
         execution_mode = selected.mode
         security_warning = selected.warning
@@ -113,6 +122,7 @@ def build_agent(
         security_warning = ""
     if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
+    sandbox_pool = sandbox_pool_of(fs_backend)
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
     tools = [*build_human_input_tools(), *spec.tools]
@@ -169,6 +179,9 @@ def build_agent(
         run_controller=run_controller,
         pause_condition=should_pause,
         compact_middleware=compact_middleware,
+        backend_selection=selected,
+        sandbox_pool=sandbox_pool,
+        skill_sources=tuple(skill_sources or ()),
     )
 
 

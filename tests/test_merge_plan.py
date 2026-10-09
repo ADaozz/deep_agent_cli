@@ -400,17 +400,18 @@ def test_openai_compatible_attachment_is_only_materialized_for_model_request(tmp
     assert message.additional_kwargs[ATTACHMENT_META_KEY] == [ref.to_dict()]
 
 
-def test_slash_candidates_are_fuzzy_and_accept_without_submit(tmp_path: Path) -> None:
+def test_slash_candidates_match_substrings_and_accept_without_submit(tmp_path: Path) -> None:
     completer = SlashCompleter(command_table())
-    names = [item.text for item in completer.get_completions(Document("/rsm"), CompleteEvent())]
+    names = [item.text for item in completer.get_completions(Document("/sum"), CompleteEvent())]
     assert "/resume" in names
+    assert list(completer.get_completions(Document("/rsm"), CompleteEvent())) == []
     exact = [item.text for item in completer.get_completions(Document("/quit"), CompleteEvent())]
     assert exact[0] == "/quit"
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(),
                          thread_id="completion")
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        app.buffer.text = "/rsm"
+        app.buffer.text = "/sum"
         app.buffer.cursor_position = len(app.buffer.text)
         completions = list(app.slash_completer.get_completions(app.buffer.document, CompleteEvent()))
         app.buffer.complete_while_typing = lambda: False
@@ -433,7 +434,7 @@ def test_tui_enter_accepts_candidate_before_running_command() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             task = asyncio.create_task(app.run_async())
             await asyncio.sleep(0.03)
-            pipe.send_text("/hlp")
+            pipe.send_text("/elp")
             await asyncio.sleep(0.08)
             pipe.send_text("\r")
             await asyncio.sleep(0.08)

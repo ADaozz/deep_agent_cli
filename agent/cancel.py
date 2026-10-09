@@ -1,4 +1,4 @@
-"""Optional cancellation protocol for synchronous tools and execute."""
+"""同步工具与 execute 的可选取消协议。"""
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
@@ -95,6 +95,11 @@ def _kill_process_group(process: Any) -> None:
     import os
     import signal
 
+    # 持久沙箱内的命令没有可信号的宿主 PID；句柄只杀掉该命令，沙箱继续运行。
+    cancel_execution = getattr(process, "cancel_execution", None)
+    if callable(cancel_execution):
+        cancel_execution()
+        return
     pid = getattr(process, "pid", None)
     if not pid:
         return

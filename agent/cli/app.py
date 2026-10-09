@@ -16,11 +16,13 @@ from zoneinfo import ZoneInfo
 from prompt_toolkit import ANSI, Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, ConditionalContainer, Float, FloatContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.containers import WindowAlign
@@ -53,6 +55,7 @@ from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
 from agent.cli.pasted_content import PastedContentDraft
+from agent.cli.skills import SkillDraft, load_skill_catalog
 from agent.cli.previews import is_mutation_tool, normalize_file_mutation
 from agent.cli.rendering import (
     RenderedUnit,
@@ -77,6 +80,8 @@ from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, Unknow
 
 # Workspace/model and execution settings on the left; git/context on the right.
 FOOTER_LINES = 2
+INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
+STATUS_NOTICE_SECONDS = 1.0
 
 
 def format_context_window(window: int) -> str:
@@ -124,15 +129,8 @@ class SlashCompleter(Completer):
             return (0, 0, len(name))
         if name.startswith(query):
             return (1, 0, len(name))
-        offset = 0
-        gaps = 0
-        for char in query:
-            found = name.find(char, offset)
-            if found < 0:
-                return None
-            gaps += found - offset
-            offset = found + 1
-        return (2, gaps, len(name))
+        offset = name.find(query)
+        return (2, offset, len(name)) if offset >= 0 else None
 
     def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
         before = document.text_before_cursor
@@ -287,10 +285,11 @@ class _EditorScrollControl(BufferControl):
 
 
 class _PastedContentProcessor(Processor):
-    """Style the visible placeholder without changing editor text or cursor offsets."""
+    """为输入块标记添加样式，保持编辑文本和光标位置不变。"""
 
-    def __init__(self, draft: PastedContentDraft) -> None:
+    def __init__(self, draft: PastedContentDraft | SkillDraft, style: str = "pasted-content") -> None:
         self._draft = draft
+        self._style = style
 
     def apply_transformation(self, transformation_input: TransformationInput) -> Transformation:
         fragments = transformation_input.fragments
@@ -307,7 +306,7 @@ class _PastedContentProcessor(Processor):
         for fragment in fragments:
             style, text, *rest = fragment
             for char in text:
-                char_style = style + " class:pasted-content" if any(
+                char_style = style + " class:" + self._style if any(
                     start <= index < end for start, end in ranges
                 ) else style
                 styled.append((char_style, char, *rest))
@@ -368,6 +367,9 @@ class CliApplication:
         self._run_task: asyncio.Task[None] | None = None
         self._compacting = False
         self._last_ctrl_c = 0.0
+        self._status_notice_handle: asyncio.TimerHandle | None = None
+        self._status_before_notice = "Ready"
+        self._status_notice: str | None = None
         self._exiting = False
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
@@ -398,6 +400,8 @@ class CliApplication:
             complete_while_typing=True,
         )
         self._pasted_content = PastedContentDraft()
+        self._skill_draft = SkillDraft()
+        self._skill_picker_draft: tuple[str, int] | None = None
         self.transcript_control = _TranscriptControl(
             document=self._transcript_document,
             cursor=self._transcript_cursor,
@@ -434,7 +438,10 @@ class CliApplication:
         self.editor_control = _EditorScrollControl(
             buffer=self.buffer, focusable=True, on_scroll=self.scroll_transcript,
             on_select_outside=self._select_below_transcript,
-            input_processors=[_PastedContentProcessor(self._pasted_content)],
+            input_processors=[
+                _PastedContentProcessor(self._pasted_content),
+                _PastedContentProcessor(self._skill_draft, "skill-block"),
+            ],
         )
         self.bindings = self._create_bindings()
 
@@ -477,6 +484,7 @@ class CliApplication:
             viewport=self,
         )
         self.interaction_divider_window = Window(height=1, char="─", style="class:interaction-divider")
+        self.interaction_bottom_divider_window = Window(height=1, char="─", style="class:interaction-divider")
         self.interaction_hint_window = Window(
             _BackToBottomControl(
                 text=FormattedText([("class:back-to-bottom", "↓ Back to bottom · esc")]),
@@ -529,8 +537,8 @@ class CliApplication:
                 filter=Condition(self._status_visible),
             ),
             ConditionalContainer(
-                Window(height=1, char="─", style="class:interaction-divider"),
-                filter=Condition(lambda: self.state.status == "Waiting for input"),
+                self.interaction_bottom_divider_window,
+                filter=interaction_visible | Condition(lambda: self.state.status == "Waiting for input"),
             ),
             ConditionalContainer(
                 Window(
@@ -574,6 +582,7 @@ class CliApplication:
             style=Style.from_dict({
                 "editor": "bg:#303030 #ffffff",
                 "pasted-content": "bg:#245c38 #e8ffe8",
+                "skill-block": "bg:#254b70 #e8f4ff bold",
                 "transcript-selection": "bg:#264f78 #ffffff noreverse",
                 "footer": "#858585",
                 "footer-workspace": "ansigreen",
@@ -688,9 +697,52 @@ class CliApplication:
             f"Or run deep-agent resume and select. Model: {model_name}"
         )
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, *, transient: bool = True) -> None:
+        """临时提示显示一秒后恢复原状态，持续状态由调用方显式指定。"""
+        previous = self.state.status
+        if self._status_notice == previous:
+            previous = self._status_before_notice
+        if previous == "Reading clipboard…" or (
+            self.interaction is None and previous.startswith(("Select ", "Type ALLOW", "Reviewing diff"))
+        ):
+            previous = "Working…  Esc to cancel" if self.state.running else "Ready"
+        if self._status_notice_handle is not None:
+            self._status_notice_handle.cancel()
+            self._status_notice_handle = None
+        self._status_notice = None
         self.state.status = text
+        if transient:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = self._loop
+            if loop is not None and loop.is_running():
+                self._status_before_notice = previous
+                self._status_notice = text
+                self._status_notice_handle = loop.call_later(
+                    STATUS_NOTICE_SECONDS, self._hide_status_notice,
+                )
         self.application.invalidate()
+
+    def _show_input_cleared_hint(self) -> None:
+        """空闲时短暂提示输入已清空，执行和待处理状态保持原样。"""
+        if (self.state.running or self._compacting or self.state.compacting
+                or self.state.status == "Waiting for input"
+                or self.state.status.endswith("still pending · F2 to decide")):
+            self.application.invalidate()
+            return
+        self.set_status(INPUT_CLEARED_HINT)
+
+    def _hide_status_notice(self) -> None:
+        """仅恢复仍有效的提示，避免覆盖后来出现的运行或审批状态。"""
+        self._status_notice_handle = None
+        notice = self._status_notice
+        self._status_notice = None
+        if self.state.status == notice:
+            previous = self._status_before_notice
+            if previous == "Compacting context" and not (self._compacting or self.state.compacting):
+                previous = "Ready"
+            self.set_status(previous, transient=False)
 
     def _switch_model(self, id_or_prefix: str, *, reasoning_effort: str | None = None) -> ModelProfile:
         profile = self.runner.request_model_change(id_or_prefix, reasoning_effort=reasoning_effort)
@@ -765,8 +817,19 @@ class CliApplication:
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
             f"Permission: {perm}\n"
-            f"Thread: {self.runner.thread_id}\nSandbox: {mode}\nTools: {tool_count}"
+            f"Thread: {self.runner.thread_id}\nSandbox: {mode}\n"
+            f"{self._sandbox_status_lines()}"
+            f"Tools: {tool_count}"
         )
+
+    def _sandbox_status_lines(self) -> str:
+        pool = self.runner.sandbox_pool
+        if pool is None:
+            return ""
+        def state(network: bool) -> str:
+            sandbox = pool.sandbox(network)
+            return f"running ({sandbox.id})" if sandbox is not None else "not started"
+        return f"Offline sandbox: {state(False)}\nNetworked sandbox: {state(True)}\n"
 
     def show_session(self) -> None:
         store = self.runner.session_store
@@ -808,9 +871,48 @@ class CliApplication:
     def _apply_session_snapshot(self, snapshot: Any) -> None:
         self.sessions.apply_snapshot(snapshot)
 
+    async def select_skill(self, arg: str = "") -> None:
+        if self.sessions.waiting or self.interaction is not None or self._compacting:
+            self.set_status("Finish the current interaction before selecting a skill")
+            return
+        if arg:
+            self.state.add_system("Usage: /skill", error=True)
+            return
+        prepared = self.runner.prepared
+        try:
+            catalog = await self._run_blocking(load_skill_catalog, prepared)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.state.add_system(f"Cannot load skills: {exc}", error=True)
+            return
+        if (self.sessions.waiting or self.interaction is not None or self._compacting
+                or self._exiting or self.runner.prepared is not prepared):
+            return
+        for warning in catalog.get("skills_load_errors", []):
+            self.state.add_system(str(warning), error=True)
+        skills = sorted(catalog.get("skills_metadata", []), key=lambda item: item["name"])
+        if not skills:
+            self.state.add_system("No valid skills in ~/.deep-agent/skills/ (SKILL.md requires name and description)")
+            self.set_status("No skills available")
+            return
+        self._skill_picker_draft = (self.buffer.text, self.buffer.cursor_position)
+        self.buffer.reset()
+        self.interaction = InteractionController(
+            kind="skill", title="Select skill", question="Choose a skill for the next message",
+            fields=[{"id": "skill", "type": "single_select", "label": "Skill", "required": True,
+                     "options": [{"value": item["path"], "label": item["name"],
+                                  "description": item["description"]} for item in skills]}],
+        )
+        self.set_status("Select a skill · Enter confirm · Esc cancel", transient=False)
+        self.application.invalidate()
+
+    def _clear_skill_draft(self) -> None:
+        self.buffer.text = self._skill_draft.expand(self.buffer.text)
+        self._skill_draft.clear()
+        self._skill_picker_draft = None
+
     async def select_model(self, arg: str = "") -> None:
         if self.sessions.waiting:
-            self.set_status(self.sessions.wait_status())
+            self.set_status(self.sessions.wait_status(), transient=False)
             return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before switching models")
@@ -858,7 +960,7 @@ class CliApplication:
         )
         if current_source in sources:
             self.interaction.option_index = sources.index(current_source)
-        self.set_status("Select a source · Enter confirm · Esc cancel")
+        self.set_status("Select a source · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def _show_model_choices(self, source: str, profiles: list[ModelProfile]) -> None:
@@ -885,7 +987,7 @@ class CliApplication:
             if option["value"] == current_id:
                 self.interaction.option_index = index
                 break
-        self.set_status("Select a model · Enter confirm · Esc back" if source else "Select a model · Enter confirm · Esc cancel")
+        self.set_status("Select a model · Enter confirm · Esc back" if source else "Select a model · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def _show_reasoning_choices(self, profile: ModelProfile, source: str = "") -> None:
@@ -908,7 +1010,7 @@ class CliApplication:
                      ]}],
         )
         self.interaction.option_index = efforts.index(selected) if selected in efforts else 0
-        self.set_status("Select reasoning effort · Enter confirm · Esc back")
+        self.set_status("Select reasoning effort · Enter confirm · Esc back", transient=False)
         self.application.invalidate()
 
     async def compact_command(self, arg: str = "") -> None:
@@ -919,11 +1021,11 @@ class CliApplication:
             self.set_status("Finish the current run or interaction before compacting")
             return
         if self.sessions.waiting:
-            self.set_status(self.sessions.wait_status())
+            self.set_status(self.sessions.wait_status(), transient=False)
             return
         self._compacting = True
         self.state.running = True
-        self.set_status("Compacting context")
+        self.set_status("Compacting context", transient=False)
         try:
             result = await self._run_blocking(self.runner.compact_context)
         except Exception as exc:  # noqa: BLE001
@@ -967,7 +1069,7 @@ class CliApplication:
 
     async def select_permission(self, arg: str = "") -> None:
         if self.sessions.waiting:
-            self.set_status(self.sessions.wait_status())
+            self.set_status(self.sessions.wait_status(), transient=False)
             return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before changing permission mode")
@@ -1020,7 +1122,7 @@ class CliApplication:
             }],
         )
         self.interaction.option_index = 0 if current is PermissionMode.ASK else 1
-        self.set_status("Select permission mode · Enter confirm · Esc cancel")
+        self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def _allow_available(self) -> bool:
@@ -1056,12 +1158,12 @@ class CliApplication:
                 "options": [],
             }],
         )
-        self.set_status("Type ALLOW to confirm · Esc cancel")
+        self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def cycle_model(self, *, delta: int = 1) -> None:
         if self.sessions.waiting:
-            self.set_status(self.sessions.wait_status())
+            self.set_status(self.sessions.wait_status(), transient=False)
             return
         if self.interaction is not None:
             self.set_status("Finish the current interaction before switching models")
@@ -1108,6 +1210,7 @@ class CliApplication:
         return restored_parts
 
     def _apply_session_snapshot(self, snapshot: Any) -> None:
+        self._clear_skill_draft()
         self.clear_transcript_selection()
         self.state.load_transcript(snapshot.transcript)
         self.state.todos = list(snapshot.todos)
@@ -1119,7 +1222,7 @@ class CliApplication:
         for notice in snapshot.notices:
             self.state.add_system(notice)
         if not self._reopen_pending_interaction(notify_missing=False):
-            self.set_status("Ready")
+            self.set_status("Ready", transient=False)
         self._transcript_anchor = None
         self._renderer.clear()
         self.state.usage = dict(self.runner.latest_usage())
@@ -1129,6 +1232,9 @@ class CliApplication:
         if self._exiting:
             return
         self._exiting = True
+        if self._status_notice_handle is not None:
+            self._status_notice_handle.cancel()
+            self._status_notice_handle = None
         self._stop_selection_scroll()
         # Stop mouse reports before prompt_toolkit leaves the alternate screen.
         # Otherwise motion generated during shutdown can reach the shell.
@@ -1490,6 +1596,10 @@ class CliApplication:
 
         @bind("submit")
         def submit(event) -> None:  # type: ignore[no-untyped-def]
+            if self.interaction is None and event.current_buffer.text.strip() == "/skill":
+                event.current_buffer.cancel_completion()
+                self._submit_buffer("steer")
+                return
             if self._accept_command_completion(event.current_buffer):
                 return
             self._submit_buffer("steer")
@@ -1520,12 +1630,23 @@ class CliApplication:
         def clipboard_paste(event) -> None:  # type: ignore[no-untyped-def]
             if self.interaction is not None:
                 return
-            self.set_status("Reading clipboard…")
+            self.set_status("Reading clipboard…", transient=False)
             asyncio.create_task(self._paste_clipboard())
 
         @kb.add(Keys.BracketedPaste, eager=True)
         def bracketed_paste(event) -> None:  # type: ignore[no-untyped-def]
             self._handle_pasted_text(event.data.replace("\r\n", "\n").replace("\r", "\n"))
+
+        @kb.add("backspace", filter=Condition(
+            lambda: self.interaction is None and self.buffer.text.startswith("/")
+            and "\n" not in self.buffer.text
+        ))
+        def command_backspace(event) -> None:  # type: ignore[no-untyped-def]
+            """退格修改命令后重新补全，同时解除已确认候选的抑制状态。"""
+            get_by_name("backward-delete-char").handler(event)
+            self.slash_completer.accepted_text = None
+            if event.current_buffer.text.startswith("/"):
+                event.current_buffer.start_completion()
 
         @kb.add("backspace", filter=Condition(
             lambda: self.interaction is None and not self.buffer.text and bool(self.state.attachments)
@@ -1582,6 +1703,7 @@ class CliApplication:
                 self.interaction.error = ""
                 event.current_buffer.reset()
                 self._pasted_content.clear()
+                self._skill_draft.clear()
                 return
             if self.interaction.index > 0:
                 self.interaction.index -= 1
@@ -1593,6 +1715,7 @@ class CliApplication:
                 else:
                     event.current_buffer.reset()
                     self._pasted_content.clear()
+                    self._skill_draft.clear()
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
@@ -1600,6 +1723,7 @@ class CliApplication:
                 self.slash_completer.accepted_text = None
                 event.current_buffer.reset()
                 self._pasted_content.clear()
+                self._skill_draft.clear()
                 self.application.invalidate()
             elif self.transcript_away_from_bottom():
                 self.follow_transcript()
@@ -1614,6 +1738,7 @@ class CliApplication:
                 self.interaction.error = ""
                 event.current_buffer.reset()
                 self._pasted_content.clear()
+                self._skill_draft.clear()
                 self.application.invalidate()
             elif self.interaction is not None:
                 self._finish_interaction(cancelled=True)
@@ -1623,9 +1748,9 @@ class CliApplication:
                 restored = self._restore_queued_to_editor(event.current_buffer)
                 self.runner.request_cancel()
                 if restored:
-                    self.set_status("Cancelling… · queued messages restored")
+                    self.set_status("Cancelling… · queued messages restored", transient=False)
                 else:
-                    self.set_status("Cancelling…")
+                    self.set_status("Cancelling…", transient=False)
                 self.application.invalidate()
 
         @bind("clear_or_exit")
@@ -1639,9 +1764,10 @@ class CliApplication:
                 return
             event.current_buffer.reset()
             self._pasted_content.clear()
+            self._skill_draft.clear()
             self.state.attachments.clear()
             self._last_ctrl_c = now
-            self.set_status("Input cleared · press Ctrl+C again to exit")
+            self._show_input_cleared_hint()
 
         @bind("exit")
         def ctrl_d(event) -> None:  # type: ignore[no-untyped-def]
@@ -1700,10 +1826,24 @@ class CliApplication:
     def _submit_buffer(self, queue_mode: str) -> None:
         self.slash_completer.accepted_text = None
         if self.sessions.waiting:
-            self.set_status(self.sessions.wait_status())
+            self.set_status(self.sessions.wait_status(), transient=False)
             return
         displayed = self.buffer.text.strip()
+        if self._skill_draft.has_invalid_marker(displayed):
+            self.state.add_system("A skill marker was edited. Restore it or remove it before submitting.", error=True)
+            self.set_status("Edited skill marker")
+            return
+        if self.interaction is None and self._skill_draft.is_present(displayed):
+            try:
+                responses = self.runner.prepared.backend.download_files([self._skill_draft.path])
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.state.add_system(f"Cannot read selected skill: {exc}", error=True)
+                return
+            if not responses or responses[0].error or responses[0].content is None:
+                self.state.add_system("Selected skill is no longer readable. Remove it or select another skill.", error=True)
+                return
         text = self._pasted_content.expand(displayed)
+        text = self._skill_draft.expand(text)
         if self._pasted_content.has_invalid_marker(displayed):
             self.state.add_system(
                 "A pasted-content marker was edited or truncated. "
@@ -1715,7 +1855,9 @@ class CliApplication:
         if self.interaction is not None:
             was_text = self.interaction.accepts_text
             complete = self.interaction.accept(text)
-            if was_text or complete:
+            if self.interaction.kind == "skill":
+                self.buffer.reset()
+            elif was_text or complete:
                 self._reset_submitted_buffer(text)
             if complete:
                 self._finish_interaction()
@@ -1726,7 +1868,8 @@ class CliApplication:
         if self._compacting:
             self.set_status("Wait for compaction to finish")
             return
-        if not self._pasted_content.has_blocks and text.startswith("/") and "\n" not in text:
+        if (not self._pasted_content.has_blocks and not self._skill_draft.is_present(displayed)
+                and text.startswith("/") and "\n" not in text):
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
             return
@@ -1747,13 +1890,14 @@ class CliApplication:
         self._start_run(text, image_refs=tuple(self.state.attachments))
 
     def _reset_submitted_buffer(self, expanded_text: str) -> None:
-        if self._pasted_content.has_blocks:
+        if self._pasted_content.has_blocks or self._skill_draft.has_blocks:
             if expanded_text:
                 self.buffer.history.append_string(expanded_text)
             self.buffer.reset(append_to_history=False)
         else:
             self.buffer.reset(append_to_history=bool(expanded_text))
         self._pasted_content.clear()
+        self._skill_draft.clear()
 
     async def _dispatch_command(self, text: str) -> None:
         name, _, arg = text[1:].partition(" ")
@@ -1776,7 +1920,7 @@ class CliApplication:
             self.state.attachments.clear()
         self.state.running = True
         self._working_messages.reset()
-        self.set_status("Working…  Esc to cancel")
+        self.set_status("Working…  Esc to cancel", transient=False)
 
         async def work() -> None:
             if resume_call is None:
@@ -1818,7 +1962,7 @@ class CliApplication:
             self.set_status(f"Cleared {count} pending image(s)")
             return
         if value.lower() == "clipboard":
-            self.set_status("Reading clipboard…")
+            self.set_status("Reading clipboard…", transient=False)
             await self._paste_clipboard(images_only=True)
             return
         await self._attach_path(value)
@@ -1929,7 +2073,15 @@ class CliApplication:
             self._apply_event(event)
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
+        previous_status = self.state.status
         self.state.apply(event)
+        if self.state.status != previous_status:
+            if event.type == "steering_queued":
+                notice = self.state.status
+                self.state.status = previous_status
+                self.set_status(notice)
+            else:
+                self.set_status(self.state.status, transient=False)
         if event.type in {"run_started", "run_cancelling"} or not self.state.running:
             self._working_messages.reset()
         if event.type == "runtime_config_applied" and isinstance(event.result, dict):
@@ -1961,7 +2113,7 @@ class CliApplication:
         elif self._deferred_config_interaction is not None:
             self.interaction = self._deferred_config_interaction
             self._deferred_config_interaction = None
-            self.set_status("Type ALLOW to confirm · Esc cancel")
+            self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
@@ -1969,6 +2121,29 @@ class CliApplication:
         if interaction is None:
             return
         self._reviewing = False
+        if interaction.kind == "skill":
+            self.interaction = None
+            draft, cursor = self._skill_picker_draft or ("", 0)
+            self._skill_picker_draft = None
+            self.buffer.text = draft
+            self.buffer.cursor_position = cursor
+            if cancelled:
+                self.set_status("Skill selection cancelled")
+                return
+            path = str(interaction.values.get("skill") or "")
+            option = next((item for item in interaction.fields[0]["options"] if item["value"] == path), None)
+            if option is None:
+                return
+            for label in self._skill_draft.labels:
+                cursor -= len(label) * draft[:cursor].count(label)
+                draft = draft.replace(label, "")
+            label = self._skill_draft.display(option["label"], path)
+            self.buffer.document = Document(
+                draft[:cursor] + label + " " + draft[cursor:], cursor_position=cursor + len(label) + 1,
+            )
+            self.set_status("Skill selected · Enter submit or add instructions")
+            self.application.invalidate()
+            return
         if interaction.kind == "resume":
             if cancelled:
                 self.interaction = None
@@ -2126,9 +2301,9 @@ class CliApplication:
     def _dismiss_pending_interrupt(self, kind: str) -> None:
         self.interaction = None
         self._reviewing = False
+        self.state.running = False
         label = {"approval": "Approval", "human": "Input", "pause": "Pause"}.get(kind, "Input")
-        self.state.add_system(f"{label} still pending · F2 to decide")
-        self.set_status("Ready")
+        self.set_status(f"{label} still pending · F2 to decide", transient=False)
 
     def _reopen_pending_interaction(self, *, notify_missing: bool = True) -> bool:
         try:
@@ -2150,13 +2325,13 @@ class CliApplication:
             return True
         if interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
             self.interaction = InteractionController.approval(list(interrupt.pending_tools))
-            self.set_status("Waiting for input")
+            self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:
             self.interaction = InteractionController.human(interrupt.payload)
-            self.set_status("Waiting for input")
+            self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.PAUSED:
             self.interaction = InteractionController.pause()
-            self.set_status("Paused")
+            self.set_status("Paused", transient=False)
         else:
             self.state.add_system(f"Unsupported interrupt: {interrupt.kind}", error=True)
             return False
@@ -2203,12 +2378,12 @@ class CliApplication:
             return
         self._reviewing = True
         self._transcript_anchor = 0
-        self.set_status("Reviewing diff · Esc or Ctrl+R to close")
+        self.set_status("Reviewing diff · Esc or Ctrl+R to close", transient=False)
 
     def _close_review(self) -> None:
         self._reviewing = False
         self._transcript_anchor = None
-        self.set_status("Waiting for input" if self.interaction is not None else "Ready")
+        self.set_status("Waiting for input" if self.interaction is not None else "Ready", transient=False)
 
 
 def default_config_dir() -> Path:

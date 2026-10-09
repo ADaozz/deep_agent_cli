@@ -14,7 +14,7 @@ from agent.cli.previews import build_failure_preview, build_tool_preview
 from agent.cli.rendering import TranscriptRenderer, _capture, _message, render_transcript
 from agent.cli.state import CliState, MessageBlock, ToolBlock
 from agent.config import Settings
-from agent.runner import AgentRunner
+from agent.runner import AgentRunner, RunEvent
 from tests.conftest import scripted_model
 
 
@@ -42,7 +42,7 @@ def test_thinking_title_hint_indent_and_expand() -> None:
     assert "Thinking" not in plain(render_transcript(CliState(blocks=[MessageBlock(kind="assistant", content="回答")]), 80))
 
 
-def test_thinking_limit_counts_logical_lines_and_short_blocks_have_no_hint() -> None:
+def test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint() -> None:
     configured = limits(thinking_tail_lines=3)
     short = MessageBlock(kind="assistant", thinking="一\n二\n三")
     text = plain(_capture(_message(short, True, configured)[0], 80))
@@ -50,9 +50,53 @@ def test_thinking_limit_counts_logical_lines_and_short_blocks_have_no_hint() -> 
     long = MessageBlock(kind="assistant", thinking="首行\n" + "很长的思考正文" * 20)
     text = plain(_capture(_message(long, True, limits(thinking_tail_lines=1))[0], 30))
     assert "Thinking" in text
-    # The hint wraps in a narrow terminal, but the logical hidden count is one.
-    assert "… 1 earlier thinking" in text
+    # 中文长行折成显示行，隐藏提示本身保持单行。
+    assert "… 11 earlier thinking" in text
+    rows = text.splitlines()
+    title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
+    assert len(rows[title + 2:]) == 1
     assert "首行" not in text
+
+
+@pytest.mark.parametrize("width", [20, 30, 80, 120])
+@pytest.mark.parametrize("content", [
+    "A single long paragraph with English words and sentences. " * 20,
+    "中文长段落和 English 混排正文。" * 30,
+    "旧段落\n\n" + "A paragraph that wraps across the terminal. " * 20 + "\n\n最后一行",
+    "a" * 500 + "\n\t" + "有制表符的内容" * 20,
+])
+def test_collapsed_thinking_keeps_exact_last_five_screen_rows(width, content):
+    """正文预算按显示行计算，缩进、空行和宽字符也占据实际宽度。"""
+    block = MessageBlock(kind="assistant", thinking=content)
+    expanded = plain(_capture(_message(block, False)[0], width)).splitlines()
+    collapsed = plain(_capture(_message(block, True)[0], width)).splitlines()
+    expanded_title = next(i for i, row in enumerate(expanded) if row.strip() == "Thinking")
+    collapsed_title = next(i for i, row in enumerate(collapsed) if row.strip() == "Thinking")
+    original_rows = expanded[expanded_title + 1:]
+    kept_rows = collapsed[collapsed_title + 2:]
+    assert len(kept_rows) == 5
+    assert [row.rstrip() for row in kept_rows] == [row.rstrip() for row in original_rows[-5:]]
+    assert f"… {len(original_rows) - 5} earlier" in collapsed[collapsed_title + 1]
+
+
+def test_thinking_preview_reflows_after_resize_and_streaming():
+    """流式追加与终端宽度变化都重新计算正文显示行。"""
+    state = CliState()
+    state.apply(RunEvent(type="thinking_delta", content="English paragraph that wraps. " * 40))
+    renderer = TranscriptRenderer()
+    for width in (80, 25, 100):
+        fragments, _ = renderer.render(state, width)
+        rows = "".join(value for _, value in fragments).splitlines()
+        title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
+        assert len(rows[title + 2:]) == 5
+    state.apply(RunEvent(type="thinking_delta", content=state.blocks[0].thinking + "\n这是后来追加的长段落。" * 30))
+    fragments, _ = renderer.render(state, 25)
+    rows = "".join(value for _, value in fragments).splitlines()
+    title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
+    assert len(rows[title + 2:]) == 5
+    state.thinking_collapsed = False
+    fragments, _ = renderer.render(state, 25)
+    assert "English" in "".join(value for _, value in fragments)
 
 
 def test_cached_renderer_respects_config_and_cache_changes() -> None:

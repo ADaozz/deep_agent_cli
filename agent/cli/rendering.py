@@ -4,6 +4,7 @@ import time
 import re
 from bisect import bisect_right
 from collections.abc import Callable
+from copy import copy
 from dataclasses import dataclass
 from io import StringIO
 from typing import Any, TypeGuard
@@ -16,13 +17,14 @@ from prompt_toolkit.formatted_text import (
     to_formatted_text,
 )
 from prompt_toolkit.formatted_text.utils import split_lines
-from rich.console import Console, Group
+from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from rich.theme import Theme
 
 from agent.cli.previews import (
     CommandExecutionPreview,
@@ -38,6 +40,7 @@ from agent.cli.previews import (
     tool_group,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.cli.skills import skill_message_display
 from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
@@ -420,6 +423,75 @@ def _numbered_diff(raw: str, width: int) -> list[Text]:
     return result
 
 
+@dataclass(frozen=True)
+class _ThinkingDetails:
+    """在已扣除缩进的实际宽度内折行，再截取思考正文的末尾显示行。"""
+
+    content: str
+    collapsed: bool
+    tail_lines: int
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        lines = self.content.splitlines() or [self.content]
+        if not self.collapsed:
+            for line in lines:
+                yield Text(line, style="italic #888888")
+            return
+        rows = []
+        for line in lines:
+            rows.extend(Text(line, style="italic #888888").wrap(
+                console, max(1, options.max_width), overflow="fold",
+            ))
+        hidden = max(0, len(rows) - self.tail_lines)
+        if hidden:
+            yield Text(
+                f"… {hidden} earlier thinking lines hidden · Ctrl+T to expand",
+                style="#888888", no_wrap=True, overflow="ellipsis",
+            )
+        for row in rows[-self.tail_lines:]:
+            row.no_wrap = True
+            row.overflow = "crop"
+            yield row
+
+
+class _SkillMessageMarkdown(Markdown):
+    """保留用户正文的 Markdown 格式，在折行前为技能引用添加块样式。"""
+
+    def __init__(self, text: str, labels: tuple[str, ...]) -> None:
+        super().__init__(text)
+        self.inlines = self.inlines | {"skill"}
+        pattern = re.compile("(" + "|".join(re.escape(label) for label in labels) + ")")
+
+        def style_tokens(tokens):
+            styled = []
+            for token in tokens:
+                if token.children:
+                    token.children = style_tokens(token.children)
+                if token.type != "text":
+                    styled.append(token)
+                    continue
+                for part in pattern.split(token.content):
+                    if not part:
+                        continue
+                    item = copy(token)
+                    item.content = part
+                    if part in labels:
+                        item.type, item.tag = "skill_inline", "skill"
+                    styled.append(item)
+            return styled
+
+        self.parsed = style_tokens(self.parsed)
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        with console.use_theme(Theme({"markdown.skill": "bold #e8f4ff on #254b70"})):
+            yield from super().__rich_console__(console, options)
+
+
+def _user_message_content(text: str) -> Markdown:
+    displayed, labels = skill_message_display(text)
+    return _SkillMessageMarkdown(displayed, labels) if labels else Markdown(text)
+
+
 def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[Any]:
     items: list[Any] = []
     if block.kind == "user":
@@ -428,7 +500,7 @@ def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLim
         message = Table.grid(expand=True, padding=0)
         message.add_column(width=2, no_wrap=True)
         message.add_column(ratio=1)
-        message.add_row(Text("› "), Markdown(label))
+        message.add_row(Text("› "), _user_message_content(label))
         content: list[Any] = [message]
         for index, ref in enumerate(block.attachments, 1):
             content.append(Text(
@@ -438,18 +510,9 @@ def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLim
         items.append(Padding(Group(*content), (1, 1, 1, 1), style=style))
     elif block.kind == "assistant":
         if block.thinking:
-            lines = block.thinking.splitlines() or [block.thinking]
             body: list[Any] = [Text("Thinking", style="bold #888888")]
-            details: list[Any] = []
-            if thinking_collapsed and len(lines) > limits.thinking_tail_lines:
-                hidden = len(lines) - limits.thinking_tail_lines
-                details.append(Text(
-                    f"… {hidden} earlier thinking lines hidden · Ctrl+T to expand",
-                    style="#888888",
-                ))
-                lines = lines[-limits.thinking_tail_lines:]
-            details.extend(Text(line, style="italic #888888") for line in lines)
-            body.append(Padding(Group(*details), (0, 0, 0, 2)))
+            details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.thinking_tail_lines)
+            body.append(Padding(details, (0, 0, 0, 2)))
             items.append(Padding(Group(*body), (1, 1, 0, 1)))
         if block.content:
             items.append(Padding(Markdown(block.content), (1, 1, 0, 1)))
