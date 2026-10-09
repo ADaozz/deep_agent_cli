@@ -651,3 +651,31 @@ def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
     finally:
         restored.close()
         store.close()
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit_file", "delete"])
+@pytest.mark.parametrize("key", ["file_path", "path"])
+def test_approval_file_tool_shows_only_target(tool, key) -> None:
+    args = {key: "/workspace/report.md", "content": "private contents",
+            "old_string": "private old text", "new_string": "private new text"}
+    ui = InteractionController.approval([{"toolCallId": "file-1", "name": tool, "args": args}])
+    assert f"Tool: {tool}" in ui.question
+    assert "Target: /workspace/report.md" in ui.question
+    assert "private" not in ui.question
+    assert ui.tool_call_ids == ["file-1"]
+    assert ui.option_index == 0
+    assert ui.accept() and ui.values["approved"] == "reject"
+
+
+def test_approval_file_targets_bound_and_redact_summary() -> None:
+    ui = InteractionController.approval([
+        {"name": "write_file", "args": {"file_path": "/workspace/" + "x" * 400}},
+        {"name": "edit_file", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
+        {"name": "delete", "args": {"file_path": "/workspace/api_key=private-value"}},
+        {"name": "delete", "args": {}},
+    ])
+    assert "truncated; Ctrl+O" in ui.question
+    assert "\x1b" not in ui.question
+    assert "private-value" not in ui.question
+    assert "[redacted: target may contain credentials]" in ui.question
+    assert "Target: <not supplied>" in ui.question

@@ -121,14 +121,14 @@ sandbox:
   extra_read_only_mounts:
     - source: ~/.local  # 替换为 npm config get prefix 的实际结果
       destination: /opt/npm-prefix
-    - source: ~/.cache/ms-playwright
-      destination: /opt/ms-playwright
   env_allowlist:
     - DISPLAY
   env_set:
     PATH: /opt/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
 ```
+
+此示例只新增 npm prefix 挂载，浏览器缓存沿用默认模板的可写 `/opt/ms-playwright` 挂载。若只使用已安装浏览器并希望只读缓存，先从 `extra_read_write_mounts` 移除缓存项，再加入 `extra_read_only_mounts`，同一目标不能同时存在于两个列表。
 
 合并进现有配置，不覆盖其他挂载和允许的变量；上述源目录必须存在。系统 Chrome 还需要 `/opt/google` 的只读挂载；位于系统目录外的 Node 本体需要独立挂载并加入 PATH。不要把个人机器的 Node 目录当成通用要求。
 

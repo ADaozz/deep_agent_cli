@@ -223,7 +223,7 @@ playwright-cli install-browser --help
 playwright-cli install-browser chromium
 ```
 
-不要用独立的 `npx playwright install chromium` 代替：它可能解析到另一版 Playwright，下载的浏览器修订号与 CLI 查找的缓存目录不同。命令以实际安装的 CLI 帮助为准；本轮核对的 CLI 0.1.22 支持上述命令（包括 `--dry-run`），不要求锁定项目 Node 或 Playwright 版本。缓存目录可写时，沙箱中的安装和删除会改宿主机上的同一目录；只使用已安装浏览器时，把该项改到 `extra_read_only_mounts`。下载浏览器需要网络，由用户在宿主机完成。
+不要用独立的 `npx playwright install chromium` 代替：它可能解析到另一版 Playwright，下载的浏览器修订号与 CLI 查找的缓存目录不同。命令以实际安装的 CLI 帮助为准；本轮核对的 CLI 0.1.22 支持上述命令（包括 `--dry-run`），不要求锁定项目 Node 或 Playwright 版本。缓存目录可写时，沙箱中的安装和删除会改宿主机上的同一目录；只使用已安装浏览器且需要只读缓存时，先从 `extra_read_write_mounts` 移除该项，再加入 `extra_read_only_mounts`，不要在两个列表中重复配置同一目标。下载浏览器需要网络，由用户在宿主机完成。
 
 Node 本体也可以来自系统 `/usr/bin/node`。若 CLI 和 npm 包安装在自定义 npm prefix（例如 `npm config get prefix` 返回 `~/.local`），必须挂载整个 prefix，而不只是它的 `bin` 目录，再调整 `PATH`。系统 Node 已在默认只读系统目录内，无需 nvm：
 
@@ -232,12 +232,12 @@ sandbox:
   extra_read_only_mounts:
     - source: ~/.local  # 替换为本机 npm prefix
       destination: /opt/npm-prefix
-    - source: ~/.cache/ms-playwright
-      destination: /opt/ms-playwright
   env_set:
     PATH: /opt/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
 ```
+
+此示例只新增 npm prefix 挂载；浏览器缓存沿用默认模板中的 `extra_read_write_mounts`，目标仍为 `/opt/ms-playwright`，不要重复添加。
 
 使用系统 Chrome 时保留 `/opt/google` 的只读挂载。系统目录以外的 Node 本体则需要另行只读挂载，并把其 `bin` 加到 `PATH`。
 

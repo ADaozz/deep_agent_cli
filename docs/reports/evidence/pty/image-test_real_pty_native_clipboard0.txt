@@ -1,85 +1,0 @@
-[?12l[?25h[?1049h[H[?2004h[?1l[?1000h[?1003h[?1015h[?1006h[?25l[0m[?7l[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
-[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
-[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-[0m [0m
-[0m                                                                                                                       [119C [0m
-[0m›                                                                                                                      [119C [0m
-[0m                                                                                                                       [119C [0m
-[0m [0m/tmp/deep-agent-image-tests/test_real_pty_native_clipboard0/worksp…[0m · [0mtest · vision · default[0m · [0mcli-f910[0m ⎇ checking gi[119Ct[0m
-[0m SANDBOXED · perm:ask                                                                                                  [119C [3A[2C[0m[?12l[?25h[?25l[0m
-
-[67C[0mace[C[0m· [0mtest[C· v[Csion[C· default[C[0m· [0mcli-f910[C[0m    ⎇ [Co[2A[114D[0m[?12l[?25h[?25l[3A[2D[0m [0m
-[0;1m Image clipboard paste is currently supported on WSL; use /image <path>                                                [119C [0m
-
-[2C[0mkeep this draft [0m[?12l[?25h[?1000l[?1015l[?1006l[?1003l[?1000l[?1015l[?1006l[?1003l[?25l[36A[17D[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
-[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
-[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
-[0;1m Input cleared · press Ctrl+C again to exit                                                                            [119C [0m
-[0m                                                                                                                       [119C [0m
-[0m›                                                                                                                      [119C [0m
-[0m                                                                                                                       [119C [0m
-[0m [0m/tmp/deep-agent-image-tests/test_real_pty_native_clipboard0/workspace[0m · [0mtest · vision · default[0m · [0mcli-f910[0m     ⎇ no gi[119Ct[0m
-[0m SANDBOXED · perm:ask                                                                                                  [119C [0m
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-[0m [0m
-[J[?7h[0m[?12l[?25h[?1049l[?2004l

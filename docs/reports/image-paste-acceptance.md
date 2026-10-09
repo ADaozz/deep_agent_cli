@@ -18,11 +18,11 @@
 | ID | 状态 | 实际检查 | 证据 |
 |---|---|---|---|
 | IMG-01 | PASS | 标准库检查真实 PNG CRC、1280×720 IHDR 和解压像素；AttachmentStore 保存后字节完全一致 | `test_fixture_is_decodable_real_png`、`test_real_png_storage_roundtrip`；[环境/图片 metadata](evidence/image-environment.json) |
-| IMG-02 | PASS | 真 PTY 发送 bracketed-paste 图片文件路径；自动识别附件，输入行不留下路径，提交前不发模型请求；提交后待发送附件清空 | `test_real_png_pty_attach_submit_exact_wire_bytes[bracketed_path_paste]`；[终端](evidence/pty/image-test_real_png_pty_attach_submi0.txt) |
-| IMG-03 | PASS | 真 PTY 的 `/image <path>` 使用同一真实 PNG；实际 HTTP 模型请求内有且仅有一个 image_url，base64 解码后逐字节等于原图 | 同测试 `[image_command]`；[终端](evidence/pty/image-test_real_png_pty_attach_submi1.txt) |
-| IMG-04 | PASS | 真 PNG + 真 PTY Ctrl+V + bitmap 分支；系统剪贴板适配器使用明确的测试替身，export 一次、临时文件被删除，已保存的附件与 HTTP wire 图片仍完整 | 同测试 `[bitmap_clipboard_adapter_double]`；[终端](evidence/pty/image-test_real_png_pty_attach_submi2.txt)。这是应用分支测试，不是原生 OS 剪贴板验收 |
-| IMG-05 | PASS | 非 WSL 真 PTY Ctrl+V 调用原生 ClipboardAdapter；明确提示 WSL 限制，保留草稿文本和光标，无假附件、不提交 API 请求 | `test_real_pty_native_clipboard_unavailable_keeps_draft`；[终端](evidence/pty/image-test_real_pty_native_clipboard0.txt) |
-| IMG-06 | PASS | 真 PTY 图片路径粘贴→现有附件机制→真实 TokenPlan Qwen auto；HTTP 200，请求包含原图7111字节、SHA256一致；模型答 `persistent`，0次工具调用，成功后待发送附件为0 | [live-image.json](evidence/live-image.json)、[真实模型终端](evidence/live-image-terminal.txt)、[运行脚本](evidence/live-image-script.py) |
+| IMG-02 | PASS | 真 PTY 发送 bracketed-paste 图片文件路径；自动识别附件，输入行不留下路径，提交前不发模型请求；提交后待发送附件清空 | `test_real_png_pty_attach_submit_exact_wire_bytes[bracketed_path_paste]`；[终端](evidence/raw-captures.tar.gz) |
+| IMG-03 | PASS | 真 PTY 的 `/image <path>` 使用同一真实 PNG；实际 HTTP 模型请求内有且仅有一个 image_url，base64 解码后逐字节等于原图 | 同测试 `[image_command]`；[终端](evidence/raw-captures.tar.gz) |
+| IMG-04 | PASS | 真 PNG + 真 PTY Ctrl+V + bitmap 分支；系统剪贴板适配器使用明确的测试替身，export 一次、临时文件被删除，已保存的附件与 HTTP wire 图片仍完整 | 同测试 `[bitmap_clipboard_adapter_double]`；[终端](evidence/raw-captures.tar.gz)。这是应用分支测试，不是原生 OS 剪贴板验收 |
+| IMG-05 | PASS | 非 WSL 真 PTY Ctrl+V 调用原生 ClipboardAdapter；明确提示 WSL 限制，保留草稿文本和光标，无假附件、不提交 API 请求 | `test_real_pty_native_clipboard_unavailable_keeps_draft`；[终端](evidence/raw-captures.tar.gz) |
+| IMG-06 | PASS | 真 PTY 图片路径粘贴→现有附件机制→真实 TokenPlan Qwen auto；HTTP 200，请求包含原图7111字节、SHA256一致；模型答 `persistent`，0次工具调用，成功后待发送附件为0 | [live-image.json](evidence/live-image.json)、[真实模型终端](evidence/raw-captures.tar.gz)、[运行脚本](evidence/live-image-script.py) |
 | IMG-07 | BLOCKED | 原生 Windows/WSL 剪贴板：在图片查看器复制位图→真实 powershell.exe inspect/export→Ctrl+V / Alt+V→提交。当前非WSL，无powershell.exe/wslpath，无法实际执行 | [image-environment.json](evidence/image-environment.json)；实现 `agent/cli/clipboard.py`；README 已声明平台限制 |
 
 本地 HTTP server 的固定回复仅用于验证 UI 和实际 API 编码字节，不作为模型识图证据；IMG-06 单独请求了真实外部模型。真实模型沿用临时本机网关，通过环境代理访问同一 TokenPlan 端点，没有修改原客户端、TLS 验证或沙箱权限。网关已退出，Key 仅经 stdin 和进程环境提供，没有写入仓库、配置或证据。请求记录只保存图片大小、摘要和 HTTP 状态，不倾倒 base64。
