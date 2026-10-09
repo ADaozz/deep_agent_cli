@@ -645,15 +645,15 @@ def test_explore_group_caps_failure_preview_and_terminal_width() -> None:
     assert all(len(line) < 80 for line in rendered.splitlines())
 
 
-def test_approval_pane_stays_decision_only() -> None:
+def test_approval_pane_shows_command_and_network() -> None:
     command = "python -m pytest tests/test_cli.py tests/test_runner.py -q --tb=short"
     controller = InteractionController.approval([{
         "toolCallId": "ex-1", "name": "execute",
         "args": {"command": command, "network": True},
     }])
     rendered = re.sub(r"\x1b\[[0-9;]*m", "", render_interaction(controller, 80))
-    assert command not in rendered
-    assert "NETWORK" in rendered
+    assert command in " ".join(rendered.split())
+    assert "Network: ON" in rendered
     assert "Approve tool call?" in rendered
     state = CliState(blocks=[ToolBlock(
         tool_call_id="ex-1", name="execute",

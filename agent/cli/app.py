@@ -770,11 +770,22 @@ class CliApplication:
     def _request_permission_mode(self, mode: PermissionMode) -> None:
         before = self.runner.permission_mode()
         self.runner.request_permission_change(mode)
+        interrupt = self.runner.current_interrupt()
+        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
+            events: list[RunEvent] = []
+            try:
+                self.runner._apply_pending_runtime_config(events.append)
+            finally:
+                self.runner._operation_lock.release()
+            for event in events:
+                self._apply_event(event, announce=False)
+            if any(event.type == "runtime_config_failed" for event in events):
+                self.set_status(f"Permission switch failed; permission remains {self.runner.permission_mode().value}.")
+                return
         if self.runner.pending_permission_mode() is None:
-            notice = f"Pending permission switch cancelled; permission remains {before.value}."
+            notice = f"Permission: {self.runner.permission_mode().value}."
         else:
             notice = f"Permission switch queued: {before.value} → {mode.value}. Current work uses {before.value}."
-        interrupt = self.runner.current_interrupt()
         if interrupt is not None and interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
             notice += " Existing approval remains under ask; press F2 to approve or reject."
         self.state.add_system(notice)
