@@ -61,9 +61,13 @@
 
 ## 网络
 
-- 默认使用 `--unshare-net`，命令没有网络。
+- 默认使用 `--unshare-net`：命令及子进程不能直接访问宿主 IP 网络，但仍可在自己的网络命名空间使用回环接口。
 - 模型在调用 `execute` 时传 `network=true`，该条命令在有网沙箱中运行，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。
 - `allow` 模式下，每条 `execute` 都在有网沙箱中运行，单次调用无法关闭。
+
+`network=false` 隔离的是**直接 IP 网络访问**，不保证完全没有间接网络通信。例如：有网沙箱中的后台服务在共享 `/workspace` 下创建文件系统 Unix Socket；无网命令连接这个 Socket 发出请求；有网后台服务代为访问互联网，并把响应返回无网命令。共享文件或 FIFO 也可能构成类似通信路径。抽象 Unix Socket 与这里的工作区文件系统 Socket 不同，前者仍受网络命名空间隔离。
+
+经其他有网进程实现的间接联网属于 **KNOWN LIMITATION**，不是沙箱逃逸。本轮不增加 Unix Socket 防护、Seccomp 或 IPC 配置开关，不改变共享工作区或双持久沙箱设计。
 
 两个沙箱都按需启动、会话内复用；权限模式只决定下一条命令要不要审批，不决定沙箱是否销毁。
 
@@ -94,16 +98,60 @@
 - 输出实时显示在对应的工具块中。
 - 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果同时给出宿主路径和 Agent 可读的 `/workspace/.deep-agent/logs/exec/...` 路径。
 - 默认没有超时。设置 `sandbox.timeout_seconds` 后作为上限；超时返回退出码 124，取消返回 130。
-- 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或 100 毫秒内没有新输出为止；之后的输出不进入本次结果，后台进程再写这些管道会收到 `SIGPIPE`。需要长期运行的后台进程应把输出重定向到文件。
+- 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或固定 100 毫秒排空窗口结束为止，窗口不会因新输出而延长；之后的输出不进入本次结果，后台进程再写这些管道会收到 `SIGPIPE`。需要长期运行的后台进程应把输出重定向到文件。
 
 程序不会修改项目的 `.gitignore`。建议加入：
 
 ```gitignore
 .deep-agent/
 .deepagents/
+.playwright-cli/
 ```
 
 `.deepagents/` 用于上下文压缩时保存被摘要掉的历史，见 [architecture.md](architecture.md#上下文压缩)。
+
+## Playwright 与有头 X11
+
+浏览器应使用当前 CLI 的依赖版本安装，在宿主机手动运行 `playwright-cli install-browser --help`，再运行 `playwright-cli install-browser chromium`；不要用可能解析到不同版本的 `npx playwright install chromium`。默认 `playwright-cli open` 使用系统 Chrome；`--browser=chromium` 使用与该 CLI 匹配的缓存 Chromium。本轮核对 CLI 0.1.22 的帮助及 `install-browser chromium --dry-run`，实际下载仍需用户准备，不锁定项目版本。
+
+Node 可以来自 `/usr/bin/node`，CLI 则可以在自定义 npm prefix 下。系统 Node 在默认 `/usr` 挂载中；额外 prefix 需要挂载其可执行文件及 npm 包整体（包含 `lib/node_modules`），再调整 PATH。精简示例：
+
+```yaml
+sandbox:
+  extra_read_only_mounts:
+    - source: ~/.local  # 替换为 npm config get prefix 的实际结果
+      destination: /opt/npm-prefix
+    - source: ~/.cache/ms-playwright
+      destination: /opt/ms-playwright
+  env_allowlist:
+    - DISPLAY
+  env_set:
+    PATH: /opt/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
+    PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+```
+
+合并进现有配置，不覆盖其他挂载和允许的变量；上述源目录必须存在。系统 Chrome 还需要 `/opt/google` 的只读挂载；位于系统目录外的 Node 本体需要独立挂载并加入 PATH。不要把个人机器的 Node 目录当成通用要求。
+
+有头模式需要允许传入 `DISPLAY`，并确保相应 X Server 可访问。用户已测试的 X11 抽象 Socket 场景中，`network=false` 的网络命名空间无法连接宿主 X Server，当前有头流程应使用有网沙箱；ask 模式需要明确传 `network=true` 并批准。Xauthority 认证可能要求额外挂载认证文件，目前未验证；Wayland 未覆盖。
+
+保留 `--unshare-ipc`，在专用 Xvfb 中关闭 MIT-SHM：
+
+```bash
+Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
+# 宿主启动 CLI 前：export DISPLAY=:2
+```
+
+无需增加 Chrome 启动参数。不要为了适配浏览器删除 IPC 隔离，也不要擅自修改宿主安全策略。以下是用户提供的真实机器帧缓冲截图验收结果，**不是当前环境的复测结果**：
+
+| X Server | Browser | 成功渲染 |
+|---|---|---|
+| MIT-SHM 开启 | 系统 Chrome | 0/10 |
+| MIT-SHM 开启 | 测试 Chromium | 8/10 |
+| MIT-SHM 关闭 | 系统 Chrome | 10/10 |
+| MIT-SHM 关闭 | 测试 Chromium | 10/10 |
+| MIT-SHM 关闭，真实 TUI | 系统 Chrome | 1/1 |
+
+有头验收必须有实际窗口 / 帧缓冲截图；DOM、title、IsViewable 或窗口存在只作辅助证据。当前环境缺少 Xvfb 时应标为 BLOCKED，不能把启动失败视为成功。CLI 可能生成 `.playwright-cli/`，建议用户自己加入项目 `.gitignore`；程序不自动修改它。
 
 ## 排查：Ubuntu / WSL2
 

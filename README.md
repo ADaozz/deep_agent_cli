@@ -201,6 +201,8 @@ ls -R ~/.deep-agent/skills/playwright-cli
 
 加载技能只提供操作说明。工具链要在宿主机装好，再通过沙箱挂载暴露给命令。沙箱不能 `sudo` 或 `apt-get`，所以不要在里面执行 `npx playwright install chrome`。
 
+`network=false` 使用 Bubblewrap 的独立网络命名空间（`--unshare-net`），限制本次命令及子进程直接访问 IP 网络；不保证完全没有间接联网。例如有网后台服务在共享 `/workspace` 创建 Unix Socket，无网命令通过它请求服务代为联网；共享文件或 FIFO 也可形成类似通路。这是已知隔离边界，不是沙箱逃逸，也不表示本轮已修复。见 [网络边界](docs/sandbox.md#网络)。
+
 ### 沙箱里的工具链
 
 首次启动时，[`agent/config.example.yaml`](agent/config.example.yaml) 会复制成 `~/.deep-agent/config.yaml`。其中的 `sandbox` 段已经是默认工具链配置：`PATH` 包含 Node.js 和 Cargo，并挂载下面这些目录。`optional: true` 的源目录在宿主机上不存在时会被跳过，不会阻止启动。
@@ -210,11 +212,45 @@ ls -R ~/.deep-agent/skills/playwright-cli
 | `~/.nvm/versions/node/v22.23.2` | `/opt/node` | 只读 | `node`、`npm`、`playwright-cli` |
 | `~/.cargo` | `/opt/cargo` | 只读 | Rust 工具链 |
 | `/opt/google` | `/opt/google` | 只读 | 系统 Chrome。`playwright-cli open` 使用 `/opt/google/chrome/chrome` |
-| `~/.cache/ms-playwright` | `/opt/ms-playwright` | 可写 | Chrome for Testing。环境变量 `PLAYWRIGHT_BROWSERS_PATH` 指向这里 |
+| `~/.cache/ms-playwright` | `/opt/ms-playwright` | 可写 | CLI 版本对应的 Chromium / Chrome for Testing。环境变量 `PLAYWRIGHT_BROWSERS_PATH` 指向这里 |
 
 Node.js 版本以本机 `~/.nvm/versions/node/` 下的目录名为准，和模板不一致时改 `source`。其他装在 `~/.local`、`/opt` 或家目录里的程序同样处理：用 `readlink -f "$(command -v 工具名)"` 找到落在 `/usr`、`/bin`、`/lib` 之外的目录，按同样格式追加挂载，并把可执行文件所在目录加到 `PATH` 前面。`PATH` 会替换沙箱默认值，末尾保留 `/usr/local/bin:/usr/bin:/bin`。
 
-`playwright-cli open` 走系统 Chrome，不读浏览器缓存。没有系统 Chrome 时，在宿主机执行 `npx playwright install chromium`（先保证 `~/.cache/ms-playwright` 存在），沙箱里再用 `playwright-cli open --browser=chromium`。缓存目录可写，沙箱中的安装和删除会改宿主机上的同一目录；只使用已安装浏览器时，把该项改到 `extra_read_only_mounts`。下载浏览器的命令需要网络。
+`playwright-cli open` 默认走系统 Chrome（通常位于 `/opt/google/chrome/chrome`），而 `playwright-cli open --browser=chromium` 选择 CLI 依赖版本对应的缓存 Chromium。没有系统 Chrome 时，先在宿主机查看当前版本的帮助，再安装浏览器：
+
+```bash
+playwright-cli install-browser --help
+playwright-cli install-browser chromium
+```
+
+不要用独立的 `npx playwright install chromium` 代替：它可能解析到另一版 Playwright，下载的浏览器修订号与 CLI 查找的缓存目录不同。命令以实际安装的 CLI 帮助为准；本轮核对的 CLI 0.1.22 支持上述命令（包括 `--dry-run`），不要求锁定项目 Node 或 Playwright 版本。缓存目录可写时，沙箱中的安装和删除会改宿主机上的同一目录；只使用已安装浏览器时，把该项改到 `extra_read_only_mounts`。下载浏览器需要网络，由用户在宿主机完成。
+
+Node 本体也可以来自系统 `/usr/bin/node`。若 CLI 和 npm 包安装在自定义 npm prefix（例如 `npm config get prefix` 返回 `~/.local`），必须挂载整个 prefix，而不只是它的 `bin` 目录，再调整 `PATH`。系统 Node 已在默认只读系统目录内，无需 nvm：
+
+```yaml
+sandbox:
+  extra_read_only_mounts:
+    - source: ~/.local  # 替换为本机 npm prefix
+      destination: /opt/npm-prefix
+    - source: ~/.cache/ms-playwright
+      destination: /opt/ms-playwright
+  env_set:
+    PATH: /opt/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
+    PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+```
+
+使用系统 Chrome 时保留 `/opt/google` 的只读挂载。系统目录以外的 Node 本体则需要另行只读挂载，并把其 `bin` 加到 `PATH`。
+
+有头模式还需要把 `DISPLAY` 加入 `sandbox.env_allowlist`，并确保对应 X Server 可访问。已测试的 X11 抽象 Socket 环境中，无网沙箱的网络命名空间无法连接宿主 X Server；当前流程应使用有网沙箱，ask 模式必须声明 `network=true` 并审批。Xauthority 认证可能需要额外挂载认证文件，该场景未验证；Wayland 也不在本轮验证范围。
+
+保留 Bubblewrap 的 `--unshare-ipc`。用户提供的真实机器 A/B 验证表明，在专用 Xvfb 关闭 MIT-SHM 可以稳定渲染，无需添加 Chrome 启动参数：
+
+```bash
+Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
+# 启动 deep-agent 前设置 DISPLAY=:2，并在 env_allowlist 中允许 DISPLAY
+```
+
+以上为用户手动准备环境的示例，CLI 不会自动安装 Node、浏览器或 Xvfb。有头渲染必须通过实际 X 窗口截图核验；读取 title、DOM 或看到窗口存在不足以证明渲染成功。详细 A/B 结果和挂载说明见 [docs/sandbox.md](docs/sandbox.md#playwright-与有头-x11)。Playwright CLI 可能生成 `.playwright-cli/`，建议在自己的项目 `.gitignore` 中忽略它；程序不会自动修改 `.gitignore`。
 
 已经存在的 `~/.deep-agent/config.yaml` 不会被模板覆盖。把模板里的 `sandbox.env_set` 和两个挂载列表合并进现有文件，保存后退出并重新启动 `deep-agent`。挂载规则见 [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)。
 
