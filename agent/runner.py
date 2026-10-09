@@ -1117,6 +1117,11 @@ class AgentRunner:
             return config
         callback = StreamDeltaCallback(
             handler or (lambda _kind, _text: None),
+            on_compaction=(
+                (lambda active: _emit(event_handler, RunEvent(
+                    type="compaction_started" if active else "compaction_finished",
+                ))) if event_handler else None
+            ),
             on_reasoning=(
                 (lambda text: _emit(event_handler, RunEvent(type="thinking_delta", content=text)))
                 if event_handler else None

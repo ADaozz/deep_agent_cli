@@ -59,6 +59,7 @@ class CliState:
     blocks: list[Block] = field(default_factory=list)
     todos: list[dict[str, str]] = field(default_factory=list)
     running: bool = False
+    compacting: bool = False
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
@@ -120,10 +121,16 @@ class CliState:
                 ))
 
     def apply(self, event: RunEvent) -> None:
+        if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
+            self.compacting = False
         if event.type == "run_started":
             self.running = True
             self.status = "Working…  Esc to cancel"
             self.active_block = None
+        elif event.type == "compaction_started":
+            self.compacting = True
+        elif event.type == "compaction_finished":
+            self.compacting = False
         elif event.type == "assistant_started":
             self.active_block = None
         elif event.type == "todos_updated" and isinstance(event.result, list):

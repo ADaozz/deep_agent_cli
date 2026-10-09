@@ -88,6 +88,40 @@ def _default_profiles() -> tuple[ModelProfile, ...]:
 
 
 @dataclass(frozen=True)
+class UiDisplayLimits:
+    """Content folding limits, loaded from the main configuration's ui section."""
+
+    thinking_tail_lines: int = 5
+    execute_tail_lines: int = 4
+    tool_tail_lines: int = 8
+    expanded_tool_lines: int = 40
+    explore_preview_items: int = 5
+    explore_failure_items: int = 3
+    edit_preview_changed_lines: int = 8
+    write_preview_lines: int = 6
+    create_preview_items: int = 5
+    failure_preview_lines: int = 4
+    command_failure_tail_lines: int = 6
+    editor_max_lines: int = 10
+    completion_menu_lines: int = 8
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            minimum = 2 if name == "edit_preview_changed_lines" else 1
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                requirement = "a positive integer" if minimum == 1 else "an integer >= 2"
+                raise ValueError(f"ui.{name} must be {requirement}")
+
+    @classmethod
+    def from_mapping(cls, ui: Mapping[str, Any]) -> "UiDisplayLimits":
+        return cls(**{name: ui[name] for name in cls.__dataclass_fields__ if name in ui})
+
+
+DEFAULT_UI_DISPLAY_LIMITS = UiDisplayLimits()
+
+
+@dataclass(frozen=True)
 class Settings:
     llm_profiles: tuple[ModelProfile, ...] = field(default_factory=_default_profiles)
     llm_default: str = "default"
@@ -97,6 +131,7 @@ class Settings:
     source_path: Path | None = None
     agent_instructions: str | None = None
     ui_timezone: str = DEFAULT_UI_TIMEZONE
+    ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
     tavily_api_key: str | None = field(default=None, repr=False)
 
     @property
@@ -179,6 +214,7 @@ class Settings:
         if instructions is not None and not isinstance(instructions, str):
             raise ValueError("agent.instructions must be a string or null")
         timezone_name = ui.get("timezone", DEFAULT_UI_TIMEZONE)
+        display_limits = UiDisplayLimits.from_mapping(ui)
         if not isinstance(timezone_name, str) or not timezone_name.strip():
             raise ValueError("ui.timezone must be a valid IANA time zone name")
         try:
@@ -194,6 +230,7 @@ class Settings:
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
             ui_timezone=timezone_name,
+            ui_display_limits=display_limits,
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
                 web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
             ),

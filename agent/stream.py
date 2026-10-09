@@ -109,6 +109,7 @@ class StreamDeltaCallback(BaseCallbackHandler):
         on_assistant: Callable[[str], None] | None = None,
         on_start: Callable[[], None] | None = None,
         on_end: Callable[[str, str], None] | None = None,
+        on_compaction: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_delta = on_delta
@@ -116,12 +117,19 @@ class StreamDeltaCallback(BaseCallbackHandler):
         self._on_assistant = on_assistant
         self._on_start = on_start
         self._on_end = on_end
+        self._on_compaction = on_compaction
+        self._summary_runs: set[Any] = set()
         self._assistant = ""
         self._reasoning = ""
         self._message: AIMessageChunk | None = None
         self._raw_text = ""
 
     def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
+        if (kwargs.get("metadata") or {}).get("lc_source") == "summarization":
+            self._summary_runs.add(kwargs.get("run_id"))
+            if self._on_compaction:
+                self._on_compaction(True)
+            return
         self._assistant = ""
         self._reasoning = ""
         self._message = None
@@ -130,6 +138,8 @@ class StreamDeltaCallback(BaseCallbackHandler):
             self._on_start()
 
     def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
+        if kwargs.get("run_id") in self._summary_runs:
+            return
         message = _chunk_message(chunk)
         if isinstance(message, AIMessageChunk):
             self._message = message if self._message is None else self._message + message
@@ -150,10 +160,23 @@ class StreamDeltaCallback(BaseCallbackHandler):
                 self._on_assistant(visible)
 
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
+        if self._finish_summary(kwargs.get("run_id")):
+            return
         if self._on_end:
             self._on_end(self._assistant, self._reasoning)
         self._assistant = ""
         self._reasoning = ""
+
+    def on_llm_error(self, *args: Any, **kwargs: Any) -> None:
+        self._finish_summary(kwargs.get("run_id"))
+
+    def _finish_summary(self, run_id: Any) -> bool:
+        if run_id not in self._summary_runs:
+            return False
+        self._summary_runs.remove(run_id)
+        if self._on_compaction and not self._summary_runs:
+            self._on_compaction(False)
+        return True
 
 
 def merge_stream_callbacks(config: dict[str, Any], callback: BaseCallbackHandler) -> dict[str, Any]:

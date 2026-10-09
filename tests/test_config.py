@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from langchain_openai import ChatOpenAI
 
-from agent.config import Settings, require_keybindings_outside_workspace, resolve_config_path
+from agent.config import Settings, UiDisplayLimits, require_keybindings_outside_workspace, resolve_config_path
 from agent.llm import QwenChatOpenAI, build_chat_model
 
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
@@ -21,6 +21,7 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
     assert settings.ui_timezone == "Asia/Shanghai"
+    assert settings.ui_display_limits.thinking_tail_lines == 5
 
 
 def test_secret_environment_references_and_tavily_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,6 +63,30 @@ def test_ui_timezone_can_be_configured_and_invalid_names_fail(tmp_path: Path) ->
     path.write_text(_MODEL_YAML + "ui:\n  timezone: Mars/Olympus\n", encoding="utf-8")
     with pytest.raises(ValueError, match="ui.timezone"):
         Settings.load(path)
+
+
+def test_thinking_tail_lines_can_be_configured(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_MODEL_YAML + "ui:\n  thinking_tail_lines: 3\n", encoding="utf-8")
+    assert Settings.load(path).ui_display_limits.thinking_tail_lines == 3
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 3.5, "5", None])
+def test_thinking_tail_lines_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="ui.thinking_tail_lines must be a positive integer"):
+        Settings.from_mapping({"ui": {"thinking_tail_lines": value}})
+
+
+def test_all_ui_display_limits_are_loaded_and_validated() -> None:
+    values = {name: 2 for name in UiDisplayLimits.__dataclass_fields__}
+    configured = Settings.from_mapping({"ui": values}).ui_display_limits
+    assert all(getattr(configured, name) == value for name, value in values.items())
+    for name in values:
+        for invalid in (0, -1, True, None, "2", 2.5):
+            with pytest.raises(ValueError, match=f"ui.{name}"):
+                Settings.from_mapping({"ui": {name: invalid}})
+    with pytest.raises(ValueError, match="ui.edit_preview_changed_lines"):
+        Settings.from_mapping({"ui": {"edit_preview_changed_lines": 1}})
 
 
 def test_removed_protected_paths_fail_with_migration_message() -> None:

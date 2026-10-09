@@ -7,6 +7,7 @@ from functools import partial
 import logging
 import os
 import time
+from time import monotonic
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -62,7 +63,8 @@ from agent.cli.rendering import (
 )
 from agent.cli.session_controller import SessionController
 from agent.cli.state import CliState, ToolBlock
-from agent.config import DEFAULT_UI_TIMEZONE, ModelProfile, require_keybindings_outside_workspace
+from agent.cli.working_messages import WorkingMessageRotation, load_working_messages
+from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, ModelProfile, require_keybindings_outside_workspace
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -73,7 +75,7 @@ from agent.permission import (
 )
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
 
-# Workspace/model/status on the left; git and context usage on the right.
+# Workspace/model and execution settings on the left; git/context on the right.
 FOOTER_LINES = 2
 
 
@@ -378,7 +380,8 @@ class CliApplication:
         self._selection_scroll_step = 0
         self._selection_scroll_handle: asyncio.TimerHandle | None = None
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
-        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name))
+        display_limits = runner.settings.ui_display_limits if runner.settings is not None else DEFAULT_UI_DISPLAY_LIMITS
+        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name), limits=display_limits)
         self._git = GitProbe(self._workspace())
         self._git_summary = self._git.summary
         self._git_task: asyncio.Task[None] | None = None
@@ -414,8 +417,15 @@ class CliApplication:
             text=self._footer_text, focusable=False, on_scroll=self.scroll_transcript,
             on_select_outside=self._select_below_transcript,
         )
+        messages_path = config_dir / "working_messages.yaml" if config_dir else None
+        self._working_messages = WorkingMessageRotation(load_working_messages(messages_path))
+        self.status_control = _ScrollableTextControl(
+            text=self._status_text, focusable=False, on_scroll=self.scroll_transcript,
+            on_select_outside=self._select_below_transcript,
+        )
         self.back_to_bottom_control = _BackToBottomControl(
-            text="↓ Back to bottom · esc",
+            text=lambda: FormattedText([("class:back-to-bottom", "↓ Back to bottom · esc")])
+            if self.interaction is None and self.transcript_away_from_bottom() else FormattedText([]),
             focusable=False,
             on_scroll=self.scroll_transcript,
             on_click=self.follow_transcript,
@@ -439,7 +449,9 @@ class CliApplication:
                 rows = self.application.output.get_size().rows
             except Exception:  # noqa: BLE001
                 rows = 30
-            maximum = max(3, min(10, rows // 3))
+            # Keep at least one input row even in an extremely short terminal.
+            terminal_limit = max(1, rows // 3)
+            maximum = min(display_limits.editor_max_lines, terminal_limit)
             return Dimension(min=1, preferred=min(lines, maximum), max=maximum)
 
         def interaction_height() -> Any:
@@ -464,6 +476,16 @@ class CliApplication:
             always_hide_cursor=True,
             viewport=self,
         )
+        self.interaction_divider_window = Window(height=1, char="─", style="class:interaction-divider")
+        self.interaction_hint_window = Window(
+            _BackToBottomControl(
+                text=FormattedText([("class:back-to-bottom", "↓ Back to bottom · esc")]),
+                focusable=False, on_scroll=self.scroll_transcript,
+                on_click=self.follow_transcript, on_select_outside=self._select_below_transcript,
+            ),
+            height=1, dont_extend_height=True,
+            align=WindowAlign.CENTER,
+        )
         body = HSplit([
             self.transcript_window,
             ConditionalContainer(
@@ -477,17 +499,11 @@ class CliApplication:
                 filter=attachments_visible,
             ),
             ConditionalContainer(
-                Window(
-                    self.back_to_bottom_control,
-                    height=1,
-                    dont_extend_height=True,
-                    align=WindowAlign.CENTER,
-                    style="class:back-to-bottom",
-                ),
-                filter=back_to_bottom_visible,
+                self.interaction_hint_window,
+                filter=back_to_bottom_visible & interaction_visible,
             ),
             ConditionalContainer(
-                Window(height=1, char="─", style="class:interaction-divider"),
+                self.interaction_divider_window,
                 filter=interaction_visible,
             ),
             ConditionalContainer(
@@ -500,6 +516,28 @@ class CliApplication:
                     style="class:interaction",
                 ),
                 filter=interaction_visible,
+            ),
+            ConditionalContainer(
+                Window(
+                    self.status_control,
+                    height=1,
+                    wrap_lines=False,
+                    always_hide_cursor=True,
+                    dont_extend_height=True,
+                    style="class:status",
+                ),
+                filter=Condition(self._status_visible),
+            ),
+            ConditionalContainer(
+                Window(height=1, char="─", style="class:interaction-divider"),
+                filter=Condition(lambda: self.state.status == "Waiting for input"),
+            ),
+            ConditionalContainer(
+                Window(
+                    self.back_to_bottom_control,
+                    height=1, dont_extend_height=True, align=WindowAlign.CENTER,
+                ),
+                filter=back_to_bottom_visible & ~interaction_visible,
             ),
             ConditionalContainer(
                 HSplit([
@@ -528,7 +566,7 @@ class CliApplication:
         self.application: Application[None] = Application(
             layout=Layout(FloatContainer(
                 content=body,
-                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=8, scroll_offset=1))],
+                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=display_limits.completion_menu_lines, scroll_offset=1))],
             ), focused_element=self.editor_control),
             key_bindings=self.bindings,
             full_screen=True,
@@ -541,6 +579,8 @@ class CliApplication:
                 "footer-workspace": "ansigreen",
                 "footer-resume-id": "ansicyan",
                 "footer-model": "ansiyellow",
+                "status": "ansicyan bold",
+                "status-message": "#aaaaaa nobold",
                 "interaction": "#d0d0d0",
                 "attachments": "#72d5e8",
                 "back-to-bottom": "bg:#163a5f #d7edff",
@@ -557,6 +597,8 @@ class CliApplication:
         self.application.timeoutlen = 0.10
         if self.keymap.warning:
             self.state.add_system(self.keymap.warning, error=True)
+        if self._working_messages.config.warning:
+            self.state.add_system(self._working_messages.config.warning, error=True)
         if self.runner.on_event is None:
             self.runner.on_event = self._on_event_thread
 
@@ -881,7 +923,7 @@ class CliApplication:
             return
         self._compacting = True
         self.state.running = True
-        self.set_status("Compacting context…")
+        self.set_status("Compacting context")
         try:
             result = await self._run_blocking(self.runner.compact_context)
         except Exception as exc:  # noqa: BLE001
@@ -1343,15 +1385,41 @@ class CliApplication:
             fragments.append(("class:attachments", f" ▣ Image #{index}  {ref.filename} · {size}\n"))
         return FormattedText(fragments)
 
-    def _footer_text(self):  # type: ignore[no-untyped-def]
+    def _status_visible(self) -> bool:
+        return bool(
+            self.state.running or self.state.status != "Ready"
+            or self.runner.control.pending_steering_count()
+            or self.runner.control.pending_follow_up_count()
+        )
+
+    def _status_text(self) -> FormattedText:
+        if not self._status_visible():
+            self._working_messages.reset()
+            return FormattedText([])
         pending = self.runner.control.pending_steering_count() + self.runner.control.pending_follow_up_count()
-        queue = f" · queued {pending}" if pending else ""
+        active = self.state.running and self.interaction is None and not self.state.status.startswith("Cancelling")
+        now = monotonic()
+        message = self._working_messages.current(active, now)
+        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(now * 10) % 10] + " " if self.state.running else ""
+        width = self._width()
+        label = self.state.status if self.state.running or self.state.status != "Ready" else ""
+        if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
+            label = "Compacting context"
+        if pending:
+            label = f"{label} · queued {pending}" if label else f"queued {pending}"
+        status = _truncate_cells(f" {spinner}{label}", width)
+        fragments = [("class:status", status)]
+        remaining = width - get_cwidth(status)
+        if message is not None and remaining > 3:
+            fragments.append(("class:status-message", " · " + _truncate_cells(message.display, remaining - 3)))
+        return FormattedText(fragments)
+
+    def _footer_text(self):  # type: ignore[no-untyped-def]
         mode = self.runner.prepared.execution_mode.value
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
             perm += f"→{pending_permission.value}(pending)"
-        spinner = " ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 11] if self.state.running else ""
         width = self._width()
         model = self.runner.current_model()
         model_label = model_display_name(model) if model is not None else "fixed model"
@@ -1365,10 +1433,10 @@ class CliApplication:
         resume_id = self.runner.thread_id[:8]
         context = format_context_usage(self.state.usage, self.runner.context_window())
         # Row 1: workspace · model · resume on the left, git on the right.
-        # Row 2: status/sandbox/permission on the left, context on the right.
+        # Row 2: sandbox/permission on the left, context on the right.
         # The left side always truncates before the right side.
         git = self._git_summary.label() or "⎇ no git"
-        status = f" {spinner}{self.state.status}{queue} · {mode} · perm:{perm}"
+        status = f" {mode} · perm:{perm}"
         git_fit = _truncate_cells(git, width)
         available = max(1, width - get_cwidth(git_fit) - 1)
         fragments: list[tuple[str, str]] = []
@@ -1707,6 +1775,7 @@ class CliApplication:
             self.state.add_user(text, attachments=image_refs)
             self.state.attachments.clear()
         self.state.running = True
+        self._working_messages.reset()
         self.set_status("Working…  Esc to cancel")
 
         async def work() -> None:
@@ -1861,6 +1930,8 @@ class CliApplication:
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
         self.state.apply(event)
+        if event.type in {"run_started", "run_cancelling"} or not self.state.running:
+            self._working_messages.reset()
         if event.type == "runtime_config_applied" and isinstance(event.result, dict):
             changes = []
             if event.result.get("model_changed"):

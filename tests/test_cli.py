@@ -97,7 +97,7 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         body = app.application.layout.container.content
         assert not any(getattr(child, "style", None) == "class:editor-border" for child in body.children)
-        editor = body.children[5].content
+        editor = next(child.content for child in body.children if hasattr(getattr(child, "content", None), "children"))
         top, middle, bottom = editor.children
         prefix, input_window = middle.children
         assert top.height == bottom.height == 1
@@ -111,9 +111,9 @@ def test_back_to_bottom_hint_is_centered_above_editor() -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         body = app.application.layout.container.content
-        hint = body.children[2].content
-        divider = body.children[3].content
-        editor = body.children[5].content
+        editor = next(child.content for child in body.children if hasattr(getattr(child, "content", None), "children"))
+        hint = next(child.content for child in body.children if getattr(getattr(child, "content", None), "content", None) is app.back_to_bottom_control)
+        divider = app.interaction_divider_window
         assert hint.content is app.back_to_bottom_control
         assert hint.align is WindowAlign.CENTER
         assert divider.char == "─"
@@ -126,7 +126,7 @@ def test_interaction_divider_only_appears_for_interactive_screens() -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         body = app.application.layout.container.content
-        divider = body.children[3]
+        divider = next(child for child in body.children if getattr(child, "content", None) is app.interaction_divider_window)
         with set_app(app.application):
             assert not divider.filter()
             app.buffer.text = "/"
@@ -2174,6 +2174,123 @@ def test_tui_pipe_input_quits_and_restores_application() -> None:
     asyncio.run(scenario())
 
 
+def test_restored_human_interaction_accepts_keyboard_selection_after_ctrl_c(tmp_path) -> None:
+    store = SessionStore(tmp_path / "human-resume.sqlite3")
+    fields = [
+        {"id": "annex_gap", "type": "single_select", "required": True,
+         "options": [{"value": "current_repo", "label": "Current repo"}, {"value": "other_repo", "label": "Other repo"}]},
+        {"id": "next_step", "type": "single_select", "required": True,
+         "options": [{"value": "profile_html", "label": "Profile HTML"}, {"value": "validator", "label": "Validator"}]},
+    ]
+    holder = AgentRunner(
+        model=scripted_model([AIMessage(content="", tool_calls=[{
+            "id": "ask-annex", "name": "request_human_input",
+            "args": {"reason": "Missing validator", "question": "接下来先做哪个？", "fields": fields},
+        }])]), backend=StateBackend(), session_store=store,
+    )
+    waiting = holder.invoke("Inspect AnnexExtensionValidator")
+    assert waiting.status == "waiting_human"
+    target = holder.thread_id
+
+    async def wait_until(predicate) -> None:
+        async def poll() -> None:
+            while not predicate():
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(poll(), timeout=3)
+
+    async def close_original() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(holder, input=pipe, output=DummyOutput())
+            app._handle_result(waiting)
+            task = asyncio.create_task(app.run_async())
+            try:
+                await wait_until(lambda: app.application.is_running)
+                # First Ctrl+C dismisses the UI; the next two clear and exit.
+                pipe.send_text("\x03\x03\x03")
+                await asyncio.wait_for(task, timeout=3)
+                assert holder.current_interrupt() is not None
+            finally:
+                if not task.done():
+                    app.exit()
+                    await task
+
+    asyncio.run(close_original())
+    holder.close()
+    runner = AgentRunner(model=scripted_model([AIMessage(content="Selected profile HTML")]), backend=StateBackend(), session_store=store)
+
+    async def restore() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.sessions.startup_session_id = target
+            task = asyncio.create_task(app.run_async())
+            try:
+                await wait_until(lambda: app.application.is_running and app.interaction is not None)
+                assert app.interaction.kind == "human"
+                pipe.send_text("\x1b[B")
+                await wait_until(lambda: app.interaction.option_index == 1)
+                pipe.send_text("\r")
+                await wait_until(lambda: app.interaction.index == 1)
+                assert app.interaction.values == {"annex_gap": "other_repo"}
+                pipe.send_text("\r")
+                await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                assert runner.current_interrupt() is None
+                state = runner.prepared.graph.get_state(runner._thread_config())
+                answer = next(m for m in state.values["messages"] if isinstance(m, ToolMessage) and m.tool_call_id == "ask-annex")
+                assert '"annex_gap": "other_repo"' in answer.content
+                assert '"next_step": "profile_html"' in answer.content
+            finally:
+                if app.application.is_running:
+                    app.exit()
+                await task
+
+    try:
+        asyncio.run(restore())
+    finally:
+        runner.close()
+        store.close()
+
+
+def test_restored_submitted_human_answer_is_history_after_cancel(tmp_path) -> None:
+    store = SessionStore(tmp_path / "answered-human.sqlite3")
+    holder = AgentRunner(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "id": "ask-annex", "name": "request_human_input",
+                "args": {"reason": "Missing validator", "question": "AnnexExtensionValidator 这块对不上，接下来先做哪个？"},
+            }]),
+            AIMessage(content="unused"),
+        ]), backend=StateBackend(), session_store=store,
+    )
+    assert holder.invoke("Inspect validator").status == "waiting_human"
+    values = {"annex_gap": "other_repo", "next_step": "profile_html"}
+
+    def cancel_after_answer(event) -> None:
+        if event.type == "tool_completed" and event.name == "request_human_input":
+            holder.request_cancel()
+
+    assert holder.submit_human_input(values, on_event=cancel_after_answer).status == "cancelled"
+    target = holder.thread_id
+    holder.close()
+    runner = AgentRunner(model=scripted_model([AIMessage(content="Continue with profile HTML")]), backend=StateBackend(), session_store=store)
+    try:
+        snapshot = runner.switch_session(target)
+        assert snapshot.interrupt_kind is None
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.sessions.apply_snapshot(snapshot)
+            assert app.interaction is None
+            assert not app._reopen_pending_interaction()
+            answered = next(b for b in app.state.blocks if isinstance(b, ToolBlock) and b.tool_call_id == "ask-annex")
+            assert answered.status == "completed"
+            assert '"annex_gap": "other_repo"' in answered.output
+            assert '"next_step": "profile_html"' in answered.output
+            app._io_executor.shutdown(wait=True)
+        assert runner.invoke("按刚才的选择继续").status == "completed"
+    finally:
+        runner.close()
+        store.close()
+
+
 def test_double_ctrl_c_disables_mouse_before_leaving_full_screen() -> None:
     class RecordingOutput(DummyOutput):
         def __init__(self) -> None:
@@ -2221,7 +2338,8 @@ def _wheel(event_type: object) -> object:
 def _paint(app: CliApplication) -> None:
     """Render one frame. `_redraw` is a no-op until the application is running."""
     app.application.render_counter += 1
-    app.application.renderer.render(app.application, app.application.layout)
+    with set_app(app.application):
+        app.application.renderer.render(app.application, app.application.layout)
 
 
 def _escape(app: CliApplication) -> None:
@@ -2536,7 +2654,9 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
         _paint(app)
         assert app.transcript_away_from_bottom()
         handlers = app.application.renderer.mouse_handlers.mouse_handlers
-        assert handlers[app.transcript_viewport_rows()][1] is not None
+        hint_window = next(w for w in app.application.renderer._last_screen.visible_windows_to_write_positions if w.content is app.back_to_bottom_control)
+        hint_y = app.application.renderer._last_screen.visible_windows_to_write_positions[hint_window].ypos
+        assert handlers[hint_y][1] is not None
 
         _escape(app)
         _paint(app)
@@ -2548,14 +2668,14 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
         _paint(app)
         handlers = app.application.renderer.mouse_handlers.mouse_handlers
         click = MouseEvent(
-            position=Point(x=1, y=app.transcript_viewport_rows()),
+            position=Point(x=1, y=hint_y),
             event_type=MouseEventType.MOUSE_DOWN,
             button=MouseButton.LEFT,
             modifiers=frozenset(),
         )
         app.application.layout.update_parents_relations()
         with set_app(app.application):
-            assert handlers[app.transcript_viewport_rows()][1](click) is None
+            assert handlers[hint_y][1](click) is None
         _paint(app)
         assert app._transcript_anchor is None
         assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
@@ -2600,26 +2720,111 @@ def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
     _with_painted_app("interaction-back-to-bottom", scenario)
 
 
-def test_back_to_bottom_hint_sits_immediately_above_interaction_divider() -> None:
+def test_back_to_bottom_hint_sits_immediately_above_editor_below_status() -> None:
     def scenario(app: CliApplication) -> None:
-        app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+        app.state.running = True
+        app.state.status = "Working…  Esc to cancel"
         app.scroll_transcript(-5)
         _paint(app)
         screen = app.application.renderer._last_screen
-        assert screen is not None
         columns = app.application.output.get_size().columns
         rows = [
             "".join(screen.data_buffer[y][x].char for x in range(columns))
             for y in range(app.application.output.get_size().rows)
         ]
         hint_row = next(y for y, row in enumerate(rows) if "↓ Back to bottom · esc" in row)
-        divider_row = next(
-            y for y, row in enumerate(rows)
-            if "─" in row and "class:interaction-divider" in screen.data_buffer[y][0].style
-        )
-        assert divider_row == hint_row + 1
+        status_row = next(y for y, row in enumerate(rows) if "Working" in row)
+        assert hint_row == status_row + 1
+        assert "class:editor" in screen.data_buffer[hint_row + 1][0].style
+        assert "class:back-to-bottom" not in screen.data_buffer[hint_row][0].style
 
-    _with_painted_app("hint-above-divider", scenario)
+    _with_painted_app("hint-above-editor", scenario)
+
+
+@pytest.mark.parametrize("interaction_kind", [None, "approval", "human"])
+def test_back_to_bottom_uses_a_row_only_when_needed(interaction_kind) -> None:
+    def scenario(app: CliApplication) -> None:
+        if interaction_kind == "approval":
+            app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+        elif interaction_kind == "human":
+            app.interaction = InteractionController.human({
+                "question": "输入说明", "fields": [{"id": "answer", "type": "text", "label": "回答"}],
+            })
+        app.state.running = app.interaction is None
+        app.state.status = "Working…  Esc to cancel" if app.interaction is None else "Waiting for input"
+        app.follow_transcript()
+        _paint(app)
+
+        def positions():
+            return {
+                control: (pos.ypos, pos.height)
+                for window, pos in app.application.renderer._last_screen.visible_windows_to_write_positions.items()
+                for control in (app.status_control, app.editor_control, app.interaction_control)
+                if window.content is control
+            }
+
+        before = positions()
+        transcript_height = app.transcript_viewport_rows()
+        app.scroll_transcript(-5)
+        _paint(app)
+        if app.interaction is None:
+            after = positions()
+            assert after[app.editor_control] == before[app.editor_control]
+            assert after[app.status_control] == (before[app.status_control][0] - 1, 1)
+            assert app.transcript_viewport_rows() == transcript_height - 1
+        else:
+            assert positions() == before
+            assert app.transcript_viewport_rows() == transcript_height - 1
+        screen = app.application.renderer._last_screen
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(app._width()))
+            for y in range(app.application.output.get_size().rows)
+        ]
+        assert sum("↓ Back to bottom · esc" in row for row in rows) == 1
+        if app.interaction is not None:
+            hint_row = next(y for y, row in enumerate(rows) if "↓ Back to bottom · esc" in row)
+            assert hint_row + 2 == before[app.interaction_control][0]
+        app.follow_transcript()
+        _paint(app)
+        assert positions() == before
+
+    _with_painted_app(f"stable-hint-{interaction_kind}", scenario)
+
+
+def test_waiting_for_input_has_matching_divider_below_status() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+        app._apply_event(RunEvent(type="interaction_requested"))
+        app.scroll_transcript(-5)
+        _paint(app)
+        screen = app.application.renderer._last_screen
+        columns = app.application.output.get_size().columns
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(columns))
+            for y in range(app.application.output.get_size().rows)
+        ]
+        status_row = next(y for y, row in enumerate(rows) if "Waiting for input" in row)
+        divider_rows = [
+            y for y, row in enumerate(rows)
+            if row.startswith("─") and "class:interaction-divider" in screen.data_buffer[y][0].style
+        ]
+        assert len(divider_rows) == 2
+        assert divider_rows[0] < status_row
+        assert divider_rows[1] == status_row + 1
+        style = app.application.style
+        assert style.get_attrs_for_style_str(screen.data_buffer[divider_rows[0]][0].style) == style.get_attrs_for_style_str(screen.data_buffer[divider_rows[1]][0].style)
+        hint_row = next(y for y, row in enumerate(rows) if "↓ Back to bottom · esc" in row)
+        assert hint_row + 1 == divider_rows[0]
+        assert rows[divider_rows[0]] == "─" * columns
+        assert sum("↓ Back to bottom · esc" in row for row in rows) == 1
+        app.state.status = "Select a model"
+        _paint(app)
+        assert len([
+            window for window in app.application.renderer._last_screen.visible_windows_to_write_positions
+            if window.style == "class:interaction-divider"
+        ]) == 1
+
+    _with_painted_app("waiting-input-divider", scenario)
 
 
 def test_transcript_uses_full_width_without_scrollbar_margin() -> None:
@@ -2632,6 +2837,160 @@ def test_transcript_uses_full_width_without_scrollbar_margin() -> None:
         assert app._width() == info.window_width
 
     _with_painted_app("full-width-transcript", scenario)
+
+
+def test_status_line_uses_editable_config_from_config_directory(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    path = config_dir / "working_messages.yaml"
+    path.write_text('interval_seconds: 8\njokes:\n  - "需求很简单，工期很勇敢。"\nfgo: []\n', encoding="utf-8")
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="working-custom",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, config_dir=config_dir, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 200)
+        app._apply_event(RunEvent(type="run_started"))
+        assert "需求很简单，工期很勇敢。" in "".join(value for _, value in app._status_text())
+
+
+def test_compaction_status_restores_working_and_clears_on_terminal_events(monkeypatch) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="compacting-status",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 200)
+        text = lambda: "".join(value for _, value in app._status_text())
+        app._apply_event(RunEvent(type="run_started"))
+        app._apply_event(RunEvent(type="compaction_started"))
+        assert "Compacting context" in text() and "Working" not in text()
+        assert " · " in text()
+        app._apply_event(RunEvent(type="compaction_finished"))
+        assert "Working" in text() and "Compacting" not in text()
+        app._apply_event(RunEvent(type="compaction_started"))
+        app._apply_event(RunEvent(type="run_cancelling"))
+        assert "Cancelling" in text() and "Compacting" not in text()
+        app._apply_event(RunEvent(type="run_failed", content="failed"))
+        assert not app.state.compacting
+        app._apply_event(RunEvent(type="run_started"))
+        assert "Working" in text()
+
+
+def test_status_line_is_above_editor_and_footer_does_not_repeat_it() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.state.running = True
+        app.state.status = "Working…  Esc to cancel"
+        _paint(app)
+        windows = {window.content: window for window in app.application.layout.find_all_windows()}
+        positions = app.application.renderer._last_screen.visible_windows_to_write_positions
+        status_position = positions[windows[app.status_control]]
+        editor_position = positions[windows[app.editor_control]]
+        footer_position = positions[windows[app.footer_control]]
+        assert status_position.ypos < editor_position.ypos < footer_position.ypos
+        assert status_position.height == 1
+        assert "Working" in "".join(value for _, value in app._status_text())
+        assert "Working" not in "".join(value for _, value in app._footer_text())
+        attrs = app.application.style.get_attrs_for_style_str("class:status")
+        assert attrs.bold
+        assert attrs.color == "ansicyan"
+        app._apply_event(RunEvent(type="run_completed"))
+        _paint(app)
+        assert windows[app.status_control] not in app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert not app._status_visible()
+
+    _with_painted_app("working-position", scenario)
+
+
+@pytest.mark.parametrize("steering,follow_up", [(1, 0), (0, 1), (1, 2)])
+def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch, steering, follow_up) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="completed-queue",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 200)
+        app._apply_event(RunEvent(type="run_started"))
+        for _ in range(steering):
+            runner.control.steer("steer")
+        for _ in range(follow_up):
+            runner.control.follow_up("follow up")
+        text = lambda: "".join(value for _, value in app._status_text())
+        assert f"{app.state.status} · queued {steering + follow_up}" in text()
+        app._apply_event(RunEvent(type="run_completed"))
+        assert app._status_visible()
+        assert text().strip() == f"queued {steering + follow_up}"
+        monkeypatch.setattr(app, "_width", lambda: 7)
+        assert text() == " queue…"
+        for _ in range(steering):
+            runner.control.pop_steering()
+        for _ in range(follow_up):
+            runner.control.pop_follow_up()
+        assert not app._status_visible()
+        assert text() == ""
+
+
+def test_working_status_rotates_and_hides_messages_after_stop(monkeypatch) -> None:
+    from agent.cli.working_messages import load_working_messages
+    config = load_working_messages()
+    monkeypatch.setattr("agent.cli.working_messages.random.shuffle", lambda items: None)
+    JOKES, FGO_LINES = config.jokes, config.fgo
+
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="working-rotation",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 200)
+        now = [100.0]
+        monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
+        app._apply_event(RunEvent(type="run_started"))
+        text = lambda: "".join(value for _, value in app._status_text())
+        assert JOKES[0].text in text()
+        now[0] += 8
+        assert JOKES[1].text in text()
+        now[0] += 8
+        assert FGO_LINES[0].display in text()
+        app._apply_event(RunEvent(type="run_cancelling"))
+        assert "Cancelling" in text()
+        assert FGO_LINES[0].text not in text()
+        app._apply_event(RunEvent(type="run_completed"))
+        assert text() == ""
+        app._apply_event(RunEvent(type="run_started"))
+        assert JOKES[0].text in text()
+        app._apply_event(RunEvent(type="interaction_requested"))
+        assert text().strip() == "Waiting for input"
+
+
+@pytest.mark.parametrize("width", [1, 20, 30, 48, 80])
+def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, width) -> None:
+    from prompt_toolkit.utils import get_cwidth
+    from agent.cli.working_messages import load_working_messages
+    FGO_LINES = load_working_messages().fgo
+
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(), thread_id="working-narrow",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: width)
+        now = [100.0]
+        monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
+        app._apply_event(RunEvent(type="run_started"))
+        for offset in (0, 16):
+            now[0] = 100 + offset
+            line = "".join(value for _, value in app._status_text())
+            assert get_cwidth(line) <= width
+            assert "\n" not in line
+            if width >= 20:
+                assert "Working" in line
+            if width == 80 and offset == 16:
+                assert any(message.display in line for message in FGO_LINES)
 
 
 def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) -> None:
@@ -2651,7 +3010,10 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         assert lines[0].rstrip().endswith("⎇ checking git")
         assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
-        assert "Ready" in lines[1]
+        assert "Ready" not in footer
+        assert "perm:" in lines[1]
+        assert not app._status_visible()
+        assert "".join(value for _, value in app._status_text()) == ""
 
 
 def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypatch) -> None:
@@ -2738,7 +3100,7 @@ def test_footer_hides_context_meter_without_a_configured_window(monkeypatch) -> 
         assert "Context" not in lines[1]
 
 
-def test_footer_places_context_on_status_line_when_git_unavailable() -> None:
+def test_footer_places_context_on_execution_settings_line_when_git_unavailable() -> None:
     settings = Settings.from_mapping({
         "llm": {
             "default": "token-plan/metered",
@@ -2813,6 +3175,27 @@ def test_compact_command_does_not_invent_usage_without_model_report() -> None:
             assert "0.0%" not in notice
 
     asyncio.run(scenario())
+
+
+def test_automatic_compaction_emits_status_events_without_streaming_summary() -> None:
+    model = scripted_model([
+        AIMessage(
+            content="first answer",
+            usage_metadata={"input_tokens": 110_000, "output_tokens": 10, "total_tokens": 110_010},
+            response_metadata={"model_provider": "openai"},
+        ),
+        AIMessage(content="internal summary"),
+        AIMessage(content="final answer"),
+    ])
+    model.profile = {"max_input_tokens": 128_000}
+    runner = AgentRunner(model=model, backend=StateBackend())
+    assert runner.invoke("long " * 15_000).status == "completed"
+    events = []
+    result = runner.invoke("continue", on_event=events.append)
+    assert result.status == "completed"
+    types = [event.type for event in events]
+    assert types.index("compaction_started") < types.index("compaction_finished") < types.index("assistant_started")
+    assert all("internal summary" not in event.content for event in events)
 
 
 def test_compact_command_runs_upstream_tool_and_reports_success() -> None:

@@ -19,6 +19,7 @@ from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
 from agent.file_mutation import FileMutationOperation
+from agent.config import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
 
 PreviewStyle = Literal["plain", "dim", "add", "delete", "error", "url"]
 PreviewGroup = Literal["explore", "mutation", "command", "web", "other"]
@@ -33,13 +34,6 @@ CommandExecutionStatus = Literal[
 # hand-writes its own wording.
 EXPAND_HINT = "Ctrl+O to expand"
 REVIEW_HINT = "Ctrl+R to review"
-
-# Maximum changed lines (- and +) shown in the edit compact preview.
-# Separators, blanks and the hidden hint never count against it.
-EDIT_PREVIEW_CHANGED_LINES = 8
-WRITE_PREVIEW_LINES = 6
-CREATE_PREVIEW_LIMIT = 5
-
 
 @dataclass(frozen=True)
 class PreviewLine:
@@ -189,15 +183,15 @@ def _changed_lines(raw: str) -> list[_ChangedLine]:
     return changed
 
 
-def _select_changed_lines(changed: list[_ChangedLine]) -> list[_ChangedLine]:
+def _select_changed_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[_ChangedLine]:
     """Pick the compact-preview lines: first N, then a +/- floor, then re-sort.
 
     When both sides exist, the preview must show at least one - and one +;
     the replacement line keeps its original diff position after sorting.
     """
-    if len(changed) <= EDIT_PREVIEW_CHANGED_LINES:
+    if len(changed) <= limits.edit_preview_changed_lines:
         return list(changed)
-    selected = changed[:EDIT_PREVIEW_CHANGED_LINES]
+    selected = changed[:limits.edit_preview_changed_lines]
     if len({line.kind for line in changed}) < 2:
         return selected
     if "add" not in {line.kind for line in selected}:
@@ -221,13 +215,13 @@ def _format_changed_text(line: str) -> str:
     return f"{prefix} {content}" if content else prefix
 
 
-def _edit_display_lines(changed: list[_ChangedLine]) -> tuple[PreviewLine, ...]:
+def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> tuple[PreviewLine, ...]:
     """Compact edit body: changed lines only, ⋮ at skipped spans, hidden count.
 
     A ⋮ marks that the preview jumped over hidden changed lines or crossed a
     hunk boundary; it never counts against the budget or the hidden total.
     """
-    selected = _select_changed_lines(changed)
+    selected = _select_changed_lines(changed, limits=limits)
     if not selected:
         return ()
     display: list[PreviewLine] = [PreviewLine("", "plain")]
@@ -307,12 +301,12 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
     return None
 
 
-def _write_compact_lines(diff: DiffPreview | None) -> tuple[PreviewLine, ...]:
+def _write_compact_lines(diff: DiffPreview | None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> tuple[PreviewLine, ...]:
     if diff is None:
         return ()
     lines = [
         PreviewLine(f"{number:>4} {line.text}", line.style)
-        for number, line in enumerate(diff.lines[:WRITE_PREVIEW_LINES], 1)
+        for number, line in enumerate(diff.lines[:limits.write_preview_lines], 1)
     ]
     hidden = len(diff.lines) - len(lines)
     if hidden:
@@ -320,7 +314,7 @@ def _write_compact_lines(diff: DiffPreview | None) -> tuple[PreviewLine, ...]:
     return tuple(lines)
 
 
-def normalize_file_mutation(block: ToolBlock) -> FileMutationPreview | None:
+def normalize_file_mutation(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> FileMutationPreview | None:
     """Map a successful tool result to file semantics; never infer a missing write operation."""
     if block.status != "completed" or block.is_error:
         return None
@@ -329,7 +323,7 @@ def normalize_file_mutation(block: ToolBlock) -> FileMutationPreview | None:
         return FileMutationPreview(
             path=diff.path if diff else _operand(block.arguments),
             operation="modify", diff=diff,
-            compact_lines=_edit_display_lines(_changed_lines(diff.full_diff)) if diff else (),
+            compact_lines=_edit_display_lines(_changed_lines(diff.full_diff), limits=limits) if diff else (),
         )
     if block.name == "write_file":
         operation = block.artifact.get("operation") if isinstance(block.artifact, dict) else None
@@ -338,7 +332,7 @@ def normalize_file_mutation(block: ToolBlock) -> FileMutationPreview | None:
         diff = build_diff_preview(block.name, block.arguments) if operation == "overwrite" else None
         return FileMutationPreview(
             path=_operand(block.arguments), operation=operation, diff=diff,
-            compact_lines=_write_compact_lines(diff) if operation == "overwrite" else (),
+            compact_lines=_write_compact_lines(diff, limits=limits) if operation == "overwrite" else (),
             label=added_line_label(diff.added or 0) if operation == "overwrite" and diff else "",
         )
     if block.name == "delete":
@@ -370,17 +364,17 @@ def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
 
 
 def aggregate_file_mutations(
-    mutations: list[FileMutationPreview], *, expanded: bool = False,
+    mutations: list[FileMutationPreview], *, expanded: bool = False, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
 ) -> FileMutationPreview:
     """Select compact rows for a consecutive semantic mutation group."""
     first = mutations[0]
     if first.operation == "create":
         paths = tuple(dict.fromkeys(mutation.path for mutation in mutations))
-        hidden = 0 if expanded else max(0, len(paths) - CREATE_PREVIEW_LIMIT)
+        hidden = 0 if expanded else max(0, len(paths) - limits.create_preview_items)
         rows: list[PreviewLine] = []
         if hidden:
             rows.append(PreviewLine(f"  ├ … {hidden} more", "dim"))
-        shown = paths if expanded else paths[-CREATE_PREVIEW_LIMIT:]
+        shown = paths if expanded else paths[-limits.create_preview_items:]
         for index, path in enumerate(shown):
             branch = "└" if index == len(shown) - 1 else "├"
             rows.append(PreviewLine(f"  {branch} {path}"))
@@ -397,8 +391,8 @@ def aggregate_file_mutations(
         for line in mutation.compact_lines
         if line.style in {"add", "delete"}
     ]
-    selected = list(enumerate(changes[:EDIT_PREVIEW_CHANGED_LINES]))
-    if len(changes) > EDIT_PREVIEW_CHANGED_LINES:
+    selected = list(enumerate(changes[:limits.edit_preview_changed_lines]))
+    if len(changes) > limits.edit_preview_changed_lines:
         kinds = {line.style for _, line in changes}
         shown = {line.style for _, (_, line) in selected}
         if len(kinds) == 2 and len(shown) == 1:
@@ -461,8 +455,8 @@ def build_ls_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
-def build_write_preview(block: ToolBlock) -> ToolPreview:
-    mutation = normalize_file_mutation(block)
+def build_write_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
+    mutation = normalize_file_mutation(block, limits=limits)
     if mutation is not None:
         return file_tool_preview(mutation)
     diff = build_diff_preview("write_file", block.arguments)
@@ -474,12 +468,12 @@ def build_write_preview(block: ToolBlock) -> ToolPreview:
     return ToolPreview(
         kind="write", verb="write", target=diff.path,
         label=added_line_label(diff.added or 0),
-        lines=_write_compact_lines(diff), group="mutation", action="review",
+        lines=_write_compact_lines(diff, limits=limits), group="mutation", action="review",
     )
 
 
-def build_edit_preview(block: ToolBlock) -> ToolPreview:
-    mutation = normalize_file_mutation(block)
+def build_edit_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
+    mutation = normalize_file_mutation(block, limits=limits)
     if mutation is not None:
         return file_tool_preview(mutation)
     diff = build_diff_preview("edit_file", block.arguments)
@@ -495,7 +489,7 @@ def build_edit_preview(block: ToolBlock) -> ToolPreview:
         detail = ""
     return ToolPreview(
         kind="edit", verb=verb, target=diff.path, detail=detail,
-        lines=_edit_display_lines(_changed_lines(diff.full_diff)),
+        lines=_edit_display_lines(_changed_lines(diff.full_diff), limits=limits),
         group="mutation", action="review",
     )
 
@@ -623,8 +617,6 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "grep": build_grep_preview,
     "glob": build_glob_preview,
 
-    "write_file": build_write_preview,
-    "edit_file": build_edit_preview,
     "delete": build_delete_preview,
 
     "execute": build_execute_preview,
@@ -665,15 +657,15 @@ def _failure_summary(output: str) -> str:
     return next((line for line in lines if not line.startswith("Exit code:")), "")
 
 
-def _failure_lines(block: ToolBlock, group: PreviewGroup) -> list[str]:
+def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[str]:
     lines = block.output.strip().splitlines()
     if lines and lines[0].startswith("参数校验失败"):
         details = [line.strip().removeprefix("- ") for line in lines if line.startswith("- ")]
-        shown = details[:4] or lines[:1]
+        shown = details[:limits.failure_preview_lines] or lines[:1]
         hidden = len(lines) - len(shown)
     else:
         content = [line for line in lines if line.strip() and not line.strip().startswith("Exit code:")]
-        limit = 6 if group == "command" else 4
+        limit = limits.command_failure_tail_lines if group == "command" else limits.failure_preview_lines
         shown = content[-limit:] if group == "command" else content[:limit]
         hidden = len(content) - len(shown)
     if hidden > 0:
@@ -681,10 +673,18 @@ def _failure_lines(block: ToolBlock, group: PreviewGroup) -> list[str]:
     return shown
 
 
-def build_failure_preview(block: ToolBlock) -> ToolPreview:
-    """Uniform preview for failed tools: real exit code + compact error output."""
+def _build_base_preview(block: ToolBlock, *, limits: UiDisplayLimits) -> ToolPreview:
+    if block.name == "write_file":
+        return build_write_preview(block, limits=limits)
+    if block.name == "edit_file":
+        return build_edit_preview(block, limits=limits)
     builder = _PREVIEW_BUILDERS.get(block.name, build_generic_preview)
-    base = builder(block)
+    return builder(block)
+
+
+def build_failure_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
+    """Uniform preview for failed tools: real exit code + compact error output."""
+    base = _build_base_preview(block, limits=limits)
     group = tool_group(block.name)
     summary = base.summary or f"{base.verb} {base.target}".strip() or base.kind
     return ToolPreview(
@@ -693,18 +693,15 @@ def build_failure_preview(block: ToolBlock) -> ToolPreview:
         target=summary,
         detail=_failure_summary(block.output),
         summary=base.summary,
-        lines=tuple(PreviewLine(line, "dim") for line in _failure_lines(block, group)),
+        lines=tuple(PreviewLine(line, "dim") for line in _failure_lines(block, group, limits=limits)),
         group=group,
         action="expand",
     )
 
 
-def build_tool_preview(block: ToolBlock) -> ToolPreview:
+def build_tool_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
     if block.name == "execute":
         return build_execute_preview(block)
     if block.is_error:
-        return build_failure_preview(block)
-    builder = _PREVIEW_BUILDERS.get(block.name)
-    if builder is None:
-        return build_generic_preview(block)
-    return builder(block)
+        return build_failure_preview(block, limits=limits)
+    return _build_base_preview(block, limits=limits)

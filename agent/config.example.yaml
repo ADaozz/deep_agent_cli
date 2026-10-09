@@ -12,6 +12,25 @@ agent:
 ui:
   # IANA time zone for the time shown after each completed answer.
   timezone: Asia/Shanghai
+  # Number of logical thinking lines kept when collapsed; positive integer.
+  thinking_tail_lines: 5
+  # Collapsed command output and generic tool output (logical lines).
+  execute_tail_lines: 4
+  tool_tail_lines: 8
+  expanded_tool_lines: 40
+  # Compact lists (items rather than wrapped screen rows).
+  explore_preview_items: 5
+  explore_failure_items: 3
+  create_preview_items: 5
+  # File previews; edit budget must be >= 2 to show both added/deleted lines.
+  edit_preview_changed_lines: 8
+  write_preview_lines: 6
+  # Failed-tool summaries.
+  failure_preview_lines: 4
+  command_failure_tail_lines: 6
+  # Editor/menu row caps; the terminal size can reduce the actual height.
+  editor_max_lines: 10
+  completion_menu_lines: 8
 
 llm:
   # Required for grouped models: source/model. Change this to select the startup model.

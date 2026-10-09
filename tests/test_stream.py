@@ -5,6 +5,28 @@ from agent.stream import StreamDeltaCallback, reasoning_text, visible_text
 from agent.session import messages_to_transcript
 
 
+def test_summary_callback_reports_lifecycle_and_keeps_summary_out_of_answer() -> None:
+    events = []
+    callback = StreamDeltaCallback(
+        lambda kind, text: events.append((kind, text)),
+        on_start=lambda: events.append("assistant_started"),
+        on_end=lambda *_: events.append("assistant_completed"),
+        on_compaction=lambda active: events.append(("compacting", active)),
+    )
+    for failed in (False, True):
+        callback.on_llm_start({}, run_id="summary", metadata={"lc_source": "summarization"})
+        callback.on_llm_new_token("内部压缩摘要", run_id="summary")
+        if failed:
+            callback.on_llm_error(RuntimeError("failed"), run_id="summary")
+        else:
+            callback.on_llm_end({}, run_id="summary")
+    assert events == [("compacting", True), ("compacting", False)] * 2
+    callback.on_llm_start({}, run_id="answer")
+    callback.on_llm_new_token("回复", run_id="answer")
+    callback.on_llm_end({}, run_id="answer")
+    assert events[-3:] == ["assistant_started", ("assistant", "回复"), "assistant_completed"]
+
+
 def test_reasoning_from_kwargs_and_think_tags() -> None:
     tagged = AIMessage(content="<think>先确认范围</think>接下来提问。")
     assert "先确认范围" in reasoning_text(tagged)
