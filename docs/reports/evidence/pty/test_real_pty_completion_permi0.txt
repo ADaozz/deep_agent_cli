@@ -1,0 +1,372 @@
+[?12l[?25h[?1049h[H[?2004h[?1l[?1000h[?1003h[?1015h[?1006h[?25l[0m[?7l[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
+[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m/tmp/deep-agent-pty-test/test_real_pty_completion_permi0/workspace[0m · [0mfixed model · default[0m · [0mcli-812b[0m    ⎇ checking gi[119Ct[0m
+[0m SANDBOXED · perm:ask                                                                                                  [119C [3A[2C[0m[?12l[?25h[?25l[0m
+
+[106C[0m [C    ⎇ [Co[2A[114D[0m[?12l[?25h[?25l[0m/mod [0m
+[6C[0m /model [0m Select source, model, and reasoning effort (/model or /model <id-prefix>) [0m [A[84D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[0m
+[6C[0m                                                                                    [A[84D[0m[?12l[?25h[?25l[0me [0m
+[7C[0m /model [0m Select source, model, and reasoning effort (/model or /model <id-prefix>) [0m [A[84D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[0ml [0m
+[7C[0m                                                                                    [A[83D[0m[?12l[?25h[?25l[33A[8D[0m [0m
+[0m [0mStatus: idle[0m
+[0m [0mModel: (fixed)[0m
+[0m [0mPermission: ask (side-effect tools, every execute and web search require approval)[0m
+[0m [0mThread: cli-812bc190-2e44-4dbc-a19f-ac4f50d47446[0m
+[0m [0mSandbox: SANDBOXED[0m
+[0m [0mOffline sandbox: not started[0m
+[0m [0mNetworked sandbox: not started[0m
+[0m [0mTools: 11[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0;1m Input cleared · press Ctrl+C again to exit                                                                            [119C [0m
+
+[2C[0m       [7D[0m[?12l[?25h[?25l[12A[2D[0m [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0;1mEnable ALLOW? (HIGH RISK)[0m                                                                                              [119C [0m
+[0mHIGH RISK: Permission mode ALLOW auto-approves every tool call and any capabilities it declares (including file writes [119C [0m
+[0mand deletes), and runs every execute with the sandbox network OPEN: full host network access (internet, localhost, LAN)[119C.[0m
+[0mThere is no per-call confirmation. Switching back to ask only restores approval for later commands; already running    [119C [0m
+[0msandbox processes keep going. Only enable this if the agent is running in a SANDBOXED backend.                         [119C [0m
+[0;1m1/1  Type ALLOW to confirm auto-approve + sandbox network open[0m                                                         [119C [0m
+[0;2mEnter submit  Ctrl+J newline  Esc cancel[0m                                                                               [119C [0m
+[0;1m Type ALLOW to confirm · Esc cancel                                                                                    [119C [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+
+[2C[0m[?12l[?25h[?25l[24A[2D[0m [0m
+[0m [0mPermission: allow.[0m
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0;1m Permission: allow.                                                                                                    [119C [0m
+
+
+
+
+[19C[0mllow[3A[21D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[22A[2D[0m [0m
+[0m [0mPermission: ask.[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[14C[0;1msk.  [0m
+
+
+
+
+[19C[0msk  [3A[21D[0m[?12l[?25h[?25l[20A[2D[0m                                                                                                                       [119C [0m
+[0m › run a command                                                                                                       [119C [0m
+[0m                                                                                                                       [119C [0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[C[0;1m⠸ Working… [CE[Cc to cancel[0m · AI 最奇怪的地方，是你一批评它，它就开始承认自己根本没犯过的错误。[0m
+
+[2C[0m[?12l[?25h[?25l[17A[2D[0m [0m
+[0m⠸ [0;1mexecute echo explicitly-approved[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[2C[0m[?12l[?25h[?25l[16A[2D[0m● [32C[0;2m — waiting for input[0m
+
+
+
+
+[0m [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0;1mApprove tool call?[0m                                                                                                     [119C [0m
+[0mTool: execute                                                                                                          [119C [0m
+[0mNetwork: OFF (default)                                                                                                 [119C [0m
+[0mCommand: echo explicitly-approved                                                                                      [119C [0m
+[0mRun executes the listed tool calls. Reject denies them.                                                                [119C [0m
+[0;1m1/1  Decision[0m                                                                                                          [119C [0m
+[0;1m→  Reject  Deny this tool call[0m                                                                                         [119C [0m
+[0m   Run  Approve and execute                                                                                            [119C [0m
+[0;2m↑↓ select  Enter confirm  Esc cancel · F2 to reopen[0m                                                                    [119C [0m
+[0;1m Waiting for input                                                                                                     [119C [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[37A[0m[0m[0m[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0;1m Approval still pending · F2 to decide                                                                                 [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [A[2C[0m[?12l[?25h[?25l[12A[2D[0m [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0;1mEnable ALLOW? (HIGH RISK)[0m                                                                                              [119C [0m
+[0mHIGH RISK: Permission mode ALLOW auto-approves every tool call and any capabilities it declares (including file writes [119C [0m
+[0mand deletes), and runs every execute with the sandbox network OPEN: full host network access (internet, localhost, LAN)[119C.[0m
+[0mThere is no per-call confirmation. Switching back to ask only restores approval for later commands; already running    [119C [0m
+[0msandbox processes keep going. Only enable this if the agent is running in a SANDBOXED backend.                         [119C [0m
+[0;1m1/1  Type ALLOW to confirm auto-approve + sandbox network open[0m                                                         [119C [0m
+[0;2mEnter submit  Ctrl+J newline  Esc cancel[0m                                                                               [119C [0m
+[0;1m Type ALLOW to confirm · Esc cancel                                                                                    [119C [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+
+[2C[0m[?12l[?25h[?25l[15A[2D[0m [0m
+[0m [0mPermission switch queued: ask → allow. Current work uses ask. Existing approval remains under ask; press F2 to approve[0m
+[0m [0mor reject.[0m
+[0m [0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0;1m Permission switch queued: ask → allow. Current work uses ask. Existing approval remains under ask; press F2 to approve[119C…[0m
+
+
+
+
+[21C[0m→allow(pending)[3A[34D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[11A[2D[0m [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0;1mApprove tool call?[0m                                                                                                     [119C [0m
+[0mTool: execute                                                                                                          [119C [0m
+[0mNetwork: OFF (default)                                                                                                 [119C [0m
+[0mCommand: echo explicitly-approved                                                                                      [119C [0m
+[0mRun executes the listed tool calls. Reject denies them.                                                                [119C [0m
+[0;1m1/1  Decision[0m                                                                                                          [119C [0m
+[0;1m→  Reject  Deny this tool call[0m                                                                                         [119C [0m
+[0m   Run  Approve and execute                                                                                            [119C [0m
+[0;2m↑↓ select  Enter confirm  Esc cancel · F2 to reopen[0m                                                                    [119C [0m
+[0;1m Waiting for input                                                                                                     [119C [0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[37A[0m[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m● [0;1mFailed ([Cxit[C1) echo explicitly-approved[0m[K[0m
+[0;2m  └ output[0m
+[0;2m    User rejected the tool call for `execute` with id pty-ex. The tool was not executed. Do not retry this tool call[0m[K[0m
+[0;2munless the user explicitly requests it.[0m
+[0m [0m
+[0m [0mPermission switch queued: ask → allow. Current work uses ask. Existing approval remains under ask; press F2 to approve[0m
+[0m [0mor reject.[0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0m [0m[K[0m
+[0;1m ⠦ Working…  Esc to cancel[0m · 程序员不怕失眠，怕的是睡醒以后忘了怎么复现。[0;1m                                              [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [A[2C[0m[?12l[?25h[?25l[9A[2D[0m [0m
+[0m [0mpermission: allow[0m
+
+
+
+
+
+
+
+
+
+
+[19C[0mllow             [3A[34D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[7A[2D[0m [0m
+[0m done[0m
+[0m [0;2mWorked for 0s · 21:06[0m
+[0m [0m
+[0m [0m
+[0m [0m[K[0m
+
+[2C[0m[?12l[?25h[?1000l[?1015l[?1006l[?1003l[?1000l[?1015l[?1006l[?1003l[?25l[36A[2D[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
+[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0m [0m
+[0m [0mStatus: idle[0m
+[0m [0mModel: (fixed)[0m
+[0m [0mPermission: ask (side-effect tools, every execute and web search require approval)[0m
+[0m [0mThread: cli-812bc190-2e44-4dbc-a19f-ac4f50d47446[0m
+[0m [0mSandbox: SANDBOXED[0m
+[0m [0mOffline sandbox: not started[0m
+[0m [0mNetworked sandbox: not started[0m
+[0m [0mTools: 11[0m
+[0m [0m
+[0m [0mPermission: allow.[0m
+[0m [0m
+[0m [0mPermission: ask.[0m
+[0m                                                                                                                       [119C [0m
+[0m › run a command                                                                                                       [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m
+[0m● [0;1mFailed (exit 1) echo explicitly-approved[0m
+[0;2m  └ output[0m
+[0;2m    User rejected the tool call for `execute` with id pty-ex. The tool was not executed. Do not retry this tool call[0m
+[0;2munless the user explicitly requests it.[0m
+[0m [0m
+[0m [0mPermission switch queued: ask → allow. Current work uses ask. Existing approval remains under ask; press F2 to approve[0m
+[0m [0mor reject.[0m
+[0m [0m
+[0m [0mpermission: allow[0m
+[0m [0m
+[0m done[0m
+[0m [0;2mWorked for 0s · 21:06[0m
+[0m [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m/tmp/deep-agent-pty-test/test_real_pty_completion_permi0/workspace[0m · [0mfixed model · default[0m · [0mcli-812b[0m          ⎇ no gi[119Ct[0m
+[0m SANDBOXED · perm:allow                                                                                                [119C [0m
+
+[0m [0m
+[J[?7h[0m[?12l[?25h[?1049l[?2004l

@@ -1,0 +1,11 @@
+[
+  {
+    "trust_env": false,
+    "error_type": "ConnectError",
+    "error": "[Errno 101] Network is unreachable"
+  },
+  {
+    "trust_env": true,
+    "http_status": 200
+  }
+]

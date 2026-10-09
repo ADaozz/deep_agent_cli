@@ -1,0 +1,177 @@
+[?12l[?25h[?1049h[H[?2004h[?1l[?1000h[?1003h[?1015h[?1006h[?25l[0m[?7l[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
+[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m/tmp/deep-agent-image-tests/test_real_png_pty_attach_submi1/worksp…[0m · [0mtest · vision · default[0m · [0mcli-621d[0m ⎇ checking gi[119Ct[0m
+[0m SANDBOXED · perm:ask                                                                                                  [119C [3A[2C[0m[?12l[?25h[?25l[0m
+
+[67C[0mace[C[0m· [0mtest[C· v[Csion[C· default[C[0m· [0mcli-621d[C[0m    ⎇ [Co[2A[114D[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[4A[2D[0m [0m
+[0m ▣ Image #1  browser-page.png · 7 KiB                                                                                  [119C [0m
+[0;1m Attached image: browser-page.png                                                                                      [119C [0m
+
+[2C[0m[?12l[?25h[?25l[33A[2D[0m                                                                                                                       [119C [0m
+[0m › Inspect the attached image.                                                                                         [119C [0m
+[0m [0m▣ Image #1  browser-page.png · 7 KiB[0m                                                                                  [119C [0m
+[0m                                                                                                                       [119C [0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m [0m[K[0m
+[C[0;1m⠼ Working…  Esc[Cto cancel[0m · 缓存失效了，但我对缓存的怀疑一直有效。[0m
+
+[2C[0m[?12l[?25h[?25l[2A[0;1m⠴[0m
+
+[2C[0m[?12l[?25h[?25l[29A[2D[0m [0m
+[0m Image bytes received.[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[2C[0m[?12l[?25h[?25l[0m[?12l[?25h[?25l[27A[2D[0m [0;2mWorked for 0s · 21:31[0m
+[0m [0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[0m [0m[K[0m
+
+[2C[0m[?12l[?25h[?1000l[?1015l[?1006l[?1003l[?1000l[?1015l[?1006l[?1003l[?25l[36A[2D[0m[J[0;1mDeepAgent[0;2m  terminal coding agent[0m
+[0;2mEsc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands[0m
+[0m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[119C─[0m
+[0m                                                                                                                       [119C [0m
+[0m › Inspect the attached image.                                                                                         [119C [0m
+[0m [0m▣ Image #1  browser-page.png · 7 KiB[0m                                                                                  [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m
+[0m Image bytes received.[0m
+[0m [0;2mWorked for 0s · 21:31[0m
+[0m [0m
+[0;1m Input cleared · press Ctrl+C again to exit                                                                            [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m›                                                                                                                      [119C [0m
+[0m                                                                                                                       [119C [0m
+[0m [0m/tmp/deep-agent-image-tests/test_real_png_pty_attach_submi1/workspace[0m · [0mtest · vision · default[0m · [0mcli-621d[0m     ⎇ no gi[119Ct[0m
+[0m SANDBOXED · perm:ask                                                                                                  [119C [0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m [0m
+[J[?7h[0m[?12l[?25h[?1049l[?2004l

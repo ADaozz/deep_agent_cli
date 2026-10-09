@@ -1,0 +1,13 @@
+playwright-cli install-browser [browser]
+
+Install browser
+
+Arguments:
+  [browser]                   browser to install
+Options:
+  --with-deps                 install system dependencies for browsers
+  --dry-run                   do not execute installation, only print information
+  --list                      prints list of browsers from all playwright installations
+  --force                     force reinstall of already installed browsers
+  --only-shell                only install headless shell when installing chromium
+  --no-shell                  do not install chromium headless shell

@@ -1,0 +1,35 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____________________________ test_network_isolation ____________________________
+
+backend = <agent.sandbox.WorkspaceCompositeBackend object at 0x7f1b22d32b70>
+
+    def test_network_isolation(backend) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = server.getsockname()[1]
+        probe = (
+            "python3 -c \"import socket; s = socket.create_connection(('127.0.0.1', %d), timeout=2); "
+            "print('connected')\"" % port
+        )
+        interfaces = "tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' '"
+        try:
+            offline = run(backend, probe)
+            assert offline.exit_code != 0
+>           assert "connected" not in offline.output
+E           assert 'connected' not in 'Traceback (...Exit code: 1'
+E
+E             'connected' is contained here:
+E               ); print('connected')
+E                                      ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E                 File "/usr/lib/python3.13/socket.py", line 864, in create_connection
+E                   raise exceptions[0]
+E                 File "/usr/lib/python3.13/socket.py", line 849, in create_connection...
+E
+E             ...Full output truncated (5 lines hidden), use '-vv' to show
+
+/tmp/deep-agent-v013/tests/test_persistent_sandbox.py:235: AssertionError
+=========================== short test summary info ============================
+FAILED ../../tmp/deep-agent-v013/tests/test_persistent_sandbox.py::test_network_isolation
+1 failed in 1.57s

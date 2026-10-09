@@ -1,0 +1,88 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_playwright_session_survives_separate_execute_calls ____________
+
+tmp_path = PosixPath('/tmp/deep-agent-pw-test/test_playwright_session_surviv0')
+page_url = 'http://127.0.0.1:38735/'
+
+    def test_playwright_session_survives_separate_execute_calls(tmp_path: Path, page_url: str) -> None:
+        workspace = tmp_path / "work"
+        workspace.mkdir()
+        try:
+            runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), sandbox_config=_prerequisites(workspace))
+        except SandboxUnavailableError as exc:
+            pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}")
+        pool = runner.sandbox_pool
+        tool = build_execute_tool(runner.prepared.backend)
+
+        def execute(command: str, *, network: bool = True) -> str:
+            return tool.invoke({"command": command, "network": network, "timeout": 120})
+
+        open_command = f"playwright-cli open {shlex.quote(page_url)}"
+        executable = os.environ.get("PLAYWRIGHT_SANDBOX_EXECUTABLE")
+        if executable:
+            config_file = workspace / "browser-test.json"
+            config_file.write_text(json.dumps({"browser": {
+                "browserName": "chromium", "launchOptions": {"executablePath": executable, "headless": True},
+            }}))
+            open_command += " --config=browser-test.json"
+        try:
+            opened = execute(open_command)
+>           assert "Page URL" in opened, f"Browser launch failed (not a skip):\n{opened}"
+E           AssertionError: Browser launch failed (not a skip):
+E             /opt/npm-prefix/lib/node_modules/@playwright/cli/node_modules/playwright-core/lib/tools/cli-client/session.js:172
+E                 const rejectWithPid = (reject, message) => reject(Object.assign(new Error(`Daemon pid=${child.pid}: ${message}`), { daemonPid: child.pid }));
+E                                                                                 ^
+E
+E             Error: Daemon pid=17: Daemon process exited with code 1
+E             [TargetClosedError2: Target page, context or browser has been closed
+E             Browser logs:
+E
+E             <launching> /usr/bin/chromium --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,NetworkTimeServiceQuerying,AimEnabled,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-blink-features=AutomationControlled --user-data-dir=/tmp/playwright_chromiumdev_profile-pMEXpt --remote-debugging-pipe --no-startup-window
+E             <launched> pid=29
+E             [pid=29][err] /usr/bin/chromium: 77: .: cannot open /etc/chromium.d/*: No such file
+E             Call log:
+E             [2m  - <launching> /usr/bin/chromium --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,NetworkTimeServiceQuerying,AimEnabled,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-blink-features=AutomationControlled --user-data-dir=/tmp/playwright_chromiumdev_profile-pMEXpt --remote-debugging-pipe --no-startup-window[22m
+E             [2m  - <launched> pid=29[22m
+E             [2m  - [pid=29][err] /usr/bin/chromium: 77: .: cannot open /etc/chromium.d/*: No such file[22m
+E             [2m  - [pid=29] <gracefully close start>[22m
+E             [2m  - [pid=29] <kill>[22m
+E             [2m  - [pid=29] <will force kill>[22m
+E             [2m  - [pid=29] exception while trying to kill process: Error: kill ESRCH[22m
+E             [2m  - [pid=29] <process did exit: exitCode=2, signal=null>[22m
+E             [2m  - [pid=29] starting temporary directories cleanup[22m
+E             [2m  - [pid=29] finished temporary directories cleanup[22m
+E             [2m  - [pid=29] <gracefully close end>[22m
+E             ] {
+E               log: [
+E                 '  - <launching> /usr/bin/chromium --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,NetworkTimeServiceQuerying,AimEnabled,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --disable-blink-features=AutomationControlled --user-data-dir=/tmp/playwright_chromiumdev_profile-pMEXpt --remote-debugging-pipe --no-startup-window',
+E                 '  - <launched> pid=29',
+E                 '  - [pid=29][err] /usr/bin/chromium: 77: .: cannot open /etc/chromium.d/*: No such file',
+E                 '  - [pid=29] <gracefully close start>',
+E                 '  - [pid=29] <kill>',
+E                 '  - [pid=29] <will force kill>',
+E                 '  - [pid=29] exception while trying to kill process: Error: kill ESRCH',
+E                 '  - [pid=29] <process did exit: exitCode=2, signal=null>',
+E                 '  - [pid=29] starting temporary directories cleanup',
+E                 '  - [pid=29] finished temporary directories cleanup',
+E                 '  - [pid=29] <gracefully close end>'
+E               ]
+E             }
+E
+E                 at rejectWithPid (/opt/npm-prefix/lib/node_modules/@playwright/cli/node_modules/playwright-core/lib/tools/cli-client/session.js:172:69)
+E                 at ChildProcess.<anonymous> (/opt/npm-prefix/lib/node_modules/@playwright/cli/node_modules/playwright-core/lib/tools/cli-client/session.js:182:11)
+E                 at ChildProcess.emit (node:events:509:28)
+E                 at maybeClose (node:internal/child_process:1141:16)
+E                 at ChildProcess._handle.onexit (node:internal/child_process:306:5) {
+E               daemonPid: 17
+E             }
+E
+E             Node.js v24.19.0
+E
+E             Exit code: 1
+E           assert 'Page URL' in '/opt/npm-prefix/lib/node_modules/@playwright/cli/node_modules/playwright-core/lib/tools/cli-client/session.js:172\n  ...ldProcess._handle.onexit (node:internal/child_process:306:5) {\n  daemonPid: 17\n}\n\nNode.js v24.19.0\n\nExit code: 1'
+
+tests/test_playwright_sandbox.py:116: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_playwright_sandbox.py::test_playwright_session_survives_separate_execute_calls
+1 failed in 7.34s
