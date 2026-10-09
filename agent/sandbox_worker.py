@@ -25,7 +25,7 @@ import time
 
 WORKDIR = "/workspace"
 CHUNK_BYTES = 65536
-POST_EXIT_IDLE_SECONDS = 0.1
+POST_EXIT_DRAIN_SECONDS = 0.1
 
 _send_lock = threading.Lock()
 _running_lock = threading.Lock()
@@ -75,16 +75,17 @@ def _run(request_id, command):
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     selector.register(process.stderr, selectors.EVENT_READ)
-    # 后台子进程可能在 shell 退出后仍占着管道；shell 结束后管道短暂无数据即停止读取。
-    idle_since = None
+    # 后台子进程可能持续写管道；shell 退出后只排空一次固定窗口。
+    drain_deadline = None
     try:
         while selector.get_map():
             exited = process.poll() is not None
-            if exited and idle_since is None:
-                idle_since = time.monotonic()
-            if idle_since is not None and time.monotonic() - idle_since >= POST_EXIT_IDLE_SECONDS:
+            if exited and drain_deadline is None:
+                drain_deadline = time.monotonic() + POST_EXIT_DRAIN_SECONDS
+            if drain_deadline is not None and time.monotonic() >= drain_deadline:
                 break
-            events = selector.select(timeout=0.05 if exited else 0.1)
+            wait = 0.1 if drain_deadline is None else max(0.0, min(0.05, drain_deadline - time.monotonic()))
+            events = selector.select(timeout=wait)
             for key, _mask in events:
                 try:
                     chunk = key.fileobj.read1(CHUNK_BYTES)
@@ -92,8 +93,6 @@ def _run(request_id, command):
                     chunk = b""
                 if chunk:
                     _send({"op": "out", "id": request_id, "data": base64.b64encode(chunk).decode("ascii")})
-                    if idle_since is not None:
-                        idle_since = time.monotonic()
                 else:
                     selector.unregister(key.fileobj)
         code = process.wait()

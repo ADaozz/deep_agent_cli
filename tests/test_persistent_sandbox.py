@@ -232,7 +232,8 @@ def test_network_isolation(backend) -> None:
     try:
         offline = run(backend, probe)
         assert offline.exit_code != 0
-        assert "connected" not in offline.output
+        # Python 3.13 tracebacks can echo the source containing print('connected').
+        assert "connected" not in offline.output.splitlines()
         assert run(backend, interfaces).output.split() == ["lo"]
 
         online = run(backend, probe, network=True)
@@ -544,3 +545,95 @@ def test_execute_tool_reuses_sandbox_through_agent(workspace: Path) -> None:
         assert completed and completed[0].content.strip() == "agent"
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize("timeout", [None, 3])
+def test_continuous_background_output_has_fixed_drain(backend, timeout) -> None:
+    # A generous test watchdog prevents the unfixed no-timeout case hanging pytest.
+    thread, outcome = _run_in_thread(
+        backend, "(while :; do echo tick; sleep 0.03; done) & echo finished",
+        timeout=timeout,
+    )
+    thread.join(timeout=2)
+    if thread.is_alive():
+        _pool(backend).shutdown("regression watchdog")
+        thread.join(timeout=5)
+        pytest.fail("execute did not return within 2s after the shell exited")
+    result = outcome["result"]
+    assert result.exit_code == 0, result.output
+    assert result.termination_reason is None
+    assert "finished" in result.output
+    assert run(backend, "echo reused").output == "reused\n"
+
+
+def test_foreground_output_streams_until_shell_exit(backend) -> None:
+    from agent.cancel import set_output_emitter
+
+    chunks = []
+    ctx = ToolCancelContext("execute", "stream-worker", threading.Event())
+    set_cancel_context(ctx)
+    set_output_emitter(lambda _id, text, _stream: chunks.append((time.monotonic(), text)))
+    try:
+        result = run(backend, "for i in 1 2 3 4; do echo tick-$i; sleep 0.15; done")
+        ended = time.monotonic()
+    finally:
+        clear_cancel_context()
+        set_output_emitter(None)
+    assert result.exit_code == 0
+    assert result.output.splitlines() == ["tick-1", "tick-2", "tick-3", "tick-4"]
+    assert chunks and chunks[0][0] < ended - 0.3
+
+
+def test_foreground_exit_code_and_abnormal_exit_preserve_worker(backend) -> None:
+    assert run(backend, "printf normal").output == "normal"
+    failed = run(backend, "echo failed; exit 7")
+    assert failed.exit_code == 7
+    signalled = run(backend, "kill -TERM $$")
+    assert signalled.exit_code == 143
+    assert run(backend, "echo reused").output == "reused\n"
+
+
+# Passing this test demonstrates a KNOWN LIMITATION, not stronger isolation.
+def test_shared_workspace_unix_socket_can_relay_host_network(backend, workspace) -> None:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import shlex
+
+    requests = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"host-network-response")
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    relay = (
+        "import socket,urllib.request\n"
+        "s=socket.socket(socket.AF_UNIX); s.bind('/workspace/relay.sock'); s.listen()\n"
+        "c,_=s.accept()\n"
+        f"c.sendall(urllib.request.urlopen('http://127.0.0.1:{port}/').read())\n"
+        "c.close(); s.close()\n"
+    )
+    (workspace / "relay.py").write_text(relay)
+    try:
+        started = run(backend, "python3 relay.py >relay.log 2>&1 &", network=True)
+        assert started.exit_code == 0
+        _wait_for(lambda: (workspace / "relay.sock").exists())
+        direct = run(backend, "python3 -c " + shlex.quote(
+            f"import socket; socket.create_connection(('127.0.0.1',{port}),timeout=1)"))
+        assert direct.exit_code != 0
+        indirect = run(backend, "python3 -c " + shlex.quote(
+            "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(3); "
+            "s.connect('/workspace/relay.sock'); print(s.recv(4096).decode())"))
+        assert indirect.exit_code == 0, indirect.output
+        assert indirect.output.strip() == "host-network-response"
+        assert requests == ["/"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
