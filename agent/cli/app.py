@@ -81,6 +81,7 @@ from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, Unknow
 # Workspace/model and execution settings on the left; git/context on the right.
 FOOTER_LINES = 2
 INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
+CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 STATUS_NOTICE_SECONDS = 1.0
 
 
@@ -366,7 +367,7 @@ class CliApplication:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._compacting = False
-        self._last_ctrl_c = 0.0
+        self._last_ctrl_c: float | None = None
         self._status_notice_handle: asyncio.TimerHandle | None = None
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
@@ -720,7 +721,8 @@ class CliApplication:
                 self._status_before_notice = previous
                 self._status_notice = text
                 self._status_notice_handle = loop.call_later(
-                    STATUS_NOTICE_SECONDS, self._hide_status_notice,
+                    CTRL_C_EXIT_WINDOW_SECONDS if text == INPUT_CLEARED_HINT else STATUS_NOTICE_SECONDS,
+                    self._hide_status_notice,
                 )
         self.application.invalidate()
 
@@ -1719,7 +1721,11 @@ class CliApplication:
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
-            if self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
+            if self.interaction is None and event.current_buffer.complete_state is not None:
+                # Dismiss the menu without cancel_completion restoring its pre-selection document.
+                event.current_buffer.complete_state = None
+                self.application.invalidate()
+            elif self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
                 self.slash_completer.accepted_text = None
                 event.current_buffer.reset()
                 self._pasted_content.clear()
@@ -1759,7 +1765,7 @@ class CliApplication:
                 self._finish_interaction(cancelled=True)
                 return
             now = time.monotonic()
-            if now - self._last_ctrl_c < 0.5:
+            if self._last_ctrl_c is not None and now - self._last_ctrl_c < CTRL_C_EXIT_WINDOW_SECONDS:
                 self.exit()
                 return
             event.current_buffer.reset()

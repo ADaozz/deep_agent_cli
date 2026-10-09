@@ -4073,3 +4073,61 @@ def test_status_reports_both_sandboxes(tmp_path) -> None:
         assert "Offline sandbox: not started" in status
         assert "Networked sandbox: not started" in status
     runner.close()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_escape_completion_preserves_current_document(selected) -> None:
+    from prompt_toolkit.document import Document
+
+    def scenario(app: CliApplication) -> None:
+        app.buffer.document = Document("/mod", 4)
+        app.buffer.complete_state = CompletionState(app.buffer.document, [Completion("model", start_position=-3)])
+        if selected:
+            app.buffer.go_to_completion(0)
+        before = app.buffer.document
+        _escape(app)
+        assert app.buffer.complete_state is None
+        assert app.buffer.document == before
+        assert not app.runner.control.cancel_requested
+        app.buffer.insert_text("x")
+        assert app.buffer.text == before.text + "x"
+        app.buffer.document = Document("/mod", 4)
+        app.buffer.complete_state = CompletionState(app.buffer.document, [Completion("model", start_position=-3)])
+        tab = next(b for b in app.bindings.bindings if b.keys == ("c-i",))
+        class Event:
+            current_buffer = app.buffer
+        tab.handler(Event())
+        assert app.buffer.text.startswith("/model")
+        assert app.buffer.complete_state is None
+
+    _with_painted_app("escape-completion", scenario)
+
+
+@pytest.mark.parametrize("gap,exits", [(0.3, True), (0.7, True), (0.999, True), (1.0, False), (1.2, False)])
+def test_ctrl_c_exit_window_boundaries(monkeypatch, gap, exits) -> None:
+    from types import SimpleNamespace
+    import agent.cli.app as cli_module
+
+    def scenario(app: CliApplication) -> None:
+        clock = [0.0]
+        monkeypatch.setattr(cli_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+        exited = []
+        monkeypatch.setattr(app, "exit", lambda: exited.append(True))
+        binding = next(b for b in app.bindings.bindings if b.keys == ("c-c",))
+        class Event:
+            current_buffer = app.buffer
+        app.buffer.text = "draft"
+        binding.handler(Event())
+        assert not exited and app.buffer.text == ""
+        clock[0] = gap
+        app.buffer.text = "another draft"
+        binding.handler(Event())
+        assert bool(exited) is exits
+        if not exits:
+            assert app.buffer.text == ""
+            assert app._last_ctrl_c == gap
+            clock[0] += 0.7
+            binding.handler(Event())
+            assert exited
+
+    _with_painted_app("ctrl-c-boundary", scenario)
