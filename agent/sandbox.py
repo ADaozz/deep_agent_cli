@@ -358,7 +358,7 @@ def _preflight_diagnostic(output: str, exit_code: int | None) -> tuple[str, str]
             "Inspect: sysctl kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces\n"
             "Inspect AppArmor denials: sudo journalctl -k -g 'apparmor|DENIED|userns'\n"
             "On Ubuntu, inspect sudo aa-status and the bwrap profile under /etc/apparmor.d/. "
-            "Use the executable-specific userns profile described in README (Ubuntu/WSL2 troubleshooting); "
+            "Use the executable-specific userns profile described in docs/sandbox.md (Ubuntu / WSL2 troubleshooting); "
             "do not globally disable AppArmor. Containers may instead need namespace/seccomp policy changes "
             "by their administrator; WSL1 is unsupported."
         )

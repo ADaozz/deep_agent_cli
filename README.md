@@ -1,491 +1,174 @@
 # deep-agent-cli
 
-面向 Linux / WSL2 的本地沙箱 Coding Agent，安装后运行 `deep-agent` 即可使用。
+`deep-agent` 是一个在终端中运行的 Coding Agent，支持 Linux 和 WSL2。它把启动时所在的目录作为工作区，调用你配置的 OpenAI 兼容模型服务，并在 [Bubblewrap](https://github.com/containers/bubblewrap) 沙箱中执行命令。Agent 运行时基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建。
 
-在终端里打开任意项目，就能读改工作区文件、在沙箱里执行命令、按需搜索公开 Web、流式输出思考与回答，并按工作区记住会话。命令默认无网；在默认的 ask 模式下，写文件、删文件和运行命令前会请求审批；allow 模式自动放行全部工具并默认开放沙箱网络。自定义副作用工具需要显式配置审批规则。
+当前版本 0.1.1，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
 
-![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
-![Linux](https://img.shields.io/badge/os-Linux%20%2F%20WSL2-FCC624?logo=linux&logoColor=black)
-![Status](https://img.shields.io/badge/status-active%20development-0E8A16)
+## 功能
 
-它要解决的问题很具体：多数 Coding Agent 要么绑云端 IDE，要么绑一整套控制面。Deep Agent 把 Agent 放进当前目录，用本地 OpenAI 兼容模型跑起来，权限和会话都在你机器上。
+- **文件操作**：在工作区中列目录、读、写、编辑、搜索、删除文件。
+- **命令执行**：在 Bubblewrap 沙箱中运行 shell 命令，默认没有网络；输出实时显示。
+- **审批**：默认模式下，运行命令、写入、编辑、删除文件前都会请求你确认。
+- **会话**：按工作区保存在本地 SQLite 中，可以随时恢复。
+- **多模型**：在配置文件中定义多个模型，运行中切换模型和推理强度。支持 Chat Completions 和 Responses 两种接口。
+- **流式输出**：思考内容和回答都流式显示。
+- **运行中干预**：任务执行时可以追加指令、排队后续任务或取消。
+- **图片输入**：向声明支持图片的模型发送图片。
+- **结构化提问**：Agent 需要你做决定时，会弹出单选、多选、是/否或文本输入。
+- **上下文压缩**：接近模型上下文窗口时自动摘要旧对话，也可以手动压缩。
+- **可选扩展**：配置 Tavily API key 后可以搜索公开网页；从 `~/.deep-agent/skills/` 加载 Skills；读取工作区根目录的 `AGENTS.md` 作为项目说明。
 
-和 Claude Code / Codex / 平台托管 Runtime 的差别：
+## 运行要求
 
-- **本地优先** — 不依赖 Control Plane、Redis、Docker、ToolGateway
-- **物理隔离** — Linux Bubblewrap，默认 `--unshare-net`，不是只靠模型“答应不乱来”
-- **Runtime 与 TUI 分离** — 终端只是一层皮，同一套 `AgentRunner` 可以接到 SSE 或自己的 UI
-- **不 Fork Deep Agents** — 装配入口只有 `create_deep_agent()`
+- Linux 或 WSL2。WSL1、原生 Windows 和 macOS 无法使用沙箱。
+- Python 3.12 或更高版本（CI 测试 3.12 和 3.13）。
+- Bubblewrap，并且系统允许非特权 user namespace。Ubuntu 24.04 默认限制这一点，处理方法见 [沙箱排查](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md#排查ubuntu--wsl2)。
+- 一个 OpenAI 兼容的模型服务（本地或远程）及其 API key。
 
-## 核心理念
+## 安装
 
-`deep_agent_cli` 的目标是做一个**简单、可控、可恢复的本地 Coding Agent**，而不是一个构建 Agent 的框架。
-
-- **少造抽象**：优先复用 Deep Agents / LangGraph 已有能力。
-- **单一状态源**：项目文件归文件系统，会话上下文与计划归 checkpoint，避免重复状态。
-- **安全边界明确**：Bubblewrap 限制能力范围，Permission 控制用户授权，两者互不混淆。
-- **恢复不等于继续**：`/resume` 只恢复会话状态，不自动执行未完成任务。F2 只重开 pending overlay。
-- **默认安全，显式扩权**：workspace 外资源、网络及高风险操作必须由用户明确开放。
-- **按真实需求演进**：没有实际问题，就不提前构建复杂机制。
-
-> 保持它是一个 Agent，而不是一个构建 Agent 的框架。
-
-## Features
-
-- **工作区工具** — `ls` / `read` / `write` / `edit` / `glob` / `grep` / `delete` 访问 `/workspace`；用户 Skills 可在只读 `/skills` 下读取
-- **公开 Web 搜索** — 配置 Tavily 密钥后提供 `web_search`；只返回带 URL 的相关摘要，不授予沙箱命令联网权限
-- **沙箱执行** — 默认隔离网络；`execute(network=true)` 使用宿主网络，可访问互联网、localhost 和局域网；allow 模式下所有 `execute` 默认使用宿主网络
-- **权限模式** — `ask` 审批 `execute` 和内置文件写入、删除工具；`allow` 仅 SANDBOXED 可启用（需输入 `ALLOW`），开启后 `execute` 默认开放宿主网络
-- **持久会话** — 每个工作区一份 SQLite；首次发送消息才保存新会话，`/resume` 选择恢复已有会话
-- **流式输出** — 思考和回答按增量刷新；`execute` 的 stdout/stderr 原地更新同一个 Tool 块
-- **转录区跟随** — 停留在底部时持续显示新输出；上滚后保留阅读位置，并提供可点击的回到底部提示
-- **运行中转向** — `Enter` 注入下一条指令，`Esc` 取消并把未发送的内容还原到输入框
-- **后续任务** — `Alt+Enter` 排入 Runtime 队列，当前任务完成后由 `AgentRunner` 接续执行
-- **多模型** — YAML 按来源分组；`/model` 依次选择来源、模型、思考强度，`Ctrl+P` 循环切换。空闲时立即生效，有任务或中断时在安全边界生效，会话保留
-- **图片附件** — Ctrl+V / 路径 / `/image`；checkpoint 只存引用，请求模型时才编码
-- **自动上下文压缩** — `create_deep_agent()` 默认带 `SummarizationMiddleware`，上下文接近上限时自动摘要；被挤掉的历史落到工作区，需要时还能再读
-- **人工交互** — Agent 缺判断时弹出单选、多选、布尔、单行、多行，不绑特定 UI
-- **任务规划** — `write_todos` 使用上游 TodoListMiddleware 更新 LangGraph 的 `todos` state；TUI 从 `values` 状态流替换当前计划，从 checkpoint 恢复计划，不保留历史版本的工具块
-- **Skills** — 只读加载 `~/.deep-agent/skills/*/SKILL.md`
-
-自动压缩已由 Deep Agents 的 `SummarizationMiddleware` 处理，不需要额外叠加一层。
-
-## Quick Start
-
-### Requirements
-
-- Python 3.12+
-- Linux 或 WSL2
-- Bubblewrap（Debian / Ubuntu：`sudo apt install bubblewrap`）
-- OpenAI 兼容推理服务（默认 `http://localhost:8000/v1`）
-
-### Install
-
-Ubuntu 24.04 / WSL2 Ubuntu 24.04 可使用系统 Python 3.12。先安装 pipx、venv 和 Bubblewrap，并检查解释器版本：
+Debian / Ubuntu：
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-venv pipx bubblewrap
-python3 -c 'import sys; assert sys.version_info >= (3, 12), "需要 Python 3.12+"; print(sys.version)'
-pipx ensurepath
-# 重新打开终端，让 ~/.local/bin 进入 PATH。
-pipx install --python python3 deep-agent-cli
+sudo apt install pipx bubblewrap
+pipx ensurepath          # 之后重新打开终端
+pipx install deep-agent-cli
 deep-agent --version
 ```
 
-旧版 Ubuntu 的系统 Python 可能低于 3.12。可升级到 Ubuntu 24.04，或按 [Python 官方安装说明](https://docs.python.org/3/using/unix.html) 安装 3.12/3.13 到独立目录，再指定解释器：
+系统 Python 低于 3.12 时，安装一个新版本的 Python，然后指定解释器（不要替换发行版自带的 `/usr/bin/python3`）：
 
 ```bash
-pipx install --python /absolute/path/to/python3.13 deep-agent-cli
+pipx install --python /path/to/python3.12 deep-agent-cli
 ```
 
-不要覆盖发行版依赖的 `/usr/bin/python3`。pipx 安装说明见 [pipx 官方文档](https://pipx.pypa.io/latest/how-to/install-pipx.html)。
+也可以装进虚拟环境：`python3 -m venv ~/.venvs/deep-agent && ~/.venvs/deep-agent/bin/pip install deep-agent-cli`。
 
-也可使用虚拟环境：
+## 快速开始
+
+**1. 生成配置文件**
 
 ```bash
-python3 -m venv ~/.venvs/deep-agent
-~/.venvs/deep-agent/bin/python -m pip install deep-agent-cli
-~/.venvs/deep-agent/bin/deep-agent --help
+deep-agent
 ```
 
-### Start
+首次运行会创建 `~/.deep-agent/config.yaml` 和 `~/.deep-agent/skills/`，然后退出。
+
+**2. 配置模型**
+
+编辑 `~/.deep-agent/config.yaml`，把 `llm` 部分改成你的服务：
+
+```yaml
+llm:
+  default: local/main                  # 启动时使用的模型：来源/模型键
+  models:
+    local:                             # 来源名，自定义
+      base_url: http://localhost:8000/v1
+      api_key: ${MY_API_KEY}           # 也可以直接写密钥
+      provider: openai-compatible      # 端点支持 Responses API 时可改为 qwen-responses
+      stream_usage: true
+      models:
+        main:                          # 模型键，自定义
+          model: your-model-name       # 发给服务端的模型名
+          context_window: 128k
+          input: [text]                # 支持图片时写 [text, image]
+```
+
+`provider` 未填写时默认为 `qwen-responses`（Responses API），只提供 Chat Completions 的服务需要显式写 `openai-compatible`。其他字段、推理强度和服务商示例见 [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/configuration.md)。
+
+**3. 在项目目录中启动**
 
 ```bash
 cd ~/projects/my-app
 deep-agent
 ```
 
-首次运行会生成配置模板并退出，即使输入来自管道也可初始化。有配置后，TUI 要求 stdin 和 stdout 都是交互终端；`echo hi | deep-agent` 会明确报错并以退出码 2 退出，不创建运行会话。`--help`、`resume --help` 和 `--version` 不读取配置、不启动沙箱或模型。编辑 `~/.deep-agent/config.yaml` 的模型端点和 API key 后，再运行 `deep-agent`。当前不支持原生 Windows 或 macOS 沙箱。
+启动时会先检查沙箱是否可用；不可用时程序给出诊断信息并拒绝启动。界面中直接输入任务即可，以 `/` 开头的输入是命令。
 
-进入 TUI 后，新会话先保留在内存中，首次发送消息时才保存。只启动、切换模型或退出，不会新增空会话记录或会话锁文件；已有工作区的 SQLite 文件仍可被打开。
-
-### Ubuntu / WSL2 troubleshooting
-
-先在不改系统策略的情况下运行：
+**4. 恢复会话**
 
 ```bash
-command -v bwrap
-python3 examples/sandbox_probe.py --require-sandbox  # 在已安装依赖的源码检出中运行
-sysctl kernel.unprivileged_userns_clone kernel.apparmor_restrict_unprivileged_userns user.max_user_namespaces
-sudo aa-status
-sudo journalctl -k -g 'apparmor|DENIED|userns'
+deep-agent resume            # 选择一个已保存的会话
+deep-agent resume 01a08aae   # 按 id 或前缀恢复
 ```
 
-未安装 bwrap 时安装 `bubblewrap`；已安装却出现 `Operation not permitted` / namespace 权限错误时，应检查 AppArmor、userns 和容器 seccomp 策略。普通预检失败应检查挂载路径、权限、`/bin/sh` 及超时。WSL1、原生 Windows/macOS 和禁止 namespace 的容器不能提供本项目要求的沙箱；WSL 用户在 Windows 中运行 `wsl -l -v` 确认版本为 2，必要时用 `wsl --set-version <发行版名称> 2` 转换。
+恢复只加载会话状态，不会自动继续执行未完成的任务。
 
-Ubuntu 24.04 开始限制无特定授权的 user namespace，详见 [Ubuntu 官方发行说明](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)。优先检查发行版已有的 bwrap profile；若缺少授权，由管理员给**实际 bwrap 可执行文件**配置专属 profile。例如路径为 `/usr/bin/bwrap` 且没有现有 profile 与之匹配时，创建 `/etc/apparmor.d/deep-agent-bwrap`：
+## 常用操作
 
-```text
-abi <abi/4.0>,
-include <tunables/global>
-profile deep-agent-bwrap /usr/bin/bwrap flags=(unconfined) {
-  userns,
-}
-```
-
-```bash
-sudo apparmor_parser -r /etc/apparmor.d/deep-agent-bwrap
-```
-
-这是针对该可执行文件的 userns 例外，会影响通过该文件启动的所有 bwrap 调用；它不是额外的文件访问隔离策略，工作区隔离仍由 Bubblewrap 完成。已有发行版 profile 时，应调整其本地 override，避免添加相同路径的冲突 profile；也可使用管理员拥有的独立 bwrap 副本并只给该路径授权。不要给 Python 或整个用户目录通配授权，也不默认关闭全局 AppArmor/userns 保护。删除自定义 profile 时先运行 `sudo apparmor_parser -R /etc/apparmor.d/deep-agent-bwrap`，再删除该文件。
-
-若日志没有 AppArmor 拒绝记录，可能是容器、seccomp 或内核不支持所需 namespace，上述 profile 不会解决这些限制。程序默认拒绝启动隔离失败的沙箱；只有明确配置 `sandbox.allow_unsandboxed: true` 或交互输入 `UNSANDBOXED` 才授权宿主执行。沙箱测试被跳过表示当前环境未验证隔离能力，不代表兼容。
-
-### Configure
-
-首次运行 `deep-agent` 会生成 `~/.deep-agent/config.yaml` 和空的 `~/.deep-agent/skills/`，提示编辑配置后退出。修改 API Key 和端点后，再次运行。配置示例：
-
-```yaml
-ui:
-  timezone: Asia/Shanghai
-llm:
-  default: local/qwen-plus
-  models:
-    local:
-      api_key: sk-your-key
-      base_url: http://localhost:8000/v1
-      provider: qwen-responses
-      models:
-        qwen-plus:
-          model: qwen3.5-plus
-          input: [text, image]
-          context_window: 1m
-        qwen3.6-flash:
-          input: [text, image]
-          context_window: 1m
-```
-
-每轮回答结束后，转录区显示耗时与结束时间，例如 `Worked for 7m 56s · 10:24`。时间默认按北京时间显示；`ui.timezone` 接受 IANA 时区名称。恢复会话时不会重建此前回合的耗时行。
-
-也可以不改文件，启动时指定：
-
-```bash
-export DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
-```
-
-接阿里云百炼 **Qwen Token Plan** 时用 `compatible-mode` 端点加 `provider: openai-compatible`，并打开 `stream_usage`，否则流式响应不回报 usage，底栏的上下文占用百分比会一直显示未知。下例可单独使用；与本地网关并用时，把 `token-plan` 组并入已有的 `llm.models`，再按需要修改 `llm.default`。来源下的模型共用端点和密钥，模型级字段可以覆盖来源级字段：
-
-```yaml
-llm:
-  default: token-plan/auto
-  models:
-    token-plan:
-      api_key: sk-your-token-plan-key
-      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-      provider: openai-compatible
-      stream_usage: true
-      context_window: 1m
-      reasoning_efforts: [none, low, medium, xhigh]  # Qwen3.8 的档位
-      models:
-        auto:                   # 由 Token Plan 侧自动路由
-          input: [text]
-          reasoning_efforts: []  # 未确认 auto 的枚举，清除来源配置，只提供 default
-        qwen3.8-max:
-          input: [text, image]
-          # 省略 reasoning_efforts，继承来源的枚举。
-        glm-5.3:
-          input: [text]
-          reasoning_efforts: [low, high, max]  # 完整覆盖来源枚举，不支持关闭思考
-```
-
-`llm.default` 必须明确指定已配置的 `来源/模型`，例如 `token-plan/auto`。`local`、`token-plan` 和模型键都是自定义名称；模型键默认也是发给 API 的模型名，需要别名时在模型项内写 `model:`。配置只接受 `llm.models.<来源>.models.<模型>` 结构；旧版 `llm.model`、扁平 `llm.models.<模型>` 以及放在 `llm` 顶层的端点或密钥字段都会报错。缺少默认模型、字段无效或 YAML 语法错误时，启动会指出配置文件及错误位置，不会默默切换模型。
-
-### 模型与推理强度
-
-`/model` 依次选择来源、具体模型、思考强度；第三段确认后统一提交，`Esc` 逐段返回。模型列表直接显示实际 API 模型名，例如 `qwen3.5-plus`；命令参数仍使用 YAML 中的 `来源/模型键`。`/model token-plan` 直接打开该来源，`/model token-plan/qwen3.8-max` 直接进入强度选择。底栏按 `来源 · 模型 · 强度` 显示，例如 `token-plan · qwen3.8-max · medium`。
-
-`reasoning_efforts` 由用户按实际模型、端点和 API 协议配置：
-
-- 有非空枚举时，菜单只显示该枚举，不添加 `default`；选择其他模型时默认定位到枚举第一项。
-- 未配置或枚举为空时，菜单只有 `default`，请求不传强度参数。`default` 使用服务端默认行为，不代表关闭思考。
-- 来源级枚举由子模型继承；子模型声明的枚举完整覆盖，显式 `null` 或 `[]` 清除继承。
-- `none` 只有在实际 API 支持时才能加入枚举；它用于关闭思考，`low` 仍然会思考。不要把 `default` 写进枚举。
-
-| provider | 强度参数 |
+| 命令 | 作用 |
 |---|---|
-| `openai-compatible` | Chat Completions 的 `reasoning_effort` |
-| `qwen-responses` | Responses 的 `reasoning.effort` |
+| `/help` | 列出命令和快捷键 |
+| `/status` | 当前模型、权限模式、沙箱状态 |
+| `/model` | 选择模型和推理强度 |
+| `/permission ask\|allow` | 切换审批模式 |
+| `/resume`、`/new` | 切换到已有会话、新建会话 |
+| `/compact` | 手动压缩上下文 |
+| `/image <路径>` | 为下一条消息附加图片 |
+| `/quit` | 退出 |
 
-两种协议的可选值可能不同。例如，百炼 DeepSeek V4.1 Flash 的 Chat Completions 文档列出 `low/high/max`，关闭思考使用 `enable_thinking=false`；Responses 则明确支持 `none/low/high/max`。本项目只通过 effort 控制强度，因此当前 Chat Completions 配置不加入未经文档确认的 `none`。详见 [Chat 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[Responses 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses) 和 [GLM 参数](https://help.aliyun.com/zh/model-studio/glm)。其他厂商模板见 [config.example.yaml](agent/config.example.yaml)。
+| 按键 | 作用 |
+|---|---|
+| `Enter` | 提交；任务运行中提交为追加指令 |
+| `Ctrl+J` | 换行 |
+| `Alt+Enter` | 排队，当前任务结束后执行 |
+| `Esc` | 取消当前任务 |
+| `F2` | 重新打开待处理的审批或提问 |
+| `Ctrl+O` / `Ctrl+T` | 展开工具详情 / 思考内容 |
+| `Ctrl+R` | 查看文件改动 |
+| `Ctrl+P` | 切换到下一个模型 |
+| `Ctrl+C` | 清空输入；连按两次退出 |
 
-空闲且无中断时，模型切换立即生效，提示为 `Model: 来源 · 模型 · 强度`。任务执行中或有未完成的审批/暂停中断时才排队，提示为 `Model queued: …`；旧调用与工具流程完成后，在下一次模型推理前生效。`/permission` 在同样的安全边界生效。已有 `ask` 审批仍需按 `F2` 批准或拒绝，`/permission allow` 不会自动批准旧调用。
+完整的命令、按键和界面行为见 [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)。
 
-已持久化会话保存当前及待切换配置，恢复该会话时继续使用；尚未发送消息的新会话只在内存中保存选择。`context_window` 决定自动压缩阈值和占用百分比分母。区域按自己的开通情况替换 `cn-beijing`。密钥只写在 workspace 外的配置里，不要提交进仓库。
+## 安全模型
 
-### Resume
+| | 行为 |
+|---|---|
+| 命令能访问的文件 | 工作区（读写，在沙箱中为 `/workspace`）、`~/.deep-agent/skills/`（只读）、系统的 `/usr`、`/bin`、`/lib`（只读）。家目录的其余部分不可见 |
+| 网络 | 命令默认无网络。模型可以为单条命令申请网络，此时它能访问互联网、`localhost` 和局域网 |
+| 环境变量 | 只传入 `LANG`、`TERM` 等少量变量，其余需在配置中显式列出 |
+| `ask` 模式（默认） | 运行命令、写入、编辑、删除文件前需要确认 |
+| `allow` 模式 | 所有工具自动批准，所有命令都开放网络。仅在沙箱可用时可开启，开启时需输入 `ALLOW` |
+| 沙箱不可用 | 拒绝启动。只有在配置中设置 `sandbox.allow_unsandboxed: true`，或在启动提示中输入 `UNSANDBOXED`，命令才会以当前用户身份直接在宿主机上运行，此时只能使用 `ask` 模式 |
 
-```bash
-deep-agent resume                 # 选择已有会话
-deep-agent resume 01a08aae-...   # 按 id 恢复
-```
+细节见 [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)。
 
-源码仓库中也可运行 `python -m agent.cli.main`。没有 `bwrap` 时默认拒绝启动；交互式终端只有输入 `UNSANDBOXED` 才会降级到宿主执行。
+## 已知限制
 
-直接运行 `deep-agent` 开始新会话；要继续之前的对话，使用上述 `resume` 命令或 TUI 中的 `/resume`。恢复只加载已有状态，不自动调用模型。`/new` 同样先创建内存中的会话，首次发送消息后才持久化。反复启动、退出或执行 `/new` 不会积累新的空记录；旧版本留下的空记录不会自动清理。
+- 沙箱不限制 CPU、内存和磁盘用量。
+- 沙箱中只有系统目录下的程序。安装在 `~/.local`、`~/.nvm`、`/opt` 等位置的工具链默认不可用，需要在配置中添加只读挂载。
+- 文件工具在 `deep-agent` 进程中直接读写宿主文件，不经过沙箱，路径限定在工作区和 Skills 目录内。工作区里的所有内容 Agent 都能读写，包括 `.git/` 和 `.env`。
+- 程序会在工作区中创建 `.deep-agent/`（命令输出超限时的日志）和 `.deepagents/`（上下文压缩时保存的历史），但不会修改 `.gitignore`。
+- 不能在家目录或其上层目录启动，因为配置目录 `~/.deep-agent` 必须位于工作区之外。
+- 只能在交互式终端中使用，没有非交互或批处理模式。
+- 模型请求和 Tavily 请求不读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。
+- 从剪贴板粘贴图片只支持 WSL；其他环境需要通过文件路径添加图片。
+- 推理强度的可选值需要按服务商文档手动配置，程序不会自动探测。
+- 不支持 MCP，也没有子 Agent。
+- 同一个会话同一时间只能被一个进程打开。
 
-## Usage
+## 文档
 
-进入交互会话后，普通文本就是任务。以 `/` 开头是命令。
+- [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/configuration.md)：所有配置项、模型与推理强度、Web 搜索、按键、环境变量
+- [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)：隔离范围、网络、日志、Ubuntu / WSL2 排查
+- [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)：命令、快捷键、图片、会话、显示规则
+- [作为 Python 库使用](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/library.md)：`AgentRunner`、事件、自定义工具
+- [架构](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/architecture.md)：分层、中间件、会话存储、上下文压缩
+- [开发](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/development.md)：测试、冒烟脚本、CI 与发布
 
-```text
-/help                    命令与快捷键
-/status                  工作区、沙箱、权限、session
-/session                 当前线程与 SQLite 路径；已保存会话显示创建/更新时间
-/new                     新建会话，首次发送消息后保存
-/resume                  列出有内容的会话并选择恢复
-/resume a1b2             按 id 前缀切换 session
-/model                   依次选择来源、模型、思考强度
-/model token-plan        打开 Token Plan 模型列表
-/model token-plan/auto   选择思考强度，确认后提交切换
-/compact                 达到手动压缩门槛后摘要旧对话；未达到时显示当前占用百分比
-/permission ask|allow   # allow 仅 SANDBOXED 且开放沙箱网络；UNSANDBOXED / CUSTOM 只有 ask
-/image clipboard | <path> | clear
-/pause                   在下一个模型安全点暂停
-/quit
-```
-
-常用按键：
-
-| 操作 | 按键 |
-|------|------|
-| 提交；运行中注入 steering | `Enter` |
-| 拖选并复制转录内容 | 鼠标左键拖动，松开后自动复制，可用 `Ctrl+V` 粘贴 |
-| 命令候选 | 输入 `/` 后用方向键选择，`Tab` / `Enter` 填入，再按 `Enter` 执行；`/model ` 和 `/permission ` 也会补全参数 |
-| 换行 | `Ctrl+J` |
-| 排到本轮结束后再问 | `Alt+Enter` |
-| 上滚时回到底部；再次按下执行当前界面的取消操作 | `Esc`；也可点击 `↓ Back to bottom · esc` |
-| 清空输入；0.5 秒内再次按下退出 | `Ctrl+C` |
-| 切换模型 | `Ctrl+P` / `Alt+P` |
-| 粘贴图片 | `Ctrl+V` / `Alt+V` |
-| 展开或收起工具详情 / Thinking | `Ctrl+O` / `Ctrl+T` |
-| 查看 edit/write/delete 的完整改动 | `Ctrl+R` |
-| 重开 pending 交互 | `F2` |
-| 取回未应用的 steering | `Alt+Up` |
-| 回看历史输出 | 滚轮 / `PgUp` / `PgDn`，`Ctrl+Home` 到顶，`Ctrl+End` 回到底部跟随 |
-
-输入 `/` 时显示命令候选；输入 `/model ` 时补全已配置的来源与模型 ID，输入 `/permission ` 时补全当前环境可用的 `ask`、`allow`。按 `Esc` 可直接清空尚未执行的命令。执行 `/model` 等交互式命令时，蓝色分隔线将选择界面与对话区隔开；如果对话已上滚，居中的 `↓ Back to bottom · esc` 提示显示在分隔线正上方。转录区隐藏右侧滚动条，可用滚轮、翻页键或 `Ctrl+Home` / `Ctrl+End` 滚动。
-
-转录区可直接按住鼠标左键拖选，松开后自动复制选中文本到系统剪贴板；拖到转录区顶部或底部会持续滚动，以便选中屏幕外的历史内容。无需按 `Ctrl+Shift`。
-
-粘贴 500 字符及以上的文本时，输入框用 `[Pasted Content XXXX chars]` 块代替长正文，周围仍可继续编辑文字；提交时会把块还原成完整粘贴内容发送给 Agent。短文本保持原样。
-
-运行中按 `Enter` 提交的 steering 会在下一次工具调用开始前交给 Agent：如果模型返回时已有新输入排队，先取消这批尚未进入审批或执行的调用，再带着新输入重新推理。已经进入审批的调用仍需按原权限处理；已经开始的工具会先完成。`Alt+Enter` 提交的 follow-up 则在当前任务结束后开始新一轮。
-
-探索类工具调用合并显示为 `Explored N items`，只预览最后五项；省略项数量显示在预览上方，底部灰色的 `Ctrl+O to expand` 提示可展开完整工具详情。再次按 `Ctrl+O` 可收起。
-
-底栏的 Git 状态在后台刷新，首次探测期间显示 `⎇ checking git`。Git 未安装、探测报错或超时分别显示 `git unavailable`、`git error`、`git timeout`；只有确认当前目录不属于仓库时才显示 `⎇ no git`。探测允许最长 10 秒，适用于 Git 状态扫描较慢的工作区；超时后保留已识别的分支名。
-
-`web_search` 单独显示查询和结果数，按 `Ctrl+O` 展开结果摘要。`write_file` 根据执行前的文件状态显示 `Create /path` 或 `Wrote /path`；连续创建多个文件合并为 `Create N files`，按 `Ctrl+O` 展开完整文件列表。覆盖写入预览显示写入行数和前六行内容，省略的行数在下方提示；按 `Ctrl+R` 查看完整内容，不在写入预览或审阅中显示 `/dev/null`、`+++`、`@@` 等 diff 头。恢复已中断会话时，没有保存工具结果的历史调用显示灰色 `interrupted (completion unconfirmed)`，不会继续转圈；仍待审批的调用显示等待状态。
-
-工具失败时显示灰色圆点、`Failed (exit N)`、具体命令或工具目标，以及简短错误；`Ctrl+O` 展开完整输出。探索组在标题中统计失败数，并额外列出最近的失败项。`execute` 显示命令的真实退出码；没有进程退出码的工具错误以约定的 `exit 1` 显示。搜索超时但返回部分结果时只提示结果不完整，不计为失败。
-
-底栏固定两行：首行左侧按 `工作区路径 · 当前模型 · resume id` 排列，分别使用终端标准绿、黄、青色，右侧显示 Git 分支与改动文件数（非 Git 目录显示 `⎇ no git`）；第二行左侧显示运行状态、执行模式、权限，右侧显示上下文占用。Git 状态每 5 秒后台刷新一次。窄终端优先保留右侧 Git 与上下文信息，左侧路径与模型先被截断。占用百分比以 `context_window` 为分母，使用模型最近一次返回的 token usage；没有用量报告时只显示窗口大小。
-
-作为库使用：
-
-```python
-from agent import AgentRunner, create_agent
-
-prepared = create_agent()
-runner = AgentRunner(prepared=prepared, on_delta=print, on_event=print)
-result = runner.invoke("列出 /workspace 下的文件")
-# result.status: completed | waiting_confirmation | waiting_human | paused | failed
-# runner.continue_run() / approve_tool(id) / reject_tool(id) / submit_human_input(values)
-```
-
-`on_event` 不含 ANSI 和终端宽度，HTTP / SSE 可以复用同一条 Runtime。
-`execute` 的 `tool_completed` 事件在 `result` 中携带 `exit_code`、`truncated`、`host_log_path`、`agent_log_path` 和 `termination_reason`；`content` 仍是发给模型的可读结果。
-
-默认工具包括文件、沙箱命令、人工输入和 `write_todos`；配置 Tavily 密钥后另行注册 `web_search`。`agent.tools.examples` 中的文档查询示例需要作为 `extra_tools` 显式加入；自定义副作用工具需要通过 `interrupt_on` 显式追加审批规则，内置审批规则不能被覆盖。工具异常不会自动重试，以免超时后重复执行副作用；模型传输错误由 OpenAI SDK 最多重试两次。
-人工输入只使用 `request_human_input`：可传 `fields` 描述文本、布尔或选择题；每道选择题自动提供 `Other:` 自定义输入，单选回传自定义文本，多选将其加入结果列表；恢复时用 `runner.submit_human_input({"text": "..."})`。审批用 `approve_tool` / `reject_tool`，暂停用 `continue_run`。旧工具 `handoff_to_human` 已移除，停在该工具调用上的旧会话恢复时会给出迁移错误。
-
-传入 `create_deep_agent()` 的 `middleware=[...]` 是附加到默认栈，不会整表替换。Deep Agents 0.7.17 会自动加入 `create_summarization_middleware(model, backend)`。本项目只禁用了默认 general-purpose subagent，没有 `excluded_middleware`，因此自动压缩是开着的。
-
-配置正数 `context_window` 时会将其作为模型的 `max_input_tokens` 传给 Deep Agents：约 85% 触发压缩，保留最近 10% 的上下文。未配置且模型自身也没有 `max_input_tokens` 时使用保守默认：约 170,000 tokens 触发、保留最近 6 条消息、旧工具参数在约 20 条消息时预裁剪。被挤掉的对话会写到 backend 上的会话历史文件，而不是直接丢掉。
-
-`/compact` 调用 Deep Agents 的 `compact_conversation` 工具手动压缩，要求最近一次模型 usage 达到自动阈值的一半；配置了上下文窗口时约为 42.5%。未达到门槛时，CLI 显示最近一次模型报告的占用百分比；模型未报告 usage 时显示未知。
-
-## Architecture
-
-```text
-你的终端
-   │
-   ▼
-cli/                 输入、渲染、按键、人工确认
-   │ RunEvent
-   ▼
-AgentRunner          流式、中断、恢复、附件
-   │ SessionRuntime  thread 独占租约与切换
-   ▼
-create_deep_agent()  LangGraph 图（不 Fork 上游）
-   │
-   ├── Model         OpenAI 兼容 / Qwen Responses
-   ├── Tools         文件、execute、人工输入、write_todos
-   ├── Middleware    暂停、转向、取消
-   │                 + Deep Agents 默认栈（含自动摘要）
-   └── Storage       SQLite checkpoint + session catalog
-          │
-          ▼
-     Bubblewrap /workspace
-```
-
-四层各做一件事：
-
-| 层 | 职责 |
-|----|------|
-| `agent/cli/` | 终端交互。换 UI 不改 Runtime |
-| `agent/runner.py` | 一次 run 的生命周期：invoke / continue_run / approve_tool / reject_tool / submit_human_input / steer / cancel |
-| `agent/factory.py` | `AgentSpec` 静态装配和 `create_deep_agent()` 构图 |
-| `agent/sandbox.py` | Bubblewrap 策略与降级 |
-
-更细的中间件顺序、挂载策略和 Qwen 事件适配在源码注释里，不在 README 展开。
-
-### Project Structure
-
-```text
-agent/
-├── cli/           # TUI（含 session_controller 会话工作流）
-├── tools/         # 文件、execute、人工输入
-├── middleware/    # 暂停、转向、取消、联网
-├── factory.py     # 装配入口
-├── runner.py      # 运行时
-├── sandbox.py     # Bubblewrap
-├── session.py     # SQLite session
-├── session_lock.py     # thread 独占锁
-├── session_runtime.py  # 租约与会话生命周期
-└── llm.py         # 模型适配
-agent/cli/main.py # pip 安装后的 deep-agent 入口
-examples/          # TUI 与流式冒烟
-skills/            # SKILL.md 示例
-tests/
-agent/config.example.yaml  # 首次启动时使用的配置模板
-```
-
-## Configuration
-
-CLI 使用 `DEEP_AGENT_CONFIG` 指定的现有配置，否则读取 `~/.deep-agent/config.yaml`；默认配置缺失时会生成模板并退出。项目内的配置文件不会自动加载。配置文件必须包含分组模型及有效的 `llm.default`；解析失败时 CLI 输出 `Configuration error` 并以状态码 2 退出。作为库使用时可显式传入 `Settings`。
-
-主配置和按键配置必须位于 workspace 外；如果将 home 目录作为 workspace，启动时会拒绝位于 `~/.deep-agent` 的配置。已有项目内的 `config.yaml` 可一次性迁到 `~/.deep-agent/config.yaml`，确认内容后删除旧文件。配置中的相对路径（除 `sandbox.workspace: .`）仍相对于配置文件所在目录解析，迁移时需检查这些路径。
-
-旧配置中的 `sandbox.protected_workspace_paths` 已移除，启动时会提示删除。旧版扁平模型配置需要按上面的 YAML 示例手动改成来源分组；程序不会自动迁移。将原工作区 `skills/` 中需要保留的目录手动复制到 `~/.deep-agent/skills/`；项目内的 `skills/` 不再自动加载。Agent 通过只读 `/skills` 路径读取用户 Skills；其他外部只读资源可使用 `extra_read_only_mounts` 显式开放。
-
-| 配置项 | 默认 | 说明 |
-|--------|------|------|
-| `agent.instructions` | `null` | 追加到默认身份之后的长期说明；支持 YAML 多行文本 |
-| `ui.timezone` | `Asia/Shanghai` | 回合结束时间使用的 IANA 时区；无效名称会报配置错误 |
-| `llm.default` | 必填 | 启动模型，格式为 `来源/模型` |
-| `llm.models.<source>.models` | 必填 | 来源下的模型列表；来源名和模型名由用户自定义 |
-| `llm.models.<source>.models.<name>.model` | `<name>` | 实际 API 模型名；仅在模型键是别名时需要填写 |
-| `llm.models.<source>.api_key` | `sk-local` | 来源共用密钥；模型级可以覆盖 |
-| `web_search.tavily_api_key` | `null` | 私有配置中的 Tavily 密钥；`TAVILY_API_KEY` 环境变量优先 |
-| `llm.models.<source>.provider` | `qwen-responses` | 来源共用 `qwen-responses` 或 `openai-compatible`；模型级可以覆盖 |
-| `llm.models.<source>.reasoning_efforts` | `[]` | 推理强度枚举；子模型省略时继承，声明时完整覆盖，`null`/`[]` 清除；非空时 CLI 仅显示枚举，空时仅显示 `default` |
-| `llm.models.<source>.stream_usage` | `false` | 流式 Chat Completions 请求附带 `stream_options.include_usage`；模型级可以覆盖 |
-| `llm.models.<source>.base_url` | `http://localhost:8000/v1` | 来源共用推理端点；模型级可以覆盖 |
-| `llm.models.<source>.models.<name>.input` | `[text]` | 图片模型写成 `[text, image]` |
-| `llm.models.<source>.context_window` | `0` | 模型输入窗口，可在模型级覆盖；可写 `1000000`、`128k` 或 `1m`；`0` 隐藏占用百分比 |
-| `sandbox.workspace` | `.` | 映射到 `/workspace`；`.` = 启动时的 cwd |
-| `sandbox.allow_unsandboxed` | `false` | 无 bwrap 时是否允许宿主机执行 |
-| `sandbox.timeout_seconds` | `null`（无限制） | 可选的单次命令超时上限，单位秒；工具可请求更短时间 |
-| `sandbox.max_output_bytes` | `100000` | TUI 实时显示开头、最终结果保留尾部的字节上限；超出时保存完整日志 |
-| `paths.state_path` | `null` | Session DB；默认 `~/.deep-agent/sessions/<hash>.sqlite3` |
-| `paths.config_dir` | `null` | 按键配置；默认 `~/.deep-agent` |
-
-按键覆盖：`~/.deep-agent/keybindings.json`。
-
-模型来源或模型级的 `api_key` 以及 `web_search.tavily_api_key` 都支持完整的 `${变量名}` 引用。引用的环境变量缺失时启动会报告配置错误；其他配置字段不做环境变量替换。真实密钥应放在本机私有配置或环境变量中，不要提交到仓库。
-
-设置 Tavily 密钥后，Agent 会获得 `web_search`，用于查找公开网页上的最新资料、新闻及外部事实；未设置时不会注册该工具。工具通过宿主机向固定的 Tavily Search 接口发起请求，20 秒超时，返回排名摘要和 URL，不抓取完整网页，也不会给 `execute` 开放网络。可在 `~/.deep-agent/config.yaml` 中加入：
-
-```yaml
-web_search:
-  tavily_api_key: ${TAVILY_API_KEY}
-```
-
-也可以只设置 `TAVILY_API_KEY`，无需添加 YAML 字段。若两者均有值，直接设置的 `TAVILY_API_KEY` 优先；使用上面的 `${TAVILY_API_KEY}` 写法时必须设置该环境变量。`web_search` 的参数为 `query`、`max_results`（1–20）、`topic`（`general` 或 `news`）、`time_range`（`day`、`week`、`month`、`year`）和 `include_domains`。结果仅是摘要；未搜到不代表资料不存在。
-
-`execute` 输出超限时，完整日志保存到当前工作区的 `.deep-agent/logs/exec/`。最终工具结果同时给出宿主机真实路径和 Agent 可用文件工具读取的 `/workspace/.deep-agent/logs/exec/...` 路径。建议在自己的项目 `.gitignore` 中加入 `.deep-agent/`；程序不会修改项目的忽略规则。
-父 shell 退出后，如果后台进程仍占有输出管道，`execute` 会继续收集数据，直到管道关闭或连续 100 毫秒没有新输出；后台进程在此后写出的内容不会进入本次工具结果。
-
-`qwen-responses` 使用 `QwenChatOpenAI` 和 Responses API；`openai-compatible` 固定走 Chat Completions，使用 `ReasoningChatOpenAI` 保留兼容端点流式和非流式响应中的 `reasoning_content`，供思考区展示及会话恢复，并在后续请求中透传已有思考内容。两者都可通过 `AttachmentStore` 引用发送图片，前提是模型 profile 声明 `input: [text, image]` 且端点支持图片。
-
-每次构图都会按默认身份、`agent.instructions`、工作区根目录 `AGENTS.md` 的顺序组成 system prompt；`AGENTS.md` 映射到 Agent 内的 `/workspace/AGENTS.md`。切换模型或权限会重新读取它。作为库调用时，`create_agent(instructions="...")` 可覆盖配置中的长期说明。
-
-CLI 启动及 `/new` 创建的新会话先保留在内存中，首次提交消息后才写入会话目录并取得持久化锁；未发送消息就退出或恢复其他会话，不留下空会话记录。历史空记录不会自动删除。LangGraph checkpoint 保存消息、中断和图状态；同一 SQLite 的 `session_catalog` 另存 thread 的 model、permission 和上一轮运行原因，展示状态按运行原因计算。旧 catalog 在打开时迁移。旧会话若保存了已不存在的扁平模型 ID，恢复时会提示该模型不可用，并改用 YAML 指定的默认模型；旧 ID 不会被当作新模型别名。模型的 `finish_reason` 保留在 checkpoint 消息中。`/resume` 只恢复状态，不调用模型。若上一轮是 `pending` 且已有 checkpoint，或上一轮是 `aborted`、`error`，下一次用户输入保持原文写入 checkpoint，恢复说明仅临时加入首次模型请求。空白新 thread 的 `pending` 不触发恢复说明。明确的审批或暂停中断仍按 checkpoint 恢复，不自动重跑工具。切换或新建会话时，TUI 会把未执行的 steering / follow-up 退回输入框；库调用者需先取回队列，才能切换会话。
-
-同一 thread 同时只能被一个进程写入：`SessionStore` 在数据库旁的 `<db>.locks/` 目录用 `flock` 实现 thread 独占，锁文件不删除，进程退出自动释放，Agent 子进程不继承锁描述符。目标会话正被其他窗口持有时，`/resume` 和 `deep-agent resume <id>` 启动恢复都会先释放当前会话并进入等待提示，`Esc` 取消等待回到会话选择器；库调用者同步调用 `switch_session` 则直接抛出 `SessionLockBusyError`。会话切换的提交点在完成全部图与 catalog 读取之后，中途失败会回滚到原会话；`steer` / `follow_up` 在脱离会话或 Runner 关闭后会被拒绝。没有持久化存储的 Runner 只在进程内通过 checkpointer 对象互斥。
-
-沙箱默认挂载当前工作区，并将 `~/.deep-agent/skills/` 只读挂载为 `/skills`；宿主家目录的其他内容不可见。`network=true` 取消网络命名空间隔离，可访问宿主网络，包括 localhost、局域网和内网。Bubblewrap 不管 CPU / 内存配额。`UNSANDBOXED` 和显式传入的 `CUSTOM` backend 只有 ask：所有 `execute` 都要审批，不能切到 allow。allow 模式下每个 `execute` 都默认使用宿主网络，单次调用无法关闭。
-
-## Development
+## 开发
 
 ```bash
-python3 -c 'import sys; assert sys.version_info >= (3, 12), "需要 Python 3.12+"'
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/ADaozz/deep_agent_cli.git
+cd deep_agent_cli
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
-python -m build
 ```
 
-`pyproject.toml` 是依赖声明的唯一维护入口。`requirements.lock` 是目前 Python 3.12 开发环境的冻结快照；升级依赖后在干净环境安装 `.[dev]`，再更新快照并运行测试。
+自动测试不调用真实模型。欢迎提交 Issue 和 Pull Request；修改行为时请附带测试。更多说明见 [开发文档](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/development.md)。
 
-使用 pipx 安装过本项目时，修改源码后在项目根目录运行 `pipx install --force .`，再重启 CLI；已有进程不会自动加载新工具。
+## 许可证
 
-自动回归不调用真实模型。`python -m pytest` 包含本地模拟 OpenAI Chat Completions HTTP 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。可单独运行 `python -m pytest -m integration`；它需要允许监听 `127.0.0.1`。实际隔离能力测试需要可用 bwrap，`REQUIRE_BWRAP_TEST=1 python -m pytest` 将缺失能力视为失败。CI 分别验证 Python 3.12 / 3.13，并保存未放宽 AppArmor 的 Ubuntu 环境诊断报告，不把 skipped 测试当成兼容证明。
-
-真实模型冒烟由用户主动运行，会使用配置中的 API Key 并消耗额度，不进入默认 pytest 或自动 CI：
-
-```bash
-python examples/e2e_live_smoke.py --help
-python examples/e2e_live_smoke.py --model token-plan/qwen3.8-flash
-# 默认创建并清理临时工作区/会话；指定 --workspace 时必须是空目录。
-# 需要外网工具测试时额外传 --network。
-python examples/sandbox_probe.py --require-sandbox
-```
-
-`stream_smoke.py` 是 **Qwen Responses 思考流** 专用验证，不是通用模型连通性测试。配置的活动模型必须使用 `provider: qwen-responses`，端点须支持 Responses，并使用会输出思考内容的 Qwen 模型；脚本的 `--effort` 必须来自 YAML 的有效枚举且不能是 `none`。默认不指定强度时，要求服务端默认开启思考。Chat Completions、关闭思考的模型或只有回答流的模型不满足其验收条件：
-
-```bash
-python examples/stream_smoke.py --effort low
-```
-
-库函数 `create_agent()` 不会自动读取 `~/.deep-agent/config.yaml`，未传 `settings` 时使用 `Settings()` 的代码默认值。CLI 则先初始化配置，再通过 `Settings.load()` 读取文件。库调用如需与 CLI 一致，应显式加载：
-
-```python
-from agent import create_agent
-from agent.config import Settings
-
-prepared = create_agent(settings=Settings.load())
-```
-
-## Roadmap
-
-- [x] 交互式 TUI
-- [x] 按工作区持久化 session
-- [x] 工作区文件工具
-- [x] Bubblewrap 沙箱（默认无网）
-- [x] 权限 ask / 仅沙箱 allow
-- [x] 流式思考与回答
-- [x] 多模型切换
-- [x] 图片附件
-- [x] 运行中 steering / 取消
-- [x] 语义化人工输入
-- [x] 自动上下文压缩（Deep Agents 默认 `SummarizationMiddleware`）
-- [x] 可安装的 Python 包
-- [ ] MCP
-
-## Project Status
-
-项目在活跃开发中。
-
-配置格式、session schema、工具集合和公开 API 在第一个稳定版之前都可能变。请先当本地工具用，不要当生产 SDK 依赖。
-
-## Contributing
-
-Issue 和 Pull Request 都欢迎。改行为请带测试；不要在 PR 里提交 `config.yaml`、`.venv` 或 session 数据库。
-
-## License
-
-MIT，详见 [LICENSE](LICENSE)。
+[MIT](https://github.com/ADaozz/deep_agent_cli/blob/main/LICENSE)
