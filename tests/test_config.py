@@ -356,7 +356,7 @@ def test_grouped_models_inherit_source_settings_and_reject_old_ids() -> None:
             }},
             "token-plan": {
                 "api_key": "secret", "base_url": "https://plan/v1",
-                "provider": "openai-compatible", "stream_usage": True,
+                "api": "chat_completions",
                 "context_window": "1m", "models": {
                     "auto": {"input": ["text"]},
                     "qwen3.8-max": {"input": ["text", "image"], "context_window": "128k"},
@@ -366,9 +366,9 @@ def test_grouped_models_inherit_source_settings_and_reject_old_ids() -> None:
     }})
     assert settings.active_profile.id == "token-plan/auto"
     assert settings.active_profile.model == "auto"
-    assert settings.active_profile.provider == "openai-compatible"
+    assert settings.active_profile.api == "chat_completions"
     assert settings.active_profile.context_window == 1_000_000
-    assert settings.active_profile.stream_usage is True
+    assert not hasattr(settings.active_profile, "stream_usage")
     assert settings.get_profile("token-plan/qwen3.8-max").context_window == 128_000
     for old_id in ("token-plan-auto", "qwen-plus", "qwen3.8-max", "token-plan-qwen3.8-max"):
         with pytest.raises(KeyError, match="Unknown"):
@@ -477,17 +477,17 @@ def test_context_window_rejects_nonsense(tmp_path: Path) -> None:
         Settings.load(path)
 
 
-def test_provider_selects_compatible_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
+def test_api_selects_compatible_chatopenai_and_rejects_unknown(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        "llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: openai-compatible\n      models:\n        compatible:\n          model: local\n",
+        "llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      api: chat_completions\n      models:\n        compatible:\n          model: local\n",
         encoding="utf-8",
     )
     model = build_chat_model(Settings.load(path).active_profile)
     assert isinstance(model, ChatOpenAI)
     assert model.use_responses_api is False
-    path.write_text("llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      provider: unknown\n      models:\n        compatible: {}\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="provider"):
+    path.write_text("llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      api: unknown\n      models:\n        compatible: {}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="api"):
         Settings.load(path)
     assert isinstance(build_chat_model(Settings().active_profile), QwenChatOpenAI)
 
@@ -501,17 +501,17 @@ def test_model_source_is_loaded_for_display(tmp_path: Path) -> None:
     assert Settings.load(path).active_profile.source == "token-plan"
 
 
-def test_stream_usage_can_be_enabled_per_provider(tmp_path: Path) -> None:
+def test_chat_completions_always_requests_stream_usage(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         "llm:\n  default: plan/auto\n  models:\n"
-        "    plan:\n      provider: openai-compatible\n      stream_usage: true\n      models:\n        auto: {}\n"
-        "    local:\n      provider: openai-compatible\n      models:\n        qwen3.6-flash:\n          stream_usage: false\n",
+        "    plan:\n      api: chat_completions\n      models:\n        auto: {}\n"
+        "    local:\n      api: chat_completions\n      models:\n        qwen3.6-flash: {}\n",
         encoding="utf-8",
     )
     settings = Settings.load(path)
     assert build_chat_model(settings.get_profile("plan/auto")).stream_usage is True
-    assert build_chat_model(settings.get_profile("local/qwen3.6-flash")).stream_usage is False
+    assert build_chat_model(settings.get_profile("local/qwen3.6-flash")).stream_usage is True
 
 
 @pytest.mark.parametrize("value,match", [
@@ -581,3 +581,58 @@ def test_invalid_group_efforts_are_checked_even_when_model_overrides() -> None:
         Settings.from_mapping({"llm": {"default": "local/test", "models": {
             "local": {"reasoning_efforts": "low", "models": {"test": {"reasoning_efforts": []}}},
         }}})
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+def test_api_inheritance_and_model_override(api):
+    settings = Settings.from_mapping({"llm": {"default": "source/a", "models": {"source": {
+        "api": api, "models": {"a": {}, "b": {"api": "chat_completions"}},
+    }}}})
+    assert settings.get_profile("source/a").api == api
+    assert settings.get_profile("source/b").api == "chat_completions"
+    assert not hasattr(settings.active_profile, "provider")
+    assert not hasattr(settings.active_profile, "stream_usage")
+
+
+@pytest.mark.parametrize("value", ["auto", None, {}])
+@pytest.mark.parametrize("level", ["source", "model"])
+def test_invalid_api_is_rejected(value, level):
+    source = {"models": {"a": {}}}
+    target = source if level == "source" else source["models"]["a"]
+    target["api"] = value
+    with pytest.raises(ValueError, match="api"):
+        Settings.from_mapping({"llm": {"default": "source/a", "models": {"source": source}}})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("provider", "qwen-responses"), ("provider", "openai-compatible"),
+    ("stream_usage", True), ("stream_usage", False),
+])
+@pytest.mark.parametrize("level", ["llm", "source", "model"])
+@pytest.mark.parametrize("explicit_api", [False, True])
+def test_removed_protocol_fields_are_rejected(field, value, level, explicit_api):
+    source = {"models": {"a": {}}}
+    llm = {"default": "source/a", "models": {"source": source}}
+    target = llm if level == "llm" else source if level == "source" else source["models"]["a"]
+    target[field] = value
+    if explicit_api:
+        target["api"] = "responses"
+    with pytest.raises(ValueError, match=rf"{field} is unsupported"):
+        Settings.from_mapping({"llm": llm})
+
+
+def test_api_loading_does_not_rewrite_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    original = 'llm:\n  default: s/m\n  models:\n    s:\n      api: responses\n      models:\n        m: {}\n'
+    path.write_text(original)
+    assert Settings.load(path).active_profile.api == "responses"
+    assert path.read_text() == original
+
+
+def test_removed_fields_error_does_not_rewrite_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    original = 'llm:\n  default: s/m\n  models:\n    s:\n      provider: qwen-responses\n      models:\n        m: {}\n'
+    path.write_text(original)
+    with pytest.raises(ValueError, match="provider is unsupported"):
+        Settings.load(path)
+    assert path.read_text() == original

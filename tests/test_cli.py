@@ -386,7 +386,7 @@ def test_plan_ignores_tool_calls_and_update_envelopes() -> None:
         "tools": {"messages": [ToolMessage(content="ok", tool_call_id="todo-1", name="write_todos")]},
     }, events.append)
     runner._emit_update_events({"tools": {"todos": plan}}, events.append)
-    assert not events
+    assert not [event for event in events if event.type != "usage"]
 
 
 def test_cli_state_updates_streaming_block_in_place() -> None:
@@ -3338,7 +3338,7 @@ def test_footer_places_context_on_execution_settings_line_when_git_unavailable()
         assert len(lines) == FOOTER_LINES
         assert "token-plan · auto · default" in lines[0]
         assert lines[0].rstrip().endswith("⎇ no git")
-        assert lines[1].rstrip().endswith("1.0m Context")
+        assert lines[1].rstrip().endswith("1.0m Context · Unknown")
 
 
 def test_context_usage_formatting() -> None:
@@ -3346,9 +3346,9 @@ def test_context_usage_formatting() -> None:
     assert format_context_window(200_000) == "200k"
     assert format_context_window(8_000) == "8k"
     assert format_context_usage({}, 0) == ""
-    assert format_context_usage({}, 128_000) == "128k Context"
-    assert format_context_usage({"total_tokens": 5_000}, 128_000) == "128k Context · 3.9% used"
-    assert format_context_usage({"total_tokens": 9_000_000}, 1_000_000) == "1.0m Context · 100.0% used"
+    assert format_context_usage({}, 128_000) == "128k Context · Unknown"
+    assert format_context_usage({"input_tokens": 5_000}, 128_000) == "128k Context · 3.9% used"
+    assert format_context_usage({"input_tokens": 9_000_000}, 1_000_000) == "1.0m Context · 900.0% used"
 
 
 def test_compact_command_reports_threshold_and_current_usage() -> None:
@@ -4131,3 +4131,21 @@ def test_ctrl_c_exit_window_boundaries(monkeypatch, gap, exits) -> None:
             assert exited
 
     _with_painted_app("ctrl-c-boundary", scenario)
+
+
+def test_context_uses_only_api_input_and_preserves_zero():
+    assert format_context_usage({"input_tokens": 0, "total_tokens": 90000}, 128000) == "128k Context · 0.0% used"
+    assert format_context_usage({"total_tokens": 90000}, 128000) == "128k Context · Unknown"
+    assert format_context_usage({"input_tokens": 1280, "total_tokens": 90000}, 128000) == "128k Context · 1.0% used"
+
+
+@pytest.mark.parametrize("event_type", ["run_started", "assistant_started", "compaction_finished", "run_cancelled", "run_failed"])
+def test_context_lifecycle_clears_previous_usage(event_type):
+    from agent.cli.state import CliState
+    state = CliState(usage={"input_tokens": 500})
+    state.apply(RunEvent(type=event_type))
+    assert state.usage == {}
+    state.apply(RunEvent(type="usage", result={"input_tokens": 0}))
+    assert state.usage == {"input_tokens": 0}
+    state.apply(RunEvent(type="usage", result={}))
+    assert state.usage == {}

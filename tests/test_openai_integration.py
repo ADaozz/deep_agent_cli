@@ -67,7 +67,7 @@ def compatible_endpoint(responses):
 
 def settings_for(endpoint):
     return Settings(llm_profiles=(ModelProfile("local/mock", "mock-coder", api_key="local-test-key",
-                    base_url=endpoint, provider="openai-compatible", reasoning_efforts=("low",)),), llm_default="local/mock")
+                    base_url=endpoint, api="chat_completions", reasoning_efforts=("low",)),), llm_default="local/mock")
 
 
 def test_local_model_stream_and_effort_mapping():

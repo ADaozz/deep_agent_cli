@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live Qwen Responses reasoning/text stream smoke through AgentRunner.on_delta."""
+"""Live Responses reasoning/text stream smoke through AgentRunner.on_delta."""
 from __future__ import annotations
 
 import argparse
@@ -33,8 +33,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{label} +{extra_len} chars] {text[-80:]!r}", flush=True)
 
     settings = Settings.load()
-    if settings.active_profile.provider != "qwen-responses":
-        parser.error("stream_smoke requires a Qwen Responses profile (provider: qwen-responses)")
+    if settings.active_profile.api != "responses":
+        parser.error("stream_smoke requires a Responses profile (api: responses)")
     if args.effort == "none":
         parser.error("stream_smoke requires thinking; effort none disables it")
     if args.effort is not None and args.effort not in settings.active_profile.reasoning_efforts:
@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no assistant.delta received", file=sys.stderr)
         return 1
     if "reasoning" not in kinds:
-        print("no Qwen Responses reasoning delta received", file=sys.stderr)
+        print("no Responses reasoning delta received", file=sys.stderr)
         return 1
     print(f"delta_events={len(events)} kinds={sorted(kinds)}")
     return 0

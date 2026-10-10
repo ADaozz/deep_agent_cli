@@ -1,150 +1,122 @@
-# DeepAgent template configuration.
-# First CLI launch copies this template to ~/.deep-agent/config.yaml and exits.
+# DeepAgent 示例配置。
+# 首次启动命令行时，将此模板复制到 ~/.deep-agent/config.yaml 后退出。
 #
-# Override path with DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml
+# 通过 DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml 指定配置文件路径。
 
 agent:
-  # Long-term user instructions appended after the built-in identity.
+  # 长期用户指令，追加在内置身份说明之后。
   # instructions: |
   #   优先使用中文回答。
   instructions: null
 
 ui:
-  # IANA time zone for the time shown after each completed answer.
+  # 每次回答结束后显示时间所使用的 IANA 时区。
   timezone: Asia/Shanghai
-  # Number of logical thinking lines kept when collapsed; positive integer.
+  # 思考内容折叠时保留的逻辑行数，必须为正整数。
   thinking_tail_lines: 5
-  # Collapsed command output and generic tool output (logical lines).
+  # 命令输出及通用工具输出折叠时保留的逻辑行数。
   execute_tail_lines: 4
   tool_tail_lines: 8
   expanded_tool_lines: 40
-  # Compact lists (items rather than wrapped screen rows).
+  # 简略列表显示的条目数，按条目计数，不按屏幕换行计数。
   explore_preview_items: 5
   explore_failure_items: 3
   create_preview_items: 5
-  # File previews; edit budget must be >= 2 to show both added/deleted lines.
+  # 文件预览行数；编辑预览至少为 2 行，才能同时显示新增和删除内容。
   edit_preview_changed_lines: 8
   write_preview_lines: 6
-  # Failed-tool summaries.
+  # 工具执行失败时的摘要行数。
   failure_preview_lines: 4
   command_failure_tail_lines: 6
-  # Editor/menu row caps; the terminal size can reduce the actual height.
+  # 编辑器和菜单的最大行数；实际高度可能因终端尺寸而缩小。
   editor_max_lines: 10
   completion_menu_lines: 8
 
 llm:
-  # Required for grouped models: source/model. Change this to select the startup model.
-  default: local/qwen-plus
+  default: token-plan/qwen3.8-flash
   models:
-    local:
-      # A literal key or a complete environment reference such as ${MODEL_API_KEY}.
-      api_key: sk-local
-      base_url: http://localhost:8000/v1
-      provider: qwen-responses
-      stream_usage: false
-      # Available reasoning efforts; when empty, the CLI only offers default (omit API parameters).
-      # Set the values accepted by this endpoint; omitted model fields inherit this list.
-      reasoning_efforts: []
+    token-plan:
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: ${TOKEN_PLAN_API_KEY}
+      api: chat_completions
+      reasoning_efforts: [none, low, medium, xhigh]
       models:
-        qwen-plus:
-          model: qwen3.5-plus
+        qwen3.8-flash:
           input: [text, image]
           context_window: 1m
-        qwen3.6-flash:
-          input: [text, image]
-          context_window: 1m
-          reasoning_efforts: null  # Explicit null or [] clears inherited efforts.
-    # --- Aliyun Bailian: Qwen Chat Completions ---
-    # https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
-    # Uncomment a group, export its key, and update llm.default to source/model.
-    # bailian:
-    #   api_key: ${DASHSCOPE_API_KEY}
-    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    #   provider: openai-compatible
-    #   stream_usage: true
-    #   reasoning_efforts: [none, low, medium, xhigh]
-    #   models:
-    #     qwen3.8-flash: {}  # Inherits the group list.
-    #     qwen3.8-max: {}
-    #     glm-5.3:
-    #       reasoning_efforts: [low, high, max]  # Replaces the group list; no none.
-    #
-    # --- Aliyun Bailian: Responses API ---
+    # --- 阿里云百炼：官方端点 ---
+    # 设置 ALIYUN_API_KEY 环境变量，取消下列注释即可添加百炼来源。
+    # 北京公共域名仍可使用，也可替换为官方业务空间专属域名。
     # https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses
-    # bailian-responses:
-    #   api_key: ${DASHSCOPE_API_KEY}
+    # bailian:
     #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    #   provider: qwen-responses
-    #   reasoning_efforts: [none, low, medium, xhigh]
+    #   api_key: ${ALIYUN_API_KEY}
+    #   api: responses
     #   models:
-    #     qwen3.8-flash: {}
-    #     qwen3.8-max: {}
+    #     qwen3.5-plus:
+    #       input: [text, image]
+    #       context_window: 1m
+    #     qwen3.8-flash:
+    #       input: [text, image]
+    #       context_window: 1m
+    #       reasoning_efforts: [none, low, medium, xhigh]
+    #     qwen3-vl-flash:
+    #       api: chat_completions
+    #       input: [text, image]
+    #       context_window: 262144
     #
-    # --- Aliyun Bailian Token Plan ---
-    # Confirm supported efforts for your Token Plan endpoint before filling the list.
-    # token-plan:
-    #   api_key: ${TOKEN_PLAN_API_KEY}
-    #   base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    #   provider: openai-compatible
-    #   stream_usage: true
-    #   reasoning_efforts: []
-    #   models:
-    #     auto: {}
-    #     qwen3.8-flash: {}
-    #     qwen3.8-max: {}
-    #
-    # --- DeepSeek official Chat Completions ---
+    # --- DeepSeek 官方：Chat Completions API ---
     # https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
     # deepseek:
     #   api_key: ${DEEPSEEK_API_KEY}
     #   base_url: https://api.deepseek.com/v1
-    #   provider: openai-compatible
+    #   api: chat_completions
     #   reasoning_efforts: [none, low, high, max]
     #   models:
     #     deepseek-flash: {}
     #
-    # --- Zhipu official Chat Completions ---
+    # --- 智谱官方：Chat Completions API ---
     # https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
     # zhipu:
     #   api_key: ${ZHIPU_API_KEY}
     #   base_url: https://open.bigmodel.cn/api/paas/v4
-    #   provider: openai-compatible
+    #   api: chat_completions
     #   reasoning_efforts: [low, high, max]
     #   models:
     #     glm-5.3: {}
     #
-    # Effort lists depend on model, protocol, and endpoint; maintain them from provider docs.
-    # Child models inherit omitted fields, replace declared lists, and clear with null or [].
-    # default is a CLI-only option: do not put it in reasoning_efforts.
-    # Responses sends reasoning.effort; Chat Completions sends reasoning_effort.
+    # 推理强度取决于模型、协议和端点，请按服务商文档维护列表。
+    # 模型级省略的字段继承来源配置；声明列表时整表替换；null 或 [] 清除继承的列表。
+    # default 仅为命令行选项，不要写入 reasoning_efforts。
+    # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
 
 
 web_search:
-  # Optional. TAVILY_API_KEY overrides this value; omit both to hide web_search.
-  # This field also accepts a literal key in your private ~/.deep-agent/config.yaml.
+  # 可选配置。TAVILY_API_KEY 环境变量优先于此值；两者均未设置时隐藏 web_search 工具。
+  # 也可以在私有配置 ~/.deep-agent/config.yaml 中直接填写密钥。
   tavily_api_key: null
 
 sandbox:
-  # Host directory mapped to /workspace. "." = the directory you start the TUI from (cwd).
+  # 映射到沙箱 /workspace 的宿主机目录；“.” 表示启动终端界面时的当前目录。
   workspace: .
   bwrap_path: bwrap
-  # Allow dangerous host execution when bubblewrap is unavailable.
+  # 是否允许在 bubblewrap 不可用时直接在宿主机执行命令，此方式具有风险。
   allow_unsandboxed: false
-  # No time limit by default. Set a positive number to cap each command.
+  # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
   timeout_seconds: null
   max_output_bytes: 100000
-  # Host env var names explicitly exposed to Agent commands.
+  # 明确允许传递给 Agent 命令的宿主机环境变量名称。
   env_allowlist: []
-  # Fixed env vars injected into the sandbox. PATH replaces the default, so keep the system dirs.
-  # playwright-cli open uses /opt/google/chrome/chrome. Do not install Chrome with
-  # `npx playwright install chrome` inside the sandbox; that command needs sudo apt-get.
-  # CLI-matched Chromium: on the host run `playwright-cli install-browser chromium`, then
-  # `playwright-cli open --browser=chromium`. It uses PLAYWRIGHT_BROWSERS_PATH.
+  # 注入沙箱的固定环境变量。PATH 会覆盖默认值，请保留系统目录。
+  # playwright-cli open 使用 /opt/google/chrome/chrome。不要在沙箱中执行
+  # `npx playwright install chrome` 安装 Chrome，该命令需要 sudo apt-get。
+  # 安装与命令行工具匹配的 Chromium：先在宿主机执行 `playwright-cli install-browser chromium`，再执行
+  # `playwright-cli open --browser=chromium`。浏览器路径由 PLAYWRIGHT_BROWSERS_PATH 指定。
   env_set:
     PATH: /opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
-  # optional: true skips a mount when its source directory does not exist.
-  # Replace the Node.js version with the directory under ~/.nvm/versions/node/.
+  # optional: true 表示源目录不存在时跳过该挂载。
+  # 请将 Node.js 版本替换为 ~/.nvm/versions/node/ 下实际存在的目录。
   extra_read_only_mounts:
     - source: ~/.nvm/versions/node/v22.23.2
       destination: /opt/node
@@ -155,14 +127,14 @@ sandbox:
     - source: /opt/google
       destination: /opt/google
       optional: true
-  # Writable browser cache. Creates, updates, and deletes inside the sandbox change the host directory.
+  # 可写的浏览器缓存；沙箱内的创建、修改和删除操作会同步到宿主机目录。
   extra_read_write_mounts:
     - source: ~/.cache/ms-playwright
       destination: /opt/ms-playwright
       optional: true
 
 paths:
-  # SQLite session DB. null → ~/.deep-agent/sessions/<workspace-hash>.sqlite3
+  # SQLite 会话数据库；null 表示使用 ~/.deep-agent/sessions/<workspace-hash>.sqlite3。
   state_path: null
-  # Keybindings directory. null → ~/.deep-agent
+  # 快捷键配置目录；null 表示使用 ~/.deep-agent。
   config_dir: null

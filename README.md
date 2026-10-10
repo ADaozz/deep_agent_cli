@@ -61,27 +61,24 @@ deep-agent
 
 ```yaml
 llm:
-  default: local/main                  # 启动时使用的模型：来源/模型键
+  default: token-plan/qwen3.8-flash
   models:
-    local:                             # 来源名，自定义
-      base_url: http://localhost:8000/v1
-      api_key: ${MY_API_KEY}           # 也可以直接写密钥
-      provider: openai-compatible      # 端点支持 Responses API 时可改为 qwen-responses
-      stream_usage: true
-      reasoning_efforts: [none, low, medium, high]  # 来源级列表，见下文
+    token-plan:
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: ${TOKEN_PLAN_API_KEY}
+      api: chat_completions
+      reasoning_efforts: [none, low, medium, xhigh]
       models:
-        main:                          # 模型键，自定义
-          model: your-model-name       # 发给服务端的模型名
-          context_window: 128k
-          input: [text]                # 支持图片时写 [text, image]
-        fast: {}                       # 省略的字段全部继承来源
-        other:
-          reasoning_efforts: [low, high]  # 写了就完整替换来源列表
+        qwen3.8-flash:
+          input: [text, image]
+          context_window: 1m
 ```
 
 模型按「来源」分组。来源下可以写的字段，模型项中也都可以写：模型项省略则继承来源，写了就覆盖。列表字段（`input`、`reasoning_efforts`）是整表替换，不是合并；`reasoning_efforts` 写成 `null` 或 `[]` 会清除继承。
 
-`provider` 未填写时默认为 `qwen-responses`（Responses API），只提供 Chat Completions 的服务需要显式写 `openai-compatible`。
+`api` 未填写时默认为 `responses`（Responses API），只提供 Chat Completions 的服务需要显式写 `chat_completions`。
+
+配置只接受 `api: responses/chat_completions`；`provider`、`stream_usage` 已移除，出现时直接报错。Chat Completions 固定请求 usage。右下角 Context 仅显示最近一次 API 返回的输入 token 占用，缺失时显示 `Unknown`，不做估算。
 
 `reasoning_efforts` 需要按服务商文档填写，程序不会自动探测。常见取值包括 `none`、`low`、`medium`、`high`、`xhigh`、`max`，同一模型在不同端点上可能不同。列表非空时，`/model` 只显示这些值，默认选中第一项；空列表或未配置时只显示 `default`，请求不携带强度参数。`default` 是 CLI 选项，不能写进列表。`none` 仅在端点明确支持关闭思考时才写；`low` 仍然会思考。Chat Completions 发送 `reasoning_effort`，Responses API 发送 `reasoning.effort`。
 

@@ -34,7 +34,7 @@ python examples/sandbox_probe.py --require-sandbox [--report report.json]
 ```
 
 - `e2e_live_smoke.py`：通过 CLI 应用对象执行斜杠命令、`ask` 审批、`allow` 模式和一个编写并运行单元测试的任务。默认创建并清理临时工作区；指定 `--workspace` 时必须是空目录。`--network` 额外测试访问 example.com。
-- `stream_smoke.py`：只验证 Qwen Responses 的思考流。要求当前模型 `provider: qwen-responses`、端点支持 Responses 且模型会输出思考内容；`--effort` 必须来自配置中的列表且不能是 `none`。Chat Completions 端点不适用。
+- `stream_smoke.py`：验证 Responses 的思考流。要求当前模型 `api: responses`、端点支持 Responses 且模型会输出思考内容；`--effort` 必须来自配置中的列表且不能是 `none`。Chat Completions 端点不适用。
 - `sandbox_probe.py`：不调用模型，只检测沙箱是否可用，输出 JSON 报告。
 
 ## CI

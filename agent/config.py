@@ -47,11 +47,10 @@ class ModelProfile:
     api_key: str = "sk-local"
     base_url: str = "http://localhost:8000/v1"
     input: tuple["InputKind", ...] = ("text",)
-    provider: Literal["qwen-responses", "openai-compatible"] = "qwen-responses"
+    api: Literal["responses", "chat_completions"] = "responses"
     # 0 = unknown, so the UI can hide the context meter instead of guessing.
     context_window: int = 0
     source: str = ""
-    stream_usage: bool = False
     reasoning_efforts: tuple[str, ...] = ()
 
     def supports_input(self, kind: "InputKind") -> bool:
@@ -399,8 +398,9 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
 
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
-    legacy_fields = {"model", "api_key", "base_url", "input", "provider", "context_window", "source", "stream_usage", "reasoning_efforts"}
-    unsupported = legacy_fields.intersection(llm)
+    _reject_removed_protocol_fields(llm, field_name="llm")
+    source_fields = {"model", "api_key", "base_url", "input", "api", "context_window", "source", "reasoning_efforts"}
+    unsupported = source_fields.intersection(llm)
     if unsupported:
         field = sorted(unsupported)[0]
         raise ValueError(f"llm.{field} is unsupported; configure it under llm.models.<source>")
@@ -420,6 +420,7 @@ def _grouped_llm_profiles(
         source = source_key.strip()
         if not isinstance(group, Mapping) or not isinstance(group.get("models"), Mapping) or not group["models"]:
             raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
+        group_api = _model_api(group, field_name=f"llm.models.{source}")
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -442,11 +443,10 @@ def _grouped_llm_profiles(
                 ) or "sk-local",
                 base_url=_model_text(inherited("base_url"), field_name=f"{field}.base_url", default="http://localhost:8000/v1"),
                 input=_model_inputs(inherited("input"), field_name=f"{field}.input"),
-                provider=_model_provider(inherited("provider"), field_name=f"{field}.provider"),
+                api=_model_api(item, field_name=field, default=group_api),
                 context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
                 reasoning_efforts=_model_reasoning_efforts(inherited("reasoning_efforts"), field_name=f"{field}.reasoning_efforts"),
                 source=source,
-                stream_usage=_model_stream_usage(inherited("stream_usage"), field_name=f"{field}.stream_usage"),
             ))
     default = llm.get("default")
     if not isinstance(default, str) or not default.strip():
@@ -501,11 +501,19 @@ def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:
     return result  # type: ignore[return-value]
 
 
-def _model_provider(value: Any, *, field_name: str) -> Literal["qwen-responses", "openai-compatible"]:
-    provider = str(value or "qwen-responses").strip()
-    if provider not in {"qwen-responses", "openai-compatible"}:
-        raise ValueError(f"{field_name} must be qwen-responses or openai-compatible")
-    return provider  # type: ignore[return-value]
+def _reject_removed_protocol_fields(mapping: Mapping[str, Any], *, field_name: str) -> None:
+    for removed in ("provider", "stream_usage"):
+        if removed in mapping:
+            raise ValueError(f"{field_name}.{removed} is unsupported; use api and remove obsolete fields")
+
+
+def _model_api(mapping: Mapping[str, Any], *, field_name: str, default: str = "responses") -> Any:
+    """Validate the explicit protocol; model-level values override the source."""
+    _reject_removed_protocol_fields(mapping, field_name=field_name)
+    api = mapping.get("api", default)
+    if not isinstance(api, str) or api not in {"responses", "chat_completions"}:
+        raise ValueError(f"{field_name}.api must be responses or chat_completions")
+    return api
 
 
 def _model_reasoning_efforts(value: Any, *, field_name: str) -> tuple[str, ...]:
@@ -519,14 +527,6 @@ def _model_reasoning_efforts(value: Any, *, field_name: str) -> tuple[str, ...]:
     if len(set(value)) != len(value):
         raise ValueError(f"{field_name} contains duplicate reasoning efforts")
     return tuple(value)
-
-
-def _model_stream_usage(value: Any, *, field_name: str) -> bool:
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise ValueError(f"{field_name} must be true or false")
-    return value
 
 
 def _model_context_window(value: Any, *, field_name: str) -> int:

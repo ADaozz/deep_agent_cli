@@ -73,7 +73,8 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
-    object.__setattr__(llm, "root_async_client", FakeClient())
+    from agent.llm import _ResponsesClient
+    object.__setattr__(llm, "root_async_client", _ResponsesClient(FakeClient()))
 
     async def collect():
         return [item async for item in llm._astream([HumanMessage(content="x")])]
@@ -116,7 +117,8 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
-    object.__setattr__(llm, "root_client", FakeClient())
+    from agent.llm import _ResponsesClient
+    object.__setattr__(llm, "root_client", _ResponsesClient(FakeClient()))
 
     chunks = list(llm._stream([HumanMessage(content="x")]))
     blocks = [chunk.message.content[0] for chunk in chunks]
@@ -126,13 +128,13 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
     assert blocks[2]["text"] == "answer"
 
 
-def test_gateway_extra_body_envelope_and_plain_chatopenai_stay_scoped() -> None:
+def test_responses_extra_body_uses_standard_sdk_envelope() -> None:
     llm = QwenChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, extra_body={"enable_thinking": True},
     )
     assert llm._get_request_payload([HumanMessage(content="x")])["extra_body"] == {
-        "extra_body": {"enable_thinking": True}
+        "enable_thinking": True
     }
     assert QwenChatOpenAI._generate is ChatOpenAI._generate
 
@@ -161,7 +163,7 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
     from agent.llm import build_chat_model
 
     qwen = build_chat_model(ModelProfile("qwen", "qwen3.5-plus"))
-    compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", provider="openai-compatible"))
+    compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", api="chat_completions"))
     assert isinstance(qwen, ChatOpenAI)
     assert isinstance(compatible, TokenPlanChatOpenAI)
     assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
@@ -174,7 +176,7 @@ def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
     from agent.llm import build_chat_model
 
     model = build_chat_model(ModelProfile(
-        "plan/auto", "auto", provider="openai-compatible",
+        "plan/auto", "auto", api="chat_completions",
         base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     ))
     assert isinstance(model, TokenPlanChatOpenAI)
@@ -209,25 +211,25 @@ def test_compatible_profiles_preserve_reasoning_for_all_hosts() -> None:
     from agent.llm import build_chat_model
 
     token_plan = build_chat_model(ModelProfile(
-        "plan/auto", "auto", provider="openai-compatible",
+        "plan/auto", "auto", api="chat_completions",
         base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     ))
     generic = build_chat_model(ModelProfile(
-        "generic/auto", "auto", provider="openai-compatible",
+        "generic/auto", "auto", api="chat_completions",
         base_url="https://example.com/v1",
     ))
     assert isinstance(token_plan, TokenPlanChatOpenAI)
     assert isinstance(generic, TokenPlanChatOpenAI)
 
 
-@pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])
+@pytest.mark.parametrize("provider", ["responses", "chat_completions"])
 def test_configured_context_window_drives_deepagents_compaction(provider: str) -> None:
     from agent.config import ModelProfile
     from agent.llm import build_chat_model
     from deepagents.middleware.summarization import compute_summarization_defaults
 
     configured = build_chat_model(ModelProfile(
-        "configured", "qwen3.5-plus", provider=provider, context_window=128_000,
+        "configured", "qwen3.5-plus", api=provider, context_window=128_000,
     ))
     assert configured.profile is not None
     assert configured.profile["max_input_tokens"] == 128_000
@@ -236,25 +238,25 @@ def test_configured_context_window_drives_deepagents_compaction(provider: str) -
     assert round(configured.profile["max_input_tokens"] * defaults["trigger"][1]) == 108_800
     assert defaults["keep"] == ("fraction", 0.10)
 
-    unknown = build_chat_model(ModelProfile("unknown", "qwen3.5-plus", provider=provider))
+    unknown = build_chat_model(ModelProfile("unknown", "qwen3.5-plus", api=provider))
     assert compute_summarization_defaults(unknown)["trigger"] == ("tokens", 170_000)
 
 
-@pytest.mark.parametrize("provider", ["qwen-responses", "openai-compatible"])
+@pytest.mark.parametrize("provider", ["responses", "chat_completions"])
 @pytest.mark.parametrize("effort", [None, "none", "low", "max"])
 def test_reasoning_effort_request_payload(provider, effort) -> None:
     from agent.config import ModelProfile
     from agent.llm import build_chat_model
     from langchain_core.messages import HumanMessage
 
-    profile = ModelProfile("test", "test", provider=provider, reasoning_efforts=("none", "low", "max"))
+    profile = ModelProfile("test", "test", api=provider, reasoning_efforts=("none", "low", "max"))
     client = build_chat_model(profile, reasoning_effort=effort)
     payload = client._get_request_payload([HumanMessage(content="hello")])
     assert "enable_thinking" not in payload.get("extra_body", {})
     if effort is None:
         assert "reasoning" not in payload
         assert "reasoning_effort" not in payload
-    elif provider == "qwen-responses":
+    elif provider == "responses":
         assert payload["reasoning"] == {"effort": effort}
         assert "reasoning_effort" not in payload
     else:
@@ -267,3 +269,28 @@ def test_unconfigured_reasoning_effort_is_rejected() -> None:
     from agent.llm import build_chat_model
     with pytest.raises(ValueError, match="Unsupported reasoning effort"):
         build_chat_model(ModelProfile("test", "test"), reasoning_effort="none")
+
+
+def test_baseline_standard_responses_event_is_unchanged() -> None:
+    event = SimpleNamespace(type="response.output_text.delta", delta="answer")
+    assert normalize_qwen_responses_event(event) is event
+
+
+def test_baseline_chat_tool_chunks_and_usage() -> None:
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    model = build_chat_model(ModelProfile("test", "test", api="chat_completions"))
+    first = model._convert_chunk_to_generation_chunk({"choices": [{"delta": {
+        "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":'}}],
+    }}]}, AIMessageChunk, None)
+    second = model._convert_chunk_to_generation_chunk({"choices": [{"delta": {
+        "tool_calls": [{"index": 0, "function": {"arguments": '"a"}'}}],
+    }}]}, AIMessageChunk, None)
+    combined = first.message + second.message
+    assert combined.tool_calls[0]["id"] == "call_1"
+    assert combined.tool_calls[0]["args"] == {"path": "a"}
+    usage = model._convert_chunk_to_generation_chunk({"choices": [], "usage": {
+        "prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15,
+    }}, AIMessageChunk, None)
+    assert usage.message.usage_metadata["input_tokens"] == 12

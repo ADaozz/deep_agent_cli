@@ -101,3 +101,23 @@ def test_stream_delta_callback_splits_think_and_answer() -> None:
     assert assistant[-1] == "再回答。"
     reasoning = [text for kind, text in events if kind == "reasoning"]
     assert "内部推理" in reasoning[-1] or "先想" in reasoning[0]
+
+
+def test_usage_only_chunk_is_forwarded_and_summary_usage_is_ignored():
+    usages = []
+    callback = StreamDeltaCallback(lambda *_: None, on_usage=usages.append)
+    callback.on_llm_start({}, run_id="answer")
+    assert usages == [{}]
+    callback.on_llm_new_token("text", chunk=AIMessageChunk(content="text"), run_id="answer")
+    assert usages == [{}]
+    callback.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 0, "output_tokens": 2, "total_tokens": 2,
+    }), run_id="answer")
+    assert usages[-1] == {"input_tokens": 0, "output_tokens": 2, "total_tokens": 2}
+    callback.on_llm_start({}, run_id="summary", metadata={"lc_source": "summarization"})
+    callback.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 999, "output_tokens": 2, "total_tokens": 1001,
+    }), run_id="summary")
+    assert len(usages) == 2
+    callback.on_llm_start({}, run_id="next")
+    assert usages[-1] == {}

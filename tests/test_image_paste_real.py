@@ -92,8 +92,7 @@ def image_tui(tmp_path, monkeypatch, model_endpoint, request):
     test:
       api_key: test
       base_url: {endpoint}
-      provider: openai-compatible
-      stream_usage: false
+      api: chat_completions
       models:
         vision:
           input: [text, image]

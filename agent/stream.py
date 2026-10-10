@@ -110,6 +110,7 @@ class StreamDeltaCallback(BaseCallbackHandler):
         on_start: Callable[[], None] | None = None,
         on_end: Callable[[str, str], None] | None = None,
         on_compaction: Callable[[bool], None] | None = None,
+        on_usage: Callable[[dict[str, int]], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_delta = on_delta
@@ -117,6 +118,7 @@ class StreamDeltaCallback(BaseCallbackHandler):
         self._on_assistant = on_assistant
         self._on_start = on_start
         self._on_end = on_end
+        self._on_usage = on_usage
         self._on_compaction = on_compaction
         self._summary_runs: set[Any] = set()
         self._assistant = ""
@@ -134,6 +136,8 @@ class StreamDeltaCallback(BaseCallbackHandler):
         self._reasoning = ""
         self._message = None
         self._raw_text = ""
+        if self._on_usage:
+            self._on_usage({})
         if self._on_start:
             self._on_start()
 
@@ -143,6 +147,12 @@ class StreamDeltaCallback(BaseCallbackHandler):
         message = _chunk_message(chunk)
         if isinstance(message, AIMessageChunk):
             self._message = message if self._message is None else self._message + message
+            if self._on_usage and isinstance(message.usage_metadata, dict):
+                # A usage-only final chunk has no text, but must still reach TUI.
+                usage = self._message.usage_metadata or {}
+                self._on_usage({key: value for key, value in usage.items()
+                                if key in {"input_tokens", "output_tokens", "total_tokens"}
+                                and type(value) is int and value >= 0})
             visible = visible_text(self._message)
             reasoning = reasoning_text(self._message)
         else:

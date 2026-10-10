@@ -35,7 +35,7 @@ def _settings_grouped_models() -> Settings:
         "default": "token-plan/auto",
         "models": {
             "local": {"models": {"qwen-plus": {"model": "qwen3.5-plus"}}},
-            "token-plan": {"provider": "openai-compatible", "models": {
+            "token-plan": {"api": "chat_completions", "models": {
                 "auto": {"context_window": "1m"},
                 "qwen3.8-max": {"context_window": "128k"},
             }},

@@ -22,42 +22,57 @@ CLI 按以下顺序查找主配置：
 
 ```yaml
 llm:
-  default: local/main            # 必填，格式为 来源/模型键
+  default: token-plan/qwen3.8-flash
   models:
-    local:                       # 来源名，自定义，不能含 /
-      base_url: http://localhost:8000/v1
-      api_key: ${LOCAL_API_KEY}
-      provider: openai-compatible
-      stream_usage: true
+    token-plan:
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: ${TOKEN_PLAN_API_KEY}
+      api: chat_completions
+      reasoning_efforts: [none, low, medium, xhigh]
       models:
-        main:                    # 模型键，自定义，不能含 /
-          model: qwen3.5-plus    # 发给 API 的模型名；省略时使用模型键
+        qwen3.8-flash:
           input: [text, image]
-          context_window: 128k
-        fast: {}                 # 全部继承来源级字段，请求模型名为 fast
+          context_window: 1m
 ```
 
 来源下可以写的字段，模型项中也都可以写；模型项中的值覆盖来源级的值。
+
+接入新的标准兼容模型，只需要在这里配置 `api`、端点地址/凭据、模型 ID 和模型能力。协议格式转换由程序完成，无需修改 Agent 核心，也无需配置厂商兼容模式。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `base_url` | `http://localhost:8000/v1` | OpenAI 兼容端点 |
 | `api_key` | `sk-local` | 字面值或 `${变量名}` |
-| `provider` | `qwen-responses` | `qwen-responses` 使用 Responses API；`openai-compatible` 使用 Chat Completions |
+| `api` | `responses` | `responses` 使用 Responses API；`chat_completions` 使用 Chat Completions |
 | `model` | 模型键 | 仅模型项可用，实际请求的模型名 |
 | `input` | `[text]` | 支持图片输入时写 `[text, image]`；必须包含 `text` |
 | `context_window` | `0` | 模型输入窗口，可写 `128000`、`128k`、`1m`。`0` 表示未知：底栏不显示占用百分比，压缩阈值使用 Deep Agents 的默认值 |
-| `stream_usage` | `false` | 仅 Chat Completions：请求中附加 `stream_options.include_usage`。端点在流式响应中不返回 usage 时，底栏的上下文占用会显示为未知 |
 | `reasoning_efforts` | `[]` | 推理强度可选值，见下文 |
 
-不再支持的写法会直接报错：`llm.model`、放在 `llm` 顶层的 `base_url` / `api_key` 等字段，以及不分来源的扁平 `llm.models.<模型>`。旧配置需要手动改写，程序不做迁移。
+不再支持的写法会直接报错：`llm.model`、放在 `llm` 顶层的 `base_url` / `api_key` 等字段，以及不分来源的扁平 `llm.models.<模型>`。这些旧布局需要手动改写。旧协议字段也不再接受，见下文。
 
-### 两种 provider
+### 两种 API
 
-- `openai-compatible`：Chat Completions。会读取流式和非流式响应中的 `reasoning_content` 字段作为思考内容，并在后续请求中原样回传。
-- `qwen-responses`：Responses API。会把 Qwen 的 `response.reasoning_text.*` 事件转换成 LangChain 能识别的格式。
+- `chat_completions`：Chat Completions。会读取流式和非流式响应中的 `reasoning_content` 或 `reasoning` 字符串字段作为思考内容，并在后续请求中原样回传。
+- `responses`：Responses API。会把 Qwen 的 `response.reasoning_text.*` 事件转换成 LangChain 能识别的格式。
 
-两种 provider 的客户端都设置了 `trust_env=False`，因此忽略 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。模型请求传输失败时由 OpenAI SDK 最多重试 2 次。
+两种 API 的客户端都设置了 `trust_env=False`，因此忽略 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。模型请求传输失败时由 OpenAI SDK 最多重试 2 次。
+
+### 已移除的配置字段
+
+`provider` 和 `stream_usage` 不再兼容：来源级或模型级出现任何一个字段，都会明确报错，即使同时配置了有效的 `api` 也不能保留旧字段。
+
+协议只通过 `api: responses` 或 `api: chat_completions` 选择；模型级覆盖来源级，省略时默认为 `responses`。不会按模型名或 Base URL 推测协议，也不会自动改写用户配置文件。Chat Completions 固定请求流式 usage，无需配置开关。
+
+### Context 与 Token Usage
+
+Chat Completions 固定请求 `stream_options.include_usage=true`；Responses 从完成事件读取 usage。服务端明确拒绝该参数时报告错误，不会关闭参数重试。普通响应缺失 usage 不影响调用成功。
+
+Context 百分比只使用最近一次 API 响应的 `usage_metadata.input_tokens / context_window * 100`，不使用 `total_tokens`、累计用量、Tokenizer 或字符估算。输入为零显示 `0.0%`；缺失时显示 `Unknown`。生成过程中在服务端返回 usage 前显示 `Unknown`，收到 usage-only 数据块立即更新。
+
+每次模型调用开始、取消/失败、切换模型、压缩完成都会清除旧值。checkpoint 保存响应所属的模型来源 ID；恢复会话时只使用当前模型、当前有效消息的最后一次 usage。旧会话仍可读取，但无法确认模型来源的旧 usage 显示 `Unknown`，下一次调用后重新获得准确数据。
+
+这里的 input_tokens 表示最近一次请求的输入量，不表示下一次请求的精确上下文。Deep Agents 自动压缩仍使用自身原有估算和阈值，独立于 TUI 显示。
 
 ### 推理强度（`reasoning_efforts`）
 
@@ -68,10 +83,10 @@ llm:
 - 只有端点明确支持时才写 `none`（关闭思考）；`low` 仍然会思考。
 - 继承规则：模型项省略该字段时继承来源的列表；写了就完整替换；写 `null` 或 `[]` 清除继承。
 
-| provider | 发送的参数 |
+| API | 发送的参数 |
 |---|---|
-| `openai-compatible` | `reasoning_effort` |
-| `qwen-responses` | `reasoning.effort` |
+| `chat_completions` | `reasoning_effort` |
+| `responses` | `reasoning.effort` |
 
 同一模型在两种协议下的可选值可能不同。模板 [`config.example.yaml`](../agent/config.example.yaml) 中有阿里云百炼、百炼 Token Plan、DeepSeek、智谱的注释示例，使用前请对照服务商当前文档确认。
 
@@ -84,8 +99,7 @@ llm:
     token-plan:
       api_key: ${TOKEN_PLAN_API_KEY}
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-      provider: openai-compatible
-      stream_usage: true          # 不开启时底栏无法显示上下文占用
+      api: chat_completions
       context_window: 1m
       reasoning_efforts: [none, low, medium, xhigh]
       models:
@@ -227,3 +241,29 @@ fgo:
 | `DEEP_AGENT_CONFIG_DIR` | `paths.config_dir` 未设置时的按键与文案目录 |
 | `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径 |
 | `TAVILY_API_KEY` | Tavily 密钥，优先于配置文件 |
+
+
+## 百炼官方来源
+
+可以在 `llm.models` 下添加以下来源，密钥从 `ALIYUN_API_KEY` 环境变量读取。此变量名是用户配置约定，程序仍按 `${变量名}` 统一解析。
+
+```yaml
+bailian:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key: ${ALIYUN_API_KEY}
+  api: responses
+  models:
+    qwen3.5-plus:
+      input: [text, image]
+      context_window: 1m
+    qwen3.8-flash:
+      input: [text, image]
+      context_window: 1m
+      reasoning_efforts: [none, low, medium, xhigh]
+    qwen3-vl-flash:
+      api: chat_completions
+      input: [text, image]
+      context_window: 262144
+```
+
+北京公共域名仍可使用；官方建议迁移到业务空间专属域名，见 [Responses 端点说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)。协议只由 `api` 决定；所有地址均按 SDK 标准格式序列化 `extra_body`。`qwen3-vl-flash` 使用 Chat Completions，窗口按 [官方模型规格](https://help.aliyun.com/zh/model-studio/qwen3-vl-flash) 填写。示例不为旧型号推测推理强度列表。

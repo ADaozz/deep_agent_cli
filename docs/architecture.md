@@ -70,10 +70,20 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 
 ## 模型适配
 
-`llm.build_chat_model()` 按 `provider` 构造客户端：
+模型接入的验收边界：用户配置只声明 API 协议、端点地址/凭据、模型 ID 和模型能力（输入模态、上下文窗口、可选推理强度）。Thinking、工具调用、图片、usage 和请求参数的格式转换由模型适配层完成，Agent 核心只消费统一的 LangChain 消息和既有运行事件。
 
-- `qwen-responses` → `QwenChatOpenAI`：使用 Responses API，在转换前把 `response.reasoning_text.*` 事件改名为 LangChain 1.6 能识别的 `response.reasoning_summary_text.*`。
-- `openai-compatible` → `ReasoningChatOpenAI`：使用 Chat Completions，读取并回传 `reasoning_content`。
+新增符合 Responses 或 Chat Completions 协议的模型，原则上只增加配置，不修改 Agent、会话、沙箱、审批和工具执行代码。新发现的非标准端点字段应局限在适配层做可选字段兼容，不向用户增加厂商开关，也不在核心代码加入按模型名/厂商分支。
+
+`llm.build_chat_model()` 按 `api` 构造客户端：
+
+- `responses` → `ResponsesChatOpenAI`：使用 Responses API，在转换前把 `response.reasoning_text.*` 事件改名为 LangChain 1.6 能识别的 `response.reasoning_summary_text.*`。
+- `chat_completions` → `ChatCompletionsChatOpenAI`：使用 Chat Completions，读取 `reasoning_content` 或 `reasoning` 字符串，正文统一保存，下一轮请求按实际收到的字段名回传。
+
+两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试和请求前附件解析。附件解析只生成请求消息，checkpoint 保存引用。Responses 在 SDK stream 入口包装已知非标准事件，继续复用 LangChain 的完整解析循环、工具调用拼接和异常映射；标准事件保持原样。所有端点统一采用 SDK 标准请求序列化，不按主机、端口或厂商嵌套 extra_body。结构化输出的 SDK parse 路径与 create 共用响应 Usage 规范化。Chat Completions 的思考正文统一保存为 reasoning_content，并在消息元数据中保留来源字段名，历史回传时按原字段发送。
+
+`QwenChatOpenAI`、`TokenPlanChatOpenAI`、`ReasoningChatOpenAI` 及旧事件规范化函数暂时保留为弃用的 Python 别名。内部不使用厂商类名选择协议。
+
+`UsageIdentityMiddleware` 在模型结果进入 checkpoint 前标记模型来源，不改变工具或图的执行决定。流式回调将 usage-only chunk 转为既有 usage 事件；TUI 仅读取 API 的 input_tokens。缺失、取消、切换和压缩时清除旧值，恢复只读取当前来源对应的有效 usage。自动压缩仍使用 Deep Agents 原有机制。
 
 配置了 `context_window` 时，写入模型 profile 的 `max_input_tokens`，Deep Agents 据此计算压缩阈值。
 

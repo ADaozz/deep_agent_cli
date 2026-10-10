@@ -1,11 +1,9 @@
-"""Qwen Responses compatibility without patching ``langchain-openai`` globally."""
+"""Two explicit OpenAI protocols with local, optional-field compatibility."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
 import base64
 from typing import Any, ClassVar
 
-import langchain_openai.chat_models.base as _lc_base
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from langchain_core.messages.content import create_image_block, create_text_block
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
@@ -16,7 +14,7 @@ from agent.attachments import ATTACHMENT_META_KEY, AttachmentStore, refs_from_me
 from agent.config import ModelProfile
 
 
-_QWEN_REASONING_EVENT_TYPES = {
+_REASONING_EVENT_TYPES = {
     "response.reasoning_text.delta": "response.reasoning_summary_text.delta",
     # 1.6.x does not consume this event yet, but normalize it without inventing
     # any fields in case an upstream converter starts doing so.
@@ -38,19 +36,48 @@ class ResponsesEventProxy:
         return self._type
 
     @property
+    def response(self) -> Any:
+        value = self._event.get("response") if isinstance(self._event, dict) else getattr(self._event, "response", None)
+        return _normalize_response_usage(value)
+
+    @property
     def summary_index(self) -> int:
         # Qwen's streamed reasoning is the final summary. content_index has a
         # different Responses meaning and must not be reused here.
         return 0
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._event, name)
+        return self._event.get(name) if isinstance(self._event, dict) else getattr(self._event, name)
 
 
-def normalize_qwen_responses_event(event: Any) -> Any:
+def normalize_responses_event(event: Any) -> Any:
     """Normalize only Qwen's reasoning event spelling for LangChain 1.6.x."""
-    event_type = _QWEN_REASONING_EVENT_TYPES.get(getattr(event, "type", None))
-    return event if event_type is None else ResponsesEventProxy(event, event_type)
+    raw_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    event_type = _REASONING_EVENT_TYPES.get(raw_type)
+    if event_type is not None:
+        return ResponsesEventProxy(event, event_type)
+    if raw_type in {"response.completed", "response.incomplete"}:
+        response = event.get("response") if isinstance(event, dict) else getattr(event, "response", None)
+        if _normalize_response_usage(response) is not response:
+            return ResponsesEventProxy(event, raw_type)
+    return event
+
+
+def _normalize_response_usage(response: Any) -> Any:
+    usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    if usage is None:
+        return response
+    count = usage.get("input_tokens") if isinstance(usage, dict) else getattr(usage, "input_tokens", None)
+    if type(count) is int and count >= 0:
+        return response
+    # LangChain defaults a missing input count to zero. Optional/malformed
+    # provider usage must remain Unknown, rather than inventing a valid zero.
+    if isinstance(response, dict):
+        return {**response, "usage": None}
+    copier = getattr(response, "model_copy", None)
+    if callable(copier):
+        return copier(update={"usage": None})
+    return _NoUsageResponse(response)
 
 
 def materialize_attachment_refs(input_: Any, store: AttachmentStore | None) -> Any:
@@ -89,9 +116,102 @@ def materialize_attachment_refs(input_: Any, store: AttachmentStore | None) -> A
     return messages if changed else input_
 
 
-class QwenChatOpenAI(ChatOpenAI):
-    """Qwen Responses adapter with ChatOpenAI-compatible fallback routing."""
+class _Delegate:
+    def __init__(self, target: Any) -> None:
+        self._target = target
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._target, name)
+
+
+class _NoUsageResponse(_Delegate):
+    usage = None
+
+
+class _EventStream(_Delegate):
+    """Normalize known event spellings; SDK owns transport and stream lifetime."""
+    def __enter__(self):
+        self._target.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._target.__exit__(*args)
+
+    async def __aenter__(self):
+        await self._target.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._target.__aexit__(*args)
+
+    def __iter__(self):
+        for event in self._target:
+            yield normalize_responses_event(event)
+
+    async def __aiter__(self):
+        async for event in self._target:
+            yield normalize_responses_event(event)
+
+
+class _RawStreamResponse(_Delegate):
+    def __init__(self, target: Any, *, stream: bool = True) -> None:
+        super().__init__(target)
+        self._stream = stream
+
+    def parse(self, *args, **kwargs):
+        value = self._target.parse(*args, **kwargs)
+        return _EventStream(value) if self._stream else _normalize_response_usage(value)
+
+
+class _ResponsesResource(_Delegate):
+    def __init__(self, target: Any, *, raw: bool = False) -> None:
+        super().__init__(target)
+        self._raw = raw
+
+    @property
+    def with_raw_response(self):
+        return _ResponsesResource(self._target.with_raw_response, raw=True)
+
+    def create(self, **kwargs):
+        return self._call("create", kwargs)
+
+    def parse(self, **kwargs):
+        # Pydantic 结构化输出走 SDK parse，需与普通 create 共用响应兼容逻辑。
+        return self._call("parse", kwargs)
+
+    def _call(self, method: str, kwargs: dict[str, Any]):
+        import inspect
+        result = getattr(self._target, method)(**kwargs)
+        def wrap(value):
+            stream = bool(kwargs.get("stream"))
+            if self._raw:
+                return _RawStreamResponse(value, stream=stream)
+            return _EventStream(value) if stream else _normalize_response_usage(value)
+        if inspect.isawaitable(result):
+            async def resolve():
+                return wrap(await result)
+            return resolve()
+        return wrap(result)
+
+
+class _ResponsesClient(_Delegate):
+    @property
+    def responses(self):
+        return _ResponsesResource(self._target.responses)
+
+    @property
+    def with_raw_response(self):
+        return _RawResponsesClient(self._target.with_raw_response)
+
+
+class _RawResponsesClient(_Delegate):
+    @property
+    def responses(self):
+        return _ResponsesResource(self._target.responses, raw=True)
+
+
+class ProtocolChatOpenAI(ChatOpenAI):
+    """Shared request-local attachment resolution and proxy-free transport."""
     _attachment_store: AttachmentStore | None = PrivateAttr(default=None)
     materializes_attachment_refs: ClassVar[bool] = True
 
@@ -115,158 +235,22 @@ class QwenChatOpenAI(ChatOpenAI):
     def set_attachment_store(self, store: AttachmentStore) -> None:
         self._attachment_store = store
 
-    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
-        # ChatOpenAI routes directly to BaseChatOpenAI._stream_responses.
-        if self._use_responses_api({**kwargs, **self.model_kwargs}):
-            yield from self._stream_responses(*args, **kwargs)
-        else:
-            yield from super()._stream(*args, **kwargs)
+    def _get_request_payload(self, input_: Any, *, stop=None, **kwargs) -> dict[str, Any]:
+        materialized = materialize_attachment_refs(input_, self._attachment_store)
+        return super()._get_request_payload(materialized, stop=stop, **kwargs)
 
-    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
-        # ChatOpenAI._astream directly calls BaseChatOpenAI._astream_responses,
-        # so it would bypass an override of _astream_responses on this class.
-        if self._use_responses_api({**kwargs, **self.model_kwargs}):
-            async for chunk in self._astream_responses(*args, **kwargs):
-                yield chunk
-        else:
-            async for chunk in super()._astream(*args, **kwargs):
-                yield chunk
 
-    def _get_request_payload(
-        self,
-        input_: Any,
-        *,
-        stop: list[str] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Keep the Gateway's documented nested ``extra_body`` on the wire.
+class ResponsesChatOpenAI(ProtocolChatOpenAI):
+    """Responses API：兼容已知非标准响应事件，统一使用 SDK 请求格式。"""
+    @model_validator(mode="after")
+    def _normalize_response_streams(self):
+        # Wrap SDK resource results, leaving LangChain's sync/async parsers intact.
+        if not isinstance(self.root_client, _ResponsesClient):
+            self.root_client = _ResponsesClient(self.root_client)
+        if not isinstance(self.root_async_client, _ResponsesClient):
+            self.root_async_client = _ResponsesClient(self.root_async_client)
+        return self
 
-        OpenAI SDK treats an outer ``extra_body`` argument as transport options
-        and merges it into JSON. This extra envelope is removed once by that
-        SDK, producing Gateway's required ``{"extra_body": {...}}`` body.
-        """
-        materialized = self._materialize_attachments(input_)
-        payload = super()._get_request_payload(materialized, stop=stop, **kwargs)
-        if not self._use_responses_api({**kwargs, **self.model_kwargs}):
-            return payload
-        extra_body = payload.get("extra_body")
-        if isinstance(extra_body, dict) and set(extra_body) != {"extra_body"}:
-            payload["extra_body"] = {"extra_body": extra_body}
-        return payload
-
-    def _materialize_attachments(self, input_: Any) -> Any:
-        return materialize_attachment_refs(input_, self._attachment_store)
-
-    def _stream_responses(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: Any = None,
-        **kwargs: Any,
-    ) -> Iterator[ChatGenerationChunk]:
-        """LangChain's sync Responses loop with Qwen event normalization."""
-        self._ensure_sync_client_available()
-        kwargs["stream"] = True
-        payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        headers: dict[str, Any] = {}
-        base_generation_info: dict[str, Any] = {}
-        try:
-            if self.include_response_headers or self._uses_gateway:
-                raw_context_manager = self.root_client.with_raw_response.responses.create(**payload)
-                context_manager = raw_context_manager.parse()
-                if self.include_response_headers:
-                    headers = {"headers": dict(raw_context_manager.headers)}
-                _lc_base._add_gateway_metadata(base_generation_info, raw_context_manager)
-            else:
-                context_manager = self.root_client.responses.create(**payload)
-
-            original_schema_obj = kwargs.get("response_format")
-            with context_manager as response:
-                is_first_chunk = True
-                current_index = current_output_index = current_sub_index = -1
-                has_reasoning = False
-                for raw_chunk in response:
-                    chunk = normalize_qwen_responses_event(raw_chunk)
-                    metadata = headers if is_first_chunk else {}
-                    current_index, current_output_index, current_sub_index, generation_chunk = (
-                        _lc_base._convert_responses_chunk_to_generation_chunk(
-                            chunk, current_index, current_output_index, current_sub_index,
-                            schema=original_schema_obj, metadata=metadata,
-                            has_reasoning=has_reasoning, output_version=self.output_version,
-                        )
-                    )
-                    if generation_chunk:
-                        if is_first_chunk and base_generation_info:
-                            generation_chunk.generation_info = {
-                                **base_generation_info,
-                                **(generation_chunk.generation_info or {}),
-                            }
-                        if run_manager:
-                            run_manager.on_llm_new_token(generation_chunk.text, chunk=generation_chunk)
-                        is_first_chunk = False
-                        if "reasoning" in generation_chunk.message.additional_kwargs:
-                            has_reasoning = True
-                        yield generation_chunk
-        except _lc_base.openai.BadRequestError as error:
-            _lc_base._handle_openai_bad_request(error)
-        except _lc_base.openai.APIError as error:
-            _lc_base._handle_openai_api_error(error)
-
-    async def _astream_responses(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: Any = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[ChatGenerationChunk]:
-        """LangChain's Responses loop with one normalization before conversion."""
-        kwargs["stream"] = True
-        payload = self._get_request_payload(messages, stop=stop, **kwargs)
-        headers: dict[str, Any] = {}
-        base_generation_info: dict[str, Any] = {}
-        try:
-            if self.include_response_headers or self._uses_gateway:
-                raw_context_manager = await self.root_async_client.with_raw_response.responses.create(**payload)
-                context_manager = raw_context_manager.parse()
-                if self.include_response_headers:
-                    headers = {"headers": dict(raw_context_manager.headers)}
-                _lc_base._add_gateway_metadata(base_generation_info, raw_context_manager)
-            else:
-                context_manager = await self.root_async_client.responses.create(**payload)
-
-            original_schema_obj = kwargs.get("response_format")
-            async with context_manager as response:
-                is_first_chunk = True
-                current_index = current_output_index = current_sub_index = -1
-                has_reasoning = False
-                async for raw_chunk in _lc_base._astream_with_chunk_timeout(
-                    response, self.stream_chunk_timeout, model_name=self.model_name
-                ):
-                    chunk = normalize_qwen_responses_event(raw_chunk)
-                    metadata = headers if is_first_chunk else {}
-                    current_index, current_output_index, current_sub_index, generation_chunk = (
-                        _lc_base._convert_responses_chunk_to_generation_chunk(
-                            chunk, current_index, current_output_index, current_sub_index,
-                            schema=original_schema_obj, metadata=metadata,
-                            has_reasoning=has_reasoning, output_version=self.output_version,
-                        )
-                    )
-                    if generation_chunk:
-                        if is_first_chunk and base_generation_info:
-                            generation_chunk.generation_info = {
-                                **base_generation_info,
-                                **(generation_chunk.generation_info or {}),
-                            }
-                        if run_manager:
-                            await run_manager.on_llm_new_token(generation_chunk.text, chunk=generation_chunk)
-                        is_first_chunk = False
-                        if "reasoning" in generation_chunk.message.additional_kwargs:
-                            has_reasoning = True
-                        yield generation_chunk
-        except _lc_base.openai.BadRequestError as error:
-            _lc_base._handle_openai_bad_request(error)
-        except _lc_base.openai.APIError as error:
-            _lc_base._handle_openai_api_error(error)
 
 
 def chat_openai(
@@ -277,30 +261,27 @@ def chat_openai(
     streaming: bool = True,
     attachment_store: AttachmentStore | None = None,
     reasoning_effort: str | None = None,
-) -> QwenChatOpenAI:
-    # Ignore ALL_PROXY/HTTP_PROXY from the shell (common WSL/SOCKS setups break
-    # localhost gateways and require optional httpx[socks]).
-    import httpx
-
-    client = QwenChatOpenAI(
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
-        streaming=streaming,
-        max_retries=2,
-        use_responses_api=True,
-        output_version="responses/v1",
-        **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
-        http_socket_options=(),
-        http_client=httpx.Client(trust_env=False),
-        http_async_client=httpx.AsyncClient(trust_env=False),
+) -> ResponsesChatOpenAI:
+    """Legacy Responses constructor; prefer build_chat_model with an API profile."""
+    return build_chat_model(
+        ModelProfile("legacy", model, api_key=api_key, base_url=base_url, api="responses",
+                     reasoning_efforts=(reasoning_effort,) if reasoning_effort else ()),
+        streaming=streaming, attachment_store=attachment_store, reasoning_effort=reasoning_effort,
     )
-    if attachment_store is not None:
-        client.set_attachment_store(attachment_store)
-    return client
 
 
-class ReasoningChatOpenAI(ChatOpenAI):
+def _optional_reasoning(fields: Any) -> tuple[str, str] | None:
+    # 兼容端点采用两种字段名；保留实际字段名用于历史回传，避免重复拼接。
+    if not isinstance(fields, dict):
+        return None
+    for key in ("reasoning_content", "reasoning"):
+        value = fields.get(key)
+        if isinstance(value, str) and value:
+            return key, value
+    return None
+
+
+class ChatCompletionsChatOpenAI(ProtocolChatOpenAI):
     """Preserve compatible providers' Chat Completions reasoning field."""
 
     def _convert_chunk_to_generation_chunk(
@@ -311,11 +292,17 @@ class ReasoningChatOpenAI(ChatOpenAI):
         )
         if generation is None or not isinstance(generation.message, AIMessageChunk):
             return generation
-        choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
+        raw_usage = chunk.get("usage")
+        if isinstance(raw_usage, dict) and (type(raw_usage.get("prompt_tokens")) is not int or raw_usage["prompt_tokens"] < 0):
+            generation.message.usage_metadata = None
+        choices = chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
         if choices:
-            reasoning = (choices[0].get("delta") or {}).get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning:
-                generation.message.additional_kwargs["reasoning_content"] = reasoning
+            reasoning = _optional_reasoning(choices[0].get("delta"))
+            if reasoning is not None:
+                field, text = reasoning
+                generation.message.additional_kwargs["reasoning_content"] = text
+                # 布尔映射可安全合并多个流式块，字符串标记则会被 LangChain 重复拼接。
+                generation.message.response_metadata["deep_agent_reasoning_fields"] = {field: True}
         return generation
 
     def _create_chat_result(
@@ -323,10 +310,16 @@ class ReasoningChatOpenAI(ChatOpenAI):
     ) -> ChatResult:
         result = super()._create_chat_result(response, generation_info)
         data = response if isinstance(response, dict) else response.model_dump()
+        raw_usage = data.get("usage") or {}
+        if (type(raw_usage.get("prompt_tokens")) is not int or raw_usage["prompt_tokens"] < 0):
+            for generation in result.generations:
+                generation.message.usage_metadata = None
         for generation, choice in zip(result.generations, data.get("choices") or [], strict=False):
-            reasoning = (choice.get("message") or {}).get("reasoning_content")
-            if isinstance(generation.message, AIMessage) and isinstance(reasoning, str) and reasoning:
-                generation.message.additional_kwargs["reasoning_content"] = reasoning
+            reasoning = _optional_reasoning(choice.get("message"))
+            if isinstance(generation.message, AIMessage) and reasoning is not None:
+                field, text = reasoning
+                generation.message.additional_kwargs["reasoning_content"] = text
+                generation.message.response_metadata["deep_agent_reasoning_fields"] = {field: True}
         return result
 
     def _get_request_payload(
@@ -339,12 +332,23 @@ class ReasoningChatOpenAI(ChatOpenAI):
                 if isinstance(original, AIMessage):
                     reasoning = original.additional_kwargs.get("reasoning_content")
                     if isinstance(reasoning, str) and reasoning:
-                        outbound["reasoning_content"] = reasoning
+                        fields = original.response_metadata.get("deep_agent_reasoning_fields")
+                        # 旧会话无标记时沿用 reasoning_content；两个别名均出现时优先使用它。
+                        uses_reasoning = (
+                            isinstance(fields, dict)
+                            and fields.get("reasoning") is True
+                            and fields.get("reasoning_content") is not True
+                        )
+                        field = "reasoning" if uses_reasoning else "reasoning_content"
+                        outbound[field] = reasoning
         return payload
 
 
-# Backwards-compatible name for existing integrations.
-TokenPlanChatOpenAI = ReasoningChatOpenAI
+# Deprecated Python aliases retained for existing integrations. Use the protocol names.
+QwenChatOpenAI = ResponsesChatOpenAI
+TokenPlanChatOpenAI = ChatCompletionsChatOpenAI
+ReasoningChatOpenAI = ChatCompletionsChatOpenAI
+normalize_qwen_responses_event = normalize_responses_event
 
 
 def build_chat_model(
@@ -357,33 +361,31 @@ def build_chat_model(
     """Build the template chat client from a ModelProfile."""
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
         raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
-    if profile.provider == "qwen-responses":
-        model = chat_openai(
-            model=profile.model,
-            api_key=profile.api_key,
-            base_url=profile.base_url,
-            streaming=streaming,
-            attachment_store=attachment_store,
-            reasoning_effort=reasoning_effort,
-        )
-    elif profile.provider == "openai-compatible":
-        import httpx
+    import httpx
 
-        model = ReasoningChatOpenAI(
-            model=profile.model,
-            api_key=profile.api_key,
-            base_url=profile.base_url,
-            streaming=streaming,
-            stream_usage=profile.stream_usage,
-            max_retries=2,
-            use_responses_api=False,
+    if profile.api == "responses":
+        adapter = ResponsesChatOpenAI
+        protocol_kwargs = {
+            "use_responses_api": True, "output_version": "responses/v1",
+            **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
+        }
+    elif profile.api == "chat_completions":
+        adapter = ChatCompletionsChatOpenAI
+        protocol_kwargs = {
+            "use_responses_api": False, "stream_usage": True,
             **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
-            http_socket_options=(),
-            http_client=httpx.Client(trust_env=False),
-            http_async_client=httpx.AsyncClient(trust_env=False),
-        )
+        }
     else:
-        raise ValueError(f"Unsupported model provider: {profile.provider}")
+        raise ValueError(f"Unsupported model API: {profile.api}")
+    model = adapter(
+        model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
+        streaming=streaming, max_retries=2, timeout=600.0,
+        http_socket_options=(), http_client=httpx.Client(trust_env=False),
+        http_async_client=httpx.AsyncClient(trust_env=False), **protocol_kwargs,
+    )
+    object.__setattr__(model, "_deep_agent_model_id", profile.id)
+    if attachment_store is not None:
+        model.set_attachment_store(attachment_store)
     if profile.context_window > 0:
         # deepagents reads this model profile to choose its 85% compaction
         # threshold and to check the request's input budget.

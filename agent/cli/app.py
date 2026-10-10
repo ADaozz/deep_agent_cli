@@ -99,10 +99,10 @@ def format_context_usage(usage: dict[str, int], window: int) -> str:
     if window <= 0:
         return ""
     label = f"{format_context_window(window)} Context"
-    used = usage.get("total_tokens") or usage.get("input_tokens") or 0
-    if used <= 0:
-        return label
-    percent = min(100.0, used / window * 100)
+    used = usage.get("input_tokens")
+    if type(used) is not int or used < 0:
+        return f"{label} · Unknown"
+    percent = used / window * 100
     return f"{label} · {percent:.1f}% used"
 
 

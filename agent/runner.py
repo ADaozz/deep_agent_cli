@@ -215,6 +215,7 @@ class AgentRunner:
         self._pending_reasoning_effort: str | None = None
         self._pending_model_id: str | None = None
         self._pending_permission_mode: PermissionMode | None = None
+        self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._closed = False
         self._close_completed = False
@@ -248,6 +249,7 @@ class AgentRunner:
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
             profile, attachment_store=self.attachment_store,
         ))
+        object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
             instructions=cfg.agent_instructions,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
@@ -456,6 +458,7 @@ class AgentRunner:
                 mode = None
                 effort = None
             if model_id is not None:
+                self._context_usage_invalidated = True
                 self._current_model_id = profile.id
             if mode is not None:
                 self._permission_mode = mode
@@ -493,9 +496,31 @@ class AgentRunner:
         """Token usage of the most recent model call still held in the checkpoint."""
         try:
             state = self.prepared.graph.get_state(self._thread_config())
+            if self._context_usage_invalidated:
+                return {}
+            values = state.values or {}
+            messages = list(values.get("messages", []) or [])
+            middleware = self.prepared.compact_middleware
+            if middleware is not None:
+                messages = middleware._summarization._apply_event_to_messages(
+                    messages, values.get("_summarization_event"),
+                )
+            last = next((item for item in reversed(messages) if isinstance(item, AIMessage)), None)
+            if last is None:
+                return {}
+            model_id = last.response_metadata.get("deep_agent_model_id")
+            if model_id != self._current_model_id:
+                # Legacy checkpoints remain readable; without a source ID their
+                # usage cannot be safely attributed after a model/source switch.
+                return {}
+            if self.session_store is not None:
+                saved = self.session_store.get(self.thread_id)
+                if saved and saved.last_run_status in {StopReason.ABORTED, StopReason.ERROR}:
+                    return {}
+            return _usage_from_messages(messages)
         except Exception:  # noqa: BLE001
+            # 恢复时压缩中间件私有接口或存储读取失败，保守返回 Unknown。
             return {}
-        return _usage_from_messages((state.values or {}).get("messages", []) or [])
 
     @_exclusive_operation
     def compact_context(self) -> CompactResult:
@@ -515,7 +540,7 @@ class AgentRunner:
             messages, values.get("_summarization_event"),
         )
         usage = _usage_from_messages(effective)
-        used = usage.get("total_tokens") or usage.get("input_tokens")
+        used = usage.get("input_tokens")
         window = self.context_window()
         if not window and self.prepared.model is not None:
             profile = self.prepared.model.profile
@@ -558,6 +583,8 @@ class AgentRunner:
             raise RuntimeError("Compaction left the agent with a pending graph step")
         if tool_result is None:
             raise RuntimeError("Compaction tool did not return a result")
+        if status == "compacted":
+            self._context_usage_invalidated = True
         if status == "compacted" and self.session_store is not None:
             self.session_store.touch(self.thread_id, last_run_status=StopReason.STOP)
         return CompactResult(status, used, window, message)
@@ -801,6 +828,7 @@ class AgentRunner:
         else:
             self._runtime.bind(snapshot.info.id)
         self._pending_reasoning_effort = info.pending_reasoning_effort
+        self._context_usage_invalidated = False
         self._pending_model_id = info.pending_model_id
         self._pending_permission_mode = parse_permission_mode(info.pending_permission_mode or "")
         if self._pending_model_id and self.settings is not None:
@@ -1132,10 +1160,16 @@ class AgentRunner:
         handler = on_delta or self.on_delta
         event_handler = on_event or self.on_event
         config = self._thread_config()
-        if handler is None and event_handler is None:
-            return config
+        def stream_usage(usage: dict[str, int]) -> None:
+            if not usage:
+                self._context_usage_invalidated = True
+            elif "input_tokens" in usage:
+                self._context_usage_invalidated = False
+            _emit(event_handler, RunEvent(type="usage", result=usage))
+
         callback = StreamDeltaCallback(
             handler or (lambda _kind, _text: None),
+            on_usage=stream_usage,
             on_compaction=(
                 (lambda active: _emit(event_handler, RunEvent(
                     type="compaction_started" if active else "compaction_finished",
@@ -1179,6 +1213,7 @@ class AgentRunner:
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         self._busy = True
+        self._context_usage_invalidated = True
         _emit(event_handler, RunEvent(type="run_started"))
 
         result: RunResult | None = None
@@ -1330,16 +1365,17 @@ class AgentRunner:
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, last_run_status=reason)
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
+            self._context_usage_invalidated = True
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
-        if handler is None:
-            return
         for message in _messages_in_update(chunk):
             if isinstance(message, AIMessage):
                 message_id = str(getattr(message, "id", "") or "")
                 usage = _usage_metadata_dict(message)
-                if usage:
+                # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
+                if "input_tokens" in usage:
+                    self._context_usage_invalidated = False
                     _emit(handler, RunEvent(type="usage", result=usage))
                 for call in message.tool_calls or []:
                     tool_call_id = str(call.get("id") or "")
@@ -1537,7 +1573,7 @@ def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
     usage = getattr(message, "usage_metadata", None)
     if not isinstance(usage, dict):
         return {}
-    return {key: int(usage[key]) for key in _USAGE_KEYS if isinstance(usage.get(key), int)}
+    return {key: int(usage[key]) for key in _USAGE_KEYS if type(usage.get(key)) is int and usage[key] >= 0}
 
 
 def _usage_from_messages(messages: Any) -> dict[str, int]:
@@ -1546,9 +1582,7 @@ def _usage_from_messages(messages: Any) -> dict[str, int]:
         if isinstance(message, AIMessage):
             if message.additional_kwargs.get("manual_compact_completed"):
                 return {}
-            usage = _usage_metadata_dict(message)
-            if usage:
-                return usage
+            return _usage_metadata_dict(message)
     return {}
 
 

@@ -58,9 +58,9 @@ def test_live_refuses_nonempty_workspace(tmp_path, monkeypatch):
     assert (tmp_path / "keep.txt").read_text() == "keep"
 
 
-@pytest.mark.parametrize("provider,effort", [("openai-compatible", None), ("qwen-responses", "none"), ("qwen-responses", "high")])
+@pytest.mark.parametrize("provider,effort", [("chat_completions", None), ("responses", "none"), ("responses", "high")])
 def test_stream_smoke_rejects_wrong_profile_or_effort_before_api(monkeypatch, provider, effort):
-    settings = Settings(llm_profiles=(ModelProfile("test", "test", provider=provider, reasoning_efforts=("low",)),), llm_default="test")
+    settings = Settings(llm_profiles=(ModelProfile("test", "test", api=provider, reasoning_efforts=("low",)),), llm_default="test")
     monkeypatch.setattr(stream.Settings, "load", lambda: settings)
     monkeypatch.setattr(stream, "build_chat_model", lambda *_args, **_kwargs: pytest.fail("model built"))
     with pytest.raises(SystemExit) as error:

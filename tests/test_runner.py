@@ -54,7 +54,7 @@ def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> 
     before = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
     result = runner.compact_context()
     assert result.status == "ineligible"
-    assert result.percent == pytest.approx(1010 / 128000 * 100)
+    assert result.percent == pytest.approx(1000 / 128000 * 100)
     after = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
     assert after == before
 
@@ -255,7 +255,7 @@ def test_ai_message_without_usage_emits_no_usage_event() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     events = []
     runner._emit_update_events({"model": {"messages": [AIMessage(content="done")]}}, events.append)
-    assert not [event for event in events if event.type == "usage"]
+    assert [event.result for event in events if event.type == "usage"] == []
 
 
 def test_latest_usage_reads_the_most_recent_ai_message() -> None:
@@ -570,3 +570,70 @@ def test_current_interrupt_is_none_without_pending_interrupt() -> None:
     assert runner.current_interrupt() is None
     assert runner.invoke("go").status == "completed"
     assert runner.current_interrupt() is None
+
+
+def test_latest_usage_does_not_fall_back_after_response_without_usage():
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="first", usage_metadata={"input_tokens": 30, "output_tokens": 5, "total_tokens": 35}),
+        AIMessage(content="no usage"),
+    ]), backend=StateBackend())
+    runner.invoke("first")
+    assert runner.latest_usage()["input_tokens"] == 30
+    runner.invoke("second")
+    assert runner.latest_usage() == {}
+
+
+def test_usage_identity_is_checkpointed_and_invalidated_on_cancel():
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="first", usage_metadata={"input_tokens": 0, "output_tokens": 5, "total_tokens": 5}),
+    ]), backend=StateBackend())
+    runner.invoke("first")
+    assert runner.latest_usage()["input_tokens"] == 0
+    last = runner.prepared.graph.get_state(runner._thread_config()).values["messages"][-1]
+    assert last.response_metadata["deep_agent_model_id"] == runner._current_model_id
+    from agent.session import StopReason
+    runner._touch_status(StopReason.ABORTED)
+    assert runner.latest_usage() == {}
+
+
+def test_legacy_checkpoint_usage_is_unknown_without_model_identity():
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
+    runner.prepared.graph.update_state(runner._thread_config(), {"messages": [AIMessage(
+        content="legacy", usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+    )]})
+    assert runner.latest_usage() == {}
+
+
+@pytest.mark.parametrize("input_tokens", [0, 37])
+def test_graph_update_without_usage_preserves_current_stream_usage(input_tokens):
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from agent.cli.state import CliState
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
+    state = CliState()
+    callback = runner._run_config(None, state.apply)["callbacks"][0]
+    callback.on_llm_start({}, [])
+    callback.on_llm_new_token("", chunk=ChatGenerationChunk(message=AIMessageChunk(
+        content="", usage_metadata={"input_tokens": input_tokens, "output_tokens": 1, "total_tokens": input_tokens + 1},
+    )))
+    runner._emit_update_events({"model": {"messages": [AIMessage(content="done")]}}, state.apply)
+    assert state.usage["input_tokens"] == input_tokens
+    assert runner._context_usage_invalidated is False
+    # 下一次调用必须清空，不能延用上一次流式用量。
+    callback.on_llm_start({}, [])
+    runner._emit_update_events({"model": {"messages": [AIMessage(content="no usage")]}}, state.apply)
+    assert state.usage == {}
+    assert runner._context_usage_invalidated is True
+
+
+@pytest.mark.parametrize("error", [TypeError("signature changed"), RuntimeError("bad summary")])
+def test_latest_usage_recovers_as_unknown_when_summary_projection_fails(monkeypatch, error):
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done", usage_metadata={
+        "input_tokens": 37, "output_tokens": 1, "total_tokens": 38,
+    })]), backend=StateBackend())
+    runner.invoke("hi")
+    assert runner.latest_usage()["input_tokens"] == 37
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(runner.prepared.compact_middleware._summarization, "_apply_event_to_messages", fail)
+    assert runner.latest_usage() == {}

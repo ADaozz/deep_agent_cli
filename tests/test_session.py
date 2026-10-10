@@ -393,3 +393,35 @@ def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path)
         assert store.get(info.id).pending_reasoning_effort is None
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("aborted", [False, True])
+def test_context_usage_restore_requires_completed_current_model(tmp_path, aborted):
+    from agent.config import ModelProfile, Settings
+    settings = Settings(llm_profiles=(ModelProfile("source/m", "m"),), llm_default="source/m")
+    path = tmp_path / "usage.sqlite3"
+    store = SessionStore(path)
+    runner = AgentRunner(model=scripted_model([AIMessage(content="answer", usage_metadata={
+        "input_tokens": 17, "output_tokens": 8, "total_tokens": 25,
+    })]), backend=StateBackend(), settings=settings, session_store=store)
+    runner.invoke("hello")
+    identifier = runner.thread_id
+    assert runner.latest_usage()["input_tokens"] == 17
+    if aborted:
+        runner._touch_status(StopReason.ABORTED)
+    runner.close()
+    store.close()
+    reopened = SessionStore(path)
+    resumed = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=settings,
+                          session_store=reopened, thread_id=identifier)
+    try:
+        if aborted:
+            assert resumed.latest_usage() == {}
+        else:
+            assert resumed.latest_usage()["input_tokens"] == 17
+            # Two sources may use the same model name; the source ID matters.
+            resumed._current_model_id = "other/m"
+            assert resumed.latest_usage() == {}
+    finally:
+        resumed.close()
+        reopened.close()

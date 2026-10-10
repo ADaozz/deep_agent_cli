@@ -28,6 +28,7 @@ from agent.llm import build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.pause import PauseGateMiddleware
+from agent.middleware.usage import UsageIdentityMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
 from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
@@ -149,6 +150,7 @@ def build_agent(
             RuntimeConfigGateMiddleware(run_controller.has_pending_config),
             PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
             RecoveryContextMiddleware(),
+            UsageIdentityMiddleware(),
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),
             ToolArgHintMiddleware(),

@@ -42,7 +42,7 @@ def _settings(workspace: Path) -> Settings:
     return Settings(
         llm_profiles=(
             ModelProfile("alpha", "model-a"),
-            ModelProfile("beta", "model-b", provider="openai-compatible", input=("text", "image")),
+            ModelProfile("beta", "model-b", api="chat_completions", input=("text", "image")),
         ),
         llm_default="alpha",
         sandbox=SandboxConfig(workspace=workspace),

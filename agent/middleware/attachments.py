@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
 from agent.attachments import AttachmentStore
-from agent.llm import QwenChatOpenAI, materialize_attachment_refs
+from agent.llm import materialize_attachment_refs
 
 
 _active_store: ContextVar[AttachmentStore | None] = ContextVar("attachment_store", default=None)
@@ -22,7 +22,7 @@ def reset_attachment_store(token: Token[AttachmentStore | None]) -> None:
 
 class AttachmentMaterializationMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        if isinstance(request.model, QwenChatOpenAI):
+        if getattr(request.model, "materializes_attachment_refs", False):
             return handler(request)
         store = _active_store.get()
         if store is None:
