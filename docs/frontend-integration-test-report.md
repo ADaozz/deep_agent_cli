@@ -128,3 +128,7 @@ Web命令：`npm ci; npm run typecheck; npm run lint; npm run test; npm run buil
 | 精确视觉采集比例 | 原PNG与CSS几何不一致，如需逐像素匹配需原始缩放/DPR；已明确差异 |
 
 是否可供本地PR审阅：**是**，核心自动化和受控HTTP链路通过；外部LLM/原生环境与部署安全限制如上，不包装为全环境PASS。没有自动创建或发布PR。独立启动命令见 [web.md](web.md)。
+
+## UI 收尾：图标与紧凑交互框
+
+补充信息标题左侧复用alert图标；审批/补充信息卡统一限制760px宽度，内距22→18px，收紧工具框、表单间距、按钮与图标尺寸。TypeCheck/Lint/Build通过，前端35项通过；针对真实批量审批、Human-input及截图流程重新执行2项浏览器测试，2 passed（13.1s）。本次未改Python代码，未重复执行全量Python或其余12项浏览器测试。上方批量/单工具/补充信息/完成/失败PNG及哈希更新为本轮截图。
