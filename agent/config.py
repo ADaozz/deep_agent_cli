@@ -271,7 +271,11 @@ def resolve_config_path(
 def require_outside_workspace(path: Path, workspace: Path, *, label: str) -> None:
     """Keep runtime configuration outside the agent's writable workspace."""
     if path.expanduser().resolve().is_relative_to(workspace.expanduser().resolve()):
-        raise ValueError(f"{label} must be outside workspace: {path}")
+        raise ConfigError(
+            f"{label} must be outside workspace: {path}\n"
+            "Launch deep-agent from a project directory that does not contain this path "
+            "(for example, cd ~/projects/my-app)."
+        )
 
 
 def require_keybindings_outside_workspace(config_dir: Path, workspace: Path) -> None:

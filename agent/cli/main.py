@@ -102,7 +102,11 @@ def main(argv: list[str] | None = None) -> None:
         serve(startup_args[1:])
         return
     resume_id, open_picker = parse_startup_args(startup_args)
-    created = initialize_user_files()
+    try:
+        created = initialize_user_files()
+    except (ValueError, OSError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     if created is not None:
         Console(stderr=True).print(
             f"Created {created} and ~/.deep-agent/skills/.\n"
@@ -115,12 +119,16 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     try:
         settings = Settings.load()
+        config_dir = settings.config_dir or default_config_dir()
+        require_keybindings_outside_workspace(config_dir, settings.sandbox.workspace)
     except (ConfigError, FileNotFoundError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
-    config_dir = settings.config_dir or default_config_dir()
-    require_keybindings_outside_workspace(config_dir, settings.sandbox.workspace)
-    runner = create_runner(settings)
+    try:
+        runner = create_runner(settings)
+    except ValueError as exc:
+        print(f"Startup error: {exc}\nCheck the sandbox and model settings in your config.", file=sys.stderr)
+        raise SystemExit(2) from None
     if runner.prepared.execution_mode is ExecutionMode.UNSANDBOXED:
         Console(stderr=True).print(f"[bold red]UNSANDBOXED: {runner.prepared.security_warning}[/bold red]")
     Console(stderr=True).print(f"[dim]workspace={settings.sandbox.workspace}[/dim]")
