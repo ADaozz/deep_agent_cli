@@ -114,6 +114,16 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     def session(session_id: str, service: RunManager = Depends(manager)):
         return service.session(session_id)
 
+    @api.get("/sessions/{session_id}/runs")
+    def session_runs(session_id: str, limit: int = Query(default=50, ge=1, le=100),
+                     cursor: str | None = Query(default=None, max_length=512),
+                     service: RunManager = Depends(manager)):
+        return service.session_runs(session_id, limit, cursor)
+
+    @api.get("/projects/{project_id}/active-run")
+    def active_run(project_id: str, service: RunManager = Depends(manager)):
+        return service.active_run(project_id)
+
     @api.post("/sessions/{session_id}/runs", status_code=202)
     def submit(session_id: str, body: CreateRun, service: RunManager = Depends(manager)):
         return service.submit(session_id, body.text, body.resume)

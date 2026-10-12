@@ -106,6 +106,25 @@ class RunManager:
         self.require_project(run["project_id"])
         return run
 
+    def session_runs(self, session_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
+        self.session(session_id)
+        try:
+            return self.store.session_runs(session_id, limit, cursor)
+        except ValueError as exc:
+            raise ServiceError(422, str(exc)) from exc
+
+    def active_run(self, project_id: str) -> dict[str, Any]:
+        with self.lock:
+            self.require_project(project_id)
+            for run_id, active in self.active.items():
+                if active.project_id == project_id:
+                    run = self.run(run_id)
+                    if run["status"] in TERMINAL:
+                        return {"run": None, "blocked": True}
+                    keys = ("id", "session_id", "project_id", "status", "created_at", "updated_at")
+                    return {"run": {key: run[key] for key in keys}}
+            return {"run": None}
+
     def submit(self, session_id: str, text: str | None, resume: bool) -> dict[str, Any]:
         with self.lock:
             session = self.session(session_id)

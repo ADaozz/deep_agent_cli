@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
 import json
+import base64
 import os
 from pathlib import Path
 import sqlite3
@@ -58,6 +59,7 @@ class ServiceStore:
                 type TEXT NOT NULL, data TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
+            CREATE INDEX IF NOT EXISTS runs_session_created ON runs(session_id, created_at DESC, id DESC);
         """)
         with self.lock:
             for row in self.conn.execute("SELECT id FROM runs").fetchall():
@@ -112,6 +114,46 @@ class ServiceStore:
             result = dict(row)
             result["result"] = json.loads(result["result"])
             return result
+
+    def session_runs(self, session_id: str, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
+        after = None
+        if cursor is not None:
+            try:
+                if len(cursor) > 512:
+                    raise ValueError
+                raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+                decoded = json.loads(raw)
+                if set(decoded) != {"session", "time", "id"} or decoded["session"] != session_id:
+                    raise ValueError
+                if not isinstance(decoded["id"], str) or not 0 < len(decoded["id"]) <= 128:
+                    raise ValueError
+                stamp = datetime.fromisoformat(decoded["time"])
+                if stamp.tzinfo is None:
+                    raise ValueError
+                after = (decoded["time"], decoded["id"])
+            except (ValueError, TypeError, KeyError):
+                raise ValueError("Invalid Run history cursor") from None
+        if not 1 <= limit <= 100:
+            raise ValueError("Run history limit must be between 1 and 100")
+        columns = "id,session_id,project_id,status,created_at,updated_at"
+        with self.lock:
+            if after is None:
+                rows = self.conn.execute(
+                    f"SELECT {columns} FROM runs WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT ?",
+                    (session_id, limit + 1),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT {columns} FROM runs WHERE session_id=? AND (created_at,id)<(?,?) "
+                    "ORDER BY created_at DESC,id DESC LIMIT ?", (session_id, *after, limit + 1),
+                ).fetchall()
+        page = [dict(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = page[-1]
+            payload = json.dumps({"session": session_id, "time": last["created_at"], "id": last["id"]}).encode()
+            next_cursor = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        return {"runs": page, "next_cursor": next_cursor}
 
     def update(self, run_id: str, status: str, result: Any = None, interrupt_id: str | None = None) -> None:
         with self.lock, self.conn:

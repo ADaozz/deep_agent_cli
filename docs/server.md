@@ -47,6 +47,8 @@ deep-agent serve --config ~/.deep-agent/service.yaml --host 127.0.0.1 --port 808
 | `POST /v1/sessions` | 通过 `project_id` 创建会话 |
 | `GET /v1/sessions?project_id=app` | 查询会话，最多返回最近 100 条 |
 | `GET /v1/sessions/{session_id}` | 查询会话归属与创建时间 |
+| `GET /v1/sessions/{session_id}/runs` | 只读任务摘要分页（新增） |
+| `GET /v1/projects/{project_id}/active-run` | 查询项目当前活动任务（新增） |
 | `POST /v1/sessions/{session_id}/runs` | 提交 `text`，或用 `resume: true` 恢复中断 |
 | `GET /v1/runs/{run_id}` | 查询任务状态、结果与待处理交互 |
 | `GET /v1/runs/{run_id}/events` | SSE 事件流 |
@@ -152,3 +154,10 @@ SSE 包含 `id`、`event`、JSON `data`。主要事件：
 ## 后续任务：长输出持久化放大
 
 `OUTPUT-PERSIST-01`（P3）：调查长输出事件/任务快照重复持久化及 SQLite 增长，评估输出存储、事件保留和清理策略。用户真机报告记录数据库从 4.25 MB 增至 15.7 MB；本轮未独立复现该体积测量。验收应对固定大小输出测量事件数、写入量和数据库增长，并确认 SSE 重放、完整日志和恢复行为保持正确。作为独立后续任务记录，本轮不修改持久化协议或扩大第一版服务范围。
+
+
+## Web 集成新增的只读查询
+
+两项新增接口均要求原服务 Bearer 认证，不调用 Runner、不创建任务。`GET /v1/sessions/{session_id}/runs?limit=50&cursor=...` 返回 `{runs:[RunSummary],next_cursor:null|string}`；limit 为1～100，按 `(created_at DESC,id DESC)` 稳定键集分页。游标绑定当前会话，无效游标422，未知/未配置项目的会话404。Summary仅含 id、session_id、project_id、status、created_at、updated_at，不含长 output 或待审批参数；详情仍用原 GET run。
+
+`GET /v1/projects/{project_id}/active-run` 返回 `{run:RunSummary|null}`。等待审批/提问、暂停、取消中仍为活跃；终态不作为活跃返回。清理失败时，保留项目占用但不误报终态为活跃，额外返回 `blocked:true`，需要重启服务。SQLite仅增量添加分页索引，原 finish 原子性与提交事件顺序不变。详见 [Web 接口补充](frontend-http-api.md) 和 [启动说明](web.md)。
