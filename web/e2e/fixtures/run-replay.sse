@@ -1,0 +1,22 @@
+id: 101
+event: run_started
+data: {"id":"RUN_TEST_001","session_id":"SESSION_TEST_001","project_id":"app","status":"running","created_at":"2026-10-13T00:00:00+00:00","updated_at":"2026-10-13T00:00:00+00:00","result":{},"interrupt_id":null}
+
+id: 108
+event: delta
+data: {"kind":"answer","text":"正在"}
+
+: keepalive
+
+id: 115
+event: delta
+data: {"kind":"answer","text":"检查测试。"}
+
+id: 115
+event: delta
+data: {"kind":"answer","text":"检查测试。"}
+
+id: 121
+event: run_finished
+data: {"id":"RUN_TEST_001","session_id":"SESSION_TEST_001","project_id":"app","status":"completed","created_at":"2026-10-13T00:00:00+00:00","updated_at":"2026-10-13T00:01:00+00:00","result":{"status":"completed","output":"正在检查测试。"},"interrupt_id":null}
+

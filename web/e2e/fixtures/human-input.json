@@ -1,0 +1,38 @@
+{
+  "purpose": "TEST_ONLY_NOT_REAL_AGENT_DATA",
+  "run": {
+    "id": "RUN_TEST_002",
+    "session_id": "SESSION_TEST_002",
+    "project_id": "app",
+    "status": "waiting_human",
+    "created_at": "2026-10-13T00:00:00+00:00",
+    "updated_at": "2026-10-13T00:01:00+00:00",
+    "interrupt_id": "INT_TEST_002",
+    "result": {
+      "status": "waiting_human",
+      "output": "",
+      "pending_tool_calls": [],
+      "human_input": {
+        "type": "human_input",
+        "interactionType": "clarification",
+        "title": "补充执行边界",
+        "reason": "执行前需要确定可修改文件",
+        "question": "请选择并解释修改范围",
+        "blocking": true,
+        "impact": ["更改代码"],
+        "fields": [
+          {"id": "name", "type": "text", "label": "任务名称", "required": true, "placeholder": "名称", "options": []},
+          {"id": "notes", "type": "textarea", "label": "说明", "required": false, "placeholder": "可选说明", "options": []},
+          {"id": "scope", "type": "single_select", "label": "修改范围", "required": true, "placeholder": "选择", "options": [{"value": "tests", "label": "仅测试", "description": "只改测试目录"},{"value": "src", "label": "代码和测试", "description": "允许源代码和测试"}]},
+          {"id": "checks", "type": "multi_select", "label": "验证项", "required": false, "placeholder": "选择", "options": [{"value": "unit", "label": "单元测试", "description": ""},{"value": "lint", "label": "Lint", "description": ""}]},
+          {"id": "confirm", "type": "boolean", "label": "允许继续", "required": true, "placeholder": "", "options": []}
+        ]
+      },
+      "error": ""
+    }
+  },
+  "request_example": {
+    "interrupt_id": "INT_TEST_002",
+    "values": {"name": "SSE 修复", "notes": "只调整测试", "scope": "tests", "checks": ["unit"], "confirm": false}
+  }
+}
