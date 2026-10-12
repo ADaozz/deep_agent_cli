@@ -2339,7 +2339,11 @@ def test_restored_submitted_human_answer_is_history_after_cancel(tmp_path) -> No
         model=scripted_model([
             AIMessage(content="", tool_calls=[{
                 "id": "ask-annex", "name": "request_human_input",
-                "args": {"reason": "Missing validator", "question": "AnnexExtensionValidator 这块对不上，接下来先做哪个？"},
+                "args": {"reason": "Missing validator", "question": "AnnexExtensionValidator 这块对不上，接下来先做哪个？",
+                         "fields": [
+                             {"id": "annex_gap", "type": "text", "required": True},
+                             {"id": "next_step", "type": "text", "required": True},
+                         ]},
             }]),
             AIMessage(content="unused"),
         ]), backend=StateBackend(), session_store=store,

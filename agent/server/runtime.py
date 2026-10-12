@@ -14,6 +14,7 @@ from uuid import uuid4
 from agent.config import Settings
 from agent.permission import PermissionMode
 from agent.runner import AgentRunner, RunResult
+from agent.tools.human_interaction import validate_human_input_values
 from agent.sandbox import select_backend
 from agent.session import SessionStore
 from agent.server.config import ServerConfig
@@ -140,6 +141,13 @@ class RunManager:
                 ids = [decision["tool_call_id"] for decision in payload]
                 if len(ids) != len(set(ids)) or set(ids) != pending:
                     raise ServiceError(409, "Decisions must cover each pending tool exactly once")
+            if kind == "human-input":
+                # This waiting snapshot contains Runner's InterruptState.payload;
+                # the matching interrupt_id ties it to the current declaration.
+                try:
+                    validate_human_input_values(payload, run["result"]["human_input"])
+                except ValueError as exc:
+                    raise ServiceError(422, str(exc)) from exc
             self.store.update(run_id, "running")
             self.active[run_id].commands.put((kind, payload))
             self.store.emit(run_id, "interaction_submitted", {"interrupt_id": interrupt_id})

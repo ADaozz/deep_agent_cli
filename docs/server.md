@@ -63,6 +63,8 @@ deep-agent serve --config ~/.deep-agent/service.yaml --host 127.0.0.1 --port 808
 
 项目互斥只覆盖该服务中的任务；CLI 或其他程序对同一目录的修改需要由系统协调。每个任务结束后关闭 Runner 和沙箱，下一次任务恢复同一会话的 checkpoint，沙箱中的 `/tmp` 和后台进程不跨任务保留。
 
+Human-input 回答使用当前中断声明的字段定义校验，不能由客户端替换 schema。必填字段缺失、`null`、空字符串、纯空白字符串或空列表返回 `422`；布尔值 `false` 有效，可选字段允许省略或留空。拒绝时保留同一等待交互、interrupt ID 和 checkpoint，可更正后重试。`202` 表示已通过字段校验并入队，不代表 Agent 已完成；后续状态仍通过任务查询或 SSE 获取。
+
 ## 调用示例
 
 以下 Python 示例可作为现有系统后端的接入参考，需要 `httpx`。`session_id` 和 `run_id` 都应由业务系统保存。
