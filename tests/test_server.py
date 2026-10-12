@@ -366,7 +366,7 @@ def test_service_startup_requires_sandbox_even_if_model_config_allows_fallback(c
 
     config.model_config.write_text("sandbox:\n  allow_unsandboxed: true\n")
     # Settings.load normally also requires model configuration; isolate the sandbox policy here.
-    monkeypatch.setattr(Settings, "load", lambda *args: Settings(sandbox=SandboxConfig(allow_unsandboxed=True)))
+    monkeypatch.setattr(Settings, "load", lambda *args, **kwargs: Settings(sandbox=SandboxConfig(allow_unsandboxed=True)))
     calls = []
     def unavailable(sandbox):
         calls.append(sandbox)
@@ -476,3 +476,35 @@ def test_http_real_human_input_validation_survives_restart(config):
             "interrupt_id": waiting["interrupt_id"], "values": {"answer": "fixed", "confirmed": False},
         }).status_code == 202
         assert wait(client, rid, "completed")["result"]["output"] == "Accepted"
+
+
+def test_server_settings_validate_project_instead_of_launch_directory(config, monkeypatch):
+    from agent.config import ConfigError, Settings
+    import yaml
+
+    config.model_config.write_text(yaml.safe_dump({
+        "llm": {"default": "test/model", "models": {"test": {"models": {"model": {}}}}},
+        "sandbox": {"workspace": "."},
+        "paths": {"config_dir": str(config.model_config.parent / "agent-config")},
+    }))
+    monkeypatch.chdir(config.model_config.parent)
+    # CLI still protects its cwd; only service-owned project selection overrides it.
+    with pytest.raises(ConfigError, match="outside workspace"):
+        Settings.load(config.model_config)
+    settings = config.settings_for("one")
+    assert settings.sandbox.workspace == config.projects["one"]
+    assert settings.sandbox.allow_unsandboxed is False
+    assert settings.state_path == config.state_dir / "projects" / "one" / "sessions.sqlite3"
+
+
+@pytest.mark.parametrize("unsafe_project", ["one", "two"])
+def test_server_settings_still_reject_config_directory_in_any_project(config, unsafe_project, monkeypatch):
+    import yaml
+
+    config.model_config.write_text(yaml.safe_dump({
+        "llm": {"default": "test/model", "models": {"test": {"models": {"model": {}}}}},
+        "paths": {"config_dir": str(config.projects[unsafe_project] / "agent-config")},
+    }))
+    monkeypatch.chdir(config.model_config.parent)
+    with pytest.raises(ValueError, match="outside workspace"):
+        config.settings_for("one")

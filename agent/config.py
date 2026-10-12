@@ -169,16 +169,19 @@ class Settings:
         return self.llm_profiles
 
     @classmethod
-    def load(cls, path: str | Path | None = None, *, base_dir: Path | None = None) -> "Settings":
-        """Load settings from a path, explicit base directory, or ~/.deep-agent/config.yaml."""
+    def load(
+        cls, path: str | Path | None = None, *, base_dir: Path | None = None,
+        workspace: Path | None = None,
+    ) -> "Settings":
+        """Load settings; an explicit workspace is applied before path safety checks."""
         resolved = resolve_config_path(path, base_dir=base_dir)
         if resolved is None:
-            return cls()
+            return cls.from_mapping({}, workspace=workspace) if workspace is not None else cls()
         try:
             data = _read_yaml(resolved)
             if "llm" not in data:
                 raise ValueError("llm.models must define grouped model sources")
-            return cls.from_mapping(data, base_dir=resolved.parent, source_path=resolved)
+            return cls.from_mapping(data, base_dir=resolved.parent, source_path=resolved, workspace=workspace)
         except yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
             location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
@@ -195,6 +198,7 @@ class Settings:
         *,
         base_dir: Path | None = None,
         source_path: Path | None = None,
+        workspace: Path | None = None,
     ) -> "Settings":
         raw = dict(data or {})
         root = (base_dir or Path.cwd()).expanduser().resolve()
@@ -202,7 +206,9 @@ class Settings:
         agent = _section(raw, "agent")
         ui = _section(raw, "ui")
         paths = _section(raw, "paths")
-        sandbox_raw = _section(raw, "sandbox")
+        sandbox_raw = dict(_section(raw, "sandbox"))
+        if workspace is not None:
+            sandbox_raw["workspace"] = workspace.expanduser().resolve()
         web_search = _section(raw, "web_search")
         if "protected_workspace_paths" in sandbox_raw:
             raise ValueError(

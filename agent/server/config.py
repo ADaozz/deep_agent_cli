@@ -77,7 +77,7 @@ class ServerConfig:
 
     def settings_for(self, project_id: str) -> Settings:
         root = self.projects[project_id]
-        settings = Settings.load(self.model_config)
+        settings = Settings.load(self.model_config, workspace=root)
         for path in (settings.config_dir or Path.home() / ".deep-agent",):
             # Skills and runtime settings must remain outside every writable project.
             for workspace in self.projects.values():
