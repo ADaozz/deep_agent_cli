@@ -28,7 +28,7 @@ jobs:
           sudo apt-get install -y bubblewrap apparmor
           bash .github/scripts/enable-ci-bwrap.sh
       - name: Install package and test tools
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,server]"
       - name: Require actual sandbox support
         run: python examples/sandbox_probe.py --require-sandbox --report sandbox-report.json
       - name: Run automatic regression including local HTTP integration

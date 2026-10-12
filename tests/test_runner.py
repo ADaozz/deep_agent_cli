@@ -637,3 +637,37 @@ def test_latest_usage_recovers_as_unknown_when_summary_projection_fails(monkeypa
         raise error
     monkeypatch.setattr(runner.prepared.compact_middleware._summarization, "_apply_event_to_messages", fail)
     assert runner.latest_usage() == {}
+
+
+def test_decide_tools_mixed_batch_validates_and_preserves_order() -> None:
+    runner = AgentRunner(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[
+                {"id": "a", "name": "write_file", "args": {"file_path": "/workspace/a.txt", "content": "yes"}},
+                {"id": "b", "name": "write_file", "args": {"file_path": "/workspace/b.txt", "content": "no"}},
+            ]),
+            AIMessage(content="finished"),
+        ]), backend=StateBackend(), thread_id="mixed-batch",
+    )
+    try:
+        assert runner.invoke("write files").status == "waiting_confirmation"
+        for decisions in (
+            [{"tool_call_id": "a", "decision": "approve"}],
+            [{"tool_call_id": "a", "decision": "approve"}] * 2,
+            [{"tool_call_id": "stale", "decision": "approve"}],
+            [{"tool_call_id": "a", "decision": "invalid"}],
+        ):
+            with pytest.raises(ValueError):
+                runner.decide_tools(decisions)
+            assert runner.current_interrupt().kind is InterruptKind.WAITING_CONFIRMATION
+        result = runner.decide_tools([
+            {"tool_call_id": "b", "decision": "reject", "message": "Leave it absent"},
+            {"tool_call_id": "a", "decision": "approve"},
+        ])
+        assert result.status == "completed"
+        assert result.output == "finished"
+        files = runner.prepared.graph.get_state(runner._thread_config()).values["files"]
+        assert "/workspace/a.txt" in files
+        assert "/workspace/b.txt" not in files
+    finally:
+        runner.close()

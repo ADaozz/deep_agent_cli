@@ -88,6 +88,7 @@ def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {package_version()}")
     commands = parser.add_subparsers(dest="command", title="commands")
+    commands.add_parser("serve", help="Run the optional HTTP service (deep-agent serve --help)")
     resume = commands.add_parser("resume", help="Resume a saved session or open the session picker")
     resume.add_argument("session_id", nargs="?", help="Session ID or unique prefix; omit to select interactively")
     args = parser.parse_args(argv)
@@ -95,7 +96,12 @@ def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    resume_id, open_picker = parse_startup_args(sys.argv[1:] if argv is None else argv)
+    startup_args = sys.argv[1:] if argv is None else argv
+    if startup_args[:1] == ["serve"]:
+        from agent.server.main import main as serve
+        serve(startup_args[1:])
+        return
+    resume_id, open_picker = parse_startup_args(startup_args)
     created = initialize_user_files()
     if created is not None:
         Console(stderr=True).print(
