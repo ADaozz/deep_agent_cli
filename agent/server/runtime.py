@@ -124,8 +124,7 @@ class RunManager:
                 active.thread.start()
             except BaseException:
                 del self.active[run_id]
-                self.store.update(run_id, "failed", {"status": "failed", "error": "Unable to start worker"})
-                self.store.emit(run_id, "run_finished", self.store.run(run_id))
+                self.store.finish(run_id, "failed", {"status": "failed", "error": "Unable to start worker"})
                 raise
             return result
 
@@ -236,12 +235,10 @@ class RunManager:
                     LOG.error("Runner cleanup failed (%s)", run_id)
                     # Retain admission reservation: unsafe to admit another writer.
                     with self.lock:
-                        self.store.update(run_id, "failed", {"status": "failed", "error": "Runner cleanup failed; restart service"})
-                        self.store.emit(run_id, "run_finished", self.run(run_id))
+                        self.store.finish(run_id, "failed", {"status": "failed", "error": "Runner cleanup failed; restart service"})
                     return
             with self.lock:
-                self.store.update(run_id, final.status, final)
-                self.store.emit(run_id, "run_finished", self.run(run_id))
+                self.store.finish(run_id, final.status, final)
                 self.active.pop(run_id, None)
 
     def close(self) -> None:

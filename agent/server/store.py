@@ -59,11 +59,10 @@ class ServiceStore:
             );
             CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
         """)
-        with self.lock, self.conn:
+        with self.lock:
             for row in self.conn.execute("SELECT id FROM runs").fetchall():
                 if self.run(row["id"])["status"] not in TERMINAL:
-                    self.update(row["id"], "interrupted", {"status": "interrupted", "error": "Service restarted; resume the session explicitly"})
-                    self.emit(row["id"], "run_finished", self.run(row["id"]))
+                    self.finish(row["id"], "interrupted", {"status": "interrupted", "error": "Service restarted; resume the session explicitly"})
 
     def _json(self, value: Any) -> str:
         def redact(item: Any) -> Any:
@@ -116,15 +115,34 @@ class ServiceStore:
 
     def update(self, run_id: str, status: str, result: Any = None, interrupt_id: str | None = None) -> None:
         with self.lock, self.conn:
-            self.conn.execute(
-                "UPDATE runs SET status=?,updated_at=?,result=?,interrupt_id=? WHERE id=?",
-                (status, now(), self._json(result or {}), interrupt_id, run_id),
-            )
+            self._update(run_id, status, result, interrupt_id)
+
+    def _update(self, run_id: str, status: str, result: Any, interrupt_id: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE runs SET status=?,updated_at=?,result=?,interrupt_id=? WHERE id=?",
+            (status, now(), self._json(result or {}), interrupt_id, run_id),
+        )
+
+    def finish(self, run_id: str, status: str, result: Any) -> None:
+        """Publish a terminal snapshot and its event in one SQLite transaction.
+
+        Keep the store lock until commit so SSE snapshots on this connection
+        cannot observe the updated status before run_finished exists. Helpers
+        deliberately do not commit; an event-write failure rolls back both.
+        """
+        if status not in TERMINAL:
+            raise ValueError("finish requires a terminal status")
+        with self.lock, self.conn:
+            self._update(run_id, status, result)
+            self._emit(run_id, "run_finished", self.run(run_id))
 
     def emit(self, run_id: str, kind: str, data: Any) -> None:
         with self.lock, self.conn:
-            self.conn.execute("INSERT INTO events(run_id,type,data) VALUES (?,?,?)",
-                              (run_id, kind, self._json(data)))
+            self._emit(run_id, kind, data)
+
+    def _emit(self, run_id: str, kind: str, data: Any) -> None:
+        self.conn.execute("INSERT INTO events(run_id,type,data) VALUES (?,?,?)",
+                          (run_id, kind, self._json(data)))
 
     def events(self, run_id: str, after: int, limit: int = 100) -> list[dict[str, Any]]:
         with self.lock:
