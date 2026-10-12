@@ -149,8 +149,8 @@ class RunManager:
                 except ValueError as exc:
                     raise ServiceError(422, str(exc)) from exc
             self.store.update(run_id, "running")
-            self.active[run_id].commands.put((kind, payload))
             self.store.emit(run_id, "interaction_submitted", {"interrupt_id": interrupt_id})
+            self.active[run_id].commands.put((kind, payload))
             return self.run(run_id)
 
     def cancel(self, run_id: str) -> dict[str, Any]:

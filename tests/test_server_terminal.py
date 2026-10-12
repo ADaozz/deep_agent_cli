@@ -310,3 +310,101 @@ def test_terminal_event_insert_failure_rolls_back_status_and_result(tmp_path, st
         assert finished[0]["data"]["interrupt_id"] is None
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("kind", ["human-input", "approvals", "continue"])
+def test_submission_event_is_committed_before_worker_is_woken(config, monkeypatch, kind):
+    from agent.runner import InterruptKind, InterruptState, RunEvent
+    import time
+
+    publication_entered = Event()
+    release_publication = Event()
+    enqueued = Event()
+    published_at_enqueue = []
+    resumed = Event()
+    errors = []
+
+    class Runner(FakeRunner):
+        def invoke(self, text, **callbacks):
+            if kind == "continue":
+                self.state = InterruptState(InterruptKind.PAUSED, {})
+                return RunResult(status="paused")
+            return super().invoke(text, **callbacks)
+
+        def processed(self, callbacks):
+            resumed.set()
+            callbacks["on_event"](RunEvent(type="answer_processed"))
+            self.state = None
+            return RunResult(status="completed", output="done")
+
+        def submit_human_input(self, values, **callbacks):
+            return self.processed(callbacks)
+
+        def decide_tools(self, decisions, **callbacks):
+            return self.processed(callbacks)
+
+        def continue_run(self, **callbacks):
+            return self.processed(callbacks)
+
+    manager = RunManager(config, lambda *args: Runner())
+    responder = None
+    try:
+        session = manager.store.create_session("causal-session", "one")
+        text = {"human-input": "human", "approvals": "approve", "continue": "paused"}[kind]
+        run = manager.submit(session["id"], text, False)
+        rid = run["id"]
+        deadline = time.monotonic() + 5
+        while manager.run(rid)["interrupt_id"] is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        waiting = manager.run(rid)
+        assert waiting["interrupt_id"]
+        original_emit = manager.store.emit
+        original_put = manager.active[rid].commands.put
+
+        def gated_emit(run_id, event, data):
+            if event == "interaction_submitted":
+                publication_entered.set()
+                assert release_publication.wait(5)
+            return original_emit(run_id, event, data)
+
+        def observed_put(command):
+            enqueued.set()
+            # This check runs at the precise wake-up boundary, not after a sleep.
+            published_at_enqueue.append(any(e["type"] == "interaction_submitted" for e in manager.store.events(rid, 0)))
+            return original_put(command)
+
+        monkeypatch.setattr(manager.store, "emit", gated_emit)
+        monkeypatch.setattr(manager.active[rid].commands, "put", observed_put)
+        payload = [{"tool_call_id": tool, "decision": "reject"} for tool in ("a", "b")] if kind == "approvals" else {"text": "answer"}
+
+        def respond():
+            try:
+                manager.respond(rid, kind, waiting["interrupt_id"], payload)
+            except BaseException as exc:
+                errors.append(exc)
+
+        responder = Thread(target=respond)
+        responder.start()
+        assert publication_entered.wait(5)
+        assert not enqueued.is_set()
+        assert not resumed.is_set()
+        release_publication.set()
+        responder.join(5)
+        assert not responder.is_alive() and not errors
+        assert resumed.wait(5)
+        assert published_at_enqueue == [True]
+        deadline = time.monotonic() + 5
+        while manager.run(rid)["status"] not in TERMINAL and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert manager.run(rid)["status"] == "completed"
+        events = manager.store.events(rid, 0)
+        submitted = next(e["id"] for e in events if e["type"] == "interaction_submitted")
+        processed = next(e["id"] for e in events if e["type"] == "agent_event" and e["data"]["type"] == "answer_processed")
+        finished = next(e["id"] for e in events if e["type"] == "run_finished")
+        assert submitted < processed < finished
+    finally:
+        release_publication.set()
+        if responder is not None:
+            responder.join(5)
+        monkeypatch.undo()
+        manager.close()
