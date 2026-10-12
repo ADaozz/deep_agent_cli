@@ -305,3 +305,7 @@ pytest -q
 ## 许可证
 
 [MIT](https://github.com/ADaozz/deep_agent_cli/blob/main/LICENSE)
+
+### 本地 Web 工作区
+
+可选 Vue3 界面通过同源 Python 网关连接 HTTP Agent 服务；令牌不进入浏览器。开发和构建启动、仅本地单用户的访问限制、SSE恢复与功能边界见 [Web 启动说明](docs/web.md)。界面不提供当前HTTP协议未支持的模型/权限切换、上传或真实Git Diff。

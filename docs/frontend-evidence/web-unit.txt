@@ -1,0 +1,19 @@
+
+> deep-agent-workspace@0.1.0 test
+> vitest run
+
+
+ RUN  v3.2.7 /workspace/deep_agent_cli/web
+
+ ✓ src/__tests__/forms.spec.ts (12 tests) 52ms
+ ✓ src/__tests__/components.spec.ts (10 tests) 41ms
+ ✓ src/__tests__/stream.spec.ts (6 tests) 24ms
+ ✓ src/__tests__/reducer.spec.ts (4 tests) 6ms
+ ✓ src/__tests__/workspace.spec.ts (1 test) 6ms
+ ✓ src/__tests__/logs.spec.ts (2 tests) 26ms
+
+ Test Files  6 passed (6)
+      Tests  35 passed (35)
+   Start at  19:21:49
+   Duration  3.37s (transform 431ms, setup 0ms, collect 700ms, tests 154ms, environment 1.58s, prepare 273ms)
+

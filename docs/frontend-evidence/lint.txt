@@ -1,0 +1,4 @@
+
+> deep-agent-workspace@0.1.0 lint
+> eslint src
+

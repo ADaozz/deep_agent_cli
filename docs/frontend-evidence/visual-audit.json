@@ -1,0 +1,218 @@
+{
+  "reference_size": [
+    1600,
+    1280
+  ],
+  "reference_panel_starts_at_y100": [
+    0,
+    1287
+  ],
+  "css_columns": [
+    218,
+    "flexible",
+    252
+  ],
+  "css_topbar": 54,
+  "screenshots": [
+    {
+      "path": "approval-multiple-1600.png",
+      "size": [
+        1600,
+        1280
+      ],
+      "sha256": "cc3b2863acf7ada6b18c7dfb72c3b08c12d464d7023307fcd0715708b9635db9",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "approval-single-1600.png",
+      "size": [
+        1600,
+        1280
+      ],
+      "sha256": "d44c2df37d14efba6ebe593acffe6d58d8f77c077ca9d702d60cc334f13e17c4",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "completed-1600.png",
+      "size": [
+        1600,
+        1280
+      ],
+      "sha256": "b44477ad2cc56e3d6b08dd4996b0ff6bb2e69d9a1e2c1c9a1ed79d628554e55a",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "failed-1440.png",
+      "size": [
+        1440,
+        900
+      ],
+      "sha256": "397c37a149caaba862e045dab478bfb6b1fad4028b3a6d1e3444d8e392e4e7f2",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "human-1440.png",
+      "size": [
+        1440,
+        900
+      ],
+      "sha256": "629ce9d7a42796ce4a5862a52a26dc8ac351146a5323a7e323f39084df5f0a30",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "m1-empty-1440.png",
+      "size": [
+        1440,
+        900
+      ],
+      "sha256": "54b07133d16d36ce808cef33dba41a6c8a8721dc558eae946ee63b7e117bd13f",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "m1-empty-1600.png",
+      "size": [
+        1600,
+        1280
+      ],
+      "sha256": "48dd3457a36557fcef4e05bffce12eaf1da73c7574f15ef8f7038ffe670cf6d9",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "running-before-cancel.png",
+      "size": [
+        1280,
+        720
+      ],
+      "sha256": "53750a89210d7b97184ab240f13c868a28353fd3fea6b438edfabd608418405e",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    }
+  ]
+}

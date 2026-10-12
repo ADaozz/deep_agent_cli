@@ -1,0 +1,13 @@
+
+> deep-agent-workspace@0.1.0 build
+> vue-tsc --noEmit && vite build
+
+vite v7.3.7 building client environment for production...
+transforming...
+✓ 52 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.42 kB │ gzip:  0.30 kB
+dist/assets/index-COV6x2PD.css   15.61 kB │ gzip:  4.41 kB
+dist/assets/index-BK7K5_UL.js   103.51 kB │ gzip: 38.86 kB
+✓ built in 933ms

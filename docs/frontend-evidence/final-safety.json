@@ -1,0 +1,24 @@
+{
+  "baseline": "f9d1e028bc92ee18f4efd462fbd2c50191c78087",
+  "branch": "feat/stitch-web-workspace",
+  "protected_files_unchanged": [
+    "agent/runner.py",
+    "agent/sandbox.py",
+    "agent/sandbox_worker.py",
+    "agent/sandbox_pool.py",
+    "agent/permission.py",
+    "agent/config.py",
+    "agent/server/config.py",
+    "pyproject.toml"
+  ],
+  "write_paths_ast_identical": true,
+  "supplied_key_literal_matches": 0,
+  "token_bundle_scan": "PASS",
+  "readonly_added_routes": [
+    "GET /v1/sessions/{session_id}/runs",
+    "GET /v1/projects/{project_id}/active-run"
+  ],
+  "pushed": false,
+  "merged": false,
+  "released": false
+}
