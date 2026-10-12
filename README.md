@@ -18,6 +18,7 @@
 - **上下文压缩**：接近模型上下文窗口时自动摘要旧对话，也可以手动压缩。
 - **技能**：从 `~/.deep-agent/skills/` 加载 Skills，通过 `/skill` 选择技能并附带任务说明，支持读取技能目录中的参考文件。
 - **可选扩展**：配置 Tavily API key 后可以搜索公开网页；读取工作区根目录的 `AGENTS.md` 作为项目说明。
+- **HTTP 后端服务**：通过可选 `server` 依赖提供后台任务、SSE 进度、会话恢复和系统界面审批，见 [后端接入](docs/server.md)。
 
 ## 运行要求
 
@@ -272,7 +273,7 @@ Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
 - 文件工具在 `deep-agent` 进程中直接读写宿主文件，不经过沙箱，路径限定在工作区和 Skills 目录内。工作区里的所有内容 Agent 都能读写，包括 `.git/` 和 `.env`。
 - 程序会在工作区中创建 `.deep-agent/`（命令输出超限时的日志）和 `.deepagents/`（上下文压缩时保存的历史），但不会修改 `.gitignore`。
 - 不能在家目录或其上层目录启动，因为配置目录 `~/.deep-agent` 必须位于工作区之外。
-- 只能在交互式终端中使用，没有非交互或批处理模式。
+- CLI 需要交互式终端；非交互调用使用可选的 [HTTP 服务](docs/server.md)。
 - 模型请求和 Tavily 请求不读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。
 - 从剪贴板粘贴图片只支持 WSL；其他环境需要通过文件路径添加图片。
 - 推理强度的可选值需要按服务商文档手动配置，程序不会自动探测。
@@ -285,6 +286,7 @@ Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
 - [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)：隔离范围、网络、日志、Ubuntu / WSL2 排查
 - [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)：命令、快捷键、图片、会话、显示规则
 - [作为 Python 库使用](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/library.md)：`AgentRunner`、事件、自定义工具
+- [HTTP 后端服务](docs/server.md)：部署、接口、任务与事件、审批和现有系统接入
 - [架构](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/architecture.md)：分层、中间件、会话存储、上下文压缩
 - [开发](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/development.md)：测试、冒烟脚本、CI 与发布
 

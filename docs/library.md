@@ -44,6 +44,8 @@ runner.close()
 
 当前中断也可以通过 `runner.current_interrupt()` 查询。
 
+一批工具需要分别批准或拒绝时，使用 `runner.decide_tools(decisions)`，每项包含 `tool_call_id`、`decision`（`approve` / `reject`）及可选的拒绝 `message`。必须覆盖每个待审批调用且不能重复；整个批次在一次恢复操作中提交。
+
 运行中可以从其他线程调用 `runner.steer(text)`、`runner.follow_up(text)`、`runner.request_pause()`、`runner.request_cancel()`。
 
 ## 事件

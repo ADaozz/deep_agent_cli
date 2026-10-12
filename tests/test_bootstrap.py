@@ -93,6 +93,27 @@ def test_startup_args_parse_resume() -> None:
     assert parse_startup_args(["resume", "abc-123"]) == ("abc-123", True)
 
 
+def test_home_workspace_reports_hint_without_traceback(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    env.pop("DEEP_AGENT_CONFIG", None)
+    result = subprocess.run(
+        [sys.executable, "-m", "agent.cli.main"],
+        text=True, capture_output=True, cwd=home, env=env, timeout=20,
+    )
+    assert result.returncode == 2
+    assert "Configuration error:" in result.stderr
+    assert "configuration directory must be outside workspace" in result.stderr
+    assert "Launch deep-agent from a project directory" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not (home / ".deep-agent").exists()
+
+
 def test_help_does_not_bootstrap_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -203,3 +224,27 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "CliApplication", App)
     cli.main([])
     assert calls == ["ran", "closed"]
+
+
+def test_cli_reports_missing_required_mount_without_traceback(monkeypatch, tmp_path, capsys):
+    from dataclasses import replace
+    from agent.cli import main as cli
+    from agent.config import BindMount
+    from agent.sandbox import select_backend
+
+    monkeypatch.setattr(cli, "initialize_user_files", lambda: None)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    missing = tmp_path / "missing-cargo"
+    settings = Settings(sandbox=replace(
+        Settings().sandbox, workspace=tmp_path,
+        extra_read_only_mounts=(BindMount(missing, "/opt/cargo"),),
+    ), config_dir=tmp_path.parent / "config")
+    monkeypatch.setattr(cli.Settings, "load", lambda: settings)
+    monkeypatch.setattr(cli, "create_runner", lambda settings: select_backend(settings.sandbox, check=False))
+    with pytest.raises(SystemExit) as error:
+        cli.main([])
+    assert error.value.code == 2
+    output = capsys.readouterr().err
+    assert f"Startup error: mount source does not exist: {missing}" in output
+    assert "Traceback" not in output

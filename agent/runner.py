@@ -59,6 +59,7 @@ from agent.session import (
 from agent.session_lock import SessionLockBusyError
 from agent.session_runtime import RestorePlan, SessionLeaseLike, SessionRuntime
 from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
+from agent.tools.human_interaction import validate_human_input_values
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
 
@@ -1086,12 +1087,43 @@ class AgentRunner:
                 "This session uses the removed handoff_to_human tool. "
                 "Start a new session and ask again with request_human_input."
             )
-        if not isinstance(values, dict):
-            raise ValueError("Human input response must contain a values object")
+        validate_human_input_values(values, state.payload)
         envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
         if state.payload.get("interactionId"):
             envelope["interactionId"] = state.payload["interactionId"]
         return self._resume(envelope, on_delta=on_delta, on_event=on_event)
+
+    @_exclusive_operation
+    def decide_tools(
+        self,
+        decisions: Sequence[dict[str, Any]],
+        *,
+        on_delta: DeltaHandler | None = None,
+        on_event: RunEventHandler | None = None,
+    ) -> RunResult:
+        """Resume a complete approval batch with an explicit decision per call."""
+        self._require_active_session()
+        state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "decide_tools")
+        pending_ids = [str(call.get("toolCallId", "")) for call in state.pending_tools]
+        by_id: dict[str, dict[str, Any]] = {}
+        for decision in decisions:
+            call_id = decision.get("tool_call_id")
+            kind = decision.get("decision")
+            if call_id not in pending_ids or call_id in by_id or kind not in ("approve", "reject"):
+                raise ValueError("Each pending tool must have exactly one approve/reject decision")
+            item = {"type": kind}
+            message = decision.get("message")
+            if message is not None and not isinstance(message, str):
+                raise ValueError("Decision message must be a string")
+            if kind == "reject" and message:
+                item["message"] = message
+            by_id[call_id] = item
+        if set(by_id) != set(pending_ids):
+            raise ValueError("Decisions must cover every pending tool call")
+        return self._resume(
+            {"decisions": [by_id[call_id] for call_id in pending_ids]},
+            on_delta=on_delta, on_event=on_event,
+        )
 
     @_exclusive_operation
     def _decide_listed_tools(  # HITL adapter: one Command must carry the full decisions list.
