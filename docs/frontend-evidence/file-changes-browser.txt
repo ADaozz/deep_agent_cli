@@ -1,0 +1,42 @@
+
+> deep-agent-workspace@0.1.0 test:e2e
+> playwright test
+
+[WebServer] (node:36156) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] INFO:     Started server process [36184]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+
+Running 15 tests using 1 worker
+
+(node:36186) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/artifacts.spec.ts:4:1 › real file changes and inspector outputs survive replay and stay scoped to a Run (2.9s)
+  ✓   2 e2e/integration.spec.ts:3:1 › genuine service + BFF + Runner batch approval and human input (2.0s)
+  ✓   3 e2e/integration.spec.ts:32:1 › fresh browser discovers current approval and history without local storage (2.2s)
+  ✓   4 e2e/integration.spec.ts:59:1 › actual private gateway token is absent from browser traffic, HTML, storage and build (993ms)
+  ✓   5 e2e/integration.spec.ts:77:1 › desktop session filter is a real focused control, not a hidden sidebar (743ms)
+  ✓   6 e2e/recovery.spec.ts:20:1 › 409 clears every old decision and a subsequent approval starts unselected (1.5s)
+  ✓   7 e2e/recovery.spec.ts:45:1 › 422 retains form values; asynchronous rejection returns to a usable waiting form (2.1s)
+[WebServer] 11:50:01 PM [vite] http proxy error: /api/agent/runs/fe3f8463-1c85-48f0-a20c-d599fd6c0210
+[WebServer] Error: connect ECONNREFUSED 127.0.0.1:8765
+[WebServer]     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+[WebServer] 11:50:02 PM [vite] http proxy error: /api/agent/runs/fe3f8463-1c85-48f0-a20c-d599fd6c0210
+[WebServer] Error: connect ECONNREFUSED 127.0.0.1:8765
+[WebServer]     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+[WebServer] INFO:     Started server process [36764]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+  ✓   8 e2e/recovery.spec.ts:68:1 › BFF disconnect reconnects from cursor without reposting or cancelling the task (5.1s)
+  ✓   9 e2e/recovery.spec.ts:94:1 › service crash produces interrupted; explicit resume restores checkpoint into a new Run (5.5s)
+  ✓  10 e2e/recovery.spec.ts:113:1 › cancellation and pause use authoritative transitions (1.8s)
+  ✓  11 e2e/recovery.spec.ts:132:1 › two projects occupy capacity; third shows real 429; stale same-project submit shows real 409 (1.1s)
+  ✓  12 e2e/recovery.spec.ts:150:1 › single approval, human, running, completed and failure actual screenshots (2.5s)
+  ✓  13 e2e/recovery.spec.ts:174:1 › real 15s keepalive traverses BFF without reconnect storm (16.2s)
+  ✓  14 e2e/recovery.spec.ts:205:1 › leaving the page closes its stream without cancelling the Run (1.7s)
+  ✓  15 e2e/workspace.spec.ts:4:1 › fixture visual baseline and real narrow drawers (866ms)
+
+  15 passed (53.3s)

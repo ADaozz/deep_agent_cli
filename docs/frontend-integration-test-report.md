@@ -20,7 +20,7 @@
 
 使用轻量composable，无Pinia/UI库；运行依赖只有Vue。Python复用已有server extra，没有增加项目Python依赖。工具层增加Vue/Vite/TS、Vitest、ESLint、Playwright及锁文件。
 
-## 最终执行与证据
+## M0–M4 原始执行与证据（追加结果见文末）
 
 | 检查 | 结果 | 命令/证据 |
 |---|---|---|
@@ -120,7 +120,7 @@ Web命令：`npm ci; npm run typecheck; npm run lint; npm run test; npm run buil
 | 原生IME/屏幕阅读器、有头X11 | NOT RUN：组合事件/键盘/浏览器PNG已测；无相应原生环境证据 |
 | 远程CI、PR、推送/合并 | NOT RUN：用户明确禁止自动推送/合并；仅本地构建与测试 |
 | 历史原始指令/会话标题 | KNOWN LIMITATION：服务未存储，不能凭输出推断；不新增敏感文本字段 |
-| Model/Branch/Diff/测试统计/二进制资源/上传 | 不在协议或范围内，隐藏或空态；不伪造 |
+| Model/Branch/完整GitDiff/测试统计/二进制资源/上传 | 无对应数据，隐藏或空态；文件工具变更记录现已实现，见追加验收 |
 | Human-input类型/选项强验证 | KNOWN LIMITATION：后端仅required空值校验，前端体验规则不是权限防护 |
 | 公网/多用户身份与项目ACL | 不支持；loopback同源限制不等于多用户认证体系 |
 | Unix socket间接联网 | KNOWN LIMITATION，不算PASS，也未作为沙箱逃逸修复 |
@@ -132,3 +132,21 @@ Web命令：`npm ci; npm run typecheck; npm run lint; npm run test; npm run buil
 ## UI 收尾：图标与紧凑交互框
 
 补充信息标题左侧复用alert图标；审批/补充信息卡统一限制760px宽度，内距22→18px，收紧工具框、表单间距、按钮与图标尺寸。TypeCheck/Lint/Build通过，前端35项通过；针对真实批量审批、Human-input及截图流程重新执行2项浏览器测试，2 passed（13.1s）。本次未改Python代码，未重复执行全量Python或其余12项浏览器测试。上方批量/单工具/补充信息/完成/失败PNG及哈希更新为本轮截图。
+
+## 追加功能：任务产出栏的代码变更
+
+用户明确要求增加代码变更后，实现 `CodeChangesPanel.vue` 和 `state/fileChanges.ts`，在原reducer保留已有 `tool_completed.artifact`，没有新增API或读取宿主Git。只展示成功文件工具操作；每个工具调用独立记录，同路径多次操作不覆盖历史。`write_file`的新建/覆盖标签来自真实artifact.operation，未知时明确标记；编辑展示真实old/new字符串、replace_all范围；覆盖/删除没有旧内容，明确说明。失败/拒绝/未完成调用和execute结果不计入。长内容复用TextWindow窗口，路径和代码按文本转义。
+
+| ID | 状态 | 覆盖与证据 |
+|---|---|---|
+| ART-01 | PASS | 单测8项：SSE分类与重复去重、失败/拒绝/运行中排除、执行输出不推断、新建/覆盖/未知、空编辑片段、路径缺失、XSS、跨Run清空 |
+| ART-02 | PASS | 真Runner/沙箱依次执行新建、编辑、覆盖、失败编辑、execute及删除；右栏4次成功操作、1个路径，失败不计入 |
+| ART-03 | PASS | 编辑前后before/after、写入内容、删除提示与真实结果一致；刷新SSE回放仍4条，切换空项目清空 |
+| ART-04 | PASS | 右栏命令输出折叠区实际展开，断言stdout/stderr标记及cat读到真实覆盖后文件。现backend合并两流并以stream=stdout转发，不伪称独立stderr |
+| ART-05 | PASS | 右栏测试结果与预览/截图均实际展开，验证协议缺口空态；不声称实现对应业务接口 |
+| ART-06 | PASS | TypeCheck/Lint/Build；前端43项、7文件；完整浏览器15项（53.3s）通过 |
+| ART-07 | PASS | 增补截图滚动定位及390×844真实文件记录抽屉、展开片段、Esc和焦点恢复后，定向1项再次通过（9.3s），[日志](frontend-evidence/file-changes-targeted-browser.txt) |
+
+证据：[完整浏览器日志](frontend-evidence/file-changes-browser.txt)、[本轮检查汇总](frontend-evidence/file-changes-checks.json)、[代码变更截图](frontend-evidence/code-changes-1600.png)。首次联调发现测试locator同时匹配顶部按钮和aside，改为complementary角色；另一次误假设stdout/stderr分流，与实际backend合流契约不符，按真实事件修正断言；不是用模型最终回答判断文件成功。
+
+限制：这是本Run文件工具操作记录和片段，不是完整Git Diff，也不是最终工作区快照；shell/外部进程改动、整文件旧快照/实际行号均不可由当前事件确认。没有新增后端写入路径、依赖、配置或权限机制，没有修改Runner/沙箱。生产Python未改，本轮未重复全量Python；前次928项证据保持。

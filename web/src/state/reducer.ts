@@ -9,6 +9,7 @@ export interface ToolView {
     stdout: string;
     stderr: string;
     result: string;
+    artifact?: unknown;
 }
 export interface RunView {
     snapshot: Run | null;
@@ -81,6 +82,7 @@ export function applyFrame(view: RunView, runId: string, frame: RunSseFrame) {
             if (data.type === 'tool_completed') {
                 tool.status = data.is_error ? 'failed' : 'completed';
                 tool.result = data.content || '';
+                tool.artifact = data.artifact;
             }
             view.tools[data.tool_call_id] = tool;
         }

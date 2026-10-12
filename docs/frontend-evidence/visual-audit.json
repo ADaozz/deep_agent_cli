@@ -20,7 +20,7 @@
         1600,
         1280
       ],
-      "sha256": "bc3183a89284d6a2d8054553bc5fc53730a2197811afd95eec54e735b0e5b0e3",
+      "sha256": "6c6ec633048b2bda434aa559ac86e259c88aa18dc21b2a829370d959671fe9b6",
       "samples": {
         "main": [
           0,
@@ -45,7 +45,7 @@
         1600,
         1280
       ],
-      "sha256": "1e25d5cbd4e3af96c687c6358078ed1f077957f73f83619ee185151bb6bde217",
+      "sha256": "5f5786be88da20d991cf644db33fa50b0626cd52b097cac8dce25e24554c3011",
       "samples": {
         "main": [
           0,
@@ -70,7 +70,7 @@
         1600,
         1280
       ],
-      "sha256": "7138be8941823671ec10dbcf314332b8e1bd0bf62321a9e364f1aa06c1f4a2e8",
+      "sha256": "eea4ddabcee85eea0bc18509dc17d0d7341bad6dfb9ab9609d976fa73a27db20",
       "samples": {
         "main": [
           0,
@@ -95,7 +95,7 @@
         1440,
         900
       ],
-      "sha256": "20adad9a4f9c433c36ff9ff69a61ef9b37387b1d5b818df9bee4d3afe85950ab",
+      "sha256": "7b51faa5678e67c4209e58bab5e06f5ce00fe846ec16fc9ef2cf076bb4355d07",
       "samples": {
         "main": [
           0,
@@ -120,7 +120,7 @@
         1440,
         900
       ],
-      "sha256": "0e840327a59e666e1c1336c75a8b34c5e1a2c5184d0df408f7eefc4943fe0fd5",
+      "sha256": "5c9787d238e3dbedec86eb3606c0b2237499280f2a9cb9a7919d17af7777d41b",
       "samples": {
         "main": [
           0,
@@ -195,7 +195,32 @@
         1280,
         720
       ],
-      "sha256": "53750a89210d7b97184ab240f13c868a28353fd3fea6b438edfabd608418405e",
+      "sha256": "e47f6b207e668fcbe17b8fa67709ed96461e5ac6998db157cfa3bad38d29f389",
+      "samples": {
+        "main": [
+          0,
+          0,
+          0
+        ],
+        "sidebar": [
+          34,
+          34,
+          36
+        ],
+        "inspector": [
+          34,
+          34,
+          36
+        ]
+      }
+    },
+    {
+      "path": "code-changes-1600.png",
+      "size": [
+        1600,
+        1280
+      ],
+      "sha256": "9f9b43aa51a3b4fd3d864d963a237bbc3f1000024da2af2e4bae6997ca02f0ed",
       "samples": {
         "main": [
           0,

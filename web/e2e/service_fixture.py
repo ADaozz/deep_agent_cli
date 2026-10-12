@@ -17,6 +17,16 @@ import signal
 
 def program(text):
     from langchain_core.messages import AIMessage
+    if text=='file-changes':
+        operations=[
+            ('change-create','write_file',{'file_path':'/workspace/changed.ts','content':'const label = "before";\n'}),
+            ('change-edit','edit_file',{'file_path':'/workspace/changed.ts','old_string':'before','new_string':'after'}),
+            ('change-overwrite','write_file',{'file_path':'/workspace/changed.ts','content':'const label = "overwritten";\n'}),
+            ('change-failed','edit_file',{'file_path':'/workspace/changed.ts','old_string':'does-not-exist','new_string':'should-not-appear'}),
+            ('change-execute','execute',{'command':"printf 'artifact stdout\\n'; printf 'artifact stderr\\n' >&2; cat /workspace/changed.ts",'network':False}),
+            ('change-delete','delete',{'file_path':'/workspace/changed.ts'}),
+        ]
+        return [*(AIMessage(content='',tool_calls=[{'id':identity,'name':name,'args':args}]) for identity,name,args in operations),AIMessage(content='文件操作完成')]
     if text=='approval':
         return [AIMessage(content='',tool_calls=[
             {'id':'execute-test','name':'execute','args':{'command':'printf "approved-command\\n"','network':False}},
