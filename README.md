@@ -304,6 +304,7 @@ Xvfb 示例仅适用于宿主没有现成显示服务的情况；CLI 不会自�
 - [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)：命令、快捷键、图片、会话、显示规则
 - [作为 Python 库使用](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/library.md)：`AgentRunner`、事件、自定义工具
 - [HTTP 后端服务](docs/server.md)：部署、接口、任务与事件、审批和现有系统接入
+- [HTTP API 与前端接入](docs/http-api.md)：请求/响应、业务状态、审批表单、SSE 续接、恢复与 TypeScript 示例
 - [架构](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/architecture.md)：分层、中间件、会话存储、上下文压缩
 - [开发](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/development.md)：测试、冒烟脚本、CI 与发布
 
