@@ -695,7 +695,7 @@ class CliApplication:
             "\n"
             f"  deep-agent resume {self.runner.thread_id}\n"
             "\n"
-            f"Or run deep-agent resume and select. Model: {model_name}"
+            f"Or run deep-agent resume and select. Model: {model_name} · {self.runner.reasoning_effort()}"
         )
 
     def set_status(self, text: str, *, transient: bool = True) -> None:
