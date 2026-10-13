@@ -74,6 +74,8 @@ Python wheel 包含 `agent.web_gateway`，**不包含 web/dist**。从 wheel 安
 
 无HTTP模型/权限/Skills切换、上传、多模态、steering、队列、完整工作区Diff、结构化测试统计或二进制截图下载；测试/预览面板明确空态。日志默认折叠，DOM显示窗口有限，完整已接收内容保留在本轮状态/服务日志。没有把最终回答中的文字解析成Diff或测试通过数。
 
+支持按任务历史轮次进行代码回退和撤销回退，包含记录成功的execute净文件改动；具体范围、冲突及快照上限见 [轮次代码回退](code-restore.md)。代码回退不撤销对话或模型checkpoint，旧轮次没有完整快照时不可用。
+
 Unix socket/文件/FIFO间接通信和 OUTPUT-PERSIST-01 仍是 [服务已知边界](server.md)，本轮不修改沙箱或事件持久化策略。
 
 ## 自动化与截图

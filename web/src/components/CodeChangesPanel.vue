@@ -42,6 +42,6 @@ const labels = { create: '新建', overwrite: '覆盖', write: '写入', edit: '
       </details>
     </template>
     <p v-else class="preview-note">暂无成功的文件工具变更记录。</p>
-    <p class="preview-note">命令执行或外部进程产生的文件改动不在此记录中。</p>
+    <p class="preview-note">文件工具详情不含命令改动；轮次回退范围以快照列表为准。</p>
   </div>
 </template>

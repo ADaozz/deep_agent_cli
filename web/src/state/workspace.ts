@@ -4,7 +4,7 @@ import { api, ApiError, streamRun } from '../api/http';
 import type { Run, Session, Project, RunSummary } from '../api/types';
 import { applyFrame, newRunView, snapshot, terminal, type RunView } from './reducer';
 export function useWorkspace() {
-    const state = reactive({ projects: [] as Project[], sessions: [] as Session[], history: [] as RunSummary[], nextCursor: null as string | null, project: '', session: '', runId: '', views: dictionary<RunView>(), prompts: dictionary<string>(), busy: false, error: '', health: false, interactionRevision: 0, projectActive: null as RunSummary | null, blocked: false });
+    const state = reactive({ projects: [] as Project[], sessions: [] as Session[], history: [] as RunSummary[], nextCursor: null as string | null, project: '', session: '', runId: '', views: dictionary<RunView>(), prompts: dictionary<string>(), busy: false, initializing: true, error: '', health: false, interactionRevision: 0, projectActive: null as RunSummary | null, blocked: false, blockedReason: '' });
     let generation = 0;
     let controller: AbortController | null = null;
     const view = computed(() => state.views[state.runId]);
@@ -14,6 +14,12 @@ export function useWorkspace() {
     function stop() { generation++; controller?.abort(); controller = null; }
     function remember() { localStorage.setItem('deep-agent.selection', JSON.stringify({ project: state.project, session: state.session, run: state.runId })); }
     function error(e: unknown) { state.error = e instanceof ApiError ? `${e.status} · ${e.message}` : e instanceof Error ? e.message : '连接失败'; }
+    function mergeHistory(items: RunSummary[]) {
+        const rows = new Map([...state.history, ...items].map(item => [item.id, item]));
+        state.history = [...rows.values()].sort((a, b) => a.created_at === b.created_at
+            ? a.id === b.id ? 0 : a.id > b.id ? -1 : 1
+            : a.created_at > b.created_at ? -1 : 1);
+    }
     async function discovery(project = state.project) {
         if (!project)
             return;
@@ -22,6 +28,7 @@ export function useWorkspace() {
         if (version === generation && state.project === project) {
             state.projectActive = result.run;
             state.blocked = !!result.blocked;
+            state.blockedReason = result.reason || '';
         }
     }
     async function follow(initial: Run) {
@@ -99,6 +106,10 @@ export function useWorkspace() {
                     return;
                 if (item.session_id !== session.id || item.project_id !== state.project)
                     throw new Error('任务归属不匹配');
+                if (!state.history.some(row => row.id === item.id)) {
+                    const { id, session_id, project_id, status, created_at, updated_at } = item;
+                    mergeHistory([{ id, session_id, project_id, status, created_at, updated_at }]);
+                }
                 await follow(item);
             }
         }
@@ -256,7 +267,7 @@ export function useWorkspace() {
         return; const version = generation; try {
         const page = await api.history(state.session, state.nextCursor);
         if (version === generation) {
-            state.history.push(...page.runs);
+            mergeHistory(page.runs);
             state.nextCursor = page.next_cursor;
         }
     }
@@ -277,6 +288,7 @@ export function useWorkspace() {
         return; const session = state.sessions.find(s => s.id === item.session_id); if (session)
         await selectSession(session, item.id); }
     async function init() {
+        state.initializing = true;
         try {
             const [projects, health] = await Promise.all([api.projects(), api.health()]);
             state.projects = projects.projects;
@@ -301,6 +313,9 @@ export function useWorkspace() {
         catch (e) {
             error(e);
         }
+        finally {
+            state.initializing = false;
+        }
     }
-    return { state, view, run, active, occupied, init, stop, selectProject, selectSession, selectRun, moreHistory, openActive, createSession, send, act, resume, reconnect };
+    return { state, view, run, active, occupied, init, stop, selectProject, selectSession, selectRun, moreHistory, openActive, createSession, send, act, resume, reconnect, refreshProject: () => discovery().catch(error) };
 }

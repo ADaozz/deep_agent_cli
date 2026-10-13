@@ -1,4 +1,4 @@
-import type { Project, Session, Run, ApprovalBody, HumanInputBody, RunSseFrame, PaginatedRuns, ActiveRunResponse } from './types';
+import type { Project, Session, Run, ApprovalBody, HumanInputBody, RunSseFrame, PaginatedRuns, ActiveRunResponse, CodeCheckpoint } from './types';
 import { SseParser } from './sse';
 export class ApiError extends Error {
     constructor(public status: number, public detail: unknown) { super(typeof detail === 'string' ? detail : JSON.stringify(detail)); }
@@ -28,6 +28,8 @@ export const api = {
     activeRun: (project: string) => json<ActiveRunResponse>('/projects/' + id(project) + '/active-run'),
     createSession: (project_id: string) => json<Session>('/sessions', 'POST', { project_id }),
     getRun: (run: string) => json<Run>('/runs/' + id(run)),
+    codeCheckpoint: (run: string) => json<CodeCheckpoint>('/runs/' + id(run) + '/code-checkpoint'),
+    restoreCode: (run: string, action: 'undo' | 'redo', revision: string) => json<CodeCheckpoint>('/runs/' + id(run) + '/code-restore', 'POST', { action, revision }),
     submit: (session: string, text: string) => json<Run>('/sessions/' + id(session) + '/runs', 'POST', { text }),
     resume: (session: string) => json<Run>('/sessions/' + id(session) + '/runs', 'POST', { resume: true }),
     approvals: (run: string, body: ApprovalBody) => json<Run>('/runs/' + id(run) + '/approvals', 'POST', body),

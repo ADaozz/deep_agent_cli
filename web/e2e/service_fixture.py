@@ -17,6 +17,14 @@ import signal
 
 def program(text):
     from langchain_core.messages import AIMessage
+    if text in ('undo-seed','undo-one','undo-two','undo-read'):
+        commands={
+            'undo-seed': "printf initial > /workspace/undo.txt; printf keep > /workspace/undo-delete.txt",
+            'undo-one': "printf one > /workspace/undo.txt; mkdir -p /workspace/undo-created; /usr/bin/python3 -c 'from pathlib import Path; Path(\"/workspace/undo-created/binary\").write_bytes(bytes([0,255,1]))'; rm /workspace/undo-delete.txt",
+            'undo-two': "printf two > /workspace/undo.txt",
+            'undo-read': "cat /workspace/undo.txt; printf '\\n'; if test -f /workspace/undo-delete.txt; then cat /workspace/undo-delete.txt; else printf missing; fi; printf '\\n'; if test -f /workspace/undo-created/binary; then od -An -tu1 /workspace/undo-created/binary; else printf absent; fi",
+        }
+        return [AIMessage(content='',tool_calls=[{'id':text,'name':'execute','args':{'command':commands[text],'network':False}}]),AIMessage(content=text+' done')]
     if text=='file-changes':
         operations=[
             ('change-create','write_file',{'file_path':'/workspace/changed.ts','content':'const label = "before";\n'}),
@@ -130,6 +138,12 @@ def orchestrate():
             matches=sum(p.read_bytes().count(literal) for p in files)
             matches+=json.dumps(payload,ensure_ascii=False).encode().count(literal)
             return {'matches':matches,'bundle_files':len(files)}
+        @control.get('/undo-evidence')
+        def undo_evidence():
+            root=base/'app'
+            return {'code':(root/'undo.txt').read_text(),
+                    'deleted':(root/'undo-delete.txt').read_text() if (root/'undo-delete.txt').is_file() else None,
+                    'binary':list((root/'undo-created/binary').read_bytes()) if (root/'undo-created/binary').is_file() else None}
         try:
             start('service');start('gateway')
             uvicorn.run(control,host='127.0.0.1',port=8766,log_level='error',access_log=False)

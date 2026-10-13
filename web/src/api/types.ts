@@ -81,6 +81,17 @@ export interface PaginatedRuns {
 export interface ActiveRunResponse {
     run: RunSummary | null;
     blocked?: boolean;
+    reason?: 'code_restore_recovery';
+}
+export interface CodeCheckpoint {
+    run_id: string;
+    available: boolean;
+    status: 'recording' | 'ready' | 'reverted' | 'unavailable';
+    revision?: string;
+    reason?: string;
+    files: { path: string; kind: string; change: 'create' | 'delete' | 'modify' }[];
+    can_undo?: boolean;
+    can_redo?: boolean;
 }
 export interface AgentEvent {
     type: string;
