@@ -59,6 +59,7 @@ from agent.session import (
 from agent.session_lock import SessionLockBusyError
 from agent.session_runtime import RestorePlan, SessionLeaseLike, SessionRuntime
 from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
+from agent.tools.human_interaction import validate_human_input_values
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
 
@@ -1086,8 +1087,7 @@ class AgentRunner:
                 "This session uses the removed handoff_to_human tool. "
                 "Start a new session and ask again with request_human_input."
             )
-        if not isinstance(values, dict):
-            raise ValueError("Human input response must contain a values object")
+        validate_human_input_values(values, state.payload)
         envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
         if state.payload.get("interactionId"):
             envelope["interactionId"] = state.payload["interactionId"]

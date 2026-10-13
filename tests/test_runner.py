@@ -671,3 +671,69 @@ def test_decide_tools_mixed_batch_validates_and_preserves_order() -> None:
         assert "/workspace/b.txt" not in files
     finally:
         runner.close()
+
+
+def _required_input_runner(*, required=True):
+    return AgentRunner(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "id": "required-input", "name": "request_human_input",
+                "args": {"reason": "Need input", "question": "Answer?", "fields": [
+                    {"id": "answer", "type": "text", "required": required},
+                    {"id": "note", "type": "textarea", "required": False},
+                ]},
+            }]),
+            AIMessage(content="Accepted"),
+        ]), backend=StateBackend(), thread_id="required-input",
+    )
+
+
+@pytest.mark.parametrize("values", [{}, {"answer": None}, {"answer": ""},
+                                  {"answer": " \t\n"}, {"answer": []}, []])
+def test_required_human_input_rejects_before_resume_and_can_retry(values):
+    from unittest.mock import patch
+
+    runner = _required_input_runner()
+    try:
+        assert runner.invoke("Ask me").status == "waiting_human"
+        state = runner.current_interrupt()
+        checkpoint = runner.prepared.graph.get_state(runner._thread_config()).config
+        with patch.object(runner, "_resume", wraps=runner._resume) as resume:
+            with pytest.raises(ValueError):
+                runner.submit_human_input(values)
+            resume.assert_not_called()
+            assert runner.current_interrupt() == state
+            assert runner.prepared.graph.get_state(runner._thread_config()).config == checkpoint
+            assert runner.submit_human_input({"answer": "fixed"}).status == "completed"
+            assert resume.call_count == 1
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("values", [
+    {"answer": "yes"}, {"answer": False}, {"answer": "yes", "note": None},
+    {"answer": "yes", "note": ""}, {"answer": "yes", "note": " \t\n"},
+    {"answer": "yes", "note": []},
+])
+def test_human_input_optional_empty_and_false_remain_valid(values):
+    from unittest.mock import patch
+
+    runner = _required_input_runner()
+    try:
+        assert runner.invoke("Ask me").status == "waiting_human"
+        with patch.object(runner, "_resume", wraps=runner._resume) as resume:
+            assert runner.submit_human_input(values).status == "completed"
+            assert resume.call_args.args[0]["values"] == values
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("values", [{}, {"answer": None}, {"answer": ""},
+                                  {"answer": " \t\n"}, {"answer": []}])
+def test_human_input_all_optional_can_be_omitted_or_empty(values):
+    runner = _required_input_runner(required=False)
+    try:
+        assert runner.invoke("Ask me").status == "waiting_human"
+        assert runner.submit_human_input(values).status == "completed"
+    finally:
+        runner.close()

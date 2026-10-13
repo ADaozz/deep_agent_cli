@@ -366,7 +366,7 @@ def test_service_startup_requires_sandbox_even_if_model_config_allows_fallback(c
 
     config.model_config.write_text("sandbox:\n  allow_unsandboxed: true\n")
     # Settings.load normally also requires model configuration; isolate the sandbox policy here.
-    monkeypatch.setattr(Settings, "load", lambda *args: Settings(sandbox=SandboxConfig(allow_unsandboxed=True)))
+    monkeypatch.setattr(Settings, "load", lambda *args, **kwargs: Settings(sandbox=SandboxConfig(allow_unsandboxed=True)))
     calls = []
     def unavailable(sandbox):
         calls.append(sandbox)
@@ -380,3 +380,131 @@ def test_service_startup_requires_sandbox_even_if_model_config_allows_fallback(c
     # Failed startup must release the service process lease.
     with TestClient(create_app(config, factory=lambda *args: FakeRunner())) as client:
         assert client.get("/health").status_code == 200
+
+
+def _human_runner_factory(config, project_id, session_id, *, restored=False):
+    from deepagents.backends import StateBackend
+    from langchain_core.messages import AIMessage
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore
+    from tests.conftest import scripted_model
+
+    store = SessionStore(config.state_dir / f"{project_id}.sqlite3")
+    messages = [
+        AIMessage(content="", tool_calls=[{
+            "id": "human-required", "name": "request_human_input",
+            "args": {"reason": "Need answer", "question": "Answer?", "fields": [
+                {"id": "answer", "type": "text", "required": True},
+                {"id": "confirmed", "type": "boolean", "required": True},
+                {"id": "note", "type": "textarea", "required": False},
+            ]},
+        }]), AIMessage(content="Accepted"),
+    ]
+    return AgentRunner(model=scripted_model(messages[1:] if restored else messages),
+                       backend=StateBackend(), session_store=store, thread_id=session_id)
+
+
+@pytest.mark.parametrize("answer", [None, "", " \t\n", []])
+def test_http_real_runner_rejects_required_input_before_admission(config, answer):
+    from unittest.mock import patch
+
+    with TestClient(create_app(config, factory=_human_runner_factory)) as client:
+        sid = session(client)
+        rid = submit(client, sid, "Ask me")
+        waiting = wait(client, rid, "waiting_human")
+        manager = client.app.state.manager
+        runner = manager.active[rid].runner
+        checkpoint = runner.prepared.graph.get_state(runner._thread_config()).config
+        events = manager.store.events(rid, 0)
+        url = f"/v1/runs/{rid}/human-input"
+        with patch.object(runner, "_resume", wraps=runner._resume) as resume:
+            for values in [{"answer": answer, "confirmed": False},
+                           {"confirmed": False, "schema": {"fields": []}}]:
+                response = client.post(url, headers=AUTH, json={
+                    "interrupt_id": waiting["interrupt_id"], "values": values,
+                })
+                assert response.status_code == 422, response.text
+                resume.assert_not_called()
+                current = client.get(f"/v1/runs/{rid}", headers=AUTH).json()
+                assert current == waiting
+                assert manager.store.events(rid, 0) == events
+                assert manager.active[rid].commands.empty()
+                assert runner.prepared.graph.get_state(runner._thread_config()).config == checkpoint
+            assert client.post(f"/v1/sessions/{sid}/runs", headers=AUTH,
+                               json={"text": "other"}).status_code == 409
+            response = client.post(url, headers=AUTH, json={
+                "interrupt_id": waiting["interrupt_id"],
+                "values": {"answer": "fixed", "confirmed": False, "note": " \t\n"},
+            })
+            assert response.status_code == 202
+            assert wait(client, rid, "completed")["result"]["output"] == "Accepted"
+            assert resume.call_count == 1
+        stream = client.get(f"/v1/runs/{rid}/events", headers=AUTH).text
+        assert stream.count("event: interaction_submitted\n") == 1
+        assert stream.count("event: run_finished\n") == 1
+
+
+def test_http_real_human_input_validation_survives_restart(config):
+    calls = 0
+
+    def restored_factory(*args):
+        nonlocal calls
+        calls += 1
+        return _human_runner_factory(*args, restored=calls > 1)
+
+    with TestClient(create_app(config, factory=restored_factory)) as client:
+        sid = session(client)
+        rid = submit(client, sid, "Ask me")
+        waiting = wait(client, rid, "waiting_human")
+        declared = waiting["result"]["human_input"]
+        assert client.post(f"/v1/runs/{rid}/human-input", headers=AUTH, json={
+            "interrupt_id": waiting["interrupt_id"], "values": {},
+        }).status_code == 422
+        # Service shutdown cancels the run while retaining the waiting checkpoint.
+    with TestClient(create_app(config, factory=restored_factory)) as client:
+        response = client.post(f"/v1/sessions/{sid}/runs", headers=AUTH, json={"resume": True})
+        assert response.status_code == 202
+        rid = response.json()["id"]
+        waiting = wait(client, rid, "waiting_human")
+        assert waiting["result"]["human_input"] == declared
+        url = f"/v1/runs/{rid}/human-input"
+        assert client.post(url, headers=AUTH, json={
+            "interrupt_id": waiting["interrupt_id"], "values": {"answer": " \n", "confirmed": False},
+        }).status_code == 422
+        assert wait(client, rid, "waiting_human")["interrupt_id"] == waiting["interrupt_id"]
+        assert client.post(url, headers=AUTH, json={
+            "interrupt_id": waiting["interrupt_id"], "values": {"answer": "fixed", "confirmed": False},
+        }).status_code == 202
+        assert wait(client, rid, "completed")["result"]["output"] == "Accepted"
+
+
+def test_server_settings_validate_project_instead_of_launch_directory(config, monkeypatch):
+    from agent.config import ConfigError, Settings
+    import yaml
+
+    config.model_config.write_text(yaml.safe_dump({
+        "llm": {"default": "test/model", "models": {"test": {"models": {"model": {}}}}},
+        "sandbox": {"workspace": "."},
+        "paths": {"config_dir": str(config.model_config.parent / "agent-config")},
+    }))
+    monkeypatch.chdir(config.model_config.parent)
+    # CLI still protects its cwd; only service-owned project selection overrides it.
+    with pytest.raises(ConfigError, match="outside workspace"):
+        Settings.load(config.model_config)
+    settings = config.settings_for("one")
+    assert settings.sandbox.workspace == config.projects["one"]
+    assert settings.sandbox.allow_unsandboxed is False
+    assert settings.state_path == config.state_dir / "projects" / "one" / "sessions.sqlite3"
+
+
+@pytest.mark.parametrize("unsafe_project", ["one", "two"])
+def test_server_settings_still_reject_config_directory_in_any_project(config, unsafe_project, monkeypatch):
+    import yaml
+
+    config.model_config.write_text(yaml.safe_dump({
+        "llm": {"default": "test/model", "models": {"test": {"models": {"model": {}}}}},
+        "paths": {"config_dir": str(config.projects[unsafe_project] / "agent-config")},
+    }))
+    monkeypatch.chdir(config.model_config.parent)
+    with pytest.raises(ValueError, match="outside workspace"):
+        config.settings_for("one")

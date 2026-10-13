@@ -44,6 +44,18 @@ def normalize_interaction_request(
     return payload
 
 
+def validate_human_input_values(values: Any, payload: dict[str, Any]) -> None:
+    """Validate against the pending server-side declaration without changing the answer."""
+    if not isinstance(values, dict):
+        raise ValueError("Human input response must contain a values object")
+    for field in payload.get("fields") or []:
+        if not field.get("required"):
+            continue
+        value = values.get(field["id"])
+        if value is None or (isinstance(value, str) and not value.strip()) or (isinstance(value, list) and not value):
+            raise ValueError("Required human input fields must not be empty")
+
+
 def resume_values(answer: Any) -> dict[str, Any]:
     if not isinstance(answer, dict) or answer.get("type") != "human_input":
         raise ValueError("Human input response must have type human_input")
