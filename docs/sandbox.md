@@ -132,7 +132,9 @@ sandbox:
 
 合并进现有配置，不覆盖其他挂载和允许的变量；上述源目录必须存在。系统 Chrome 还需要 `/opt/google` 的只读挂载；位于系统目录外的 Node 本体需要独立挂载并加入 PATH。不要把个人机器的 Node 目录当成通用要求。
 
-有头模式需要允许传入 `DISPLAY`，并确保相应 X Server 可访问。用户已测试的 X11 抽象 Socket 场景中，`network=false` 的网络命名空间无法连接宿主 X Server，当前有头流程应使用有网沙箱；ask 模式需要明确传 `network=true` 并批准。Xauthority 认证可能要求额外挂载认证文件，目前未验证；Wayland 未覆盖。
+有头模式需要允许传入 `DISPLAY`，并确保相应 X Server 可访问。默认模板已允许 `DISPLAY`，并可选只读挂载 WSLg 的 `/mnt/wslg/.X11-unix` 到沙箱 `/tmp/.X11-unix`；启动 CLI 的终端需已有正确的 `DISPLAY`（WSLg 通常为 `:0`）。现有配置需手动合并这些项目，退出并重新启动 CLI 后生效。WSLg 已提供显示服务，无需另外安装 Xvfb。
+
+已实测挂载 WSLg 的 X11 文件 socket 后，`network=false` 下 `playwright-cli open about:blank --headed` 可以启动、截图并关闭。普通 Linux X11 桌面可使用宿主 `/tmp/.X11-unix` 作为挂载源。若仅依赖 X11 抽象 socket，无网沙箱的网络命名空间仍无法连接宿主 X Server，需要 `network=true`；访问互联网页面也需要网络，ask 模式需审批。挂载显示 socket 允许连接宿主显示服务，不改变 IP 网络或 IPC 隔离。Xauthority 认证可能需要传入 `XAUTHORITY` 并挂载认证文件，目前未验证；WSLg 此处使用 X11，原生 Wayland 未覆盖。
 
 保留 `--unshare-ipc`，在专用 Xvfb 中关闭 MIT-SHM：
 

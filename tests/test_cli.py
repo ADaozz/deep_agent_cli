@@ -277,7 +277,7 @@ def test_exit_hint_skips_empty_thread_and_shows_model_after_content(tmp_path) ->
         message = used.continue_session_message()
     assert message is not None
     assert f"deep-agent resume {runner.thread_id}" in message
-    assert "Model: qwen3.5-plus" in message
+    assert "Model: qwen3.5-plus · default" in message
     store.close()
 
 
@@ -3440,7 +3440,7 @@ def test_compact_command_runs_upstream_tool_and_reports_success() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app.state.usage = {"total_tokens": 60_010}
+            app.state.usage = {"input_tokens": 60_000, "total_tokens": 60_010}
             task = asyncio.create_task(app._dispatch_command("/compact"))
             # A real Application has a refresh timer; keep the DummyOutput test
             # loop ticking while LangGraph finishes work in the IO executor.
@@ -3451,7 +3451,7 @@ def test_compact_command_runs_upstream_tool_and_reports_success() -> None:
             assert task.done()
             await task
             assert "Conversation compacted." in app.state.blocks[-1].content
-            assert app.state.usage == {}
+            assert app.state.usage == {"input_tokens": 60_000, "total_tokens": 60_010}
             assert app.state.running is False
 
     asyncio.run(scenario())
@@ -4144,12 +4144,24 @@ def test_context_uses_only_api_input_and_preserves_zero():
 
 
 @pytest.mark.parametrize("event_type", ["run_started", "assistant_started", "compaction_finished", "run_cancelled", "run_failed"])
-def test_context_lifecycle_clears_previous_usage(event_type):
+def test_context_lifecycle_preserves_previous_usage(event_type):
     from agent.cli.state import CliState
     state = CliState(usage={"input_tokens": 500})
     state.apply(RunEvent(type=event_type))
-    assert state.usage == {}
+    assert state.usage == {"input_tokens": 500}
     state.apply(RunEvent(type="usage", result={"input_tokens": 0}))
     assert state.usage == {"input_tokens": 0}
     state.apply(RunEvent(type="usage", result={}))
-    assert state.usage == {}
+    assert state.usage == {"input_tokens": 0}
+
+
+@pytest.mark.parametrize("usage", [{}, {"output_tokens": 12}, {"total_tokens": 512},
+                                   {"input_tokens": None}, {"input_tokens": -1},
+                                   {"input_tokens": True}])
+def test_context_ignores_usage_without_valid_input_tokens(usage):
+    from agent.cli.state import CliState
+    state = CliState(usage={"input_tokens": 500, "output_tokens": 10, "total_tokens": 510})
+    state.apply(RunEvent(type="usage", result=usage))
+    assert state.usage == {"input_tokens": 500, "output_tokens": 10, "total_tokens": 510}
+    state.apply(RunEvent(type="usage", result={"input_tokens": 750}))
+    assert state.usage == {"input_tokens": 750}
