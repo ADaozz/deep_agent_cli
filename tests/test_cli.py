@@ -277,7 +277,7 @@ def test_exit_hint_skips_empty_thread_and_shows_model_after_content(tmp_path) ->
         message = used.continue_session_message()
     assert message is not None
     assert f"deep-agent resume {runner.thread_id}" in message
-    assert "Model: qwen3.5-plus" in message
+    assert "Model: qwen3.5-plus · default" in message
     store.close()
 
 
