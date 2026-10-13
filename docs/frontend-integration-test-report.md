@@ -150,3 +150,7 @@ Web命令：`npm ci; npm run typecheck; npm run lint; npm run test; npm run buil
 证据：[完整浏览器日志](frontend-evidence/file-changes-browser.txt)、[本轮检查汇总](frontend-evidence/file-changes-checks.json)、[代码变更截图](frontend-evidence/code-changes-1600.png)。首次联调发现测试locator同时匹配顶部按钮和aside，改为complementary角色；另一次误假设stdout/stderr分流，与实际backend合流契约不符，按真实事件修正断言；不是用模型最终回答判断文件成功。
 
 限制：这是本Run文件工具操作记录和片段，不是完整Git Diff，也不是最终工作区快照；shell/外部进程改动、整文件旧快照/实际行号均不可由当前事件确认。没有新增后端写入路径、依赖、配置或权限机制，没有修改Runner/沙箱。生产Python未改，本轮未重复全量Python；前次928项证据保持。
+
+## 追加：按轮次回退/撤销代码回退
+
+已实现新轮次完整边界快照、显式确认式undo/redo、冲突预检、失败恢复日志及重启持久化。原只读范围按用户追加要求扩展。最终Python946、前端51、浏览器16通过，详见 [轮次回退验收](code-restore-test-report.md) 与 [使用说明](code-restore.md)。原验收记录保留为历史阶段证据，不将其旧AST核查误称本次Worker完全未变。

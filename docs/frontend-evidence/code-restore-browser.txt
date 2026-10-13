@@ -1,0 +1,43 @@
+
+> deep-agent-workspace@0.1.0 test:e2e
+> playwright test
+
+[WebServer] (node:51645) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] INFO:     Started server process [51669]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+
+Running 16 tests using 1 worker
+
+(node:51671) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/artifacts.spec.ts:4:1 › real file changes and inspector outputs survive replay and stay scoped to a Run (3.2s)
+  ✓   2 e2e/code-restore.spec.ts:13:1 › per-dialog-round undo/redo restores real shell files, survives restart and rejects later edits (5.3s)
+  ✓   3 e2e/integration.spec.ts:3:1 › genuine service + BFF + Runner batch approval and human input (2.0s)
+  ✓   4 e2e/integration.spec.ts:32:1 › fresh browser discovers current approval and history without local storage (2.2s)
+  ✓   5 e2e/integration.spec.ts:59:1 › actual private gateway token is absent from browser traffic, HTML, storage and build (983ms)
+  ✓   6 e2e/integration.spec.ts:77:1 › desktop session filter is a real focused control, not a hidden sidebar (688ms)
+  ✓   7 e2e/recovery.spec.ts:20:1 › 409 clears every old decision and a subsequent approval starts unselected (1.4s)
+  ✓   8 e2e/recovery.spec.ts:45:1 › 422 retains form values; asynchronous rejection returns to a usable waiting form (1.5s)
+[WebServer] 12:31:14 AM [vite] http proxy error: /api/agent/runs/2712072f-1bc4-410f-9f8d-a53cf0c2ca2d
+[WebServer] Error: connect ECONNREFUSED 127.0.0.1:8765
+[WebServer]     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+[WebServer] 12:31:15 AM [vite] http proxy error: /api/agent/runs/2712072f-1bc4-410f-9f8d-a53cf0c2ca2d
+[WebServer] Error: connect ECONNREFUSED 127.0.0.1:8765
+[WebServer]     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1864:16)
+[WebServer] INFO:     Started server process [52376]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+  ✓   9 e2e/recovery.spec.ts:68:1 › BFF disconnect reconnects from cursor without reposting or cancelling the task (5.5s)
+  ✓  10 e2e/recovery.spec.ts:94:1 › service crash produces interrupted; explicit resume restores checkpoint into a new Run (5.5s)
+  ✓  11 e2e/recovery.spec.ts:113:1 › cancellation and pause use authoritative transitions (2.1s)
+  ✓  12 e2e/recovery.spec.ts:132:1 › two projects occupy capacity; third shows real 429; stale same-project submit shows real 409 (1.2s)
+  ✓  13 e2e/recovery.spec.ts:150:1 › single approval, human, running, completed and failure actual screenshots (2.9s)
+  ✓  14 e2e/recovery.spec.ts:174:1 › real 15s keepalive traverses BFF without reconnect storm (16.1s)
+  ✓  15 e2e/recovery.spec.ts:205:1 › leaving the page closes its stream without cancelling the Run (1.2s)
+  ✓  16 e2e/workspace.spec.ts:4:1 › fixture visual baseline and real narrow drawers (948ms)
+
+  16 passed (59.1s)
