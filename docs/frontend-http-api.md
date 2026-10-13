@@ -17,3 +17,7 @@ RunSummary只有 `id,session_id,project_id,status,created_at,updated_at`。任�
 - Other：当前 Runner 返回自由文本本身，multi_select包含原选项值与自由文本；不会发送 `__other__` marker 代替用户输入。已由真实 Runner 集成测试确认。
 
 只新增读端点和一个索引；没有会话命名/删除、prompt持久化、Diff、模型/权限切换、多模态或文件下载API。部署仍限本地单用户，Unix socket 间接通信及 OUTPUT-PERSIST-01 限制见原服务文档。
+
+## 用户追加：按轮次回退代码
+
+GET `/v1/runs/{run_id}/code-checkpoint`、POST `/v1/runs/{run_id}/code-restore`及同源BFF映射已实现。POST只接受action(undo/redo)和当前revision，禁止客户端schema/路径/内容/force；成功200、冲突409。完整契约及限制见 [code-restore.md](code-restore.md)。代码快照状态独立于Run/SSE，操作后GET对账，不自动重试POST。

@@ -59,6 +59,11 @@ class Continue(Body):
     interrupt_id: str
 
 
+class CodeRestore(Body):
+    action: Literal["undo", "redo"]
+    revision: str = Field(min_length=1, max_length=128)
+
+
 def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -131,6 +136,14 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @api.get("/runs/{run_id}")
     def run(run_id: str, service: RunManager = Depends(manager)):
         return service.run(run_id)
+
+    @api.get("/runs/{run_id}/code-checkpoint")
+    def code_checkpoint(run_id: str, service: RunManager = Depends(manager)):
+        return service.code_checkpoint(run_id)
+
+    @api.post("/runs/{run_id}/code-restore")
+    def code_restore(run_id: str, body: CodeRestore, service: RunManager = Depends(manager)):
+        return service.restore_code(run_id, body.action, body.revision)
 
     @api.post("/runs/{run_id}/approvals", status_code=202)
     def approvals(run_id: str, body: Approval, service: RunManager = Depends(manager)):

@@ -161,3 +161,7 @@ SSE 包含 `id`、`event`、JSON `data`。主要事件：
 两项新增接口均要求原服务 Bearer 认证，不调用 Runner、不创建任务。`GET /v1/sessions/{session_id}/runs?limit=50&cursor=...` 返回 `{runs:[RunSummary],next_cursor:null|string}`；limit 为1～100，按 `(created_at DESC,id DESC)` 稳定键集分页。游标绑定当前会话，无效游标422，未知/未配置项目的会话404。Summary仅含 id、session_id、project_id、status、created_at、updated_at，不含长 output 或待审批参数；详情仍用原 GET run。
 
 `GET /v1/projects/{project_id}/active-run` 返回 `{run:RunSummary|null}`。等待审批/提问、暂停、取消中仍为活跃；终态不作为活跃返回。清理失败时，保留项目占用但不误报终态为活跃，额外返回 `blocked:true`，需要重启服务。SQLite仅增量添加分页索引，原 finish 原子性与提交事件顺序不变。详见 [Web 接口补充](frontend-http-api.md) 和 [启动说明](web.md)。
+
+## 轮次代码回退
+
+新增认证 GET `/v1/runs/{run_id}/code-checkpoint` 和 POST `/v1/runs/{run_id}/code-restore`，用于用户显式回退/撤销代码回退；不是Agent模型工具，也不修改原审批和SSE终态事务。元数据/nonce约束、私有存储、冲突及恢复锁详见 [code-restore.md](code-restore.md)。项目恢复被锁定时active-run附加reason=code_restore_recovery。
