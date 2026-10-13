@@ -763,7 +763,6 @@ class CliApplication:
             notice = f"Model queued: {model_display_name(profile)} · {self.runner.pending_reasoning_effort() or self.runner.reasoning_effort()}"
         if interrupt is not None and interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
             notice += " · F2: pending approval"
-        self.state.add_system(notice)
         self.set_status(notice)
         return profile
 
@@ -1073,7 +1072,6 @@ class CliApplication:
             self.state.add_system("There are no older messages to compact yet.")
             self.set_status("No older context to compact")
         elif result.status == "compacted":
-            self.state.usage.clear()
             self.state.add_system(result.message)
             self.set_status("Context compacted")
         else:
@@ -2113,7 +2111,10 @@ class CliApplication:
             if event.result.get("permission_changed"):
                 changes.append(f"permission: {event.result['permission_mode']}")
             if announce:
-                self.state.add_system("; ".join(changes))
+                if event.result.get("model_changed") or event.result.get("reasoning_changed"):
+                    self.set_status("; ".join(changes))
+                if event.result.get("permission_changed"):
+                    self.state.add_system(f"permission: {event.result['permission_mode']}")
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
         self.application.invalidate()

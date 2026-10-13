@@ -274,7 +274,8 @@ def test_cli_model_prefix_switch() -> None:
             assert runner.invoke("hello", on_event=app._apply_event).output == "new"
             assert app.runner.current_model().id == "beta"
             assert app.state.usage == {}
-            assert any("Model: model-b · default" == getattr(block, "content", "") for block in app.state.blocks)
+            assert not any(getattr(block, "content", "").startswith(("Model:", "Model queued:"))
+                           for block in app.state.blocks)
 
     asyncio.run(scenario())
 
@@ -297,11 +298,18 @@ def test_cli_idle_switch_preserves_pending_approval() -> None:
             assert runner.pending_model().id == "beta"
             assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "cli-write"
             assert app.state.status == "Model queued: model-b · default · F2: pending approval"
+            applied_notices = []
+            def on_event(event):
+                app._apply_event(event)
+                if event.type == "runtime_config_applied":
+                    applied_notices.append(app.state.status)
             with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="done")])):
-                result = runner.approve_tool("cli-write", on_event=app._apply_event)
+                result = runner.approve_tool("cli-write", on_event=on_event)
             assert result.status == "completed"
             assert runner.current_model().id == "beta"
-            assert any(getattr(block, "content", "") == "Model: model-b · default" for block in app.state.blocks)
+            assert applied_notices == ["Model: model-b · default"]
+            assert not any(getattr(block, "content", "").startswith(("Model:", "Model queued:"))
+                           for block in app.state.blocks)
     finally:
         runner.close()
 

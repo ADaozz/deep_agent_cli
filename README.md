@@ -2,7 +2,7 @@
 
 `deep-agent` 是一个在终端中运行的 Coding Agent，支持 Linux 和 WSL2。它把启动时所在的目录作为工作区，调用你配置的 OpenAI 兼容模型服务，并在 [Bubblewrap](https://github.com/containers/bubblewrap) 沙箱中执行命令。Agent 运行时基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建。
 
-当前版本 0.1.3，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
+当前版本 0.1.4，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
 
 ## 功能
 
@@ -210,6 +210,7 @@ ls -R ~/.deep-agent/skills/playwright-cli
 | `~/.nvm/versions/node/v22.23.2` | `/opt/node` | 只读 | `node`、`npm`、`playwright-cli` |
 | `~/.cargo` | `/opt/cargo` | 只读 | Rust 工具链 |
 | `/opt/google` | `/opt/google` | 只读 | 系统 Chrome。`playwright-cli open` 使用 `/opt/google/chrome/chrome` |
+| `/mnt/wslg/.X11-unix` | `/tmp/.X11-unix` | 只读 | WSLg 的 X11 文件 socket，供有头浏览器连接宿主显示服务 |
 | `~/.cache/ms-playwright` | `/opt/ms-playwright` | 可写 | CLI 版本对应的 Chromium / Chrome for Testing。环境变量 `PLAYWRIGHT_BROWSERS_PATH` 指向这里 |
 
 Node.js 版本以本机 `~/.nvm/versions/node/` 下的目录名为准，和模板不一致时改 `source`。其他装在 `~/.local`、`/opt` 或家目录里的程序同样处理：用 `readlink -f "$(command -v 工具名)"` 找到落在 `/usr`、`/bin`、`/lib` 之外的目录，按同样格式追加挂载，并把可执行文件所在目录加到 `PATH` 前面。`PATH` 会替换沙箱默认值，末尾保留 `/usr/local/bin:/usr/bin:/bin`。
@@ -239,7 +240,23 @@ sandbox:
 
 使用系统 Chrome 时保留 `/opt/google` 的只读挂载。系统目录以外的 Node 本体则需要另行只读挂载，并把其 `bin` 加到 `PATH`。
 
-有头模式还需要把 `DISPLAY` 加入 `sandbox.env_allowlist`，并确保对应 X Server 可访问。已测试的 X11 抽象 Socket 环境中，无网沙箱的网络命名空间无法连接宿主 X Server；当前流程应使用有网沙箱，ask 模式必须声明 `network=true` 并审批。Xauthority 认证可能需要额外挂载认证文件，该场景未验证；Wayland 也不在本轮验证范围。
+有头模式需要宿主提供 X Server、传入 `DISPLAY`，并让沙箱访问显示 socket。默认模板已允许 `DISPLAY`，并可选挂载 WSLg 的 `/mnt/wslg/.X11-unix` 到沙箱 `/tmp/.X11-unix`。在 WSLg 环境中可直接复用现有显示服务，无需另装 Xvfb。启动 `deep-agent` 的终端必须已有正确的 `DISPLAY`（WSLg 通常为 `:0`）。
+
+已有配置请合并以下内容，保留其他环境变量和挂载：
+
+```yaml
+sandbox:
+  env_allowlist:
+    - DISPLAY
+  extra_read_only_mounts:
+    - source: /mnt/wslg/.X11-unix
+      destination: /tmp/.X11-unix
+      optional: true
+```
+
+保存后退出并重新启动 `deep-agent`，让新沙箱加载配置，再执行 `playwright-cli open about:blank --headed`。已在 WSLg 下实测 `network=false` 的有头启动、页面截图及关闭成功；访问互联网页面仍需要声明 `network=true`，ask 模式需审批。此配置允许沙箱连接宿主 X Server，不改变 IP 网络或 IPC 隔离。
+
+普通 Linux X11 桌面可把挂载源改为 `/tmp/.X11-unix`。仅使用 X11 抽象 socket 时，无网沙箱无法访问宿主网络命名空间中的该 socket，需要有网沙箱。Xauthority 认证可能需要传入 `XAUTHORITY` 并挂载对应认证文件，该场景未验证；原生 Wayland 连接也未验证，WSLg 此处使用的是 X11。
 
 保留 Bubblewrap 的 `--unshare-ipc`。用户提供的真实机器 A/B 验证表明，在专用 Xvfb 关闭 MIT-SHM 可以稳定渲染，无需添加 Chrome 启动参数：
 
@@ -248,9 +265,9 @@ Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
 # 启动 deep-agent 前设置 DISPLAY=:2，并在 env_allowlist 中允许 DISPLAY
 ```
 
-以上为用户手动准备环境的示例，CLI 不会自动安装 Node、浏览器或 Xvfb。有头渲染必须通过实际 X 窗口截图核验；读取 title、DOM 或看到窗口存在不足以证明渲染成功。详细 A/B 结果和挂载说明见 [docs/sandbox.md](docs/sandbox.md#playwright-与有头-x11)。Playwright CLI 可能生成 `.playwright-cli/`，建议在自己的项目 `.gitignore` 中忽略它；程序不会自动修改 `.gitignore`。
+Xvfb 示例仅适用于宿主没有现成显示服务的情况；CLI 不会自动安装 Node、浏览器或 Xvfb。有头渲染必须通过实际 X 窗口截图核验；读取 title、DOM 或看到窗口存在不足以证明渲染成功。详细 A/B 结果和挂载说明见 [docs/sandbox.md](docs/sandbox.md#playwright-与有头-x11)。Playwright CLI 可能生成 `.playwright-cli/`，建议在自己的项目 `.gitignore` 中忽略它；程序不会自动修改 `.gitignore`。
 
-已经存在的 `~/.deep-agent/config.yaml` 不会被模板覆盖。把模板里的 `sandbox.env_set` 和两个挂载列表合并进现有文件，保存后退出并重新启动 `deep-agent`。挂载规则见 [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)。
+已经存在的 `~/.deep-agent/config.yaml` 不会被模板覆盖。把模板里的 `sandbox.env_allowlist`、`sandbox.env_set` 和两个挂载列表合并进现有文件，保存后退出并重新启动 `deep-agent`。挂载规则见 [沙箱与权限](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md)。
 
 ## 安全模型
 
