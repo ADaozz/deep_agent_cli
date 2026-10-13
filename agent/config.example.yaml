@@ -106,7 +106,9 @@ sandbox:
   timeout_seconds: null
   max_output_bytes: 100000
   # 明确允许传递给 Agent 命令的宿主机环境变量名称。
-  env_allowlist: []
+  # 有头浏览器复用宿主 X11 显示；宿主未设置 DISPLAY 时不传入。
+  env_allowlist:
+    - DISPLAY
   # 注入沙箱的固定环境变量。PATH 会覆盖默认值，请保留系统目录。
   # playwright-cli open 使用 /opt/google/chrome/chrome。不要在沙箱中执行
   # `npx playwright install chrome` 安装 Chrome，该命令需要 sudo apt-get。
@@ -126,6 +128,11 @@ sandbox:
       optional: true
     - source: /opt/google
       destination: /opt/google
+      optional: true
+    # WSLg 已提供 X Server，无需安装 Xvfb。文件 socket 支持 network=false。
+    # 普通 Linux 桌面可改为 /tmp/.X11-unix；无显示服务时跳过此挂载。
+    - source: /mnt/wslg/.X11-unix
+      destination: /tmp/.X11-unix
       optional: true
   # 可写的浏览器缓存；沙箱内的创建、修改和删除操作会同步到宿主机目录。
   extra_read_write_mounts:

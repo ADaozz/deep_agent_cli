@@ -619,10 +619,10 @@ def test_graph_update_without_usage_preserves_current_stream_usage(input_tokens)
     runner._emit_update_events({"model": {"messages": [AIMessage(content="done")]}}, state.apply)
     assert state.usage["input_tokens"] == input_tokens
     assert runner._context_usage_invalidated is False
-    # 下一次调用必须清空，不能延用上一次流式用量。
+    # Runner invalidates current usage; the footer retains the last reported reading.
     callback.on_llm_start({}, [])
     runner._emit_update_events({"model": {"messages": [AIMessage(content="no usage")]}}, state.apply)
-    assert state.usage == {}
+    assert state.usage["input_tokens"] == input_tokens
     assert runner._context_usage_invalidated is True
 
 

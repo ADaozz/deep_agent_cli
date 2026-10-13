@@ -123,8 +123,6 @@ class CliState:
     def apply(self, event: RunEvent) -> None:
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
-        if event.type in {"run_started", "assistant_started", "compaction_finished", "run_cancelled", "run_failed"}:
-            self.usage.clear()
         if event.type == "run_started":
             self.running = True
             self.status = "Working…  Esc to cancel"
@@ -144,7 +142,10 @@ class CliState:
                 if key in {"input_tokens", "output_tokens", "total_tokens"}
                 and type(value) is int and value >= 0
             }
-            self.usage = usage
+            # Keep the last reported context size until a new input count arrives.
+            # Empty/start events and output-only usage cannot replace that reading.
+            if "input_tokens" in usage:
+                self.usage = usage
         elif event.type in {"thinking_delta", "assistant_delta"}:
             block = touch(self._assistant_block())
             if event.type == "thinking_delta":
