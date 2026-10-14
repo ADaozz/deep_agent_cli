@@ -18,12 +18,17 @@ from agent.server.store import ServiceStore, TERMINAL
 from tests.test_server import FakeRunner, config  # Reuse the service fixture.
 
 
+CANCEL_SCENARIOS = {"cancelled", "cancel_after_completion", "cancel_cleanup_unconfirmed"}
+
+
 @pytest.mark.parametrize("scenario, status", [
     ("completed", "completed"),
     ("returned_failure", "failed"),
     ("execution_exception", "failed"),
     ("initialization_exception", "failed"),
     ("cancelled", "cancelled"),
+    ("cancel_after_completion", "completed"),
+    ("cancel_cleanup_unconfirmed", "failed"),
     ("cleanup_exception", "failed"),
     ("worker_start_exception", "failed"),
 ])
@@ -52,6 +57,10 @@ def test_sse_waits_for_atomic_terminal_publication(config, monkeypatch, scenario
             assert release_producer.wait(10)
             if scenario == "execution_exception":
                 raise RuntimeError("execution failed")
+            if scenario == "cancelled":
+                return RunResult(status="cancelled")
+            if scenario == "cancel_cleanup_unconfirmed":
+                return RunResult(status="cancelled", error="model request did not confirm it stopped")
             return RunResult(status="failed" if scenario == "returned_failure" else "completed", output="done")
 
         def close(self):
@@ -181,7 +190,7 @@ def test_sse_waits_for_atomic_terminal_publication(config, monkeypatch, scenario
         assert producer_ready.wait(5)
         reader.start()
         assert first_snapshot.wait(5)
-        if scenario == "cancelled":
+        if scenario in CANCEL_SCENARIOS:
             assert submit_done.wait(5)
             manager.cancel(created["id"])
         release_producer.set()
@@ -194,7 +203,7 @@ def test_sse_waits_for_atomic_terminal_publication(config, monkeypatch, scenario
         # a terminal state with a missing event (the restart/crash boundary).
         with sqlite3.connect(config.state_dir / "service.sqlite3") as observer:
             observed_status = observer.execute("SELECT status FROM runs WHERE id=?", (created["id"],)).fetchone()[0]
-            assert observed_status == ("cancelling" if scenario == "cancelled" else "running")
+            assert observed_status == ("cancelling" if scenario in CANCEL_SCENARIOS else "running")
             assert observer.execute("SELECT COUNT(*) FROM events WHERE run_id=? AND type='run_finished'",
                                     (created["id"],)).fetchone()[0] == 0
         release_writer.set()
@@ -208,6 +217,8 @@ def test_sse_waits_for_atomic_terminal_publication(config, monkeypatch, scenario
         assert len(finished) == 1
         assert finished[0] == manager.run(created["id"])
         assert finished[0]["status"] == status
+        if scenario == "cancel_cleanup_unconfirmed":
+            assert finished[0]["result"]["error"] == "model request did not confirm it stopped"
     finally:
         release_producer.set()
         release_writer.set()

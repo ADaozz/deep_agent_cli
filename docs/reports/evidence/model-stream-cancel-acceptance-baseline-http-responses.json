@@ -1,0 +1,155 @@
+{
+  "label": "baseline-http-responses",
+  "mode": "http",
+  "api": "responses",
+  "repo_commit": "c4f4ce1",
+  "scenario": "mixed",
+  "samples_s": [
+    5.0,
+    15.0,
+    30.0
+  ],
+  "started_at": 1791947302.2555242,
+  "summary": {
+    "cycles_run": 1,
+    "server_saw_close": 0,
+    "max_close_s": null,
+    "open_model_tcp_at_last_sample": 1,
+    "follow_ups_completed": 0,
+    "normal_mean_s": 0.446,
+    "normal_requests": 3,
+    "normal_request_bytes": 64880,
+    "normal_reported_tokens": 84,
+    "follow_mean_s": 0.0,
+    "threads": [
+      4,
+      8
+    ],
+    "stopped_early": "follow-up task after cycle 0 did not complete"
+  },
+  "pid": 27144,
+  "normal_tasks": [
+    {
+      "marker": "NORMAL-0",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.918,
+      "requests": 1,
+      "request_bytes": 21473,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-1",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.202,
+      "requests": 1,
+      "request_bytes": 21668,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-2",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.218,
+      "requests": 1,
+      "request_bytes": 21739,
+      "reported_tokens": 28
+    }
+  ],
+  "cycles": [
+    {
+      "index": 0,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-4 (_work)": 1,
+            "ThreadPoolExecutor-4_0": 1,
+            "ThreadPoolExecutor-4_1": 1,
+            "ThreadPoolExecutor-4_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": [
+            "Thread-4 (_work)"
+          ]
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0199,
+      "samples": {
+        "5s": {
+          "threads": 8,
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "run_status": "cancelling",
+          "held_session_leases": 1
+        },
+        "15s": {
+          "threads": 8,
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "run_status": "cancelling",
+          "held_session_leases": 1
+        },
+        "30s": {
+          "threads": 8,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "Thread-4 (_work)": 1,
+              "ThreadPoolExecutor-4_0": 1,
+              "ThreadPoolExecutor-4_1": 1,
+              "ThreadPoolExecutor-4_2": 1,
+              "asyncio_0": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": [
+              "Thread-4 (_work)"
+            ]
+          },
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "run_status": "cancelling",
+          "held_session_leases": 1
+        }
+      },
+      "server_saw_close_after_s": null,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:run_cancelling",
+        "<stream still open>"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-0",
+        "completed": false,
+        "submit_status": 409,
+        "detail": {
+          "detail": "Project already has an unfinished run"
+        }
+      },
+      "follow_up_has_cancelled_prompt": false
+    }
+  ],
+  "baseline_threads": 4,
+  "stopped_early": "follow-up task after cycle 0 did not complete",
+  "exit_code": 0,
+  "leases_after_exit": 0,
+  "log_tail": "/v1/sessions/4492b41a-058c-4e41-bab2-075361f63eed/runs HTTP/1.1\" 409 Conflict\nINFO:     Shutting down\nINFO:     Waiting for application shutdown.\nERROR:    Traceback (most recent call last):\n  File \"/workspace/.venv/lib/python3.12/site-packages/starlette/routing.py\", line 654, in lifespan\n    async with self.lifespan_context(app) as maybe_state:\n  File \"/usr/lib/python3.12/contextlib.py\", line 217, in __aexit__\n    await anext(self.gen)\n  File \"/workspace/.venv/lib/python3.12/site-packages/fastapi/routing.py\", line 247, in merged_lifespan\n    async with original_context(app) as maybe_original_state:\n  File \"/usr/lib/python3.12/contextlib.py\", line 217, in __aexit__\n    await anext(self.gen)\n  File \"/tmp/baseline/agent/server/app.py\", line 70, in lifespan\n    await asyncio.to_thread(manager.close)\n  File \"/usr/lib/python3.12/asyncio/threads.py\", line 25, in to_thread\n    return await loop.run_in_executor(None, func_call)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/concurrent/futures/thread.py\", line 58, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/baseline/agent/server/runtime.py\", line 266, in close\n    raise RuntimeError(\"Agent workers did not drain; service lease retained until process exit\")\nRuntimeError: Agent workers did not drain; service lease retained until process exit\n\nERROR:    Application shutdown failed. Exiting.\nINFO:     Finished server process [27144]\n"
+}

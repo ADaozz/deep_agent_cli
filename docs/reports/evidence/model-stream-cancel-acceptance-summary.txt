@@ -1,0 +1,84 @@
+Model stream cancel - real-environment fault injection (diagnostic runs, local scripted SSE endpoint)
+Driver: examples/cancel_fault_injection.py (real `deep-agent` TUI in a PTY / real `deep-agent serve`, real bwrap sandbox)
+Command: python examples/cancel_fault_injection.py --mode {tui|http} --api {chat_completions|responses} --repo {checkout} --cycles N
+Scenarios rotate: before_first_chunk, mid_stream, continuous. Samples at 5s/15s/30s after Esc / POST cancel.
+Not formal A/B statistics: no real model, token counts are the scripted usage (28 per finished request).
+Note: runs labelled commit=ff35e57 were made before a metadata-only commit rewrite; ff35e57 and 0330a65 have the identical tree.
+
+[baseline-http-responses] commit=c4f4ce1 mode=http api=responses
+  cycles=1 server_saw_close=0 max_close_s=None model_tcp_open_at_30s=1 follow_ups_completed=0 stopped_early='follow-up task after cycle 0 did not complete'
+  normal tasks: requests=3 request_bytes=64880 reported_tokens=84 mean_s=0.446; follow-up mean_s=0.0
+  OS threads (start, after each cycle at 30s): [4, 8]
+   #0 before_first_chunk close_s=None tcp@30s=1 state@30s=cancelling http_stack@30s=['Thread-4 (_work)'] leases=1 events=['agent_event:run_cancelling'] cancel_http=202 follow_up=FAIL submit=409
+  exit_code=0 leases_after_exit=0
+
+[baseline-tui-chat] commit=c4f4ce1 mode=tui api=chat_completions
+  cycles=1 server_saw_close=0 max_close_s=None model_tcp_open_at_30s=1 follow_ups_completed=0 stopped_early='follow-up task after cycle 0 did not complete'
+  normal tasks: requests=3 request_bytes=71262 reported_tokens=84 mean_s=0.084; follow-up mean_s=20.018
+  OS threads (start, after each cycle at 30s): [2, 6]
+   #0 before_first_chunk close_s=None tcp@30s=1 state@30s=['aborted'] http_stack@30s=['deep-agent-io_0'] leases=1 ui_cancelled=False follow_up=FAIL
+  exit_code=-9 leases_after_exit=0
+
+[fixed-http-chat] commit=ff35e57 mode=http api=chat_completions
+  cycles=10 server_saw_close=10 max_close_s=0.0175 model_tcp_open_at_30s=0 follow_ups_completed=10
+  normal tasks: requests=3 request_bytes=65271 reported_tokens=84 mean_s=0.222; follow-up mean_s=0.161
+  OS threads (start, after each cycle at 30s): [4, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+   #0 before_first_chunk close_s=0.0175 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #1 mid_stream         close_s=0.017 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #2 continuous         close_s=0.0172 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #3 before_first_chunk close_s=0.0166 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #4 mid_stream         close_s=0.0167 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #5 continuous         close_s=0.0172 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #6 before_first_chunk close_s=0.0149 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #7 mid_stream         close_s=0.0157 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #8 continuous         close_s=0.015 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #9 before_first_chunk close_s=0.0149 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+  exit_code=0 leases_after_exit=0
+
+[fixed-http-responses] commit=ff35e57 mode=http api=responses
+  cycles=10 server_saw_close=10 max_close_s=0.0229 model_tcp_open_at_30s=0 follow_ups_completed=10
+  normal tasks: requests=3 request_bytes=64880 reported_tokens=84 mean_s=0.485; follow-up mean_s=0.164
+  OS threads (start, after each cycle at 30s): [4, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+   #0 before_first_chunk close_s=0.016 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #1 mid_stream         close_s=0.0175 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #2 continuous         close_s=0.0158 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #3 before_first_chunk close_s=0.0166 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #4 mid_stream         close_s=0.0175 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #5 continuous         close_s=0.0229 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #6 before_first_chunk close_s=0.0162 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #7 mid_stream         close_s=0.0165 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #8 continuous         close_s=0.0157 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+   #9 before_first_chunk close_s=0.0157 tcp@30s=0 state@30s=cancelled http_stack@30s=[] leases=0 events=['agent_event:run_cancelling', 'agent_event:run_cancelled', 'run_finished'] cancel_http=202 follow_up=ok
+  exit_code=0 leases_after_exit=0
+
+[fixed-tui-chat] commit=ff35e57 mode=tui api=chat_completions
+  cycles=10 server_saw_close=10 max_close_s=0.1639 model_tcp_open_at_30s=0 follow_ups_completed=10
+  normal tasks: requests=3 request_bytes=71262 reported_tokens=84 mean_s=0.088; follow-up mean_s=0.066
+  OS threads (start, after each cycle at 30s): [2, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+   #0 before_first_chunk close_s=0.1523 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #1 mid_stream         close_s=0.1527 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #2 continuous         close_s=0.1529 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #3 before_first_chunk close_s=0.1529 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #4 mid_stream         close_s=0.1518 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #5 continuous         close_s=0.1639 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #6 before_first_chunk close_s=0.1522 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #7 mid_stream         close_s=0.1522 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #8 continuous         close_s=0.1527 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #9 before_first_chunk close_s=0.1522 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+  exit_code=0 leases_after_exit=0
+
+[fixed-tui-responses] commit=ff35e57 mode=tui api=responses
+  cycles=10 server_saw_close=10 max_close_s=0.1536 model_tcp_open_at_30s=0 follow_ups_completed=10
+  normal tasks: requests=3 request_bytes=70889 reported_tokens=84 mean_s=0.279; follow-up mean_s=0.083
+  OS threads (start, after each cycle at 30s): [2, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+   #0 before_first_chunk close_s=0.1536 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #1 mid_stream         close_s=0.1521 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #2 continuous         close_s=0.1519 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #3 before_first_chunk close_s=0.1528 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #4 mid_stream         close_s=0.1522 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #5 continuous         close_s=0.1523 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #6 before_first_chunk close_s=0.1523 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #7 mid_stream         close_s=0.1518 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #8 continuous         close_s=0.1522 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+   #9 before_first_chunk close_s=0.1519 tcp@30s=0 state@30s=['aborted'] http_stack@30s=[] leases=1 ui_cancelled=True follow_up=ok
+  exit_code=0 leases_after_exit=0

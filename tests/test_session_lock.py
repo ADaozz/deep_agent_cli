@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from agent.session import SessionStore
 from agent.session_lock import (
     InProcessSessionLockManager,
@@ -281,3 +283,53 @@ def test_in_process_close_releases_leases() -> None:
     manager.close()
     assert lease.released
     assert other.try_acquire("thread-a") is not None
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_cancelled_model_stream_keeps_lease_until_runner_closes(tmp_path: Path, api: str) -> None:
+    import threading
+    import time
+
+    from deepagents.backends import StateBackend
+    from agent.config import ModelProfile, Settings
+    from agent.llm_stream import live_stream_count
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    with ScriptedSSEServer(api, [Turn(mode="hang")]) as server:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=server.base_url, api=api),),
+                            llm_default="local/s")
+        path = tmp_path / "state.sqlite3"
+        store = SessionStore(path)
+        runner = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id="leased")
+        results = []
+        worker = threading.Thread(target=lambda: results.append(runner.invoke("hang")))
+        worker.start()
+
+        def other_runner():
+            other_store = SessionStore(path)
+            try:
+                AgentRunner(settings=settings, backend=StateBackend(), session_store=other_store,
+                            thread_id="leased").close()
+            finally:
+                other_store.close()
+
+        try:
+            assert server.wait_for_connection(0).hanging.wait(5)
+            with pytest.raises(SessionLockBusyError):
+                other_runner()
+            started = time.monotonic()
+            runner.request_cancel()
+            worker.join(5)
+            assert not worker.is_alive() and time.monotonic() - started < 5
+            assert results[0].status == "cancelled"
+            assert server.connections[0].closed.wait(2)
+            assert live_stream_count() == 0
+            # Cancelled is not closed: the runner still owns the thread.
+            with pytest.raises(SessionLockBusyError):
+                other_runner()
+        finally:
+            runner.close()
+            store.close()
+        other_runner()

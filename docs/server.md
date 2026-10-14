@@ -465,6 +465,13 @@ POST /v1/runs/{run_id}/cancel
 
 无请求体，返回 `202 Run`，一般为 `cancelling`。运行中、等待审批、等待回答和暂停的活动任务都可取消。服务请求 Runner 停止，解除等待，并等待 worker 清理；后续通常到达 `cancelled`，清理失败可能变为 `failed`。
 
+终态只裁决一次，以 Runner 实际到达的执行边界为准：
+
+- 本轮已经结束（最终回答已写入 checkpoint）后才生效的取消不覆盖结果，`cancelling` 之后仍可能到达 `completed`。
+- 取消在本轮结束前生效时到达 `cancelled`。此前已完成的工具调用（包括文件写入）保留，其结果已记录在 checkpoint 中，下一轮可见。
+- 取消已生效但无法确认模型请求已关闭时到达 `failed`，`result.error` 说明原因；若 worker 清理时仍无法确认，则按 `Runner cleanup failed; restart service` 保留项目占用。
+- 等待审批时取消、且审批尚未被处理，工具不执行，审批中断保留，该会话需用 `resume=true` 恢复。
+
 已终止或无活动 worker 返回 `409 Run has already ended`。取消处理中重复请求可能再次返回 `202`，前端只发送一次并禁用按钮。断开事件流、离开页面、AbortController 中止浏览器请求，都不是服务取消操作。取消不回滚工作区修改，也不撤销已经完成的外部副作用。
 
 ## 5. SSE 事件协议

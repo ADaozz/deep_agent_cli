@@ -508,3 +508,279 @@ def test_server_settings_still_reject_config_directory_in_any_project(config, un
     monkeypatch.chdir(config.model_config.parent)
     with pytest.raises(ValueError, match="outside workspace"):
         config.settings_for("one")
+
+
+def _events(client, rid):
+    import json as _json
+    response = client.get(f"/v1/runs/{rid}/events", headers=AUTH)
+    events = []
+    kind = None
+    for line in response.text.splitlines():
+        if line.startswith("event: "):
+            kind = line[7:]
+        elif line.startswith("data: "):
+            events.append((kind, _json.loads(line[6:])))
+    return events
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_cancel_of_silent_model_stream_reaches_cancelled(config, api):
+    """C12: real Runner and SSE model; cancel -> cancelling -> cancelled, one run_finished."""
+    import json as _json
+
+    from deepagents.backends import StateBackend
+    from agent.config import ModelProfile, Settings
+    from agent.llm_stream import live_stream_count
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    with ScriptedSSEServer(api, [Turn(text="partial then silence", mode="hang", chunks_before_hang=1),
+                                 Turn(text="next run ok")]) as model:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=model.base_url, api=api),),
+                            llm_default="local/s")
+
+        def real_factory(config, project_id, session_id):
+            store = SessionStore(config.state_dir / f"{project_id}.sqlite3")
+            return AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id=session_id)
+
+        with TestClient(create_app(config, factory=real_factory)) as client:
+            sid = session(client)
+            rid = submit(client, sid, "start")
+            connection = model.wait_for_connection(0)
+            assert connection.hanging.wait(5)
+            started = time.monotonic()
+            first = client.post(f"/v1/runs/{rid}/cancel", headers=AUTH)
+            assert first.status_code == 202 and first.json()["status"] in {"cancelling", "cancelled"}
+            again = client.post(f"/v1/runs/{rid}/cancel", headers=AUTH)
+            assert again.status_code in {202, 409}
+            run = wait(client, rid, "cancelled")
+            assert time.monotonic() - started < 5
+            assert run["result"]["status"] == "cancelled" and not run["result"].get("error")
+            assert connection.closed.wait(2) and connection.closed_by_client_at is not None
+            assert live_stream_count() == 0
+            assert client.post(f"/v1/runs/{rid}/cancel", headers=AUTH).status_code == 409
+            events = _events(client, rid)
+            kinds = [kind if kind != "agent_event" else data["type"] for kind, data in events]
+            assert kinds.count("run_finished") == 1 and kinds[-1] == "run_finished"
+            assert kinds.count("run_cancelling") == 1
+            assert kinds.count("run_cancelled") == 1
+            assert "run_failed" not in kinds and "run_completed" not in kinds
+            assert kinds.index("run_cancelled") < kinds.index("run_finished")
+            store = SessionStore(config.state_dir / "one.sqlite3")
+            try:
+                assert store.get(sid).last_run_status.value == "aborted"
+            finally:
+                store.close()
+            # C07 over HTTP: the session accepts new work once the old worker drained.
+            follow = submit(client, sid, "next")
+            assert wait(client, follow, "completed")["result"]["output"] == "next run ok"
+            assert "start" in _json.dumps(model.connections[1].body, ensure_ascii=False)
+        assert model.open_connections() == []
+
+
+def _terminal(client, rid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run = client.get(f"/v1/runs/{rid}", headers=AUTH).json()
+        if run["status"] in TERMINAL:
+            return run
+        time.sleep(0.005)
+    pytest.fail(f"Run did not finish: {run}")
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_cancel_racing_completion_reports_the_executed_outcome(config, api):
+    """Cancel swept across an approved write_file, the final answer and completion."""
+    from deepagents.backends import StateBackend
+    from langchain_core.messages import AIMessage, ToolMessage
+    from agent.config import ModelProfile, Settings
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore
+    from agent.stream import message_text
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    rounds = 12
+    with ScriptedSSEServer(api) as model:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=model.base_url, api=api),),
+                            llm_default="local/s")
+        database = config.state_dir / "one.sqlite3"
+
+        def real_factory(config, project_id, session_id):
+            return AgentRunner(settings=settings, backend=StateBackend(),
+                               session_store=SessionStore(database), thread_id=session_id)
+
+        def checkpoint(sid):
+            store = SessionStore(database)
+            reader = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id=sid)
+            try:
+                values = reader.prepared.graph.get_state(reader._thread_config()).values
+                return values, store.get(sid).last_run_status.value
+            finally:
+                reader.close()
+                store.close()
+
+        outcomes = []
+        with TestClient(create_app(config, factory=real_factory)) as client:
+            for index in range(rounds):
+                # A cancel that beats the approval leaves that interrupt pending,
+                # so every round uses its own session.
+                sid = session(client)
+                call = {"id": f"write-{index}", "name": "write_file",
+                        "args": {"file_path": f"/round-{index}.txt", "content": f"round {index}"}}
+                model.replace_turns(Turn(tool_calls=[call]), Turn(text=f"done {index} a b c d e", interval=0.003))
+                rid = submit(client, sid, f"write round {index}")
+                waiting = wait(client, rid, "waiting_confirmation")
+                call_id = waiting["result"]["pending_tool_calls"][0]["toolCallId"]
+                assert client.post(f"/v1/runs/{rid}/approvals", headers=AUTH, json={
+                    "interrupt_id": waiting["interrupt_id"],
+                    "decisions": [{"tool_call_id": call_id, "decision": "approve"}],
+                }).status_code == 202
+                time.sleep(0.012 * index)
+                cancel = client.post(f"/v1/runs/{rid}/cancel", headers=AUTH)
+                assert cancel.status_code in {202, 409}
+                run = _terminal(client, rid)
+                kinds = [kind if kind != "agent_event" else data["type"] for kind, data in _events(client, rid)]
+                assert kinds.count("run_finished") == 1
+                values, catalog = checkpoint(sid)
+                messages = values["messages"]
+                start = max(i for i, m in enumerate(messages) if message_text(m) == f"write round {index}")
+                added = messages[start:]
+                tool_results = [m for m in added if isinstance(m, ToolMessage) and m.tool_call_id == call_id]
+                answered = any(isinstance(m, AIMessage) and message_text(m).startswith(f"done {index} ")
+                               for m in added)
+                written = f"/round-{index}.txt" in (values.get("files") or {})
+                # A file the tool wrote is always recorded once in the checkpoint.
+                assert len(tool_results) == (1 if written else 0)
+                if run["status"] == "completed":
+                    assert answered and written and catalog == "stop"
+                    assert "run_cancelled" not in kinds
+                else:
+                    assert run["status"] == "cancelled", run
+                    assert cancel.status_code == 202 and not run["result"].get("error")
+                    assert not answered and catalog == "aborted"
+                    assert kinds.count("run_cancelled") == 1
+                outcomes.append((run["status"], written))
+        assert model.open_connections() == [] and not model.errors
+        print("http-race-outcomes", outcomes)
+        assert {"completed", "cancelled"} <= {status for status, _ in outcomes}, outcomes
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_cancel_after_stop_persisted_keeps_completed(config, api):
+    """HTTP cancel accepted after the Runner wrote STOP but before its cleanup ran."""
+    from deepagents.backends import StateBackend
+    from agent.config import ModelProfile, Settings
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore, StopReason
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    holder = {}
+    with ScriptedSSEServer(api, [Turn(text="finished"), Turn(text="after")]) as model:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=model.base_url, api=api),),
+                            llm_default="local/s")
+        database = config.state_dir / "one.sqlite3"
+
+        def real_factory(config, project_id, session_id):
+            runner = AgentRunner(settings=settings, backend=StateBackend(),
+                                 session_store=SessionStore(database), thread_id=session_id)
+            original_touch = runner._touch_status
+
+            def touch_then_cancel(reason):
+                original_touch(reason)
+                if reason is StopReason.STOP and "cancel" not in holder:
+                    manager = holder["manager"]
+                    rid = next(iter(manager.active))
+                    holder["cancel"] = manager.cancel(rid)["status"]
+                    holder["catalog"] = runner.session_store.get(runner.thread_id).last_run_status
+
+            runner._touch_status = touch_then_cancel
+            return runner
+
+        with TestClient(create_app(config, factory=real_factory)) as client:
+            holder["manager"] = client.app.state.manager
+            sid = session(client)
+            rid = submit(client, sid, "answer")
+            run = _terminal(client, rid)
+            assert holder["cancel"] == "cancelling"
+            assert holder["catalog"] is StopReason.STOP
+            assert run["status"] == "completed" and run["result"]["output"] == "finished"
+            kinds = [kind if kind != "agent_event" else data["type"] for kind, data in _events(client, rid)]
+            assert kinds.count("run_finished") == 1
+            assert "run_completed" in kinds and "run_cancelled" not in kinds and "run_failed" not in kinds
+            store = SessionStore(database)
+            try:
+                assert store.get(sid).last_run_status is StopReason.STOP
+            finally:
+                store.close()
+            follow = submit(client, sid, "next")
+            assert wait(client, follow, "completed")["result"]["output"] == "after"
+            import json as _json
+            assert "[Previous run status]" not in _json.dumps(model.connections[1].body, ensure_ascii=False)
+
+
+def test_cancel_does_not_signal_runner_under_manager_lock(config):
+    import threading
+
+    observed = {}
+    holder = {}
+
+    class LockProbeRunner(FakeRunner):
+        def request_cancel(self):
+            def probe():
+                acquired = holder["manager"].lock.acquire(timeout=1)
+                observed["free"] = acquired
+                if acquired:
+                    holder["manager"].lock.release()
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(2)
+            super().request_cancel()
+
+    with TestClient(create_app(config, factory=lambda *_: LockProbeRunner())) as client:
+        holder["manager"] = client.app.state.manager
+        rid = submit(client, session(client), "block")
+        deadline = time.monotonic() + 5
+        while holder["manager"].active.get(rid) is None or holder["manager"].active[rid].runner is None:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        assert client.post(f"/v1/runs/{rid}/cancel", headers=AUTH).status_code == 202
+        wait(client, rid, "cancelled")
+    assert observed == {"free": True}
+
+
+def test_cancel_racing_run_start_is_replayed(config):
+    """Cancel accepted after the worker published its runner but before begin_run."""
+    gate = Event()
+    entered = Event()
+    runners = []
+
+    class SlowStartRunner(FakeRunner):
+        def invoke(self, text, **callbacks):
+            entered.set()
+            assert gate.wait(5)
+            callbacks["on_event"](RunEvent(type="run_started"))
+            if self.cancelled.wait(2):
+                return RunResult(status="cancelled")
+            return RunResult(status="completed", output="raced")
+
+        def request_cancel(self):
+            # Like begin_run, the first signal is lost before the run starts.
+            if entered.is_set() and not gate.is_set():
+                return
+            super().request_cancel()
+
+    def factory(*_args):
+        runners.append(SlowStartRunner())
+        return runners[-1]
+
+    with TestClient(create_app(config, factory=factory)) as client:
+        rid = submit(client, session(client), "go")
+        assert entered.wait(5)
+        assert client.post(f"/v1/runs/{rid}/cancel", headers=AUTH).status_code == 202
+        gate.set()
+        run = wait(client, rid, "cancelled")
+        assert run["result"]["status"] == "cancelled"
+        assert runners[0].cancelled.is_set()
+        kinds = [kind for kind, _data in _events(client, rid)]
+        assert kinds.count("run_finished") == 1

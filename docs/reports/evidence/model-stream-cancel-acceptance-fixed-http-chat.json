@@ -1,0 +1,942 @@
+{
+  "label": "fixed-http-chat",
+  "mode": "http",
+  "api": "chat_completions",
+  "repo_commit": "ff35e57",
+  "scenario": "mixed",
+  "samples_s": [
+    5.0,
+    15.0,
+    30.0
+  ],
+  "started_at": 1791947302.1674824,
+  "summary": {
+    "cycles_run": 10,
+    "server_saw_close": 10,
+    "max_close_s": 0.0175,
+    "open_model_tcp_at_last_sample": 0,
+    "follow_ups_completed": 10,
+    "normal_mean_s": 0.222,
+    "normal_requests": 3,
+    "normal_request_bytes": 65271,
+    "normal_reported_tokens": 84,
+    "follow_mean_s": 0.161,
+    "threads": [
+      4,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6
+    ],
+    "stopped_early": null
+  },
+  "pid": 27129,
+  "normal_tasks": [
+    {
+      "marker": "NORMAL-0",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.324,
+      "requests": 1,
+      "request_bytes": 21623,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-1",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.169,
+      "requests": 1,
+      "request_bytes": 21757,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-2",
+      "completed": true,
+      "final_status": "completed",
+      "elapsed_s": 0.174,
+      "requests": 1,
+      "request_bytes": 21891,
+      "reported_tokens": 28
+    }
+  ],
+  "cycles": [
+    {
+      "index": 0,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-4 (_work)": 1,
+            "ThreadPoolExecutor-4_0": 1,
+            "ThreadPoolExecutor-4_1": 1,
+            "ThreadPoolExecutor-4_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0257,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0175,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-0",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.174,
+        "requests": 1,
+        "request_bytes": 22072,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 1,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-6 (_work)": 1,
+            "ThreadPoolExecutor-6_0": 1,
+            "ThreadPoolExecutor-6_1": 1,
+            "ThreadPoolExecutor-6_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0192,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.017,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-1",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.141,
+        "requests": 1,
+        "request_bytes": 22253,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 2,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-8 (_work)": 1,
+            "ThreadPoolExecutor-8_0": 1,
+            "ThreadPoolExecutor-8_1": 1,
+            "ThreadPoolExecutor-8_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0213,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0172,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-2",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.191,
+        "requests": 1,
+        "request_bytes": 22434,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 3,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 9,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-10 (_work)": 1,
+            "ThreadPoolExecutor-10_0": 1,
+            "ThreadPoolExecutor-10_1": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0174,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0166,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-3",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.153,
+        "requests": 1,
+        "request_bytes": 22615,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 4,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-12 (_work)": 1,
+            "ThreadPoolExecutor-12_0": 1,
+            "ThreadPoolExecutor-12_1": 1,
+            "ThreadPoolExecutor-12_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0186,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0167,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-4",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.145,
+        "requests": 1,
+        "request_bytes": 22796,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 5,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-14 (_work)": 1,
+            "ThreadPoolExecutor-14_0": 1,
+            "ThreadPoolExecutor-14_1": 1,
+            "ThreadPoolExecutor-14_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0205,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0172,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-5",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.174,
+        "requests": 1,
+        "request_bytes": 22977,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 6,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-16 (_work)": 1,
+            "ThreadPoolExecutor-16_0": 1,
+            "ThreadPoolExecutor-16_1": 1,
+            "ThreadPoolExecutor-16_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.017,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0149,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-6",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.174,
+        "requests": 1,
+        "request_bytes": 23158,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 7,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-18 (_work)": 1,
+            "ThreadPoolExecutor-18_0": 1,
+            "ThreadPoolExecutor-18_1": 1,
+            "ThreadPoolExecutor-18_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0169,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0157,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-7",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.144,
+        "requests": 1,
+        "request_bytes": 23339,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 8,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "ThreadPoolExecutor-20_0": 1,
+            "ThreadPoolExecutor-20_1": 1,
+            "ThreadPoolExecutor-20_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": [
+            "deep-agent-model-stream"
+          ]
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0163,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.015,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:assistant_delta",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-8",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.139,
+        "requests": 1,
+        "request_bytes": 23520,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    },
+    {
+      "index": 9,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 10,
+        "python_threads": {
+          "names": {
+            "AnyIO worker thread": 1,
+            "MainThread": 1,
+            "Thread-22 (_work)": 1,
+            "ThreadPoolExecutor-22_0": 1,
+            "ThreadPoolExecutor-22_1": 1,
+            "ThreadPoolExecutor-22_2": 1,
+            "asyncio_0": 2,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "run_status": "running",
+        "held_session_leases": 1
+      },
+      "cancel_http_status": 202,
+      "cancel_response_s": 0.0175,
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "AnyIO worker thread": 1,
+              "MainThread": 1,
+              "asyncio_0": 2,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "run_status": "cancelled",
+          "held_session_leases": 0
+        }
+      },
+      "server_saw_close_after_s": 0.0149,
+      "events": [
+        "run_started",
+        "agent_event:run_started",
+        "agent_event:usage",
+        "agent_event:assistant_started",
+        "agent_event:run_cancelling",
+        "agent_event:run_cancelled",
+        "run_finished"
+      ],
+      "follow_up": {
+        "marker": "FOLLOW-9",
+        "completed": true,
+        "final_status": "completed",
+        "elapsed_s": 0.172,
+        "requests": 1,
+        "request_bytes": 23701,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true
+    }
+  ],
+  "baseline_threads": 4,
+  "exit_code": 0,
+  "leases_after_exit": 0,
+  "log_tail": "13-3960-4e05-b664-b4c472502a9a HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:60466 - \"POST /v1/sessions/899ea5a9-d22e-470e-8552-f723b5dcdd4a/runs HTTP/1.1\" 202 Accepted\nINFO:     127.0.0.1:60480 - \"GET /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2 HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:60494 - \"POST /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2/cancel HTTP/1.1\" 202 Accepted\nINFO:     127.0.0.1:60014 - \"GET /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2 HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:56074 - \"GET /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2 HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33490 - \"GET /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2 HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33502 - \"GET /v1/runs/28641fef-e9a9-47d1-b6f3-cb6fdd9968d2/events HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33518 - \"POST /v1/sessions/899ea5a9-d22e-470e-8552-f723b5dcdd4a/runs HTTP/1.1\" 202 Accepted\nINFO:     127.0.0.1:33530 - \"GET /v1/runs/6d68b424-2a2b-4139-a61b-6c78a41ebddb HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33544 - \"GET /v1/runs/6d68b424-2a2b-4139-a61b-6c78a41ebddb HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33550 - \"GET /v1/runs/6d68b424-2a2b-4139-a61b-6c78a41ebddb HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33552 - \"GET /v1/runs/6d68b424-2a2b-4139-a61b-6c78a41ebddb HTTP/1.1\" 200 OK\nINFO:     127.0.0.1:33556 - \"GET /v1/runs/6d68b424-2a2b-4139-a61b-6c78a41ebddb HTTP/1.1\" 200 OK\nINFO:     Shutting down\nINFO:     Waiting for application shutdown.\nINFO:     Application shutdown complete.\nINFO:     Finished server process [27129]\n"
+}
