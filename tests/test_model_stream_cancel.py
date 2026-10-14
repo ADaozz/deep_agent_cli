@@ -690,3 +690,104 @@ def test_unregistered_model_still_streams_outside_a_run(make_runner) -> None:
         assert message.content == "plain call"
         assert _live_bridges() == 0
 
+
+# ---------------------------------------------------------------------------
+# Shared stream loop: sessions are isolated, and process exit closes streams.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("api", APIS)
+def test_cancelling_one_session_leaves_concurrent_streams_intact(api: str, make_runner) -> None:
+    text = " ".join(f"w{i}" for i in range(20))
+    stalled = [ScriptedSSEServer(api, [Turn(text="stalls", mode="hang", chunks_before_hang=1)]) for _ in range(2)]
+    flowing = [ScriptedSSEServer(api, [Turn(text=text, interval=0.03)]) for _ in range(2)]
+    servers = stalled + flowing
+    for server in servers:
+        server.__enter__()
+    try:
+        runners = [make_runner(server, thread_id=f"concurrent-{i}") for i, server in enumerate(servers)]
+        harnesses = [Harness(runner).start(runner.invoke, "go") for runner in runners]
+        for server in stalled:
+            assert server.wait_for_connection(0).hanging.wait(5)
+        for server in flowing:
+            assert server.wait_for_connection(0).first_chunk_sent.wait(5)
+        cancelled_at = time.monotonic()
+        for runner in runners[:2]:
+            runner.request_cancel()
+        for harness, server in zip(harnesses[:2], stalled):
+            assert harness.join(CANCEL_BUDGET) and harness.result.status == "cancelled"
+            assert server.connections[0].closed.wait(1)
+        assert time.monotonic() - cancelled_at < 2
+        # The other sessions were mid-stream on the same loop and must finish untouched.
+        assert all(not server.connections[0].closed.is_set() for server in flowing)
+        for harness, server in zip(harnesses[2:], flowing):
+            assert harness.join(10), harness.types()
+            assert harness.result.status == "completed" and harness.result.output == text
+            assert not {"run_cancelled", "run_failed"} & set(harness.types())
+        assert _live_bridges() == 0
+    finally:
+        for server in servers:
+            server.close()
+
+
+_EXIT_PROBE = r'''
+import sys, threading, time
+from deepagents.backends import StateBackend
+from agent.config import ModelProfile, Settings
+from agent.runner import AgentRunner
+from agent.llm_stream import live_stream_count, shutdown_stream_loop
+
+base_url, api, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+settings = Settings(llm_profiles=(ModelProfile("l/s", "s", api_key="k", base_url=base_url, api=api),),
+                    llm_default="l/s")
+runner = AgentRunner(settings=settings, backend=StateBackend(), thread_id="exit")
+assert runner.invoke("first").status == "completed"
+worker = threading.Thread(target=runner.invoke, args=("second",), daemon=True)
+worker.start()
+deadline = time.monotonic() + 5
+while live_stream_count() == 0 and time.monotonic() < deadline:
+    time.sleep(0.01)
+print("streaming", live_stream_count(), flush=True)
+sys.stdin.readline()  # the test saw this request arrive at the server
+if mode == "cancel-then-exit":
+    runner.request_cancel()
+    worker.join(5)
+    print("worker-alive", worker.is_alive(), flush=True)
+    runner.close()
+elif mode == "shutdown-while-streaming":
+    # The same call atexit makes: it must cancel the task and release the request.
+    print("shutdown", shutdown_stream_loop(), "live", live_stream_count(), flush=True)
+    worker.join(5)
+    print("worker-alive", worker.is_alive(), flush=True)
+'''
+
+
+@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize("mode", ["exit-while-streaming", "cancel-then-exit", "shutdown-while-streaming"])
+def test_process_exit_closes_shared_loop_and_streams(api: str, mode: str) -> None:
+    import subprocess
+    import sys
+
+    with ScriptedSSEServer(api, [Turn(text="first ok"), Turn(text="x", mode="forever", interval=0.05)]) as server:
+        process = subprocess.Popen(
+            [sys.executable, "-X", "dev", "-c", _EXIT_PROBE, server.base_url, api, mode],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=Path(__file__).resolve().parents[1],
+        )
+        try:
+            assert server.wait_for_connection(1, 30).first_chunk_sent.wait(5)
+            started = time.monotonic()
+            stdout, stderr = process.communicate("go\n", timeout=30)
+        finally:
+            if process.poll() is None:
+                process.kill()
+        elapsed = time.monotonic() - started
+        assert process.returncode == 0, stderr
+        assert "streaming 1" in stdout
+        if mode != "exit-while-streaming":
+            assert "worker-alive False" in stdout
+        if mode == "shutdown-while-streaming":
+            assert "shutdown True live 0" in stdout
+        assert server.connections[1].closed.wait(5)
+        assert elapsed < 20
+        for noise in ("Task was destroyed", "Event loop is closed", "Exception ignored",
+                      "was never awaited", "Traceback"):
+            assert noise not in stderr, stderr
