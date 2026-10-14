@@ -1,0 +1,7 @@
+$ python -m pytest -q --tb=line -o faulthandler_timeout=60   # branch HEAD 0330a65 + uncommitted acceptance script
+/workspace/tests/test_display_limits.py:54: AssertionError: assert '… 11 earlier thinking' in '                                                                                \n Thinking                          ...nking lines hidden · Ctrl+T to expand                         \n   的思考正文很长的思考正文很长的思考正文很长的思考正文                         '
+/workspace/tests/test_skills.py:316: AssertionError: assert 1 >= 2
+=========================== short test summary info ============================
+FAILED tests/test_display_limits.py::test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint
+FAILED tests/test_skills.py::test_skill_block_style_survives_wrapping_and_ordinary_text_is_unchanged
+2 failed, 941 passed, 4 skipped in 110.37s (0:01:50)

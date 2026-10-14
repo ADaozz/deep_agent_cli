@@ -1,0 +1,1158 @@
+{
+  "label": "fixed-tui-responses",
+  "mode": "tui",
+  "api": "responses",
+  "repo_commit": "ff35e57",
+  "scenario": "mixed",
+  "samples_s": [
+    5.0,
+    15.0,
+    30.0
+  ],
+  "started_at": 1791947302.2273705,
+  "summary": {
+    "cycles_run": 10,
+    "server_saw_close": 10,
+    "max_close_s": 0.1536,
+    "open_model_tcp_at_last_sample": 0,
+    "follow_ups_completed": 10,
+    "normal_mean_s": 0.279,
+    "normal_requests": 3,
+    "normal_request_bytes": 70889,
+    "normal_reported_tokens": 84,
+    "follow_mean_s": 0.083,
+    "threads": [
+      2,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5
+    ],
+    "stopped_early": null
+  },
+  "pid": 27132,
+  "normal_tasks": [
+    {
+      "marker": "NORMAL-0",
+      "completed": true,
+      "elapsed_s": 0.722,
+      "requests": 1,
+      "request_bytes": 23476,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-1",
+      "completed": true,
+      "elapsed_s": 0.047,
+      "requests": 1,
+      "request_bytes": 23671,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-2",
+      "completed": true,
+      "elapsed_s": 0.067,
+      "requests": 1,
+      "request_bytes": 23742,
+      "reported_tokens": 28
+    }
+  ],
+  "cycles": [
+    {
+      "index": 0,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-4_0": 1,
+            "ThreadPoolExecutor-4_1": 1,
+            "ThreadPoolExecutor-4_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "› cancel probe 0",
+          "⠋ Working…  Esc to cancel · 问题在本地无法复现，它可能不喜欢我的工位。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1536,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-0",
+        "completed": true,
+        "elapsed_s": 0.066,
+        "requests": 1,
+        "request_bytes": 24191,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 1,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-6_0": 1,
+            "ThreadPoolExecutor-6_1": 1,
+            "ThreadPoolExecutor-6_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "partial answer",
+          "⠙ Working…  Esc to cancel · 多线程提高了效率：几个错误可以同时出现。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1521,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-1",
+        "completed": true,
+        "elapsed_s": 0.065,
+        "requests": 1,
+        "request_bytes": 24328,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 2,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "ThreadPoolExecutor-8_0": 1,
+            "ThreadPoolExecutor-8_1": 1,
+            "ThreadPoolExecutor-8_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "tok0 tok1 tok2 tok3 tok4",
+          "⠏ Working…  Esc to cancel · 我把灵魂挂载到了 /dev/null。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1519,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-2",
+        "completed": true,
+        "elapsed_s": 0.067,
+        "requests": 1,
+        "request_bytes": 24465,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 3,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-10_0": 1,
+            "ThreadPoolExecutor-10_1": 1,
+            "ThreadPoolExecutor-10_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "› cancel probe 3",
+          "⠇ Working…  Esc to cancel · 我本来想 push 一个笑话，但担心产生 conflict。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1528,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-3",
+        "completed": true,
+        "elapsed_s": 0.065,
+        "requests": 1,
+        "request_bytes": 24602,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 4,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-12_0": 1,
+            "ThreadPoolExecutor-12_1": 1,
+            "ThreadPoolExecutor-12_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "partial answer",
+          "⠧ Working…  Esc to cancel · 一行代码解决问题的代价，是下一行开始研究人生。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1522,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-4",
+        "completed": true,
+        "elapsed_s": 0.065,
+        "requests": 1,
+        "request_bytes": 24739,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 5,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "ThreadPoolExecutor-14_0": 1,
+            "ThreadPoolExecutor-14_1": 1,
+            "ThreadPoolExecutor-14_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "tok0 tok1 tok2 tok3 tok4",
+          "⠴ Working…  Esc to cancel · 人工智能写代码只用了十秒，我解释代码用了十杯咖啡。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1523,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-5",
+        "completed": true,
+        "elapsed_s": 0.066,
+        "requests": 1,
+        "request_bytes": 24876,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 6,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-16_0": 1,
+            "ThreadPoolExecutor-16_1": 1,
+            "ThreadPoolExecutor-16_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "› cancel probe 6",
+          "⠴ Working…  Esc to cancel · 一行代码解决问题的代价，是下一行开始研究人生。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1523,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-6",
+        "completed": true,
+        "elapsed_s": 0.066,
+        "requests": 1,
+        "request_bytes": 25013,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 7,
+      "scenario": "mid_stream",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-18_0": 1,
+            "ThreadPoolExecutor-18_1": 1,
+            "ThreadPoolExecutor-18_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "partial answer",
+          "⠴ Working…  Esc to cancel · 我们发明 AI 是为了取代程序员，最后又雇了程序员来照顾 AI。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1518,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-7",
+        "completed": true,
+        "elapsed_s": 0.088,
+        "requests": 1,
+        "request_bytes": 25150,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 8,
+      "scenario": "continuous",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "ThreadPoolExecutor-20_0": 1,
+            "ThreadPoolExecutor-20_1": 1,
+            "ThreadPoolExecutor-20_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "tok0 tok1 tok2 tok3 tok4",
+          "⠸ Working…  Esc to cancel · 我们发明 AI 是为了取代程序员，最后又雇了程序员来照顾 AI。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1522,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-8",
+        "completed": true,
+        "elapsed_s": 0.066,
+        "requests": 1,
+        "request_bytes": 25287,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    },
+    {
+      "index": 9,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 8,
+        "python_threads": {
+          "names": {
+            "ThreadPoolExecutor-22_0": 1,
+            "ThreadPoolExecutor-22_1": 1,
+            "ThreadPoolExecutor-22_2": 1,
+            "asyncio_0": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-model-stream": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": []
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "› cancel probe 9",
+          "⠹ Working…  Esc to cancel · 我删除了无用代码，顺便发现它其实有用。",
+          "›",
+          "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 5,
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 5,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "asyncio_0": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-model-stream": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": []
+          },
+          "agent_model_tcp_established": 0,
+          "server_open_requests": 0,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "Error: Operation cancelled.",
+            "Cancelled",
+            "›",
+            "/tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": 0.1519,
+      "ui_showed_cancelled": true,
+      "follow_up": {
+        "marker": "FOLLOW-9",
+        "completed": true,
+        "elapsed_s": 0.216,
+        "requests": 1,
+        "request_bytes": 25424,
+        "reported_tokens": 28
+      },
+      "follow_up_has_cancelled_prompt": true,
+      "follow_up_has_abort_note": true
+    }
+  ],
+  "baseline_threads": 2,
+  "exit_code": 0,
+  "leases_after_exit": 0,
+  "final_screen": " Worked for 0s · 11:12                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n › cancel probe 8                                                                                                                           \n                                                                                                                                            \n                                                                                                                                            \n tok0 tok1 tok2 tok3 tok4 tok5 tok6 tok7 tok8                                                                                               \n                                                                                                                                            \n Error: Operation cancelled.                                                                                                                \n                                                                                                                                            \n › reply with FOLLOW-8                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n FOLLOW-8 done                                                                                                                              \n Worked for 0s · 11:13                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n › cancel probe 9                                                                                                                           \n                                                                                                                                            \n                                                                                                                                            \n Error: Operation cancelled.                                                                                                                \n                                                                                                                                            \n › reply with FOLLOW-9                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n FOLLOW-9 done                                                                                                                              \n Worked for 0s · 11:13                                                                                                                      \n                                                                                                                                            \n Input cleared · press Ctrl+C again to exit                                                                                                 \n                                                                                                                                            \n›                                                                                                                                           \n                                                                                                                                            \n /tmp/cancel-fi-1jrlwz9f/workspace · local · stream · default · 77cfd87b                                                            ⎇ no git\n SANDBOXED · perm:ask                                                                                                                       \nTo continue this session, run:                                                                                                              \n                                                                                                                                            \n  deep-agent resume 77cfd87b-341a-4037-8c35-d1e429961773                                                                                    \n                                                                                                                                            \nOr run deep-agent resume and select. Model: local · stream · default                                                                        \n                                                                                                                                            "
+}
