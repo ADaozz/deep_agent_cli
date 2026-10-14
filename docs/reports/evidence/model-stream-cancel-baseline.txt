@@ -1,0 +1,517 @@
+cancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.001, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-1 (process_request_thread)", "ThreadPoolExecutor-1_0", "ThreadPoolExecutor-1_1", "ThreadPoolExecutor-1_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.017, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-2 (process_request_thread)", "ThreadPoolExecutor-2_0", "ThreadPoolExecutor-2_1", "ThreadPoolExecutor-2_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.002, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-3 (process_request_thread)", "ThreadPoolExecutor-3_0", "ThreadPoolExecutor-3_1", "ThreadPoolExecutor-3_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.001, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-4 (process_request_thread)", "ThreadPoolExecutor-4_0", "ThreadPoolExecutor-4_1", "ThreadPoolExecutor-4_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.001, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-5 (process_request_thread)", "ThreadPoolExecutor-5_0", "ThreadPoolExecutor-5_1", "ThreadPoolExecutor-5_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.002, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-6 (process_request_thread)", "ThreadPoolExecutor-6_0", "ThreadPoolExecutor-6_1", "ThreadPoolExecutor-6_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+FFFFFFcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.001, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-45 (process_request_thread)", "ThreadPoolExecutor-35_0", "ThreadPoolExecutor-35_1", "ThreadPoolExecutor-35_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+Fcancel-report {"runner_finished": false, "cancel_to_runner_end_s": 5.002, "server_saw_close": false, "cancel_to_server_close_s": null, "live_bridges": null, "threads": ["MainThread", "Thread-47 (process_request_thread)", "ThreadPoolExecutor-38_0", "ThreadPoolExecutor-38_1", "ThreadPoolExecutor-38_2", "runner-op", "sse-test-server"], "result": null, "error": null}
+FFF.F
+=================================== FAILURES ===================================
+_____ test_cancel_stops_model_stream[before_first_chunk-chat_completions] ______
+
+api = 'chat_completions', scenario = 'before_first_chunk'
+make_runner = <function make_runner.<locals>.build at 0x7fcebf152ca0>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebf160b30>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebf14dc70>
+report = {'cancel_to_runner_end_s': 5.001, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.001, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-1 (process_request_thread)', 'ThreadPoolExecutor-1_0', 'ThreadPoolExecutor-1_1', 'ThreadPoolExecutor-1_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+_________ test_cancel_stops_model_stream[before_first_chunk-responses] _________
+
+api = 'responses', scenario = 'before_first_chunk'
+make_runner = <function make_runner.<locals>.build at 0x7fcebe6516c0>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebe5de810>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebe76d8e0>
+report = {'cancel_to_runner_end_s': 5.017, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.017, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-2 (process_request_thread)', 'ThreadPoolExecutor-2_0', 'ThreadPoolExecutor-2_1', 'ThreadPoolExecutor-2_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+______ test_cancel_stops_model_stream[silent_mid_stream-chat_completions] ______
+
+api = 'chat_completions', scenario = 'silent_mid_stream'
+make_runner = <function make_runner.<locals>.build at 0x7fcebefa6de0>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebe668bf0>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebefa9880>
+report = {'cancel_to_runner_end_s': 5.002, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.002, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-3 (process_request_thread)', 'ThreadPoolExecutor-3_0', 'ThreadPoolExecutor-3_1', 'ThreadPoolExecutor-3_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+_________ test_cancel_stops_model_stream[silent_mid_stream-responses] __________
+
+api = 'responses', scenario = 'silent_mid_stream'
+make_runner = <function make_runner.<locals>.build at 0x7fcebefa6a20>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebe668950>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebe66a720>
+report = {'cancel_to_runner_end_s': 5.001, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.001, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-4 (process_request_thread)', 'ThreadPoolExecutor-4_0', 'ThreadPoolExecutor-4_1', 'ThreadPoolExecutor-4_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+_________ test_cancel_stops_model_stream[continuous-chat_completions] __________
+
+api = 'chat_completions', scenario = 'continuous'
+make_runner = <function make_runner.<locals>.build at 0x7fcebe6f7600>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebe6efbf0>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebe760110>
+report = {'cancel_to_runner_end_s': 5.001, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.001, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-5 (process_request_thread)', 'ThreadPoolExecutor-5_0', 'ThreadPoolExecutor-5_1', 'ThreadPoolExecutor-5_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+_____________ test_cancel_stops_model_stream[continuous-responses] _____________
+
+api = 'responses', scenario = 'continuous'
+make_runner = <function make_runner.<locals>.build at 0x7fcebfc434c0>
+
+    @pytest.mark.parametrize("api", APIS)
+    @pytest.mark.parametrize("scenario", ["before_first_chunk", "silent_mid_stream", "continuous"])
+    def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None:
+        turn = {
+            "before_first_chunk": Turn(mode="hang"),
+            "silent_mid_stream": Turn(text="partial answer then silence", mode="hang", chunks_before_hang=2,
+                                      reasoning="thinking"),
+            "continuous": Turn(mode="forever", interval=0.01),
+        }[scenario]
+        with ScriptedSSEServer(api, [turn, Turn(text="fresh answer")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            connection = server.wait_for_connection(0)
+            if scenario == "before_first_chunk":
+                connection.hanging.wait(5)
+            elif scenario == "silent_mid_stream":
+                connection.hanging.wait(5)
+                harness.wait_for(lambda: "assistant_delta" in harness.types())
+            else:
+                harness.wait_for(lambda: harness.types().count("assistant_delta") >= 5)
+            report = _cancel_and_measure(harness, server, 0)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebcca67e0>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebcca5400>
+report = {'cancel_to_runner_end_s': 5.002, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.002, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-6 (process_request_thread)', 'ThreadPoolExecutor-6_0', 'ThreadPoolExecutor-6_1', 'ThreadPoolExecutor-6_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+______ test_long_silent_reasoning_gap_is_not_cancelled[chat_completions] _______
+
+api = 'chat_completions'
+make_runner = <function make_runner.<locals>.build at 0x7fcebccaeac0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fcebcd84170>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_long_silent_reasoning_gap_is_not_cancelled(api: str, make_runner, monkeypatch) -> None:
+        # LangChain's async path applies this per-chunk timeout; the sync path never did.
+        monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
+        with ScriptedSSEServer(api, [Turn(reasoning="long think", gap_before_text=1.5, text="done thinking")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "think hard")
+            assert harness.join(15), harness.types()
+            assert harness.error is None, harness.error
+            assert harness.result.status == "completed" and harness.result.output == "done thinking"
+>           assert _live_bridges() == 0
+E           assert None == 0
+E            +  where None = _live_bridges()
+
+tests/test_model_stream_cancel.py:218: AssertionError
+__________ test_long_silent_reasoning_gap_is_not_cancelled[responses] __________
+
+api = 'responses'
+make_runner = <function make_runner.<locals>.build at 0x7fcebcd44180>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fcebcd34f80>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_long_silent_reasoning_gap_is_not_cancelled(api: str, make_runner, monkeypatch) -> None:
+        # LangChain's async path applies this per-chunk timeout; the sync path never did.
+        monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
+        with ScriptedSSEServer(api, [Turn(reasoning="long think", gap_before_text=1.5, text="done thinking")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "think hard")
+            assert harness.join(15), harness.types()
+            assert harness.error is None, harness.error
+            assert harness.result.status == "completed" and harness.result.output == "done thinking"
+>           assert _live_bridges() == 0
+E           assert None == 0
+E            +  where None = _live_bridges()
+
+tests/test_model_stream_cancel.py:218: AssertionError
+______________________ test_repeated_cancel_is_idempotent ______________________
+
+make_runner = <function make_runner.<locals>.build at 0x7fcebcd47ce0>
+
+    def test_repeated_cancel_is_idempotent(make_runner) -> None:
+        with ScriptedSSEServer("chat_completions", [Turn(mode="hang")]) as server:
+            runner = make_runner(server)
+            harness = Harness(runner).start(runner.invoke, "start")
+            server.wait_for_connection(0).hanging.wait(5)
+            threads = [threading.Thread(target=runner.request_cancel) for _ in range(10)]
+            started = time.monotonic()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(2)
+            assert not any(thread.is_alive() for thread in threads), "request_cancel blocked"
+>           assert harness.join(CANCEL_BUDGET)
+E           assert False
+E            +  where False = join(5.0)
+E            +    where join = <test_model_stream_cancel.Harness object at 0x7fcebcc16600>.join
+
+tests/test_model_stream_cancel.py:236: AssertionError
+______ test_cancel_racing_completion_has_single_outcome[chat_completions] ______
+
+api = 'chat_completions'
+make_runner = <function make_runner.<locals>.build at 0x7fcebcc61f80>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_cancel_racing_completion_has_single_outcome(api: str, make_runner) -> None:
+        rounds = 12
+        with ScriptedSSEServer(api, [Turn(text="a b c d e f", interval=0.002) for _ in range(rounds)]) as server:
+            runner = make_runner(server)
+            outcomes = []
+            for index in range(rounds):
+                harness = Harness(runner).start(runner.invoke, f"round {index}")
+                server.wait_for_connection(index)
+                time.sleep(0.002 * (index % 6))
+                runner.request_cancel()
+                assert harness.join(CANCEL_BUDGET), harness.types()
+                assert harness.error is None, harness.error
+                types = harness.types()
+                terminal = [item for item in types if item in {"run_completed", "run_cancelled", "run_failed"}]
+                assert len(terminal) == 1, types
+                assert harness.result.status in {"completed", "cancelled"}
+                assert terminal[0] == f"run_{harness.result.status}"
+                assert server.connections[index].closed.wait(CANCEL_BUDGET)
+                outcomes.append(harness.result.status)
+>           assert _live_bridges() == 0
+E           assert None == 0
+E            +  where None = _live_bridges()
+
+tests/test_model_stream_cancel.py:269: AssertionError
+_________ test_cancel_racing_completion_has_single_outcome[responses] __________
+
+api = 'responses'
+make_runner = <function make_runner.<locals>.build at 0x7fcebcc8bd80>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_cancel_racing_completion_has_single_outcome(api: str, make_runner) -> None:
+        rounds = 12
+        with ScriptedSSEServer(api, [Turn(text="a b c d e f", interval=0.002) for _ in range(rounds)]) as server:
+            runner = make_runner(server)
+            outcomes = []
+            for index in range(rounds):
+                harness = Harness(runner).start(runner.invoke, f"round {index}")
+                server.wait_for_connection(index)
+                time.sleep(0.002 * (index % 6))
+                runner.request_cancel()
+                assert harness.join(CANCEL_BUDGET), harness.types()
+                assert harness.error is None, harness.error
+                types = harness.types()
+                terminal = [item for item in types if item in {"run_completed", "run_cancelled", "run_failed"}]
+                assert len(terminal) == 1, types
+                assert harness.result.status in {"completed", "cancelled"}
+                assert terminal[0] == f"run_{harness.result.status}"
+                assert server.connections[index].closed.wait(CANCEL_BUDGET)
+                outcomes.append(harness.result.status)
+>           assert _live_bridges() == 0
+E           assert None == 0
+E            +  where None = _live_bridges()
+
+tests/test_model_stream_cancel.py:269: AssertionError
+__ test_cancel_after_approved_tool_keeps_single_tool_result[chat_completions] __
+
+api = 'chat_completions'
+make_runner = <function make_runner.<locals>.build at 0x7fcebcb76d40>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_cancel_after_approved_tool_keeps_single_tool_result(api: str, make_runner) -> None:
+        call = {"id": "write-once", "name": "write_file",
+                "args": {"file_path": "/once.txt", "content": "written once"}}
+        turns = [Turn(tool_calls=[call]), Turn(mode="hang"), Turn(text="all good")]
+        with ScriptedSSEServer(api, turns) as server:
+            runner = make_runner(server)
+            waiting = runner.invoke("write it")
+            assert waiting.status == "waiting_confirmation"
+            # Cancelling while idle at the approval prompt must not execute the tool.
+            runner.request_cancel()
+            state = runner.prepared.graph.get_state(runner._thread_config())
+            assert "/once.txt" not in (state.values.get("files") or {})
+            harness = Harness(runner).start(runner.approve_tool, "write-once")
+            server.wait_for_connection(1).hanging.wait(5)
+            report = _cancel_and_measure(harness, server, 1)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:292: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebcb907d0>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebe5081d0>
+report = {'cancel_to_runner_end_s': 5.001, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.001, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-45 (process_request_thread)', 'ThreadPoolExecutor-35_0', 'ThreadPoolExecutor-35_1', 'ThreadPoolExecutor-35_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+_____ test_cancel_after_approved_tool_keeps_single_tool_result[responses] ______
+
+api = 'responses'
+make_runner = <function make_runner.<locals>.build at 0x7fcebcb76ca0>
+
+    @pytest.mark.parametrize("api", APIS)
+    def test_cancel_after_approved_tool_keeps_single_tool_result(api: str, make_runner) -> None:
+        call = {"id": "write-once", "name": "write_file",
+                "args": {"file_path": "/once.txt", "content": "written once"}}
+        turns = [Turn(tool_calls=[call]), Turn(mode="hang"), Turn(text="all good")]
+        with ScriptedSSEServer(api, turns) as server:
+            runner = make_runner(server)
+            waiting = runner.invoke("write it")
+            assert waiting.status == "waiting_confirmation"
+            # Cancelling while idle at the approval prompt must not execute the tool.
+            runner.request_cancel()
+            state = runner.prepared.graph.get_state(runner._thread_config())
+            assert "/once.txt" not in (state.values.get("files") or {})
+            harness = Harness(runner).start(runner.approve_tool, "write-once")
+            server.wait_for_connection(1).hanging.wait(5)
+            report = _cancel_and_measure(harness, server, 1)
+>           _assert_clean_cancel(harness, server, report)
+
+tests/test_model_stream_cancel.py:292: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+harness = <test_model_stream_cancel.Harness object at 0x7fcebe3a8410>
+server = <tests.model_stream_server.ScriptedSSEServer object at 0x7fcebe55ac90>
+report = {'cancel_to_runner_end_s': 5.002, 'cancel_to_server_close_s': None, 'error': None, 'live_bridges': None, ...}
+
+    def _assert_clean_cancel(harness: Harness, server: ScriptedSSEServer, report: dict[str, Any]) -> None:
+>       assert report["runner_finished"], f"Runner still blocked {CANCEL_BUDGET}s after cancel: {report}"
+E       AssertionError: Runner still blocked 5.0s after cancel: {'runner_finished': False, 'cancel_to_runner_end_s': 5.002, 'server_saw_close': False, 'cancel_to_server_close_s': None, 'live_bridges': None, 'threads': ['MainThread', 'Thread-47 (process_request_thread)', 'ThreadPoolExecutor-38_0', 'ThreadPoolExecutor-38_1', 'ThreadPoolExecutor-38_2', 'runner-op', 'sse-test-server'], 'result': None, 'error': None}
+E       assert False
+
+tests/test_model_stream_cancel.py:140: AssertionError
+________________ test_repeated_start_cancel_cycles_do_not_leak _________________
+
+make_runner = <function make_runner.<locals>.build at 0x7fcebe568400>
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-5/test_repeated_start_cancel_cyc0')
+
+    def test_repeated_start_cancel_cycles_do_not_leak(make_runner, tmp_path: Path) -> None:
+        cycles = 10
+        with ScriptedSSEServer("chat_completions", [Turn(mode="hang") for _ in range(cycles)]) as server:
+            runner = make_runner(server)
+            # Warm up the shared stream loop so it is not counted as a leak.
+            warm = Harness(runner).start(runner.invoke, "warm")
+            server.wait_for_connection(0).hanging.wait(5)
+            runner.request_cancel()
+>           assert warm.join(CANCEL_BUDGET)
+E           assert False
+E            +  where False = join(5.0)
+E            +    where join = <test_model_stream_cancel.Harness object at 0x7fcebe5860c0>.join
+
+tests/test_model_stream_cancel.py:317: AssertionError
+___________________ test_cancel_before_begin_run_is_not_lost ___________________
+
+make_runner = <function make_runner.<locals>.build at 0x7fcebe449300>
+
+    def test_cancel_before_begin_run_is_not_lost(make_runner) -> None:
+        with ScriptedSSEServer("chat_completions", [Turn(text="should not run")]) as server:
+            runner = make_runner(server)
+>           reservation = runner.reserve_run()
+                          ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'AgentRunner' object has no attribute 'reserve_run'
+
+tests/test_model_stream_cancel.py:353: AttributeError
+_____________ test_unregistered_model_still_streams_outside_a_run ______________
+
+make_runner = <function make_runner.<locals>.build at 0x7fcebe48f100>
+
+    def test_unregistered_model_still_streams_outside_a_run(make_runner) -> None:
+        with ScriptedSSEServer("chat_completions", [Turn(text="plain call")]) as server:
+            runner = make_runner(server)
+            message = runner._chat_model.invoke([HumanMessage(content="hi")])
+            assert message.content == "plain call"
+>           assert _live_bridges() == 0
+E           assert None == 0
+E            +  where None = _live_bridges()
+
+tests/test_model_stream_cancel.py:379: AssertionError
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/test_model_stream_cancel.py::test_idle_cancel_does_not_affect_next_run
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[before_first_chunk-chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[before_first_chunk-responses]
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[silent_mid_stream-chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[silent_mid_stream-responses]
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[continuous-chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_cancel_stops_model_stream[continuous-responses]
+FAILED tests/test_model_stream_cancel.py::test_long_silent_reasoning_gap_is_not_cancelled[chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_long_silent_reasoning_gap_is_not_cancelled[responses]
+FAILED tests/test_model_stream_cancel.py::test_repeated_cancel_is_idempotent
+FAILED tests/test_model_stream_cancel.py::test_cancel_racing_completion_has_single_outcome[chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_cancel_racing_completion_has_single_outcome[responses]
+FAILED tests/test_model_stream_cancel.py::test_cancel_after_approved_tool_keeps_single_tool_result[chat_completions]
+FAILED tests/test_model_stream_cancel.py::test_cancel_after_approved_tool_keeps_single_tool_result[responses]
+FAILED tests/test_model_stream_cancel.py::test_repeated_start_cancel_cycles_do_not_leak
+FAILED tests/test_model_stream_cancel.py::test_cancel_before_begin_run_is_not_lost
+FAILED tests/test_model_stream_cancel.py::test_unregistered_model_still_streams_outside_a_run
+16 failed, 1 passed in 62.24s (0:01:02)
