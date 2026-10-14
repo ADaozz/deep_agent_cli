@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from agent.config import ModelProfile, Settings
 from agent.runner import AgentRunner, RunEvent, RunResult
 from agent.session import SessionStore, StopReason
+from agent.stream import message_text
 from tests.model_stream_server import ScriptedSSEServer, Turn
 
 pytestmark = pytest.mark.integration
@@ -249,7 +250,7 @@ def test_repeated_cancel_is_idempotent(make_runner) -> None:
 @pytest.mark.parametrize("api", APIS)
 def test_cancel_racing_completion_has_single_outcome(api: str, make_runner) -> None:
     rounds = 16
-    with ScriptedSSEServer(api, [Turn(text="a b c d e f", interval=0.004) for _ in range(rounds)]) as server:
+    with ScriptedSSEServer(api, [Turn(text=f"a b c d e {i}", interval=0.004) for i in range(rounds)]) as server:
         runner = make_runner(server)
         outcomes = []
         for index in range(rounds):
@@ -267,11 +268,68 @@ def test_cancel_racing_completion_has_single_outcome(api: str, make_runner) -> N
             assert terminal[0] == f"run_{harness.result.status}"
             assert server.connections[index].closed.wait(CANCEL_BUDGET)
             outcomes.append(harness.result.status)
+            # The reported outcome matches what the checkpoint and catalog hold.
+            messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+            since_prompt = messages[max(i for i, m in enumerate(messages) if message_text(m) == f"round {index}"):]
+            answered = any(isinstance(m, AIMessage) and message_text(m) == f"a b c d e {index}" for m in since_prompt)
+            status = runner.session_store.get(runner.thread_id).last_run_status
             if harness.result.status == "completed":
-                assert harness.result.output == "a b c d e f"
+                assert harness.result.output == f"a b c d e {index}"
+                assert answered and status is StopReason.STOP
+            else:
+                assert not answered and status is StopReason.ABORTED
         assert _live_bridges() == 0
         print("race-outcomes", outcomes)
         assert {"completed", "cancelled"} <= set(outcomes), outcomes
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_cancel_after_answer_committed_keeps_completed(api: str, make_runner) -> None:
+    """Cancel between the model node and the remaining hooks drains the graph."""
+    with ScriptedSSEServer(api, [Turn(text="committed answer"), Turn(text="next answer")]) as server:
+        runner = make_runner(server)
+        events: list[str] = []
+
+        def on_event(event: RunEvent) -> None:
+            # The usage event after assistant_completed comes from the model
+            # node's update, i.e. after its answer was checkpointed.
+            if event.type == "usage" and "assistant_completed" in events:
+                runner.request_cancel()
+            events.append(event.type)
+
+        result = runner.invoke("answer", on_event=on_event)
+        assert "run_cancelling" in events
+        assert result.status == "completed" and result.output == "committed answer"
+        assert "run_completed" in events and "run_cancelled" not in events
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
+        follow = runner.invoke("again")
+        assert follow.status == "completed" and follow.output == "next answer"
+        assert "aborted by the user" not in json.dumps(server.connections[1].body)
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_cancel_after_graph_finished_keeps_completed(api: str, make_runner) -> None:
+    with ScriptedSSEServer(api, [Turn(text="finished answer"), Turn(text="second")]) as server:
+        runner = make_runner(server)
+        graph = runner.prepared.graph
+        original = graph.stream
+
+        def stream_then_cancel(*args, **kwargs):
+            yield from original(*args, **kwargs)
+            runner.request_cancel()
+
+        graph.stream = stream_then_cancel
+        events: list[str] = []
+        try:
+            result = runner.invoke("answer", on_event=lambda event: events.append(event.type))
+        finally:
+            del graph.stream
+        assert result.status == "completed" and result.output == "finished answer"
+        assert "run_completed" in events and "run_cancelled" not in events
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
+        # The late cancel belonged to the finished run only.
+        assert runner.invoke("again").status == "completed"
+        assert "aborted by the user" not in json.dumps(server.connections[1].body)
 
 
 # ---------------------------------------------------------------------------
@@ -631,3 +689,4 @@ def test_unregistered_model_still_streams_outside_a_run(make_runner) -> None:
         message = runner._chat_model.invoke([HumanMessage(content="hi")])
         assert message.content == "plain call"
         assert _live_bridges() == 0
+

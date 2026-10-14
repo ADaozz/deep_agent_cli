@@ -579,6 +579,93 @@ def test_http_cancel_of_silent_model_stream_reaches_cancelled(config, api):
         assert model.open_connections() == []
 
 
+def _terminal(client, rid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run = client.get(f"/v1/runs/{rid}", headers=AUTH).json()
+        if run["status"] in TERMINAL:
+            return run
+        time.sleep(0.005)
+    pytest.fail(f"Run did not finish: {run}")
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_cancel_racing_completion_reports_the_executed_outcome(config, api):
+    """Cancel swept across an approved write_file, the final answer and completion."""
+    from deepagents.backends import StateBackend
+    from langchain_core.messages import AIMessage, ToolMessage
+    from agent.config import ModelProfile, Settings
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore
+    from agent.stream import message_text
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    rounds = 12
+    with ScriptedSSEServer(api) as model:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=model.base_url, api=api),),
+                            llm_default="local/s")
+        database = config.state_dir / "one.sqlite3"
+
+        def real_factory(config, project_id, session_id):
+            return AgentRunner(settings=settings, backend=StateBackend(),
+                               session_store=SessionStore(database), thread_id=session_id)
+
+        def checkpoint(sid):
+            store = SessionStore(database)
+            reader = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id=sid)
+            try:
+                values = reader.prepared.graph.get_state(reader._thread_config()).values
+                return values, store.get(sid).last_run_status.value
+            finally:
+                reader.close()
+                store.close()
+
+        outcomes = []
+        with TestClient(create_app(config, factory=real_factory)) as client:
+            for index in range(rounds):
+                # A cancel that beats the approval leaves that interrupt pending,
+                # so every round uses its own session.
+                sid = session(client)
+                call = {"id": f"write-{index}", "name": "write_file",
+                        "args": {"file_path": f"/round-{index}.txt", "content": f"round {index}"}}
+                model.replace_turns(Turn(tool_calls=[call]), Turn(text=f"done {index} a b c d e", interval=0.003))
+                rid = submit(client, sid, f"write round {index}")
+                waiting = wait(client, rid, "waiting_confirmation")
+                call_id = waiting["result"]["pending_tool_calls"][0]["toolCallId"]
+                assert client.post(f"/v1/runs/{rid}/approvals", headers=AUTH, json={
+                    "interrupt_id": waiting["interrupt_id"],
+                    "decisions": [{"tool_call_id": call_id, "decision": "approve"}],
+                }).status_code == 202
+                time.sleep(0.012 * index)
+                cancel = client.post(f"/v1/runs/{rid}/cancel", headers=AUTH)
+                assert cancel.status_code in {202, 409}
+                run = _terminal(client, rid)
+                kinds = [kind if kind != "agent_event" else data["type"] for kind, data in _events(client, rid)]
+                assert kinds.count("run_finished") == 1
+                values, catalog = checkpoint(sid)
+                messages = values["messages"]
+                start = max(i for i, m in enumerate(messages) if message_text(m) == f"write round {index}")
+                added = messages[start:]
+                tool_results = [m for m in added if isinstance(m, ToolMessage) and m.tool_call_id == call_id]
+                answered = any(isinstance(m, AIMessage) and message_text(m).startswith(f"done {index} ")
+                               for m in added)
+                written = f"/round-{index}.txt" in (values.get("files") or {})
+                # A file the tool wrote is always recorded once in the checkpoint.
+                assert len(tool_results) == (1 if written else 0)
+                if run["status"] == "completed":
+                    assert answered and written and catalog == "stop"
+                    assert "run_cancelled" not in kinds
+                else:
+                    assert run["status"] == "cancelled", run
+                    assert cancel.status_code == 202 and not run["result"].get("error")
+                    assert not answered and catalog == "aborted"
+                    assert kinds.count("run_cancelled") == 1
+                outcomes.append((run["status"], written))
+        assert model.open_connections() == [] and not model.errors
+        print("http-race-outcomes", outcomes)
+        assert {"completed", "cancelled"} <= {status for status, _ in outcomes}, outcomes
+
+
 def test_cancel_does_not_signal_runner_under_manager_lock(config):
     import threading
 

@@ -57,6 +57,22 @@ def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
         raise
 
 
+def _cancel_outcome(result: RunResult) -> RunResult:
+    """Terminal result of a run whose cancel was accepted.
+
+    The Runner's own outcome decides: work that completed (or failed) before
+    the cancel took effect keeps that status, and a cancel whose model request
+    was not confirmed closed is a failure rather than a clean cancellation.
+    Only a worker that stopped waiting for an interaction has no Runner
+    outcome of its own; nothing ran after the cancel there.
+    """
+    if result.status in {"completed", "failed"}:
+        return result
+    if result.status == "cancelled" and result.error:
+        return RunResult(status="failed", error=result.error)
+    return RunResult(status="cancelled")
+
+
 class RunManager:
     def __init__(self, config: ServerConfig, factory: Callable = runner_factory) -> None:
         self.config = config
@@ -236,12 +252,7 @@ class RunManager:
                         # Bad answers must not lose a pending question or release the project.
                         self.store.emit(run_id, "interaction_rejected", {"error": "Invalid interaction response"})
                         result = self._interruption(runner)
-                if active.cancelled.is_set():
-                    # An accepted cancel is the run's outcome; keep a cleanup
-                    # error the Runner reported with it.
-                    final = RunResult(status="cancelled", error=result.error if result.status == "cancelled" else "")
-                else:
-                    final = result
+                final = _cancel_outcome(result) if active.cancelled.is_set() else result
         except Exception:
             # Exceptions may embed endpoint credentials. Keep public errors generic.
             LOG.error("Agent worker failed (%s)", run_id)

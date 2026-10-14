@@ -51,10 +51,10 @@ class Connection:
     hanging: threading.Event = field(default_factory=threading.Event)
 
 
-def _chat_payload(model: str, delta: dict[str, Any] | None = None, *, finish: str | None = None,
+def _chat_payload(model: str, delta: dict[str, Any] | None = None, *, finish: str | None = None, rid: str = "local",
                   usage: dict[str, int] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "id": "chatcmpl-local", "object": "chat.completion.chunk", "created": 0, "model": model,
+        "id": f"chatcmpl-{rid}", "object": "chat.completion.chunk", "created": 0, "model": model,
         "choices": [] if delta is None and finish is None else [
             {"index": 0, "delta": delta or {}, "finish_reason": finish},
         ],
@@ -118,6 +118,12 @@ class ScriptedSSEServer:
         with self._lock:
             self._turns.extend(turns)
 
+    def replace_turns(self, *turns: Turn) -> None:
+        """Drop unconsumed turns, e.g. those a cancelled run never requested."""
+        with self._lock:
+            self._turns.clear()
+            self._turns.extend(turns)
+
     # -- observation ----------------------------------------------------------------
     def wait_for_connection(self, index: int, timeout: float = 5.0) -> Connection:
         deadline = time.monotonic() + timeout
@@ -138,6 +144,7 @@ class ScriptedSSEServer:
         expected = "/v1/chat/completions" if self.api == "chat_completions" else "/v1/responses"
         connection = Connection(handler.path, body, time.monotonic())
         with self._request_seen:
+            number = len(self.connections)
             self.connections.append(connection)
             turn = self._turns.popleft() if self._turns else None
             self._request_seen.notify_all()
@@ -153,7 +160,9 @@ class ScriptedSSEServer:
         handler.wfile.flush()
         sock = handler.connection
         try:
-            for event in self._events(turn, body.get("model", "local")):
+            # Real endpoints return a new id per response; LangChain uses it as
+            # the message id, and equal ids would replace earlier answers.
+            for event in self._events(turn, body.get("model", "local"), f"local-{number}"):
                 if event is _HANG:
                     connection.hanging.set()
                     self._watch_until_closed(sock, connection)
@@ -207,11 +216,11 @@ class ScriptedSSEServer:
                 return
         connection.closed.set()
 
-    def _events(self, turn: Turn, model: str):
+    def _events(self, turn: Turn, model: str, rid: str):
         if self.api == "chat_completions":
-            yield from self._chat_events(turn, model)
+            yield from self._chat_events(turn, model, rid)
         else:
-            yield from self._responses_events(turn)
+            yield from self._responses_events(turn, rid)
 
     def _deltas(self, turn: Turn):
         """(kind, text) deltas; "forever" mode never ends."""
@@ -233,7 +242,7 @@ class ScriptedSSEServer:
         if turn.mode == "hang":
             yield "hang", ""
 
-    def _chat_events(self, turn: Turn, model: str):
+    def _chat_events(self, turn: Turn, model: str, rid: str):
         def data(payload: dict[str, Any]) -> bytes:
             return f"data: {json.dumps(payload)}\n\n".encode()
         first = True
@@ -247,25 +256,25 @@ class ScriptedSSEServer:
             delta: dict[str, Any] = {"role": "assistant"} if first else {}
             first = False
             delta["reasoning_content" if kind == "reasoning" else "content"] = text
-            yield data(_chat_payload(model, delta))
+            yield data(_chat_payload(model, delta, rid=rid))
         for index, call in enumerate(turn.tool_calls):
             delta = {"tool_calls": [{"index": index, "id": call["id"], "type": "function", "function": {
                 "name": call["name"], "arguments": json.dumps(call["args"])}}]}
             if first:
                 delta["role"] = "assistant"
                 first = False
-            yield data(_chat_payload(model, delta))
-        yield data(_chat_payload(model, {}, finish="tool_calls" if turn.tool_calls else "stop"))
+            yield data(_chat_payload(model, delta, rid=rid))
+        yield data(_chat_payload(model, {}, finish="tool_calls" if turn.tool_calls else "stop", rid=rid))
         if turn.usage is not None:
-            yield data(_chat_payload(model, usage=turn.usage))
+            yield data(_chat_payload(model, usage=turn.usage, rid=rid))
         yield b"data: [DONE]\n\n"
 
-    def _responses_events(self, turn: Turn):
+    def _responses_events(self, turn: Turn, rid: str):
         sequence = itertools.count()
         def data(payload: dict[str, Any]) -> bytes:
             payload = {**payload, "sequence_number": next(sequence)}
             return f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n".encode()
-        yield data({"type": "response.created", "response": _response_body("in_progress", None)})
+        yield data({"type": "response.created", "response": _response_body("in_progress", None, rid)})
         for kind, text in self._deltas(turn):
             if kind == "hang":
                 yield _HANG
@@ -275,10 +284,10 @@ class ScriptedSSEServer:
                 continue
             if kind == "reasoning":
                 yield data({"type": "response.reasoning_text.delta", "output_index": 0,
-                            "item_id": "rs_1", "content_index": 0, "delta": text})
+                            "item_id": f"rs_{rid}", "content_index": 0, "delta": text})
             else:
                 yield data({"type": "response.output_text.delta", "output_index": 1,
-                            "content_index": 0, "item_id": "msg_1", "delta": text})
+                            "content_index": 0, "item_id": f"msg_{rid}", "delta": text})
         for offset, call in enumerate(turn.tool_calls):
             index = 2 + offset
             item = {"type": "function_call", "id": f"fc_{call['id']}", "call_id": call["id"],
@@ -286,11 +295,11 @@ class ScriptedSSEServer:
             yield data({"type": "response.output_item.added", "output_index": index, "item": item})
             yield data({"type": "response.function_call_arguments.delta", "output_index": index,
                         "item_id": item["id"], "delta": json.dumps(call["args"])})
-        yield data({"type": "response.completed", "response": _response_body("completed", turn.usage)})
+        yield data({"type": "response.completed", "response": _response_body("completed", turn.usage, rid)})
 
 
-def _response_body(status: str, usage: dict[str, int] | None) -> dict[str, Any]:
-    return {"id": "resp_local", "object": "response", "created_at": 0, "status": status,
+def _response_body(status: str, usage: dict[str, int] | None, rid: str) -> dict[str, Any]:
+    return {"id": f"resp_{rid}", "object": "response", "created_at": 0, "status": status,
             "model": "local", "output": [], "usage": usage}
 
 

@@ -1341,9 +1341,9 @@ class AgentRunner:
         interrupted = ""
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}
-        previous_todos = _todos_in_state(
-            self.prepared.graph.get_state(self._thread_config()).values or {}
-        )
+        state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
+        previous_todos = _todos_in_state(state_values)
+        last_message_id = _last_message_id(state_values)
         try:
             for chunk in self.prepared.graph.stream(
                 graph_input, config, stream_mode=["updates", "values"], control=run_control,
@@ -1373,6 +1373,9 @@ class AgentRunner:
                     if interrupt.kind is InterruptKind.WAITING_HUMAN:
                         human_input = interrupt.payload
         except GraphDrained:
+            if self._final_answer_committed(last_message_id):
+                return RunResult(status="completed",
+                                 output=_final_output(self.prepared.graph, self._thread_config()))
             return self._cancelled_result(event_handler)
         except Exception as exc:  # noqa: BLE001
             # A ModelStreamCancelled without a cancel request of this run is
@@ -1385,9 +1388,9 @@ class AgentRunner:
             self._touch_status(StopReason.ERROR)
             return RunResult(status="failed", error=str(exc))
 
-        if self.control.cancel_requested and not interrupted:
-            return self._cancelled_result(event_handler)
-
+        # graph.stream returned without GraphDrained: the graph reached its end
+        # and the final message is already checkpointed. A cancel that arrived
+        # after the last step does not undo that, so the run stays completed.
         if interrupted:
             self.control.set_defer_steering(True)
             self._touch_status(StopReason.DEFERRED)
@@ -1401,6 +1404,19 @@ class AgentRunner:
 
         output = _final_output(self.prepared.graph, self._thread_config())
         return RunResult(status="completed", output=output)
+
+    def _final_answer_committed(self, last_message_id: str | None) -> bool:
+        """Whether this run checkpointed a final answer before it was drained.
+
+        After an answer without tool calls only no-op middleware hooks remain
+        (or a steering continuation, which the cancel stops), so the turn is
+        complete and the late cancel must not report it as cancelled.
+        """
+        values = self.prepared.graph.get_state(self._thread_config()).values or {}
+        messages = values.get("messages") or []
+        if not messages or _last_message_id(values) == last_message_id:
+            return False
+        return isinstance(messages[-1], AIMessage) and not messages[-1].tool_calls
 
     def _cancelled_result(self, event_handler: RunEventHandler | None) -> RunResult:
         """Finish a cancelled run once its model request is confirmed closed.
@@ -1585,6 +1601,11 @@ def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> InterruptSt
     if not interrupts:
         return None
     return classify_interrupt(interrupts, graph, config)
+
+
+def _last_message_id(values: dict[str, Any]) -> str | None:
+    messages = values.get("messages") or []
+    return getattr(messages[-1], "id", None) if messages else None
 
 
 def _final_output(graph: Any, config: dict[str, Any]) -> str:
