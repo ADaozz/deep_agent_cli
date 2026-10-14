@@ -25,6 +25,7 @@
 - Linux 或 WSL2。WSL1、原生 Windows 和 macOS 无法使用沙箱。
 - Python 3.12 或更高版本（CI 测试 3.12 和 3.13）。
 - Bubblewrap，并且系统允许非特权 user namespace。Ubuntu 24.04 默认限制这一点，处理方法见 [沙箱排查](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md#排查ubuntu--wsl2)。
+- 推荐安装 ripgrep（`rg`），用于高性能正则代码搜索；未安装时使用有界的 Python 正则搜索回退。
 - 一个 OpenAI 兼容的模型服务（本地或远程）及其 API key。
 
 ## 安装
@@ -32,7 +33,7 @@
 Debian / Ubuntu：
 
 ```bash
-sudo apt install pipx bubblewrap
+sudo apt install pipx bubblewrap ripgrep
 pipx ensurepath          # 之后重新打开终端
 pipx install deep-agent-cli
 # 已安装旧版本时升级：
@@ -47,6 +48,73 @@ pipx install --python /path/to/python3.12 deep-agent-cli
 ```
 
 也可以装进虚拟环境：`python3 -m venv ~/.venvs/deep-agent && ~/.venvs/deep-agent/bin/pip install deep-agent-cli`。
+
+## 安装 ripgrep（推荐）
+
+`deep-agent` 的 `grep` 工具默认支持正则表达式，并优先使用
+[ripgrep](https://github.com/BurntSushi/ripgrep) 搜索工作区和只读 Skills。
+推荐安装 `rg`，以获得更好的大型代码仓库搜索性能。它是系统工具，不是 Python 依赖。
+
+### Ubuntu / Debian / WSL2
+
+```bash
+sudo apt update
+sudo apt install ripgrep
+```
+
+### Fedora
+
+```bash
+sudo dnf install ripgrep
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S ripgrep
+```
+
+### 验证安装
+
+```bash
+rg --version
+command -v rg
+```
+
+`ripgrep` 是软件包名称，`rg` 是实际执行的命令。WSL2 用户需要在 WSL2 Linux
+环境中安装。程序自动检查 `rg` 是否可用，无需配置路径，也不影响 Agent 启动。
+
+未安装 `rg` 时回退至独立进程中的 Python `re` 搜索。常见正则语法一致，但
+Rust Regex 与 Python `re` 的 Unicode 字符类等语法和行为存在差异；不支持的表达式
+会明确报错，不会转为字面量搜索。安装了 `rg` 但执行失败时也会报错。
+
+### 搜索模式与限制
+
+默认按正则表达式匹配：
+
+```text
+grep(pattern="def (run|execute)\\(", output_mode="content")
+```
+
+如需搜索普通字符串，请设置 `fixed_string=true`，例如：
+
+```text
+grep(pattern="config.yaml", fixed_string=true)
+```
+
+**行为变更**：旧版默认按字面量搜索；现在 `.`, `*`, `+`, `[` 等字符默认解释为正则语法。
+通过自定义非本地 Backend 注入的工具仍使用该 Backend 的原有搜索接口。
+
+保留 `files_with_matches`、`content`、`count` 三种输出模式；`count` 统计匹配行数，
+不统计同一行中命中子串的次数。`path` 默认 `/workspace`，可以搜索挂载的 `/skills`；
+`glob` 用于筛选文件。建议先用 `grep` 定位，再用 `read_file(offset, limit)` 查看上下文。
+
+每次搜索总超时 10 秒，默认最多 1000 个匹配行，可用 `max_count` 调整；返回体积
+最多约 64 KiB，单行内容最多 2048 字节。达到数量或体积限制会明确提示截断。
+两种引擎都跳过二进制文件和大于 10 MiB 的文件；大文件跳过会提示结果不完整。
+为了保持一致的文件边界，两种引擎采用相同文件遍历与 glob 规则，不读取 `.gitignore`
+规则；递归搜索跳过所有符号链接，直接搜索符号链接会拒绝。搜索只读，不触发命令执行审批。
+超时或用户取消会终止搜索进程及其子进程。两种引擎均按单行搜索，不支持多行 pattern。
 
 ## 快速开始
 

@@ -36,7 +36,7 @@ agent/session_lock.py  每个会话一个 flock 锁
 - `web_search`（有 Tavily 密钥时注册）
 - 调用方通过 `extra_tools` 传入的工具
 
-文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。
+文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供；本地工作区的 `grep` 单独注册为有界正则搜索工具，自定义非本地 Backend 保留其原有 `grep`，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。
 
 Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profile），因此没有 `task` 工具。
 

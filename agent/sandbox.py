@@ -179,6 +179,32 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.skills_dir = skills_dir
 
     @property
+    def supports_regex_search(self) -> bool:
+        return isinstance(self.executor, (BubblewrapBackend, UnsandboxedShellBackend))
+
+    def regex_search_location(self, path: str | None) -> tuple[Path, str, str, int]:
+        """Validate a virtual mount path using the routed filesystem's checks.
+
+        Return the original relative path so the worker can reject symlinks
+        with descriptor-relative opens rather than trusting a resolved pathname.
+        """
+        if not self.supports_regex_search:
+            raise ValueError("Backend does not support local regex search")
+        virtual = path or SANDBOX_ROOT
+        if not virtual.startswith("/") or ".." in virtual or "~" in virtual or "\x00" in virtual:
+            raise ValueError("Permission denied: invalid virtual search path")
+        for mount, backend in self.routes.items():
+            prefix = mount.rstrip("/")
+            if virtual == prefix or virtual.startswith(mount):
+                relative = virtual[len(prefix):].lstrip("/")
+                try:
+                    backend._resolve_path(relative or "/")
+                except (ValueError, OSError):
+                    raise ValueError("Permission denied: search path escapes its authorized mount") from None
+                return backend.cwd, relative, prefix, backend.max_file_size_bytes
+        raise ValueError(_OUTSIDE_WORKSPACE_ERROR)
+
+    @property
     def id(self) -> str:
         return self.executor.id
 
