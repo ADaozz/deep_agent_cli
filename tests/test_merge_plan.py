@@ -347,13 +347,18 @@ def test_model_finish_reason_stays_in_checkpoint_not_catalog(
     store.close()
 
 
-def test_cancel_marks_aborted_before_process_exit(tmp_path: Path) -> None:
+def test_cancel_signal_leaves_in_progress_marker_for_exit_recovery(tmp_path: Path) -> None:
+    # request_cancel only signals. A process that exits before the run records
+    # its stop reason keeps PENDING, which recovery treats as an unexpected end.
     store = SessionStore(tmp_path / "cancel.sqlite3")
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
                          backend=StateBackend(), session_store=store)
+    store.touch(runner.thread_id, last_run_status=StopReason.PENDING)
     runner._busy = True
     runner.request_cancel()
-    assert store.get(runner.thread_id).last_run_status is StopReason.ABORTED
+    assert store.get(runner.thread_id).last_run_status is StopReason.PENDING
+    assert runner._resume_context is None
+    assert RecoveryContext.for_stop_reason(StopReason.PENDING).text
     store.close()
 
 

@@ -649,10 +649,11 @@ class AgentRunner:
 
         Returns without waiting; the operation in progress reports the outcome.
         Also cancels a run reserved with ``reserve_run`` that has not started.
+        Only the run's own exit path records its stop reason: the cancel may
+        arrive after the run already finished, and a run that never reaches
+        that path stays PENDING, which recovery already handles.
         """
         self.control.cancel()
-        if self._busy:
-            self._touch_status(StopReason.ABORTED)
 
     def reserve_run(self) -> int:
         """Mark that the caller is dispatching a run so an early cancel is not lost."""

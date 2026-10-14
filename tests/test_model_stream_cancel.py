@@ -332,6 +332,44 @@ def test_cancel_after_graph_finished_keeps_completed(api: str, make_runner) -> N
         assert "aborted by the user" not in json.dumps(server.connections[1].body)
 
 
+@pytest.mark.parametrize("api", APIS)
+def test_cancel_after_stop_persisted_before_cleanup_keeps_completed(api: str, make_runner) -> None:
+    """Cancel lands after STOP was written but before _stream's finally clears _busy."""
+    with ScriptedSSEServer(api, [Turn(text="done answer"), Turn(text="next answer")]) as server:
+        runner = make_runner(server)
+        original_touch = runner._touch_status
+        window: dict[str, Any] = {}
+
+        def touch_then_cancel(reason: StopReason) -> None:
+            original_touch(reason)
+            if reason is StopReason.STOP and not window:
+                window["busy"] = runner._busy
+                window["catalog"] = runner.session_store.get(runner.thread_id).last_run_status
+                runner.request_cancel()
+                window["catalog_after_cancel"] = runner.session_store.get(runner.thread_id).last_run_status
+                window["recovery_after_cancel"] = runner._resume_context
+
+        runner._touch_status = touch_then_cancel
+        events: list[RunEvent] = []
+        try:
+            result = runner.invoke("answer", on_event=events.append)
+        finally:
+            del runner._touch_status
+        assert window["busy"] is True and window["catalog"] is StopReason.STOP
+        assert window["catalog_after_cancel"] is StopReason.STOP
+        assert window["recovery_after_cancel"] is None
+        assert result.status == "completed" and result.output == "done answer" and not result.error
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
+        assert runner._resume_context is None
+        types = [event.type for event in events]
+        terminal = [t for t in types if t in {"run_completed", "run_cancelled", "run_failed"}]
+        assert terminal == ["run_completed"], types
+        follow = runner.invoke("again")
+        assert follow.status == "completed" and follow.output == "next answer"
+        assert "[Previous run status]" not in json.dumps(server.connections[1].body, ensure_ascii=False)
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
+
+
 # ---------------------------------------------------------------------------
 # C09: cancelling after an approved tool ran does not re-run or fake that tool.
 # ---------------------------------------------------------------------------

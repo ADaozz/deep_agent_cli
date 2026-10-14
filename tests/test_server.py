@@ -666,6 +666,59 @@ def test_http_cancel_racing_completion_reports_the_executed_outcome(config, api)
         assert {"completed", "cancelled"} <= {status for status, _ in outcomes}, outcomes
 
 
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_cancel_after_stop_persisted_keeps_completed(config, api):
+    """HTTP cancel accepted after the Runner wrote STOP but before its cleanup ran."""
+    from deepagents.backends import StateBackend
+    from agent.config import ModelProfile, Settings
+    from agent.runner import AgentRunner
+    from agent.session import SessionStore, StopReason
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    holder = {}
+    with ScriptedSSEServer(api, [Turn(text="finished"), Turn(text="after")]) as model:
+        settings = Settings(llm_profiles=(ModelProfile("local/s", "s", base_url=model.base_url, api=api),),
+                            llm_default="local/s")
+        database = config.state_dir / "one.sqlite3"
+
+        def real_factory(config, project_id, session_id):
+            runner = AgentRunner(settings=settings, backend=StateBackend(),
+                                 session_store=SessionStore(database), thread_id=session_id)
+            original_touch = runner._touch_status
+
+            def touch_then_cancel(reason):
+                original_touch(reason)
+                if reason is StopReason.STOP and "cancel" not in holder:
+                    manager = holder["manager"]
+                    rid = next(iter(manager.active))
+                    holder["cancel"] = manager.cancel(rid)["status"]
+                    holder["catalog"] = runner.session_store.get(runner.thread_id).last_run_status
+
+            runner._touch_status = touch_then_cancel
+            return runner
+
+        with TestClient(create_app(config, factory=real_factory)) as client:
+            holder["manager"] = client.app.state.manager
+            sid = session(client)
+            rid = submit(client, sid, "answer")
+            run = _terminal(client, rid)
+            assert holder["cancel"] == "cancelling"
+            assert holder["catalog"] is StopReason.STOP
+            assert run["status"] == "completed" and run["result"]["output"] == "finished"
+            kinds = [kind if kind != "agent_event" else data["type"] for kind, data in _events(client, rid)]
+            assert kinds.count("run_finished") == 1
+            assert "run_completed" in kinds and "run_cancelled" not in kinds and "run_failed" not in kinds
+            store = SessionStore(database)
+            try:
+                assert store.get(sid).last_run_status is StopReason.STOP
+            finally:
+                store.close()
+            follow = submit(client, sid, "next")
+            assert wait(client, follow, "completed")["result"]["output"] == "after"
+            import json as _json
+            assert "[Previous run status]" not in _json.dumps(model.connections[1].body, ensure_ascii=False)
+
+
 def test_cancel_does_not_signal_runner_under_manager_lock(config):
     import threading
 
