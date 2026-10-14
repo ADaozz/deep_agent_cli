@@ -1,20 +1,27 @@
-## 更新内容
+## v0.1.6 更新内容
 
-本版本修复恢复会话提示遗漏思考强度的问题：模型信息现在显示为 `Model: deepseek · deepseek-flash · low`，使用当前会话已保存的思考强度。未显式设置时显示 `default`。此前会话中的思考强度没有丢失，此次补充的是显示字段。
+### 模型流取消与执行状态一致性
 
-## v0.1.4 功能回顾
+- 修复内置模型在 SSE 静默、网络读取长期等待时无法被 `Esc` 或 HTTP Cancel 终止的问题。同步 LangGraph Runner 通过可取消的异步模型流关闭底层请求；继续保留现有 `SqliteSaver`、Session Checkpoint、同步 Python API 和沙箱架构。
+- 强化取消与自然完成之间的竞态处理。模型最终回答已提交时，迟到取消不会覆盖 `completed` / `STOP`；取消、失败、完成由 Runner 的最终执行路径裁决，异常退出则由已有的 `PENDING` 恢复机制提示。
+- 修复运行开始前取消可能丢失的问题；按 Run Generation 绑定模型流、预约与取消。上一轮结束清理不会删除下一轮预约；CLI 过滤上一轮迟到事件，HTTP 取消支持幂等请求并在清理完成后公布终态。
+- 在真正确认模型请求关闭之前，不将取消视为完全完成；不能确认清理时明确报告错误并保留 Session Lease，避免新任务并发修改同一 Checkpoint。
 
-- 新增可选 HTTP Agent 服务 `deep-agent serve`，复用 CLI 的 AgentRunner、工具和沙箱，提供会话、任务、审批、人工输入、持久化 SSE 和恢复接口。服务使用独立状态目录；CLI 和服务同时修改同一项目文件时仍需协调。
-- 修复任务终态与 SSE 结束事件的原子发布、交互提交事件顺序、必填人工输入校验，以及服务按项目工作区校验配置的行为。
-- 统一模型配置，按来源和模型选择 Chat Completions 或 Responses API；改进思考内容回传、输入 token 用量识别和图片附件处理。旧版模型配置需按新模板迁移，详见配置文档。
-- 右下角 Context 保留上一轮有效读数，直到返回新的 `input_tokens`；开始生成、取消、失败、压缩及空用量不再清空显示。切换模型或会话时重置，首次尚未收到用量时显示 `Unknown`。
-- 模型及思考等级切换提示仅显示在输入框上方，不再插入对话窗口。
-- 默认模板允许传入 `DISPLAY`，可选挂载 WSLg X11 文件 socket；复用宿主已有显示服务，无需安装 Xvfb。已验证无网沙箱的有头浏览器启动、页面截图及关闭；访问互联网仍需网络权限。已有配置需手动合并并重启 CLI。
-- 改进沙箱长输出、取消及终端审批行为，补充相关回归与使用文档。Unix socket 间接联网仍是已知隔离边界，长输出持久化放大列为后续任务。
+### 验证
 
-## 安装与升级
+- 真实本地 HTTP SSE 故障注入覆盖两种 API 协议、TUI 与 HTTP 服务、静默取消、连接释放、反复取消、会话后续执行和并发隔离。
+- 真实 TokenPlan `qwen3.8-flash` 验收覆盖 Chat Completions 与 Responses：流式 Reasoning、Tool Calls、API Usage、沙箱 Coding 任务、首包后取消和完成竞态。验证记录见 [PR #3](https://github.com/ADaozz/deep_agent_cli/pull/3)。
+- GitHub Actions 在 Python 3.12 / 3.13 上的相关自动回归通过。
 
-要求 Python 3.12+；运行环境为 Linux 或 WSL2，默认沙箱还需要 Bubblewrap 及允许 user namespace 的系统策略。
+### 已知限制
+
+- 非流式模型请求与外部自定义 `BaseChatModel` 不能保证硬取消。
+- 取消不会撤销已执行的文件修改或外部工具副作用；恢复前应检查工作区。
+- 本次未进行 `graph.astream()` 全面迁移，也不改变沙箱网络隔离边界。
+
+### 安装与升级
+
+要求 Python 3.12+，Linux 或 WSL2。默认沙箱需要 Bubblewrap 和可用的 user namespace。
 
 ```bash
 pipx install deep-agent-cli
@@ -24,6 +31,4 @@ pipx upgrade deep-agent-cli
 pipx install --force 'deep-agent-cli[server]'
 ```
 
-本次发布提供 wheel 与源码包；GitHub 与 PyPI 使用同一组构建产物。
-
-配置与服务接入说明：[配置文档](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/configuration.md)、[HTTP 服务](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/server.md)、[有头浏览器与沙箱](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md#playwright-与有头-x11)。
+GitHub Release 与 PyPI 使用同一次 CI 构建的 wheel 和源码包。更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[HTTP 服务](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/server.md)及[开发与发布](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/development.md)。

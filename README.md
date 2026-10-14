@@ -2,7 +2,7 @@
 
 `deep-agent` 是一个在终端中运行的 Coding Agent，支持 Linux 和 WSL2。它把启动时所在的目录作为工作区，调用你配置的 OpenAI 兼容模型服务，并在 [Bubblewrap](https://github.com/containers/bubblewrap) 沙箱中执行命令。Agent 运行时基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建。
 
-当前版本 0.1.5，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
+当前版本 0.1.6，处于早期开发阶段。第一个稳定版之前，配置格式、会话存储格式和 Python API 都可能出现不兼容变更。
 
 ## 功能
 
@@ -12,7 +12,7 @@
 - **会话**：按工作区保存在本地 SQLite 中，可以随时恢复。
 - **多模型**：在配置文件中定义多个模型，运行中切换模型和推理强度。支持 Chat Completions 和 Responses 两种接口。
 - **流式输出**：思考内容和回答都流式显示；思考区默认保留按终端宽度折行后的末尾 5 行正文，`Ctrl+T` 展开。
-- **运行中干预**：任务执行时可以追加指令、排队后续任务或取消。
+- **运行中干预**：任务执行时可以追加指令、排队后续任务或取消。`Esc` 可主动取消内置模型的流式 HTTP 请求，即使 SSE 长时间没有新数据；HTTP 服务支持异步取消与明确的运行终态。
 - **图片输入**：向声明支持图片的模型发送图片。
 - **结构化提问**：Agent 需要你做决定时，会弹出单选、多选、是/否或文本输入。
 - **上下文压缩**：接近模型上下文窗口时自动摘要旧对话，也可以手动压缩。
@@ -35,6 +35,8 @@ Debian / Ubuntu：
 sudo apt install pipx bubblewrap
 pipx ensurepath          # 之后重新打开终端
 pipx install deep-agent-cli
+# 已安装旧版本时升级：
+pipx upgrade deep-agent-cli
 deep-agent --version
 ```
 
@@ -102,6 +104,15 @@ deep-agent resume 01a08aae   # 按 id 或前缀恢复
 ```
 
 恢复只加载会话状态，不会自动继续执行未完成的任务。
+
+## 取消与会话恢复
+
+- **CLI**：正在执行时按 `Esc` 请求取消当前轮次。内置的 OpenAI 兼容模型会主动取消流式请求并等待网络连接关闭，而不是只停止界面输出；`execute` 等工具仍按各自的取消机制收尾。
+- **HTTP 服务**：`POST /v1/runs/{run_id}/cancel` 接受请求时返回 HTTP 202。它表示取消已受理，不表示任务已结束；应通过 Run 状态和 SSE `run_finished` 事件确认结果。若最终回答已完成并持久化，迟到的取消不会把 `completed` 覆盖成 `cancelled`。
+- **恢复**：中断后的 Session 可以继续使用；意外退出且未完成收尾的运行以 `PENDING` 状态提示恢复检查。取消不会回滚已经写入文件或执行的工具副作用，继续前请核对工作区状态。
+- **适用范围**：主动取消模型网络读取针对内置的流式 OpenAI 兼容模型。非流式调用和自定义 `BaseChatModel` 不保证能被强制取消；无法确认清理完成时会报告错误，不会直接释放正在使用的 Session Lock。
+
+详细接口和状态语义见 [HTTP 服务](docs/server.md)；本次变更见 [PR #3](https://github.com/ADaozz/deep_agent_cli/pull/3)。
 
 ## 常用操作
 

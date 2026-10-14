@@ -47,7 +47,18 @@ python examples/sandbox_probe.py --require-sandbox [--report report.json]
 
 ## 发布
 
-推送 `v*` 标签触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：先跑测试，检查标签与 `pyproject.toml` 中的版本一致，构建后发布到 GitHub Releases（说明取自 `.github/release-notes.md`）和 PyPI（trusted publishing）。
+推送 `v*` 标签触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：先跑测试，检查标签与 `pyproject.toml` 中的版本一致，构建后发布到 GitHub Releases（说明取自 `.github/release-notes.md`）和 PyPI（trusted publishing）。**只合并 PR 或推送 `main` 不会触发 PyPI 发布**。
+
+发布时先确保 README、Release Notes、`pyproject.toml` 的版本一致，且对应提交的 CI 已通过；标签必须指向包含这些文件的 `main` 提交。例如发布 `0.1.6`：
+
+```bash
+git switch main
+git pull --ff-only origin main
+git tag v0.1.6
+git push origin v0.1.6
+```
+
+通过 GitHub Actions `release` 工作流确认 `tests`、`build`、`github`、`pypi` 都成功后，再到 GitHub Releases 和 PyPI 核对 `0.1.6` 的 wheel 和源码包。若发布失败，应检查失败步骤后修复，**不要对已经发布到 PyPI 的版本号重新上传覆盖**。
 
 ## 贡献
 
