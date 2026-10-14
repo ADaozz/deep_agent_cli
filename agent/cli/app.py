@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from functools import partial
 import logging
 import os
@@ -83,6 +84,20 @@ FOOTER_LINES = 2
 INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
 CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 STATUS_NOTICE_SECONDS = 1.0
+
+_RUN_EPOCH: ContextVar[int | None] = ContextVar("deep_agent_tui_run_epoch", default=None)
+
+
+def _call_in_run_epoch(epoch: int, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a Runner operation in a context tagged with its run epoch.
+
+    LangGraph copies the context into node and tool threads, so every event
+    the operation emits carries the epoch back to the UI loop.
+    """
+    def call() -> Any:
+        _RUN_EPOCH.set(epoch)
+        return func(*args, **kwargs)
+    return copy_context().run(call)
 
 
 def format_context_window(window: int) -> str:
@@ -366,6 +381,10 @@ class CliApplication:
         self._io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deep-agent-io")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._run_task: asyncio.Task[None] | None = None
+        # Each dispatched run gets an epoch; its Runner events carry it so a
+        # late event of an earlier run cannot change the current run's UI.
+        self._run_epoch = 0
+        self._cancel_sent = False
         self._compacting = False
         self._last_ctrl_c: float | None = None
         self._status_notice_handle: asyncio.TimerHandle | None = None
@@ -1761,6 +1780,11 @@ class CliApplication:
                 self.set_status("Wait for compaction to finish")
             elif self.state.running:
                 restored = self._restore_queued_to_editor(event.current_buffer)
+                if self._cancel_sent:
+                    self.set_status("Cancelling… waiting for the run to stop", transient=False)
+                    self.application.invalidate()
+                    return
+                self._cancel_sent = True
                 self.runner.request_cancel()
                 if restored:
                     self.set_status("Cancelling… · queued messages restored", transient=False)
@@ -1936,29 +1960,41 @@ class CliApplication:
         self.state.running = True
         self._working_messages.reset()
         self.set_status("Working…  Esc to cancel", transient=False)
+        self._run_epoch += 1
+        epoch = self._run_epoch
+        self._cancel_sent = False
+        # Esc may arrive before the worker reaches begin_run; the reservation
+        # keeps that cancel instead of letting begin_run clear it.
+        reservation = self.runner.reserve_run()
 
         async def work() -> None:
-            if resume_call is None:
-                try:
-                    result = await self._run_blocking(
-                        self.runner.invoke_with_attachment_refs,
-                        text,
-                        image_refs=image_refs,
-                        on_event=self._on_event_thread,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.state.attachments[:] = image_refs
-                    self._apply_event(RunEvent(type="run_failed", content=str(exc)))
-                    return
-                if result.status == "failed" and image_refs:
-                    self.state.attachments[:] = image_refs
-            else:
-                try:
-                    result = await self._run_blocking(resume_call)
-                except Exception as exc:  # noqa: BLE001
-                    self._apply_event(RunEvent(type="run_failed", content=str(exc)))
-                    return
-            self._handle_result(result)
+            try:
+                if resume_call is None:
+                    try:
+                        result = await self._run_blocking(
+                            _call_in_run_epoch, epoch,
+                            self.runner.invoke_with_attachment_refs,
+                            text,
+                            image_refs=image_refs,
+                            on_event=self._on_event_thread,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.state.attachments[:] = image_refs
+                        self._apply_event(RunEvent(type="run_failed", content=str(exc)))
+                        return
+                    if result.status == "failed" and image_refs:
+                        self.state.attachments[:] = image_refs
+                else:
+                    try:
+                        result = await self._run_blocking(_call_in_run_epoch, epoch, resume_call)
+                    except Exception as exc:  # noqa: BLE001
+                        self._apply_event(RunEvent(type="run_failed", content=str(exc)))
+                        return
+                self._handle_result(result)
+            finally:
+                self.runner.release_run_reservation(reservation)
+                if epoch == self._run_epoch:
+                    self._cancel_sent = False
 
         self._run_task = asyncio.create_task(work())
 
@@ -2082,10 +2118,17 @@ class CliApplication:
                     temp.unlink(missing_ok=True)
 
     def _on_event_thread(self, event: RunEvent) -> None:
+        epoch = _RUN_EPOCH.get()
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._apply_event, event)
+            self._loop.call_soon_threadsafe(self._apply_run_event, event, epoch)
         else:
-            self._apply_event(event)
+            self._apply_run_event(event, epoch)
+
+    def _apply_run_event(self, event: RunEvent, epoch: int | None) -> None:
+        # Events without an epoch come from the UI thread (steering, control).
+        if epoch is not None and epoch != self._run_epoch:
+            return
+        self._apply_event(event)
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
         previous_status = self.state.status
@@ -2120,6 +2163,13 @@ class CliApplication:
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
+        if result.status == "cancelled":
+            self.state.running = False
+            if result.error:
+                self.state.add_system(result.error, error=True)
+                self.set_status("Cancel cleanup not confirmed", transient=False)
+            elif self.state.status != "Cancelled":
+                self.set_status("Cancelled", transient=False)
         if result.status == "paused":
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")

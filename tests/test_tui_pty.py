@@ -83,14 +83,16 @@ asyncio.run(main())
 
 
 class Tui:
-    def __init__(self, tmp_path: Path, playwright=False, page_url=""):
+    def __init__(self, tmp_path: Path, playwright=False, page_url="", probe=None, extra_args=()):
+        # Read the module global at call time: other suites patch _PROBE.
+        probe = probe or _PROBE
         self.state = tmp_path / 'state.json'
         workspace = tmp_path / 'workspace'
         workspace.mkdir()
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 120, 0, 0))
         env = {**os.environ, 'TERM': 'xterm-256color'}
-        args = [sys.executable, '-c', _PROBE, str(workspace), str(self.state)]
+        args = [sys.executable, '-c', probe, str(workspace), str(self.state), *extra_args]
         if playwright:
             args.extend(['playwright', page_url])
         self.workspace = workspace
@@ -227,3 +229,88 @@ def test_real_pty_allow_playwright_flow(tmp_path, page_url):
         assert state['interaction'] is None
     finally:
         tui.close()
+
+
+_STREAM_PROBE = r'''
+import asyncio, json, sys, threading
+from pathlib import Path
+from deepagents.backends import StateBackend
+from agent.cli.app import CliApplication
+from agent.config import ModelProfile, Settings
+from agent.llm_stream import live_stream_count
+from agent.runner import AgentRunner
+from agent.session import SessionStore
+
+async def main():
+    workspace, target, base_url, api = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+    settings = Settings(llm_profiles=(ModelProfile('local/stream', 'stream-model', api_key='local',
+                        base_url=base_url, api=api),), llm_default='local/stream')
+    store = SessionStore(workspace / 'state.sqlite3')
+    runner = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id='pty-cancel')
+    app = CliApplication(runner)
+    requests = []
+    original = runner.request_cancel
+    def counted_cancel():
+        requests.append(1)
+        original()
+    runner.request_cancel = counted_cancel
+    def snapshot():
+        info = store.get(runner.thread_id)
+        data = {'status': app.state.status, 'running': app.state.running,
+                'transcript': '\n'.join(str(getattr(b, 'content', '')) for b in app.state.blocks),
+                'cancel_requests': len(requests), 'live_streams': live_stream_count(),
+                'busy': runner._busy, 'last_run': info.last_run_status.value if info and info.last_run_status else None,
+                'threads': sorted(t.name for t in threading.enumerate())}
+        temporary = target.with_suffix('.new')
+        temporary.write_text(json.dumps(data))
+        temporary.replace(target)
+    async def watch():
+        while True:
+            snapshot()
+            await asyncio.sleep(.02)
+    observer = asyncio.create_task(watch())
+    try:
+        await app.run_async()
+    finally:
+        observer.cancel()
+        snapshot()
+        runner.close()
+        store.close()
+asyncio.run(main())
+'''
+
+
+@pytest.mark.parametrize('api', ['chat_completions', 'responses'])
+def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_path, api):
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    turns = [Turn(text='partial reply then silence', mode='hang', chunks_before_hang=1),
+             Turn(text='second answer')]
+    with ScriptedSSEServer(api, turns) as server:
+        tui = Tui(tmp_path, probe=_STREAM_PROBE, extra_args=(server.base_url, api))
+        try:
+            tui.wait(lambda s: s['status'] == 'Ready')
+            tui.send('first task\r')
+            connection = server.wait_for_connection(0)
+            assert connection.hanging.wait(8)
+            tui.wait(lambda s: s['running'] and 'partial' in s['transcript'])
+            started = time.monotonic()
+            tui.send('\x1b')
+            state = tui.wait(lambda s: not s['running'] and s['status'] == 'Cancelled' and not s['busy'], timeout=5)
+            elapsed = time.monotonic() - started
+            assert elapsed < 5, elapsed
+            assert connection.closed.wait(1) and connection.closed_by_client_at is not None
+            assert state['live_streams'] == 0
+            assert state['cancel_requests'] == 1
+            assert state['last_run'] == 'aborted'
+            assert 'Operation cancelled.' in state['transcript']
+            # Esc while idle neither cancels nor disturbs the next run.
+            tui.send('\x1b')
+            tui.send('second task\r')
+            state = tui.wait(lambda s: 'second answer' in s['transcript'] and s['status'] == 'Ready')
+            assert state['cancel_requests'] == 1 and state['live_streams'] == 0
+            assert len(server.connections) == 2
+            assert 'aborted by the user' in json.dumps(server.connections[1].body)
+        finally:
+            tui.close()
+        assert server.open_connections() == []

@@ -737,3 +737,70 @@ def test_human_input_all_optional_can_be_omitted_or_empty(values):
         assert runner.submit_human_input(values).status == "completed"
     finally:
         runner.close()
+
+
+def test_runner_cancels_running_execute_tool(tmp_path) -> None:
+    """C08: cancelling a long execute still kills it and ends the run promptly."""
+    import threading
+    import time
+
+    marker = tmp_path / "started"
+    backend = UnsandboxedShellBackend(SandboxConfig(workspace=tmp_path, allow_unsandboxed=True))
+    prepared = create_agent(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "long-exec", "name": "execute",
+                                           "args": {"command": f"touch {marker}; sleep 60"}}]),
+        AIMessage(content="unused"),
+    ]), backend=backend, skills=[])
+    runner = AgentRunner(prepared=prepared, thread_id="exec-cancel")
+    try:
+        assert runner.invoke("run").status == "waiting_confirmation"
+        results = []
+        worker = threading.Thread(target=lambda: results.append(runner.approve_tool("long-exec")))
+        worker.start()
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        started = time.monotonic()
+        runner.request_cancel()
+        worker.join(5)
+        assert not worker.is_alive() and time.monotonic() - started < 5
+        assert results[0].status == "cancelled"
+    finally:
+        runner.close()
+
+
+def test_model_stream_cancelled_without_cancel_request_is_a_failure() -> None:
+    from agent.llm_stream import ModelStreamCancelled
+
+    class StoppedModel(type(scripted_model([]))):
+        def _generate(self, *args, **kwargs):
+            raise ModelStreamCancelled("stopped by someone else")
+
+    runner = AgentRunner(model=StoppedModel(messages=iter([])), backend=StateBackend(), thread_id="not-cancel")
+    try:
+        events = []
+        result = runner.invoke("hello", on_event=events.append)
+        assert result.status == "failed"
+        assert "stopped unexpectedly" in result.error
+        assert [event.type for event in events if event.type.startswith("run_")][-1] == "run_failed"
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_errors_stay_failures_and_keep_sdk_retries(api) -> None:
+    from agent.config import ModelProfile
+    from tests.model_stream_server import ScriptedSSEServer
+
+    with ScriptedSSEServer(api, []) as server:
+        settings = Settings(llm_profiles=(ModelProfile("local/e", "e", base_url=server.base_url, api=api),),
+                            llm_default="local/e")
+        runner = AgentRunner(settings=settings, backend=StateBackend(), thread_id="http-error")
+        try:
+            result = runner.invoke("hello")
+        finally:
+            runner.close()
+    assert result.status == "failed"
+    # max_retries=2: the original request plus two retries, as before the bridge.
+    assert len(server.errors) == 3

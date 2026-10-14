@@ -4165,3 +4165,92 @@ def test_context_ignores_usage_without_valid_input_tokens(usage):
     assert state.usage == {"input_tokens": 500, "output_tokens": 10, "total_tokens": 510}
     state.apply(RunEvent(type="usage", result={"input_tokens": 750}))
     assert state.usage == {"input_tokens": 750}
+
+
+def test_escape_before_worker_starts_cancels_the_dispatched_run() -> None:
+    """C16 in the TUI: Esc lands after running=True but before begin_run."""
+    import threading
+
+    calls = []
+
+    class CountingModel(type(scripted_model([]))):
+        def _generate(self, *args, **kwargs):
+            calls.append(1)
+            return super()._generate(*args, **kwargs)
+
+    runner = AgentRunner(model=CountingModel(messages=iter([AIMessage(content="never")])),
+                         backend=StateBackend(), thread_id="esc-before-start")
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            gate = threading.Event()
+            blockers = [app._io_executor.submit(gate.wait, 5) for _ in range(2)]
+            app._start_run("dispatched")
+            assert app.state.running
+            _escape(app)
+            _escape(app)
+            gate.set()
+            for blocker in blockers:
+                blocker.result(5)
+            await asyncio.wait_for(app._run_task, 5)
+            assert not app.state.running
+            assert app.state.status == "Cancelled"
+            assert calls == []
+            assert any("Operation cancelled." in getattr(block, "content", "") for block in app.state.blocks)
+            app._io_executor.shutdown(wait=True)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        runner.close()
+
+
+def test_repeated_escape_sends_one_cancel_per_run() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="esc-once")
+    sent = []
+    runner.request_cancel = lambda: sent.append(1)  # type: ignore[method-assign]
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.state.running = True
+        for _ in range(4):
+            _escape(app)
+        assert sent == [1]
+        assert "Cancelling" in app.state.status
+        app._cancel_sent = False
+        app.state.running = False
+    runner.close()
+
+
+def test_stale_run_events_do_not_reach_the_current_run() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="stale-events")
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app._run_epoch = 2
+        app.state.running = True
+        app._apply_run_event(RunEvent(type="run_cancelled"), 1)
+        app._apply_run_event(RunEvent(type="assistant_delta", content="old run text"), 1)
+        assert app.state.running
+        assert not any("old run text" in getattr(block, "content", "") for block in app.state.blocks)
+        app._apply_run_event(RunEvent(type="assistant_delta", content="current text"), 2)
+        assert any(getattr(block, "content", "") == "current text" for block in app.state.blocks)
+        # Control events from the UI thread carry no epoch and always apply.
+        app._apply_run_event(RunEvent(type="run_cancelling"), None)
+        assert app.state.status == "Cancelling…"
+    runner.close()
+
+
+def test_unconfirmed_cancel_cleanup_is_reported() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="cancel-unclosed")
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.state.running = True
+        app._handle_result(RunResult(status="cancelled", error="Cancelled, but the model request did not confirm it stopped"))
+        assert not app.state.running
+        assert app.state.status == "Cancel cleanup not confirmed"
+        assert any("did not confirm" in getattr(block, "content", "") for block in app.state.blocks)
+    runner.close()
