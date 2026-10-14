@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 from typing import Literal
 
@@ -23,6 +24,14 @@ DEFAULT_MAX_COUNT = 1000
 MAX_OUTPUT_BYTES = 64 * 1024
 MAX_RECORD_BYTES = 32 * 1024
 TRUNCATED = "Results truncated: maximum match count reached."
+
+
+def resolve_rg() -> str | None:
+    """Prefer rg installed alongside this Python interpreter, then system PATH."""
+    candidate = Path(sysconfig.get_path("scripts")) / "rg"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return shutil.which("rg")
 
 
 def _signal_group(process: subprocess.Popen, sig: int) -> None:
@@ -75,7 +84,7 @@ def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
             return "Error: Search cancelled."
         payload = dict(root=str(root), relative=relative, virtual_root=virtual_root,
                        pattern=pattern, glob=glob, fixed_string=fixed_string,
-                       rg=shutil.which("rg"), file_limit=file_limit)
+                       rg=resolve_rg(), file_limit=file_limit)
         deadline = time.monotonic() + SEARCH_TIMEOUT
         process = subprocess.Popen(
             [sys.executable, str(Path(__file__).with_name("_grep_worker.py"))],

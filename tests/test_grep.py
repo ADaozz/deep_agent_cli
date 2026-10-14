@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import threading
 import time
@@ -25,10 +24,10 @@ from tests.conftest import graph_tool_names, scripted_model
 
 @pytest.fixture(params=["rg", "python"])
 def engine(request, monkeypatch):
-    executable = shutil.which("rg")
+    executable = implementation.resolve_rg()
     if request.param == "rg":
         assert executable, "Install ripgrep to validate both engines"
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: executable if request.param == "rg" else None)
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: executable if request.param == "rg" else None)
     return request.param
 
 
@@ -137,12 +136,12 @@ def test_output_is_bounded(engine, workspace):
 
 
 def test_engine_common_regex_parity(workspace, monkeypatch):
-    rg = shutil.which("rg")
+    rg = implementation.resolve_rg()
     assert rg
     for pattern in ["foo|bar", r"def \w+\(", "中文|café", "config.yaml"]:
-        monkeypatch.setattr(implementation.shutil, "which", lambda _: rg)
+        monkeypatch.setattr(implementation, "resolve_rg", lambda: rg)
         accelerated = invoke(workspace, pattern=pattern, output_mode="content")
-        monkeypatch.setattr(implementation.shutil, "which", lambda _: None)
+        monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
         assert invoke(workspace, pattern=pattern, output_mode="content") == accelerated
 
 
@@ -150,7 +149,7 @@ def test_rg_failure_is_not_no_matches(workspace, monkeypatch, tmp_path):
     failing = tmp_path / "rg"
     failing.write_text("#!/bin/sh\nprintf 'deliberate rg failure\\n'\nexit 2\n")
     failing.chmod(0o755)
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: str(failing))
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: str(failing))
     assert "ripgrep execution" in invoke(workspace, pattern="foo")
 
 
@@ -166,7 +165,7 @@ def _record_processes(monkeypatch):
 
 
 def test_python_backtracking_timeout_and_cleanup(workspace, monkeypatch):
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: None)
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
     monkeypatch.setattr(implementation, "SEARCH_TIMEOUT", 2.0)
     (workspace[1] / "bad.py").write_text("a" * 100000 + "!")
     processes = _record_processes(monkeypatch)
@@ -181,7 +180,7 @@ def test_cancel_cleans_worker_and_rg_child(workspace, monkeypatch, tmp_path):
     slow = tmp_path / "rg"
     slow.write_text(f"#!/bin/sh\necho $$ > '{child_pid}'\nexec sleep 60\n")
     slow.chmod(0o755)
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: str(slow))
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: str(slow))
     processes = _record_processes(monkeypatch)
     context = ToolCancelContext("grep", "search", threading.Event())
     result = []
@@ -249,7 +248,7 @@ def test_rg_timeout_reaps_child(workspace, monkeypatch, tmp_path):
     slow = tmp_path / "slow-rg"
     slow.write_text(f"#!/bin/sh\necho $$ > '{child_pid}'\nexec sleep 60\n")
     slow.chmod(0o755)
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: str(slow))
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: str(slow))
     monkeypatch.setattr(implementation, "SEARCH_TIMEOUT", 2.0)
     processes = _record_processes(monkeypatch)
     assert "timed out" in invoke(workspace, pattern="foo")
@@ -259,7 +258,7 @@ def test_rg_timeout_reaps_child(workspace, monkeypatch, tmp_path):
 
 
 def test_python_unsupported_syntax_and_literal_escape(workspace, monkeypatch):
-    monkeypatch.setattr(implementation.shutil, "which", lambda _: None)
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
     assert "Invalid Python regular expression" in invoke(workspace, pattern=r"\p{L}")
     assert invoke(workspace, pattern="[", fixed_string=True) == "No matches found"
 
@@ -268,3 +267,38 @@ def test_duplicate_grep_is_rejected(workspace, fake_done):
     with pytest.raises(ValueError, match="extra grep"):
         create_agent(model=fake_done, backend=workspace[0], skills=[],
                      extra_tools=[implementation.build_regex_grep_tool(workspace[0])])
+
+
+def test_resolve_rg_prefers_python_scripts(tmp_path, monkeypatch):
+    rg = tmp_path / "rg"
+    rg.write_text("#!/bin/sh\nexit 0\n")
+    rg.chmod(0o755)
+    monkeypatch.setattr(implementation.sysconfig, "get_path", lambda name: str(tmp_path))
+    def unexpected_path_lookup(_name):
+        pytest.fail("PATH must not be consulted when the Python environment has executable rg")
+    monkeypatch.setattr(implementation.shutil, "which", unexpected_path_lookup)
+    assert implementation.resolve_rg() == str(rg)
+
+
+@pytest.mark.parametrize("local", ["missing", "not_executable", "directory"])
+def test_resolve_rg_falls_back_to_system_path(tmp_path, monkeypatch, local):
+    rg = tmp_path / "rg"
+    if local == "not_executable":
+        rg.write_text("not executable")
+        rg.chmod(0o644)
+    elif local == "directory":
+        rg.mkdir()
+    monkeypatch.setattr(implementation.sysconfig, "get_path", lambda name: str(tmp_path))
+    looked_up = []
+    def system_rg(name):
+        looked_up.append(name)
+        return "/usr/bin/rg"
+    monkeypatch.setattr(implementation.shutil, "which", system_rg)
+    assert implementation.resolve_rg() == "/usr/bin/rg"
+    assert looked_up == ["rg"]
+
+
+def test_resolve_rg_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(implementation.sysconfig, "get_path", lambda name: str(tmp_path))
+    monkeypatch.setattr(implementation.shutil, "which", lambda _: None)
+    assert implementation.resolve_rg() is None

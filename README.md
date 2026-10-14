@@ -25,7 +25,7 @@
 - Linux 或 WSL2。WSL1、原生 Windows 和 macOS 无法使用沙箱。
 - Python 3.12 或更高版本（CI 测试 3.12 和 3.13）。
 - Bubblewrap，并且系统允许非特权 user namespace。Ubuntu 24.04 默认限制这一点，处理方法见 [沙箱排查](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/sandbox.md#排查ubuntu--wsl2)。
-- 推荐安装 ripgrep（`rg`），用于高性能正则代码搜索；未安装时使用有界的 Python 正则搜索回退。
+- ripgrep（`rg`）通过项目的 `ripgrep-bin` Python 依赖自动安装，无需额外系统安装。
 - 一个 OpenAI 兼容的模型服务（本地或远程）及其 API key。
 
 ## 安装
@@ -33,7 +33,7 @@
 Debian / Ubuntu：
 
 ```bash
-sudo apt install pipx bubblewrap ripgrep
+sudo apt install pipx bubblewrap
 pipx ensurepath          # 之后重新打开终端
 pipx install deep-agent-cli
 # 已安装旧版本时升级：
@@ -49,11 +49,22 @@ pipx install --python /path/to/python3.12 deep-agent-cli
 
 也可以装进虚拟环境：`python3 -m venv ~/.venvs/deep-agent && ~/.venvs/deep-agent/bin/pip install deep-agent-cli`。
 
-## 安装 ripgrep（推荐）
+## ripgrep 安装与定位
 
 `deep-agent` 的 `grep` 工具默认支持正则表达式，并优先使用
-[ripgrep](https://github.com/BurntSushi/ripgrep) 搜索工作区和只读 Skills。
-推荐安装 `rg`，以获得更好的大型代码仓库搜索性能。它是系统工具，不是 Python 依赖。
+[ripgrep](https://github.com/BurntSushi/ripgrep)。安装项目时，Python 依赖
+`ripgrep-bin>=15.2.0,<16` 会自动安装 `rg`，通常无需手动安装系统软件包。
+
+程序按以下顺序选择搜索引擎，无需配置路径：
+
+1. 当前 Python 环境的 scripts 目录中的可执行 `rg`，包括 venv 或 pipx 的项目环境。
+2. 系统 `PATH` 中的 `rg`。
+3. 两处均不可用时，使用现有独立进程中的 Python `re` 回退。
+
+程序只定位已安装的可执行文件，不自动下载二进制，也不修改 `PATH`。
+pipx 环境中的依赖命令可能不会直接暴露到用户的 `PATH`，但 Agent 仍可找到环境内的 `rg`。
+
+以下系统安装方式可作为备选：
 
 ### Ubuntu / Debian / WSL2
 
@@ -76,13 +87,28 @@ sudo pacman -S ripgrep
 
 ### 验证安装
 
+使用虚拟环境时，在该环境中运行：
+
+```bash
+python -c 'import subprocess; from agent.tools.grep import resolve_rg; rg = resolve_rg(); print(rg); subprocess.run([rg, "--version"], check=True)'
+```
+
+使用 pipx 时可检查项目环境中的依赖命令：
+
+```bash
+pipx runpip deep-agent-cli show ripgrep-bin
+"$(pipx environment --value PIPX_LOCAL_VENVS)/deep-agent-cli/bin/rg" --version
+```
+
+验证系统备选安装：
+
 ```bash
 rg --version
 command -v rg
 ```
 
-`ripgrep` 是软件包名称，`rg` 是实际执行的命令。WSL2 用户需要在 WSL2 Linux
-环境中安装。程序自动检查 `rg` 是否可用，无需配置路径，也不影响 Agent 启动。
+`ripgrep` 是系统软件包名称，`rg` 是实际执行的命令。WSL2 用户若选择系统安装，
+需要在 WSL2 Linux 环境中安装。Agent 不要求用户把虚拟环境的 scripts 目录加入 `PATH`。
 
 未安装 `rg` 时回退至独立进程中的 Python `re` 搜索。常见正则语法一致，但
 Rust Regex 与 Python `re` 的 Unicode 字符类等语法和行为存在差异；不支持的表达式
