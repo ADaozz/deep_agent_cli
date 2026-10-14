@@ -29,7 +29,8 @@ PERMISSION_ALLOW_WARNING = (
     "(internet, localhost, LAN). There is no per-call confirmation. Switching "
     "back to ask only restores approval for later commands; already running "
     "sandbox processes keep going. Only enable this if the agent is running "
-    "in a SANDBOXED backend."
+    "in a SANDBOXED backend. External MCP servers are outside Bubblewrap "
+    "isolation and can have broader permissions than the local sandbox."
 )
 
 def allow_mode_available(execution_mode: ExecutionMode) -> bool:

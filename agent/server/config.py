@@ -9,6 +9,7 @@ import re
 import yaml
 
 from agent.config import Settings, require_outside_workspace
+from agent.mcp.config import MCPConfig
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,8 @@ class ServerConfig:
     token: str = field(repr=False)
     max_runs: int = 2
     source_path: Path | None = None
+    mcp_config: Path | None = None
+    mcp_snapshot: MCPConfig = field(default_factory=MCPConfig, init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "projects", {
@@ -38,12 +41,16 @@ class ServerConfig:
                 raise ValueError("Project IDs must contain only letters, digits, _ or -")
             if not root.is_dir():
                 raise ValueError(f"Project {key} must reference an existing directory")
-            for path in (self.model_config, self.state_dir, self.source_path):
+            for path in (self.model_config, self.state_dir, self.source_path, self.mcp_config):
                 if path is not None:
                     require_outside_workspace(Path(path), root, label="service configuration/storage")
             if any(other != root and (root.is_relative_to(other) or other.is_relative_to(root))
                    for other in roots) or roots.count(root) > 1:
                 raise ValueError("Project workspaces must not overlap")
+        if self.mcp_config is not None:
+            path = Path(self.mcp_config).expanduser().resolve()
+            object.__setattr__(self, "mcp_config", path)
+            object.__setattr__(self, "mcp_snapshot", MCPConfig.load(path))
 
     @classmethod
     def load(cls, path: str | Path) -> ServerConfig:
@@ -51,7 +58,7 @@ class ServerConfig:
         raw = yaml.safe_load(source.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("Server configuration must be a mapping")
-        unknown = set(raw) - {"projects", "model_config", "state_dir", "token_env", "max_runs"}
+        unknown = set(raw) - {"projects", "model_config", "state_dir", "token_env", "max_runs", "mcp_config"}
         if unknown:
             raise ValueError(f"Unknown server configuration keys: {', '.join(sorted(unknown))}")
         projects = raw.get("projects")
@@ -73,6 +80,7 @@ class ServerConfig:
             state_dir=resolve(raw.get("state_dir", "server-state")),
             token=os.environ.get(token_env, ""),
             max_runs=raw.get("max_runs", 2), source_path=source,
+            mcp_config=resolve(raw["mcp_config"]) if raw.get("mcp_config") is not None else None,
         )
 
     def settings_for(self, project_id: str) -> Settings:

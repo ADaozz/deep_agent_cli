@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> None:
         config = ServerConfig.load(args.config)
     except (OSError, ValueError) as exc:
         parser.exit(2, f"Server configuration error: {exc}\n")
+    print(f"MCP service startup profile: {config.mcp_snapshot.current}; configuration is fixed until restart")
     uvicorn.run(create_app(config), host=args.host, port=args.port, workers=1)
 
 

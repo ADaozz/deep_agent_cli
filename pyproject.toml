@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
   "deepagents>=0.7.17,<0.8.0",
-  "langchain>=1.0,<2.0",
+  "langchain[mcp]>=1.4.0,<2.0",
   "langchain-core>=1.0,<2.0",
   "langchain-openai>=1.6.2,<1.7.0",
   "langgraph>=1.0,<2.0",

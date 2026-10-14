@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from functools import wraps
 from pathlib import Path
@@ -61,6 +61,8 @@ from agent.session_lock import SessionLockBusyError
 from agent.session_runtime import RestorePlan, SessionLeaseLike, SessionRuntime
 from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
 from agent.tools.human_interaction import validate_human_input_values
+from agent.mcp.config import MCPConfig, MCPProfile
+from agent.mcp.client import MCPToolSet
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
 
@@ -316,6 +318,119 @@ class AgentRunner:
             self.session_store.path if self.session_store is not None
             else workspace_state_path(workspace or Path.cwd())
         )
+        self.mcp_config = MCPConfig()
+        self.mcp_config_path: Path | None = None
+        self._mcp_tools: MCPToolSet | None = None
+        self._mcp_loaded = False
+
+    def mcp_status(self) -> str:
+        count = len(self._mcp_tools.tools) if self._mcp_tools else 0
+        target = self.mcp_config.profiles.get(self.mcp_config.current)
+        from agent.mcp.config import redacted_url
+        return (f"MCP: {self.mcp_config.current} · {count} tools"
+                + (f" · {redacted_url(target.url)}\nExternal MCP servers are outside Bubblewrap isolation."
+                   if target else ""))
+
+    def mcp_tool_origin(self, name: str) -> dict[str, str] | None:
+        for tool in self._mcp_tools.tools if self._mcp_tools else ():
+            if tool.name == name:
+                return (tool.metadata or {}).get("deep_agent_mcp")
+        return None
+
+    def require_mcp_idle(self) -> None:
+        if self._busy or self._operation_lock.locked():
+            raise RuntimeError("Finish the current run before changing MCP")
+        self._require_active_session()
+        state = self.prepared.graph.get_state(self._thread_config())
+        if getattr(state, "next", ()) or self.current_interrupt() is not None:
+            raise RuntimeError("Finish the pending interaction before changing MCP")
+
+    def mcp_approval_calls(self, calls: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        result = []
+        for call in calls:
+            item = dict(call)
+            origin = self.mcp_tool_origin(str(item.get("name") or ""))
+            if origin:
+                item["mcp"] = origin
+            result.append(item)
+        return result
+
+    @_exclusive_operation
+    def load_mcp(self, path: Path) -> None:
+        self._require_mcp_change()
+        config = MCPConfig.load(path)
+        if config.current == "none" and self._mcp_tools is None:
+            self.mcp_config = config
+        else:
+            self._commit_mcp(config, persist=False)
+        self.mcp_config_path = path
+        self._mcp_loaded = True
+
+    @_exclusive_operation
+    def load_mcp_snapshot(self, config: MCPConfig) -> None:
+        """Service-start configuration, no TUI persistence or live reload."""
+        self._require_active_session()
+        if self._mcp_loaded:
+            self._require_mcp_change()
+        self._commit_mcp(config, persist=False)
+
+    @_exclusive_operation
+    def switch_mcp(self, name: str) -> None:
+        self._require_mcp_change()
+        if name == self.mcp_config.current:
+            return
+        self._commit_mcp(MCPConfig(name, dict(self.mcp_config.profiles)))
+
+    @_exclusive_operation
+    def add_mcp(self, profile: MCPProfile, *, activate: bool) -> None:
+        self._require_mcp_change()
+        if profile.name in self.mcp_config.profiles:
+            raise ValueError("MCP profile name already exists")
+        profiles = {**self.mcp_config.profiles, profile.name: profile}
+        config = MCPConfig(profile.name if activate else self.mcp_config.current, profiles)
+        if activate:
+            self._commit_mcp(config)
+        else:
+            if self.mcp_config_path is None:
+                raise RuntimeError("MCP configuration path is not set")
+            config.save(self.mcp_config_path)
+            self.mcp_config = config
+
+    def _require_mcp_change(self) -> None:
+        self._require_active_session()
+        state = self.prepared.graph.get_state(self._thread_config())
+        if getattr(state, "next", ()) or self.current_interrupt() is not None:
+            raise RuntimeError("Finish the pending interaction before changing MCP")
+
+    def _commit_mcp(self, config: MCPConfig, *, persist: bool = True) -> None:
+        candidate: MCPToolSet | None = None
+        try:
+            if config.current != "none":
+                candidate = MCPToolSet.prepare(config.profiles[config.current])
+            old_tools = self._mcp_tools.tools if self._mcp_tools else ()
+            spec = replace(self._spec, tools=tuple(t for t in self._spec.tools
+                                                   if not any(t is old for old in old_tools))
+                           + (candidate.tools if candidate else ()))
+            prepared = build_agent(
+                spec, self._chat_model, self._permission_mode, self._checkpointer,
+                self.control, self._pause_condition,
+                interrupt_on_override=self._custom_interrupt_on if self._permission_mode is PermissionMode.ASK else None,
+                backend_selection=self.prepared.backend_selection,
+            )
+            if persist:
+                if self.mcp_config_path is None:
+                    raise RuntimeError("MCP configuration path is not set")
+                config.save(self.mcp_config_path)
+        except BaseException:
+            if candidate is not None:
+                candidate.close()
+            raise
+        old = self._mcp_tools
+        self.prepared, self._spec = prepared, spec
+        self.mcp_config, self._mcp_tools = config, candidate
+        self._mcp_loaded = True
+        if old is not None:
+            old.close()
 
     @property
     def thread_id(self) -> str:
@@ -943,6 +1058,8 @@ class AgentRunner:
                 "Runner close could not confirm the model request stopped; the "
                 "session lease is kept until it closes and close is retried"
             )
+        if self._mcp_tools is not None:
+            self._mcp_tools.close()
         self._close_completed = True
         self._runtime.close()
         if self._attachment_tempdir is not None:
@@ -1374,7 +1491,7 @@ class AgentRunner:
                         update, self.prepared.graph, self._thread_config(),
                     )
                     interrupted = interrupt.kind.value
-                    pending = list(interrupt.pending_tools)
+                    pending = self.mcp_approval_calls(interrupt.pending_tools)
                     if interrupt.kind is InterruptKind.WAITING_HUMAN:
                         human_input = interrupt.payload
         except GraphDrained:

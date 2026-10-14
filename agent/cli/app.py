@@ -133,10 +133,12 @@ class SlashCompleter(Completer):
         *,
         model_profiles: Callable[[], list[ModelProfile]] | None = None,
         permission_modes: Callable[[], list[str]] | None = None,
+        mcp_profiles: Callable[[], list[str]] | None = None,
     ) -> None:
         self.commands = commands
         self.model_profiles = model_profiles or (lambda: [])
         self.permission_modes = permission_modes or (lambda: [])
+        self.mcp_profiles = mcp_profiles or (lambda: [])
         self.accepted_text: str | None = None
 
     @staticmethod
@@ -181,6 +183,8 @@ class SlashCompleter(Completer):
                                          for profile in profiles if "/" in profile.id))
             candidates.extend((source, "Model source") for source in sources)
             candidates.extend((profile.id, f"Model: {model_display_name(profile)}") for profile in profiles)
+        elif name == "mcp":
+            candidates.extend((value, "MCP profile") for value in ["none", "add", *self.mcp_profiles()])
         elif name == "permission":
             descriptions = {"ask": "Require approval for tools", "allow": "Auto-approve tools (SANDBOXED, HIGH RISK)"}
             candidates.extend((mode, descriptions[mode]) for mode in self.permission_modes())
@@ -412,6 +416,7 @@ class CliApplication:
             self.commands,
             model_profiles=self.runner.list_models,
             permission_modes=lambda: ["ask", "allow"] if self._allow_available() else ["ask"],
+            mcp_profiles=lambda: list(self.runner.mcp_config.profiles),
         )
         self.buffer = Buffer(
             multiline=True,
@@ -850,7 +855,7 @@ class CliApplication:
             f"Permission: {perm}\n"
             f"Thread: {self.runner.thread_id}\nSandbox: {mode}\n"
             f"{self._sandbox_status_lines()}"
-            f"Tools: {tool_count}"
+            f"Tools: {tool_count}\n{self.runner.mcp_status()}"
         )
 
     def _sandbox_status_lines(self) -> str:
@@ -940,6 +945,123 @@ class CliApplication:
         self.buffer.text = self._skill_draft.expand(self.buffer.text)
         self._skill_draft.clear()
         self._skill_picker_draft = None
+
+    async def select_mcp(self, arg: str = "") -> None:
+        try:
+            if (self.sessions.waiting or self.state.running or self.interaction is not None
+                    or getattr(self, "_mcp_configuring", False)):
+                raise RuntimeError("Finish the current run or interaction before changing MCP")
+            self.runner.require_mcp_idle()
+            if self.runner.mcp_config_path is None:
+                from agent.mcp.config import config_directory
+                self.runner.mcp_config_path = config_directory(
+                    self.runner.settings.config_dir if self.runner.settings else None) / "mcp.yaml"
+            name = arg.strip()
+            if name == "add":
+                self._show_mcp_add()
+            elif name:
+                await self._change_mcp(name)
+            else:
+                current = self.runner.mcp_config.current
+                names = ["none", *self.runner.mcp_config.profiles]
+                options = [{"value": value, "label": value + (" (current)" if value == current else "")}
+                           for value in names]
+                options.append({"value": "+add", "label": "+ Add MCP"})
+                self.interaction = InteractionController(
+                    kind="mcp", title="Select MCP", question="",
+                    fields=[{"id": "profile", "type": "single_select", "label": "Profile", "options": options}],
+                    option_index=names.index(current),
+                )
+                self.application.invalidate()
+        except (RuntimeError, ValueError, OSError) as exc:
+            self.state.add_system(str(exc), error=True)
+
+    def _show_mcp_add(self, values: dict | None = None, error: str = "") -> None:
+        self.interaction = InteractionController(
+            kind="mcp_add", title="Add MCP", question="",
+            fields=[
+                {"id": "name", "type": "text", "label": "Name", "required": True},
+                {"id": "transport", "type": "single_select", "label": "Transport", "options": [
+                    {"value": "streamable_http", "label": "Streamable HTTP"},
+                    {"value": "sse", "label": "Legacy SSE"}]},
+                {"id": "url", "type": "text", "label": "URL", "required": True},
+            ], values=dict(values or {}), error=error,
+        )
+        self.buffer.text = str((values or {}).get("name", ""))
+        self.application.invalidate()
+
+    async def _change_mcp(self, name: str, profile: Any = None, *, activate: bool = True) -> bool:
+        self._mcp_configuring = True
+        try:
+            self.set_status("Preparing MCP tools…", transient=False)
+            if profile is None:
+                await self._run_blocking(self.runner.switch_mcp, name)
+            else:
+                await self._run_blocking(self.runner.add_mcp, profile, activate=activate)
+            self.interaction = None
+            self.set_status("MCP configuration saved")
+            self.state.add_system(self.runner.mcp_status())
+            return True
+        except Exception as exc:
+            # Transport failures may echo query strings or remote payloads.
+            message = f"MCP configuration failed ({type(exc).__name__}); previous tools remain active"
+            if isinstance(exc, (ValueError, OSError)):
+                message += f": {exc}" if isinstance(exc, ValueError) else ": could not save configuration"
+            if self.interaction is not None:
+                self.interaction.error = message
+            else:
+                self.state.add_system(message, error=True)
+            self.set_status(message)
+            return False
+        finally:
+            self._mcp_configuring = False
+            self.application.invalidate()
+
+    async def _complete_mcp_interaction(self, interaction: InteractionController) -> None:
+        self._mcp_configuring = True
+        try:
+            await self._apply_mcp_interaction(interaction)
+        finally:
+            self._mcp_configuring = False
+            self.application.invalidate()
+
+    async def _apply_mcp_interaction(self, interaction: InteractionController) -> None:
+        if interaction.kind == "mcp":
+            name = str(interaction.values.get("profile") or "none")
+            if name == "+add":
+                self._show_mcp_add()
+            else:
+                await self._change_mcp(name)
+        elif interaction.kind == "mcp_add":
+            try:
+                from agent.mcp.config import MCPProfile, redacted_url
+                values = interaction.values
+                profile = MCPProfile(values["name"], values["url"], values["transport"])
+                if profile.name in self.runner.mcp_config.profiles:
+                    raise ValueError("MCP profile name already exists")
+                self.interaction = InteractionController(
+                    kind="mcp_confirm", title="MCP Configuration",
+                    question=f"Name: {profile.name}\nTransport: {profile.transport}\nURL: {redacted_url(profile.url)}\n\nExternal MCP servers are outside Bubblewrap isolation.",
+                    fields=[{"id": "action", "type": "single_select", "label": "Action", "options": [
+                        {"value": "activate", "label": "Save and activate"},
+                        {"value": "save", "label": "Save only"},
+                        {"value": "edit", "label": "Edit"},
+                        {"value": "cancel", "label": "Cancel"}]}],
+                    values=dict(values),
+                )
+            except ValueError as exc:
+                self._show_mcp_add(interaction.values, str(exc))
+        else:
+            action = interaction.values.get("action")
+            if action == "cancel":
+                self.interaction = None
+            elif action == "edit":
+                self._show_mcp_add(interaction.values)
+            else:
+                from agent.mcp.config import MCPProfile
+                profile = MCPProfile(interaction.values["name"], interaction.values["url"], interaction.values["transport"])
+                await self._change_mcp(profile.name, profile, activate=action == "activate")
+        self.application.invalidate()
 
     async def select_model(self, arg: str = "") -> None:
         if self.sessions.waiting:
@@ -1863,6 +1985,9 @@ class CliApplication:
         return True
 
     def _submit_buffer(self, queue_mode: str) -> None:
+        if getattr(self, "_mcp_configuring", False):
+            self.set_status("Wait for MCP configuration to finish")
+            return
         self.slash_completer.accepted_text = None
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status(), transient=False)
@@ -1898,6 +2023,15 @@ class CliApplication:
                 self.buffer.reset()
             elif was_text or complete:
                 self._reset_submitted_buffer(text)
+            if self.interaction.kind == "mcp_add" and not complete:
+                field = self.interaction.current
+                if self.interaction.accepts_text:
+                    self.buffer.text = str(self.interaction.values.get(field["id"], ""))
+                else:
+                    options = field.get("options") or []
+                    selected = self.interaction.values.get(field["id"])
+                    self.interaction.option_index = next((i for i, option in enumerate(options)
+                                                         if option["value"] == selected), 0)
             if complete:
                 self._finish_interaction()
             self.application.invalidate()
@@ -2189,6 +2323,16 @@ class CliApplication:
         if interaction is None:
             return
         self._reviewing = False
+        if interaction.kind in {"mcp", "mcp_add", "mcp_confirm"}:
+            if getattr(self, "_mcp_configuring", False):
+                return
+            if cancelled:
+                self.interaction = None
+                self.set_status("MCP selection cancelled")
+            else:
+                self._mcp_configuring = True
+                self.application.create_background_task(self._complete_mcp_interaction(interaction))
+            return
         if interaction.kind == "skill":
             self.interaction = None
             draft, cursor = self._skill_picker_draft or ("", 0)
@@ -2392,7 +2536,12 @@ class CliApplication:
             ))
             return True
         if interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
-            self.interaction = InteractionController.approval(list(interrupt.pending_tools))
+            calls = [dict(call) for call in interrupt.pending_tools]
+            for call in calls:
+                origin = self.runner.mcp_tool_origin(str(call.get("name") or ""))
+                if origin:
+                    call["mcp"] = origin
+            self.interaction = InteractionController.approval(calls)
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:
             self.interaction = InteractionController.human(interrupt.payload)

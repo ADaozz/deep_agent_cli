@@ -144,6 +144,14 @@ deep-agent resume 01a08aae   # 按 id 或前缀恢复
 
 完整的命令、按键和界面行为见 [终端界面](https://github.com/ADaozz/deep_agent_cli/blob/main/docs/tui.md)。
 
+## 使用远程 MCP 工具
+
+正常安装已包含 MCP 依赖。输入 `/mcp` 选择远程工具服务，选择 `+ Add MCP`（或 `/mcp add`）依次填写名称、传输方式和 HTTP(S) URL，可选择保存并启用或仅保存。默认使用 Streamable HTTP，旧服务可显式选择 Legacy SSE。
+
+`/mcp <name>` 切换已保存的服务，`/mcp none` 禁用并保留配置，`/status` 显示服务和工具数量。配置保存在 `~/.deep-agent/mcp.yaml`；`DEEP_AGENT_CONFIG_DIR` 优先指定目录，否则使用 `paths.config_dir` 或默认目录。连接或保存失败保留现有工具；正在运行、等待审批或切换会话时不能更换 MCP。
+
+所有 MCP 工具在 `ask` 下均需原有审批，Esc 沿用工具取消流程。`allow` 自动批准调用；**远端 MCP Server 不受本地 Bubblewrap 隔离**。首版仅支持远程 Tools，不支持本地 stdio 命令、OAuth 或明文 URL Token。模型、权限和会话切换会保留当前工具环境。配置与实现边界见 [MCP 接入](docs/mcp.md)。
+
 ## 使用 Skills
 
 每个技能放在 `~/.deep-agent/skills/` 下的独立目录中，入口文件为 `SKILL.md`。其 YAML 头部必须包含 `name` 和 `description`；技能列表显示 `name`，缺少有效元数据的目录会被跳过。

@@ -137,6 +137,16 @@ def build_agent(
             fs_backend,
             network_by_default=permission is PermissionMode.ALLOW,
         ))
+    reserved = set(DEFAULT_FS_TOOLS) | {"write_todos", "task", "compact_conversation"}
+    seen: set[str] = set()
+    for tool in tools:
+        mcp_tool = bool((tool.metadata or {}).get("deep_agent_mcp"))
+        if (tool.name in seen or tool.name in reserved
+                or mcp_tool and tool.name in {"execute", "web_search", "request_human_input"}):
+            raise ValueError(f"Tool name conflict: {tool.name}")
+        seen.add(tool.name)
+        if permission is PermissionMode.ASK and mcp_tool:
+            hitl[tool.name] = {"allowed_decisions": ["approve", "reject"]}
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )

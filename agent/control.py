@@ -297,6 +297,7 @@ class RunController:
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             cancel_event=event,
+            generation=scope.generation if scope is not None else None,
         )
         if self.cancel_requested:
             ctx.request_cancel()

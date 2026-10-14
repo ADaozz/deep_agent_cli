@@ -24,6 +24,16 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 - `sandbox` 标记的测试需要真实可用的 Bubblewrap；不可用时默认跳过。跳过不代表当前环境兼容。
 - `tests/test_server.py` 验证 HTTP 服务接口、审批、并发、事件续接和会话恢复；未安装 `server` 依赖时跳过，CI 安装该依赖并执行这些测试。
 
+## MCP 工具接入
+
+MCP 内置依赖为 `langchain[mcp]>=1.4.0,<2.0`，继续使用 `deepagents>=0.7.17,<0.8.0`。`agent/mcp/client.py` 仅通过官方 `langchain.mcp.MCPAdapter` 发现、转换工具，传输显式使用 FastMCP 的 HTTP 或 SSE Transport；不解析协议或启动本地服务。
+
+`bridge.py` 每套已发现的工具拥有一个稳定 asyncio 循环，完整委托原工具 `ainvoke()`，参数校验和结果格式化只执行一次。取消通过现有 `ToolCancelContext`（Run Generation、Tool Call ID）绑定单次 Task；等待 Task 的收尾完成才返回。`Runner.close()` 在关闭桥接资源之前不会释放 Session Lease。模型/权限重建复用 `AgentSpec.tools`，不把 Client 放进 Checkpoint。
+
+切换流程先发现、校验和构建候选 Graph，再原子保存独立 `mcp.yaml`，最后提交内存状态并关闭旧资源。原有同步 `graph.stream()`、SQLite、HITL 和模型取消链路均保留。服务模式只读启动快照，详见 [MCP 接入](mcp.md)。
+
+`tests/test_mcp_client.py` 启动真实 HTTP/SSE FastMCP 测试进程，经官方 Adapter 和真实同步 LangGraph ToolNode 验证 Schema、文本、图片、文件、结构化 artifact 和错误状态。其他 MCP 测试覆盖配置原子保存、并发取消、Runner 审批/拒绝、HTTP Cancel、SQLite 恢复、模型/权限/会话切换及 `/mcp` 交互。测试服务只在测试目录存在，不属于产品接口。
+
 ## 真实模型冒烟
 
 以下脚本会使用配置中的 API key 并消耗额度，不在 CI 中运行：
