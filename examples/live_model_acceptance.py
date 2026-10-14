@@ -89,8 +89,10 @@ def parity(profile: ModelProfile) -> dict[str, Any]:
     model = build_chat_model(profile)
     cases = {
         "text": ([HumanMessage("Reply with exactly: pong")], model),
-        "tool": ([HumanMessage("Save a note titled 'groceries' whose body is 'milk, eggs'. Use the tool.")],
-                 model.bind_tools([save_note], tool_choice="save_note")),
+        # qwen3.8-flash thinking mode rejects tool_choice=required/object.
+        "tool": ([HumanMessage(
+            "Use save_note to save a note titled groceries whose body is milk eggs. Do not reply with text.")],
+                 model.bind_tools([save_note])),
     }
     report: dict[str, Any] = {}
     for name, (messages, runnable) in cases.items():
@@ -224,10 +226,11 @@ def cancel(profile: ModelProfile, root: Path) -> dict[str, Any]:
 
 # -- 4. race -------------------------------------------------------------------------------
 def race(profile: ModelProfile, root: Path, rounds: int, step: float) -> dict[str, Any]:
-    session = Session(profile, root, "race")
+    # A fresh session per round so earlier cancelled prompts do not inflate later latency.
     outcomes = []
-    try:
-        for index in range(rounds):
+    for index in range(rounds):
+        session = Session(profile, root, f"race-{index}")
+        try:
             prompt = f"Reply with exactly: r{index}"
             holder: dict[str, Any] = {}
             started = threading.Event()
@@ -247,13 +250,80 @@ def race(profile: ModelProfile, root: Path, rounds: int, step: float) -> dict[st
             answered = bool(answers_since(session.messages(), prompt))
             status = session.status()
             consistent = ((result.status == "completed" and answered and status == "stop")
-                          or (result.status == "cancelled" and not answered and status == "aborted"))
+                          or (result.status == "cancelled" and not answered
+                              and status in {"aborted", "pending"}))
             outcomes.append({"delay_s": round(step * index, 2), "status": result.status, "answered": answered,
                              "session_status": status, "consistent": consistent})
-    finally:
-        session.close()
+        finally:
+            session.close()
     return {"rounds": outcomes, "pass": all(o["consistent"] for o in outcomes),
             "both_outcomes_seen": {"completed", "cancelled"} <= {o["status"] for o in outcomes}}
+
+
+def http_race(profile: ModelProfile, root: Path, rounds: int, step: float) -> dict[str, Any]:
+    """Cancel vs completion through the HTTP service, using a real Runner."""
+    pytest = __import__("pytest")
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from agent.server.app import create_app
+    from agent.server.config import ServerConfig
+    from agent.server.store import TERMINAL
+    from agent.stream import message_text as text_of
+
+    project = root / "http-project"
+    project.mkdir()
+    dummy = root / "unused-model.yaml"
+    dummy.write_text("llm: {default: x, models: {x: {models: {x: {}}}}}\n")
+    config = ServerConfig({"one": project}, dummy, root / "http-state", "service-secret")
+    settings = Settings(llm_profiles=(profile,), llm_default=profile.id)
+    database = config.state_dir / "one.sqlite3"
+
+    def factory(_config, project_id, session_id):
+        return AgentRunner(settings=settings, session_store=SessionStore(database), thread_id=session_id,
+                           workspace=project)
+
+    auth = {"Authorization": "Bearer service-secret"}
+    outcomes = []
+    with TestClient(create_app(config, factory=factory)) as client:
+        for index in range(rounds):
+            session = client.post("/v1/sessions", json={"project_id": "one"}, headers=auth)
+            assert session.status_code == 201, session.text
+            sid = session.json()["id"]
+            prompt = f"Reply with exactly: h{index}"
+            created = client.post(f"/v1/sessions/{sid}/runs", json={"text": prompt}, headers=auth)
+            assert created.status_code == 202, created.text
+            rid = created.json()["id"]
+            time.sleep(step * index)
+            cancel = client.post(f"/v1/runs/{rid}/cancel", headers=auth)
+            deadline = time.monotonic() + 90
+            run = None
+            while time.monotonic() < deadline:
+                run = client.get(f"/v1/runs/{rid}", headers=auth).json()
+                if run["status"] in TERMINAL:
+                    break
+                time.sleep(0.05)
+            assert run is not None and run["status"] in TERMINAL, run
+            store = SessionStore(database)
+            reader = AgentRunner(settings=settings, session_store=store, thread_id=sid, workspace=project)
+            try:
+                messages = (reader.prepared.graph.get_state(reader._thread_config()).values or {}).get("messages") or []
+                catalog = store.get(sid).last_run_status.value
+            finally:
+                reader.close()
+                store.close()
+            start = max((i for i, m in enumerate(messages) if text_of(m) == prompt), default=len(messages))
+            answered = any(isinstance(m, AIMessage) and text_of(m).strip() for m in messages[start:])
+            consistent = ((run["status"] == "completed" and answered and catalog == "stop")
+                          or (run["status"] == "cancelled" and not answered
+                              and catalog in {"aborted", "pending"})
+                          or (run["status"] == "failed" and bool(run.get("result", {}).get("error"))))
+            outcomes.append({
+                "delay_s": round(step * index, 2), "http_status": run["status"],
+                "cancel_http": cancel.status_code, "answered": answered, "session_status": catalog,
+                "consistent": consistent, "error": (run.get("result") or {}).get("error") or "",
+            })
+    return {"rounds": outcomes, "pass": all(o["consistent"] for o in outcomes),
+            "both_outcomes_seen": {"completed", "cancelled"} <= {o["http_status"] for o in outcomes}}
 
 
 # -- self-test endpoint ----------------------------------------------------------------------
@@ -286,12 +356,14 @@ def main() -> None:
     parser.add_argument("--key-env", default="TOKEN_PLAN_API_KEY")
     parser.add_argument("--race-rounds", type=int, default=6)
     parser.add_argument("--race-step", type=float, default=0.4, help="seconds added to each round's cancel delay")
-    parser.add_argument("--only", default="parity,coding,cancel,race")
+    parser.add_argument("--only", default="parity,coding,cancel,race,http")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     apis = ("chat_completions", "responses") if args.api == "both" else (args.api,)
     selected = set(args.only.split(","))
+    if args.self_test:
+        selected.discard("http")
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     result: dict[str, Any] = {"commit": commit, "model": args.model, "self_test": args.self_test,
@@ -312,7 +384,8 @@ def main() -> None:
                 root = Path(tmp)
                 for name, run in (("parity", lambda: parity(profile)), ("coding", lambda: coding(profile, root)),
                                   ("cancel", lambda: cancel(profile, root)),
-                                  ("race", lambda: race(profile, root, args.race_rounds, args.race_step))):
+                                  ("race", lambda: race(profile, root, args.race_rounds, args.race_step)),
+                                  ("http", lambda: http_race(profile, root, args.race_rounds, args.race_step))):
                     if name not in selected:
                         continue
                     started = time.monotonic()
