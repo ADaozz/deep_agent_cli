@@ -341,10 +341,9 @@ def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
         "edit_file",
         "delete",
         "execute",
-        "write_todos",
         "compact_conversation",
     }
-    assert len(names) == 11
+    assert len(names) == 10
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 

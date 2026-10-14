@@ -71,7 +71,7 @@ def render_transcript(
 
 # --- Incremental transcript rendering -------------------------------------
 #
-# The transcript is split into render units: the header, the plan, one message,
+# The transcript is split into render units: the header, one message,
 # one tool, or one collapsed explore group. A unit is pushed through Rich and
 # parsed into prompt_toolkit fragments exactly once, then replayed from cache
 # until its fingerprint changes. While streaming, only the active block is
@@ -128,16 +128,6 @@ def transcript_units(
     units: list[TranscriptUnit] = [
         TranscriptUnit("header", (), lambda: Group(*_header())),
     ]
-    if state.todos:
-        todos = [dict(item) for item in state.todos]
-        units.append(TranscriptUnit(
-            "todos",
-            (
-                tuple((item.get("content"), item.get("status")) for item in todos),
-                _spinner_tick() if any(item.get("status") == "in_progress" for item in todos) else None,
-            ),
-            lambda: _todos(todos),
-        ))
     index = 0
     blocks = state.blocks
     while index < len(blocks):
@@ -306,7 +296,7 @@ class TranscriptRenderer:
             self._width = width
         units = transcript_units(state, self._timezone, width, limits=self._limits)
         live_ids = {id(block) for block in state.blocks}
-        live = {"header", "todos"}
+        live = {"header"}
         live.update(key for key in self._cache if isinstance(key, tuple) and len(key) > 1 and key[1] in live_ids)
         for key in [key for key in self._cache if key not in live]:
             del self._cache[key]
@@ -546,19 +536,6 @@ def _header() -> list[Any]:
     items: list[Any] = [title, hints]
     items.extend([Rule(style="#303030"), Text("")])
     return items
-
-
-def _todos(todos: list[dict[str, str]]) -> Any:
-    lines: list[Text] = [Text("Plan", style="bold bright_cyan")]
-    for item in todos:
-        status = item.get("status")
-        marker_status = {
-            "in_progress": "running", "pending": "waiting", "blocked": "waiting",
-            "failed": "error", "completed": "completed",
-        }.get(status or "", "waiting")
-        symbol, style = _tool_status_marker(marker_status)
-        lines.append(Text.assemble((f"{symbol} ", style), (str(item.get("content") or ""), style)))
-    return Padding(Group(*lines), (0, 1, 1, 1))
 
 
 def _is_explore(block: Any) -> TypeGuard[ToolBlock]:

@@ -328,65 +328,25 @@ def test_turn_summary_is_after_answer_and_uses_configured_timezone() -> None:
     assert shanghai.index("done") < shanghai.index("Worked for")
 
 
-def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path) -> None:
-    store = SessionStore(tmp_path / "plan.sqlite3")
-    first_plan = [
-        {"content": "Inspect files", "status": "in_progress"},
-        {"content": "Run tests", "status": "pending"},
-    ]
-    updated_plan = [
-        {"content": "Inspect files", "status": "completed"},
-        {"content": "Run tests", "status": "in_progress"},
-    ]
-    runner = AgentRunner(model=scripted_model([
-        AIMessage(content="", tool_calls=[{"id": "todo-1", "name": "write_todos", "args": {"todos": first_plan}}]),
-        AIMessage(content="", tool_calls=[{"id": "todo-2", "name": "write_todos", "args": {"todos": updated_plan}}]),
-        AIMessage(content="working"),
-    ]), backend=StateBackend(), session_store=store)
+def test_session_restores_without_plan_tool(tmp_path) -> None:
+    store = SessionStore(tmp_path / "session.sqlite3")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="working")]),
+                         backend=StateBackend(), session_store=store)
     events: list[RunEvent] = []
-    assert runner.invoke("plan the work", on_event=events.append).status == "completed"
-    assert [event.result for event in events if event.type == "todos_updated"] == [first_plan, updated_plan]
-    assert all(event.name != "write_todos" for event in events if event.type.startswith("tool_"))
-    live_state = CliState()
-    for event in events:
-        live_state.apply(event)
-    assert live_state.todos == updated_plan
-    snapshot = runner.load_session(runner.thread_id)
-    assert snapshot is not None
-    assert snapshot.todos == updated_plan
-    assert all(block.name != "write_todos" for block in snapshot.transcript if block.kind == "tool")
-    with create_pipe_input() as pipe:
-        app = CliApplication(runner, input=pipe, output=DummyOutput())
-        app._apply_session_snapshot(snapshot)
-        rendered = _plain(render_transcript(app.state, 80))
-        assert rendered.count("Plan") == 1
-        assert "● Inspect files" in rendered
-        assert re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Run tests", rendered)
+    assert runner.invoke("work", on_event=events.append).status == "completed"
+    assert not [event for event in events if event.type == "todos_updated"]
+    assert "Plan" not in _plain(render_transcript(CliState(), 80))
     thread = runner.thread_id
     runner.close()
     store.close()
-    reopened = SessionStore(tmp_path / "plan.sqlite3")
-    resumed = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+    reopened = SessionStore(tmp_path / "session.sqlite3")
+    resumed = AgentRunner(model=scripted_model([AIMessage(content="continued")]),
                           backend=StateBackend(), session_store=reopened)
-    assert resumed.switch_session(thread).todos == updated_plan
+    snapshot = resumed.switch_session(thread)
+    assert any(block.content == "working" for block in snapshot.transcript)
+    assert resumed.invoke("continue").output == "continued"
     resumed.close()
     reopened.close()
-
-
-def test_plan_ignores_tool_calls_and_update_envelopes() -> None:
-    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
-    events: list[RunEvent] = []
-    plan = [{"content": "Inspect files", "status": "in_progress"}]
-    runner._emit_update_events({
-        "model": {"messages": [AIMessage(content="", tool_calls=[{
-            "id": "todo-1", "name": "write_todos", "args": {"todos": plan},
-        }])]},
-    }, events.append)
-    runner._emit_update_events({
-        "tools": {"messages": [ToolMessage(content="ok", tool_call_id="todo-1", name="write_todos")]},
-    }, events.append)
-    runner._emit_update_events({"tools": {"todos": plan}}, events.append)
-    assert not [event for event in events if event.type != "usage"]
 
 
 def test_cli_state_updates_streaming_block_in_place() -> None:
@@ -3636,7 +3596,6 @@ def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None
 def test_transcript_renderer_matches_uncached_render() -> None:
     state = CliState()
     state.add_user("hello there")
-    state.todos = [{"content": "Inspect files", "status": "completed"}]
     state.blocks.append(ToolBlock(
         tool_call_id="t1", name="execute", arguments={"command": "pytest -q"},
         output="ok\nfailed", status="completed",

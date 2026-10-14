@@ -145,7 +145,6 @@ class SessionController:
         app._clear_skill_draft()
         app.clear_transcript_selection()
         app.state.load_transcript(snapshot.transcript)
-        app.state.todos = list(snapshot.todos)
         app.interaction = None
         app._deferred_config_interaction = None
         app._reviewing = False

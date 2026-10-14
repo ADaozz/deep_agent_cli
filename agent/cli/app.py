@@ -1243,7 +1243,6 @@ class CliApplication:
         self._clear_skill_draft()
         self.clear_transcript_selection()
         self.state.load_transcript(snapshot.transcript)
-        self.state.todos = list(snapshot.todos)
         self.interaction = None
         self._reviewing = False
         self.state.add_system(

@@ -17,7 +17,6 @@ from deepagents.middleware.summarization import (
     create_summarization_tool_middleware,
 )
 from deepagents._models import get_model_identifier, get_model_provider
-from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -156,7 +155,6 @@ def build_agent(
             ToolArgHintMiddleware(),
             WriteOperationMiddleware(fs_backend),
             AttachmentMaterializationMiddleware(),
-            TodoListMiddleware(),
             WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
             compact_middleware,
         ],

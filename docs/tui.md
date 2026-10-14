@@ -101,7 +101,6 @@ deep-agent --version
 - **命令输出**：实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并为 `Explored N items`。
 - **文件写入**：新建显示 `Create <路径>`，连续新建合并为 `Create N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
-- **任务计划**：Agent 调用 `write_todos` 时显示当前计划，恢复会话时一并恢复。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。

@@ -36,7 +36,7 @@ agent/session_lock.py  每个会话一个 flock 锁
 - `web_search`（有 Tavily 密钥时注册）
 - 调用方通过 `extra_tools` 传入的工具
 
-文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。`write_todos` 由 LangChain 的 `TodoListMiddleware` 提供。
+文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。
 
 Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profile），因此没有 `task` 工具。
 
@@ -52,7 +52,6 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 | `ToolArgHintMiddleware` | 工具参数校验失败时返回可操作的提示 |
 | `WriteOperationMiddleware` | 在 `write_file` 结果中标记是新建还是覆盖 |
 | `AttachmentMaterializationMiddleware` | 请求模型时把图片引用替换为实际内容 |
-| `TodoListMiddleware` | `write_todos` |
 | `WorkspaceFilesystemMiddleware` | 文件工具 |
 | `SummarizationToolMiddleware` | `/compact` 使用的 `compact_conversation` |
 
@@ -105,7 +104,7 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 
 每个工作区一个 SQLite 文件（WAL 模式，权限 `0600`），包含：
 
-- LangGraph `SqliteSaver` 的 checkpoint：消息、中断、图状态（含 `todos`）。序列化器禁用 pickle 回退。
+- LangGraph `SqliteSaver` 的 checkpoint：消息、中断、图状态。序列化器禁用 pickle 回退。
 - `session_catalog` 表：标题、时间、模型、推理强度、权限模式、待生效的切换、上一轮的结束原因（`pending` / `stop` / `error` / `aborted` / `deferred`）。旧表结构在打开时迁移。
 
 数据库旁边：

@@ -57,7 +57,6 @@ def touch(block: MessageBlock | ToolBlock) -> MessageBlock | ToolBlock:
 @dataclass
 class CliState:
     blocks: list[Block] = field(default_factory=list)
-    todos: list[dict[str, str]] = field(default_factory=list)
     running: bool = False
     compacting: bool = False
     status: str = "Ready"
@@ -92,7 +91,6 @@ class CliState:
 
     def clear(self) -> None:
         self.blocks.clear()
-        self.todos.clear()
         self.active_block = None
         self.pending_user_ids.clear()
         self.usage.clear()
@@ -133,8 +131,6 @@ class CliState:
             self.compacting = False
         elif event.type == "assistant_started":
             self.active_block = None
-        elif event.type == "todos_updated" and isinstance(event.result, list):
-            self.todos = [dict(item) for item in event.result if isinstance(item, dict)]
         elif event.type == "usage" and isinstance(event.result, dict):
             usage = {
                 key: int(value)

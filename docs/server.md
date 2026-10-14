@@ -557,7 +557,6 @@ interface AgentEvent {
 | `tool_output_delta` | `tool_call_id/content/stream`；普通 merged 输出按增量追加，tail_snapshot 替换当前有界输出并标记截断 |
 | `tool_completed` | `content/result/is_error/artifact`，结束对应工具卡片；不把 artifact 任意字符串当下载地址 |
 | `usage` | `result` 可能含 input_tokens/output_tokens/total_tokens，也可能为 {}；不是会话累计费用 |
-| `todos_updated` | `result` 为任务项数组，替换当前待办展示 |
 | `compaction_started` / `compaction_finished` | 自动压缩进度；不表示当前 run 已结束 |
 | `turn_completed` | `content` 为该轮回答，`result` 含 elapsed_seconds/finished_at；可显示耗时 |
 | 其他事件 | 忽略不识别的展示事件，保留原始记录；任务状态仍从服务快照读取 |
