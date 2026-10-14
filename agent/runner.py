@@ -81,12 +81,16 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
             raise RuntimeError("Runner is closed")
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Runner already has an active operation")
+        # The reservation in force on entry was made for this operation. One
+        # made while it runs belongs to the caller's next run and must survive.
+        reservation = self.control.reserved_generation
         try:
             return method(self, *args, **kwargs)
         finally:
             # An operation that ended before begin_run must not leave its
             # reservation (and a cancel aimed at it) for a later run.
-            self.control.release_reservation()
+            if reservation is not None:
+                self.control.release_reservation(reservation)
             self._operation_lock.release()
     return guarded
 

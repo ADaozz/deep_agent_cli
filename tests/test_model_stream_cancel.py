@@ -463,6 +463,71 @@ def test_cancel_before_begin_run_is_not_lost(make_runner) -> None:
         assert runner.invoke("again").status == "completed"
 
 
+@pytest.mark.parametrize("window", ["before_end_run", "after_end_run"])
+def test_next_turn_reservation_and_cancel_survive_previous_turn_exit(window: str, make_runner) -> None:
+    """Turn B reserves and gets Esc while Turn A is still inside _exclusive_operation.
+
+    before_end_run: A already persisted STOP (the TUI saw run_completed) but its
+    run scope is still active. after_end_run: A's scope ended, the decorator's
+    finally has not run yet.
+    """
+    with ScriptedSSEServer("chat_completions", [Turn(text="turn a"), Turn(text="turn c")]) as server:
+        runner = make_runner(server)
+        tail: dict[str, Any] = {}
+
+        def dispatch_b_and_press_esc() -> None:
+            tail["reservation"] = runner.reserve_run()
+            tail["a_scope_active"] = runner.control.run_generation is not None
+            runner.request_cancel()
+
+        if window == "before_end_run":
+            original_touch = runner._touch_status
+
+            def touch(reason: StopReason) -> None:
+                original_touch(reason)
+                if reason is StopReason.STOP and not tail:
+                    dispatch_b_and_press_esc()
+
+            runner._touch_status = touch
+        else:
+            original_stream = runner._stream
+
+            def stream(*args: Any, **kwargs: Any) -> RunResult:
+                result = original_stream(*args, **kwargs)
+                if not tail:
+                    dispatch_b_and_press_esc()
+                return result
+
+            runner._stream = stream
+        events_a: list[RunEvent] = []
+        try:
+            result_a = runner.invoke("turn a", on_event=events_a.append)
+        finally:
+            runner.__dict__.pop("_touch_status", None)
+            runner.__dict__.pop("_stream", None)
+        assert tail["a_scope_active"] is (window == "before_end_run")
+        # Turn A keeps its own completed outcome.
+        assert result_a.status == "completed" and result_a.output == "turn a"
+        assert "run_cancelled" not in [event.type for event in events_a]
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
+        # A's exit left B's reservation, and the Esc aimed at it, in place.
+        assert runner.control.reserved_generation == tail["reservation"]
+        assert runner.control.cancel_requested
+        events_b: list[RunEvent] = []
+        try:
+            result_b = runner.invoke("turn b", on_event=events_b.append)
+        finally:
+            runner.release_run_reservation(tail["reservation"])
+        assert result_b.status == "cancelled" and not result_b.error
+        assert [event.type for event in events_b].count("run_cancelled") == 1
+        assert len(server.connections) == 1
+        assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.ABORTED
+        # The cancel was consumed by B and does not leak into the following turn.
+        result_c = runner.invoke("turn c")
+        assert result_c.status == "completed" and result_c.output == "turn c"
+        assert runner.control.reserved_generation is None
+
+
 def test_idle_cancel_does_not_affect_next_run(make_runner) -> None:
     with ScriptedSSEServer("chat_completions", [Turn(text="ran")]) as server:
         runner = make_runner(server)
@@ -653,6 +718,20 @@ def test_controller_reservation_keeps_early_cancel_and_isolates_generations() ->
     controller.cancel()
     controller.begin_run()
     assert not controller.cancel_requested
+    controller.end_run()
+    # Releasing an older generation leaves a newer reservation alone, and a
+    # cancel while an earlier run is still active goes to the reserved run.
+    older = controller.reserve_run()
+    controller.begin_run()
+    newer = controller.reserve_run()
+    assert newer != older
+    controller.cancel()
+    controller.release_reservation(older)
+    assert controller.reserved_generation == newer
+    controller.end_run()
+    assert controller.cancel_requested
+    run_control = controller.begin_run()
+    assert controller.run_generation == newer and run_control.drain_requested
     controller.end_run()
 
 

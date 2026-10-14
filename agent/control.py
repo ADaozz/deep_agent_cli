@@ -79,10 +79,19 @@ class RunController:
                 self._reserved = _RunScope(next(self._generations))
             return self._reserved.generation
 
-    def release_reservation(self, generation: int | None = None) -> None:
-        """Drop an unconsumed reservation (all of them when generation is None)."""
+    @property
+    def reserved_generation(self) -> int | None:
         with self._lock:
-            if self._reserved is not None and generation in (None, self._reserved.generation):
+            return self._reserved.generation if self._reserved is not None else None
+
+    def release_reservation(self, generation: int) -> None:
+        """Drop the reservation of ``generation`` if no run has consumed it.
+
+        A reservation made later for another run has a different generation
+        and is left alone.
+        """
+        with self._lock:
+            if self._reserved is not None and self._reserved.generation == generation:
                 self._reserved = None
 
     def begin_run(self) -> RunControl:
@@ -202,13 +211,16 @@ class RunController:
             return messages
 
     def cancel(self) -> None:
-        """Cancel the active (or reserved) run; repeated calls are no-ops.
+        """Cancel the reserved (or else active) run; repeated calls are no-ops.
 
         State changes happen under the lock; draining the graph, cancelling
         model streams and tools, and emitting events happen after it.
         """
         with self._lock:
-            scope = self._active or self._reserved
+            # begin_run consumes any reservation, so one that is pending while
+            # a run is active was made for the next dispatched run (the active
+            # one is only finishing its cleanup); the cancel is meant for it.
+            scope = self._reserved or self._active
             if scope is None:
                 # Idle: record the request without touching any future run.
                 scope = self._last
