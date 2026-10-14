@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterator
 
+from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from langchain_core.messages.content import create_image_block, create_text_block
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
@@ -12,6 +13,12 @@ from pydantic import PrivateAttr, model_validator
 
 from agent.attachments import ATTACHMENT_META_KEY, AttachmentStore, refs_from_message
 from agent.config import ModelProfile
+from agent.llm_stream import (
+    CancellableStreamBridge,
+    ModelStreamCancelled,
+    current_stream_owner,
+    in_stream_loop_thread,
+)
 
 
 _REASONING_EVENT_TYPES = {
@@ -211,9 +218,15 @@ class _RawResponsesClient(_Delegate):
 
 
 class ProtocolChatOpenAI(ChatOpenAI):
-    """Shared request-local attachment resolution and proxy-free transport."""
+    """Shared request-local attachment resolution and proxy-free transport.
+
+    Synchronous streaming runs LangChain's async stream on the managed stream
+    loop (``agent.llm_stream``) so the run that owns the request can cancel a
+    blocked read. Non-streaming ``_generate`` keeps the synchronous client.
+    """
     _attachment_store: AttachmentStore | None = PrivateAttr(default=None)
     materializes_attachment_refs: ClassVar[bool] = True
+    supports_stream_cancellation: ClassVar[bool] = True
 
     @model_validator(mode="before")
     @classmethod
@@ -221,6 +234,10 @@ class ProtocolChatOpenAI(ChatOpenAI):
         """Keep direct construction safe from inherited WSL SOCKS settings too."""
         if not isinstance(values, dict):
             return values
+        if "stream_chunk_timeout" in cls.model_fields and "stream_chunk_timeout" not in values:
+            # The async stream would otherwise abort after 120s without a
+            # content chunk, which the synchronous stream never did.
+            values = {**values, "stream_chunk_timeout": None}
         if values.get("http_client") is None or values.get("http_async_client") is None:
             import httpx
 
@@ -234,6 +251,43 @@ class ProtocolChatOpenAI(ChatOpenAI):
 
     def set_attachment_store(self, store: AttachmentStore) -> None:
         self._attachment_store = store
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        if in_stream_loop_thread():
+            # Blocking the loop thread on its own queue would deadlock.
+            yield from super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
+            return
+        astream = super()._astream
+        bridge: CancellableStreamBridge[ChatGenerationChunk] = CancellableStreamBridge(
+            lambda: astream(messages, stop=stop, run_manager=None, **kwargs),
+        )
+        owner = current_stream_owner()
+        if owner is not None and not owner.register_model_stream(bridge):
+            raise ModelStreamCancelled("The run was cancelled before the model request started")
+        responses_api = self._use_responses_api({**kwargs, **self.model_kwargs})
+        try:
+            for chunk in bridge.iter_chunks():
+                # LangChain's async stream reports tokens to an async manager;
+                # the sync handlers are called here, on the consuming thread,
+                # with the same arguments the sync stream passes.
+                if run_manager is not None:
+                    if responses_api:
+                        run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+                    else:
+                        run_manager.on_llm_new_token(
+                            chunk.text, chunk=chunk,
+                            logprobs=(chunk.generation_info or {}).get("logprobs"),
+                        )
+                yield chunk
+        finally:
+            if owner is not None:
+                owner.unregister_model_stream(bridge)
 
     def _get_request_payload(self, input_: Any, *, stop=None, **kwargs) -> dict[str, Any]:
         materialized = materialize_attachment_refs(input_, self._attachment_store)

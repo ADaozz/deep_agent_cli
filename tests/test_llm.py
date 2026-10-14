@@ -104,13 +104,33 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
         def __iter__(self):
             return iter(events)
 
+    class FakeAsyncResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def __aiter__(self):
+            for event in events:
+                yield event
+
     class FakeResponses:
         def create(self, **payload):
             assert payload["stream"] is True
             return SimpleNamespace(headers={"x-test": "sync"}, parse=lambda: FakeResponse())
 
+    class FakeAsyncResponses:
+        async def create(self, **payload):
+            assert payload["stream"] is True
+            return SimpleNamespace(headers={"x-test": "sync"}, parse=lambda: FakeAsyncResponse())
+
     class FakeClient:
         responses = FakeResponses()
+        with_raw_response = SimpleNamespace(responses=responses)
+
+    class FakeAsyncClient:
+        responses = FakeAsyncResponses()
         with_raw_response = SimpleNamespace(responses=responses)
 
     llm = QwenChatOpenAI(
@@ -119,13 +139,17 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
     )
     from agent.llm import _ResponsesClient
     object.__setattr__(llm, "root_client", _ResponsesClient(FakeClient()))
+    object.__setattr__(llm, "root_async_client", _ResponsesClient(FakeAsyncClient()))
 
-    chunks = list(llm._stream([HumanMessage(content="x")]))
-    blocks = [chunk.message.content[0] for chunk in chunks]
-    assert chunks[0].message.response_metadata["headers"]["x-test"] == "sync"
-    assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
-    assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
-    assert blocks[2]["text"] == "answer"
+    # _stream is served by the cancellable async bridge; the plain sync
+    # stream must produce the same chunks.
+    for chunks in (list(llm._stream([HumanMessage(content="x")])),
+                   list(super(QwenChatOpenAI, llm)._stream([HumanMessage(content="x")]))):
+        blocks = [chunk.message.content[0] for chunk in chunks]
+        assert chunks[0].message.response_metadata["headers"]["x-test"] == "sync"
+        assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
+        assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
+        assert blocks[2]["text"] == "answer"
 
 
 def test_responses_extra_body_uses_standard_sdk_envelope() -> None:
@@ -149,13 +173,22 @@ def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
                 "context_length_exceeded", response=response, body={},
             )
 
+    class FakeAsyncResponses:
+        async def create(self, **_payload):
+            raise openai.BadRequestError(
+                "context_length_exceeded", response=response, body={},
+            )
+
     llm = QwenChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True,
     )
     object.__setattr__(llm, "root_client", SimpleNamespace(responses=FakeResponses()))
+    object.__setattr__(llm, "root_async_client", SimpleNamespace(responses=FakeAsyncResponses()))
     with pytest.raises(lc_base.OpenAIContextOverflowError):
         list(llm._stream([HumanMessage(content="x")]))
+    with pytest.raises(lc_base.OpenAIContextOverflowError):
+        list(super(QwenChatOpenAI, llm)._stream([HumanMessage(content="x")]))
 
 
 def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_differ() -> None:
@@ -294,3 +327,61 @@ def test_baseline_chat_tool_chunks_and_usage() -> None:
         "prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15,
     }}, AIMessageChunk, None)
     assert usage.message.usage_metadata["input_tokens"] == 12
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_bridged_stream_matches_sync_stream_over_real_http(api) -> None:
+    """Reasoning, text, tool calls, usage and callback tokens survive the async bridge unchanged."""
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    from agent.llm_stream import live_stream_count
+    from agent.stream import reasoning_text, visible_text
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+
+    call = {"id": "call_1", "name": "read_file", "args": {"path": "a"}}
+    turn = Turn(reasoning="think first", text="the answer is here", tool_calls=[call])
+
+    class Tokens(BaseCallbackHandler):
+        def __init__(self):
+            self.tokens = []
+
+        def on_llm_new_token(self, token, **kwargs):
+            self.tokens.append((token, type(kwargs.get("chunk")).__name__))
+
+    def collect(model, bridged):
+        handler = Tokens()
+        if bridged:
+            chunks = list(model.stream([HumanMessage(content="hi")], config={"callbacks": [handler]}))
+        else:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(type(model), "_stream", ChatOpenAI._stream)
+                chunks = list(model.stream([HumanMessage(content="hi")], config={"callbacks": [handler]}))
+        combined = chunks[0]
+        for chunk in chunks[1:]:
+            combined += chunk
+        return chunks, combined, handler.tokens
+
+    with ScriptedSSEServer(api, [turn, turn]) as server:
+        model = build_chat_model(ModelProfile("local/x", "local-x", base_url=server.base_url, api=api))
+        bridged_chunks, bridged, bridged_tokens = collect(model, True)
+        sync_chunks, plain, sync_tokens = collect(model, False)
+    assert len(bridged_chunks) == len(sync_chunks)
+    assert [chunk.content for chunk in bridged_chunks] == [chunk.content for chunk in sync_chunks]
+    assert bridged_tokens == sync_tokens and bridged_tokens
+    for combined in (bridged, plain):
+        assert reasoning_text(combined) == "think first"
+        assert visible_text(combined) == "the answer is here"
+        assert combined.tool_calls == [{"name": "read_file", "args": {"path": "a"}, "id": "call_1", "type": "tool_call"}]
+        assert combined.usage_metadata["input_tokens"] == 21
+        assert combined.usage_metadata["output_tokens"] == 7
+    assert live_stream_count() == 0
+
+
+def test_custom_models_keep_their_own_stream_path() -> None:
+    from tests.conftest import scripted_model
+
+    model = scripted_model([AIMessage(content="plain")])
+    assert not getattr(model, "supports_stream_cancellation", False)
+    assert model.invoke("x").content == "plain"

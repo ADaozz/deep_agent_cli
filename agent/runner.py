@@ -36,6 +36,7 @@ from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
+from agent.llm_stream import ModelStreamCancelled, reset_stream_owner, set_stream_owner
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
 from agent.permission import (
@@ -67,6 +68,10 @@ HUMAN_TOOLS = frozenset({"request_human_input"})
 # releases the session lease early: close() raises, keeps the lease, and can be
 # retried once the run finally drained.
 CLOSE_DRAIN_SECONDS = 30.0
+# How long a cancelled run waits for its model HTTP request to confirm it has
+# closed before reporting the cleanup as unconfirmed.
+MODEL_STREAM_CLOSE_SECONDS = 5.0
+MODEL_STREAM_UNCLOSED = "Cancelled, but the model request did not confirm it stopped"
 
 
 def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -79,6 +84,9 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
         try:
             return method(self, *args, **kwargs)
         finally:
+            # An operation that ended before begin_run must not leave its
+            # reservation (and a cancel aimed at it) for a later run.
+            self.control.release_reservation()
             self._operation_lock.release()
     return guarded
 
@@ -637,10 +645,21 @@ class AgentRunner:
         self.control.request_pause()
 
     def request_cancel(self) -> None:
-        """Request hard cancel for execute / cancellable tools and drain the graph."""
+        """Request hard cancel of the model stream, cancellable tools, and the graph.
+
+        Returns without waiting; the operation in progress reports the outcome.
+        Also cancels a run reserved with ``reserve_run`` that has not started.
+        """
         self.control.cancel()
         if self._busy:
             self._touch_status(StopReason.ABORTED)
+
+    def reserve_run(self) -> int:
+        """Mark that the caller is dispatching a run so an early cancel is not lost."""
+        return self.control.reserve_run()
+
+    def release_run_reservation(self, reservation: int) -> None:
+        self.control.release_reservation(reservation)
 
     def steer(self, text: str) -> None:
         # No _exclusive_operation: steering must enter while a run holds the
@@ -913,6 +932,11 @@ class AgentRunner:
             raise RuntimeError(
                 "Runner close timed out with a run still active; the session "
                 "lease is kept until the run drains and close is retried"
+            )
+        if not self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS):
+            raise RuntimeError(
+                "Runner close could not confirm the model request stopped; the "
+                "session lease is kept until it closes and close is retried"
             )
         self._close_completed = True
         self._runtime.close()
@@ -1244,6 +1268,7 @@ class AgentRunner:
         set_output_emitter(self._emit_tool_output)
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
+        stream_owner_token = set_stream_owner(self.control)
         self._busy = True
         self._context_usage_invalidated = True
         _emit(event_handler, RunEvent(type="run_started"))
@@ -1297,6 +1322,7 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
+            reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)
             if (result is not None and result.status == "completed") or (
@@ -1347,22 +1373,20 @@ class AgentRunner:
                     if interrupt.kind is InterruptKind.WAITING_HUMAN:
                         human_input = interrupt.payload
         except GraphDrained:
-            _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status(StopReason.ABORTED)
-            return RunResult(status="cancelled")
+            return self._cancelled_result(event_handler)
         except Exception as exc:  # noqa: BLE001
+            # A ModelStreamCancelled without a cancel request of this run is
+            # not a user cancel and stays a failure, like any network error.
             if self.control.cancel_requested:
-                _emit(event_handler, RunEvent(type="run_cancelled"))
-                self._touch_status(StopReason.ABORTED)
-                return RunResult(status="cancelled")
+                return self._cancelled_result(event_handler)
+            if isinstance(exc, ModelStreamCancelled):
+                exc = RuntimeError(f"Model stream stopped unexpectedly: {exc}")
             _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
             self._touch_status(StopReason.ERROR)
             return RunResult(status="failed", error=str(exc))
 
         if self.control.cancel_requested and not interrupted:
-            _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status(StopReason.ABORTED)
-            return RunResult(status="cancelled")
+            return self._cancelled_result(event_handler)
 
         if interrupted:
             self.control.set_defer_steering(True)
@@ -1377,6 +1401,19 @@ class AgentRunner:
 
         output = _final_output(self.prepared.graph, self._thread_config())
         return RunResult(status="completed", output=output)
+
+    def _cancelled_result(self, event_handler: RunEventHandler | None) -> RunResult:
+        """Finish a cancelled run once its model request is confirmed closed.
+
+        graph.stream has returned, so no node can still write a checkpoint.
+        An unconfirmed close is reported on the result and makes close() keep
+        the session lease.
+        """
+        closed = self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS)
+        self._touch_status(StopReason.ABORTED)
+        error = "" if closed else MODEL_STREAM_UNCLOSED
+        _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
+        return RunResult(status="cancelled", error=error)
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
