@@ -75,23 +75,28 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 grep 参数校验（pattern / max_count / glob 规则）
   → WorkspaceCompositeBackend.regex_search_location() 校验虚拟路径
   → 宿主以 O_NOFOLLOW 逐级打开挂载根与目标（拒绝符号链接）；直接文件先做 glob、大小、二进制检查
-  → SANDBOXED 且有 rg：BubblewrapBackend.search_args() 构造只读搜索沙箱，单个 rg 进程遍历并搜索
+  → SANDBOXED 且有 rg：SandboxPool → PersistentSandbox.start_argv() → 现有 Worker → 单个 rg 进程
     否则：一个 Python Worker（agent/tools/_grep_worker.py）基于目录描述符遍历并用 re 匹配
   → 流式解析，按输出模式计数、去重与截断 → ToolMessage
 ```
 
-- 搜索沙箱与 `execute` 的持久沙箱无关：每次搜索一次性启动 `bwrap`，以 `--ro-bind-fd`
-  挂载已打开的挂载根描述符（旧版 bwrap 使用该描述符的 `/proc/self/fd` 链接），只包含
-  `/workspace` 或 `/skills` 之一、`rg` 二进制（`sandbox.search_runtime()` 解析符号链接；
-  动态链接时附加加载器报告的共享库）；无网络、无可写挂载、无 `/proc`、清空环境变量，
-  不使用 `sandbox_args()` 和配置中的额外挂载。
+- grep 根据工厂传入的权限模式选择已有 SandboxPool：ask 使用无网实例，allow 使用有网实例。
+  两个实例都懒启动、在会话内复用，与相同网络模式的 execute 共用 Worker/PID，无独立 grep 沙箱。
+- Worker 在启动时只读挂载环境内优先定位的 rg 到 `/run/deep-agent/rg`，利用已有运行时；
+  不再需要 grep 专属的 ELF、共享库发现或 Bubblewrap 启动分支。
+- `start_argv()` 通过原控制管道、request_id、RemoteCommand 发送结构化 argv 和 cwd；
+  Worker 使用 `subprocess.Popen(argv, shell=False)`，按流区分 stdout/stderr，保留原 Shell 入口的合并输出。
+  搜索路径在 Worker 内再次以目录描述符和 O_NOFOLLOW 打开，并核对挂载根 inode；
+  单文件用已打开的文件描述符传给 rg，避免路径校验后的符号链接替换。
 - `rg` 的工作目录是搜索目录，因此 Glob 相对 `path` 锚定，父目录中的 ignore 文件仍然生效；
   结果路径在 `/workspace`、`/skills` 虚拟路径下拼接，不出现宿主路径。
 - Glob 规则在 `_grep_worker.parse_globs()` 中统一校验；`rg` 收到原始规则（每条一个 `--glob`），
   Python 引擎按 ripgrep override 语义翻译成 wcmatch 模式，按顺序取最后命中的规则。
-- 每次搜索只有一个子进程（`bwrap` 或 Python Worker），以独立进程组启动。取消或超时时
-  杀掉进程组；`bwrap --die-with-parent` 随后结束沙箱 PID 命名空间中的 `rg`。
-  `rg` 的环境变量全部清空；Python Worker 只保留 `PATH` 与 UTF-8 locale，不继承 API key。
+- 搜索结束、取消或超时复用 RemoteCommand.kill 与 Worker 的退出事件，只清理本次 rg。
+  正常情况下沙箱不销毁；Worker 失效则沿用 SandboxPool 的替换机制，不重试正在执行的搜索。
+  UNSANDBOXED / 缺少 rg 的 Python 回退保持原有独立可终止进程。
+- grep 不增加审批或 network 参数；ask 下 execute(network=true) 仍经审批使用有网实例，
+  allow 下 execute 默认有网，原 execute Tool Schema 与网络 ContextVar 均不改变。
 
 ## 模型适配
 

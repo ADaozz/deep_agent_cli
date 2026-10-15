@@ -1,8 +1,7 @@
 """Bounded regex search for the local workspace and read-only skills mounts.
 
-SANDBOXED: one ripgrep process inside a dedicated read-only, offline bwrap
-sandbox that only contains the searched mount and the rg runtime. rg walks the
-tree itself (ignore files, hidden files, binary and size filtering).
+SANDBOXED: one ripgrep process in the existing permission-mode SandboxPool.
+rg walks the tree itself (ignore files, hidden files, binary and size filtering).
 UNSANDBOXED, or rg unavailable: one Python worker that opens every component
 relative to a directory descriptor with O_NOFOLLOW.
 """
@@ -27,7 +26,8 @@ from typing import Callable, Literal
 from langchain_core.tools import StructuredTool
 
 from agent.cancel import get_cancel_context
-from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend, runtime_identity, search_runtime
+from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend, SEARCH_BINARY_PATH, KILL_CONFIRM_SECONDS
+from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxStartError
 from agent.tools import _grep_worker as rules_engine
 
 SEARCH_TIMEOUT = 10.0
@@ -71,7 +71,7 @@ class _SearchProcessHandle:
 
 def _stop(process: subprocess.Popen) -> None:
     # Signal the group before reaping so its id cannot have been reused.
-    # bwrap --die-with-parent then tears down the whole sandbox PID namespace.
+    # The host-side Python fallback is the only caller of this process helper.
     if process.returncode is None:
         _signal_group(process, signal.SIGKILL)
     process.wait()
@@ -208,6 +208,93 @@ def _stream(argv: list[str], consume: Callable[[bytes], bool], *, deadline: floa
     return _Run(status, process.returncode, stderr.decode("utf-8", "replace").strip())
 
 
+def _stream_rg(executor: BubblewrapBackend, argv: list[str], target: _Target,
+               consume: Callable[[bytes], bool], *, deadline: float, network: bool) -> _Run:
+    """Use the pool's command handle and exit events, leaving its worker alive."""
+    context = get_cancel_context()
+    pool = executor.pool
+
+    def run(sandbox: PersistentSandbox) -> _Run:
+        if context and context.cancelled:
+            return _Run("cancelled", None, "")
+        if time.monotonic() >= deadline:
+            return _Run("timeout", None, "")
+        identity = os.fstat(target.mount_fd)
+        try:
+            handle = sandbox.start_argv(
+                argv, target.virtual_dir,
+                mount_identity=(target.virtual_root, identity.st_dev, identity.st_ino),
+                file=PurePosixPath(target.relative).name if target.is_file else None,
+            )
+        except SandboxLostError:
+            pool.discard(sandbox, "search worker lost before starting rg")
+            raise
+        if context:
+            context.register_process(handle)
+        stderr = bytearray()
+        status = "exited"
+        exit_code = None
+        terminal = False
+        killed_at = None
+        try:
+            while True:
+                now = time.monotonic()
+                if status == "exited":
+                    if context and context.cancelled:
+                        status = "cancelled"
+                    elif now >= deadline:
+                        status = "timeout"
+                if status != "exited" and killed_at is None:
+                    handle.kill()
+                    killed_at = now
+                if killed_at is not None and now - killed_at >= KILL_CONFIRM_SECONDS:
+                    pool.discard(sandbox, "search worker did not confirm rg termination")
+                    break
+                event = handle.next_event(0.05)
+                if event is None:
+                    continue
+                kind, data = event
+                if kind == "out":
+                    if status == "exited" and not consume(data):
+                        status = "stopped"
+                elif kind == "err":
+                    stderr += data[:max(0, MAX_STDERR_BYTES - len(stderr))]
+                elif kind == "exit":
+                    terminal = True
+                    exit_code = data
+                    break
+                elif kind == "spawn_error":
+                    terminal = True
+                    raise ValueError("ripgrep could not start: " + str(data))
+                else:
+                    terminal = True
+                    pool.discard(sandbox, str(data))
+                    raise ValueError("search sandbox was lost; the search was not retried")
+        finally:
+            if not terminal and sandbox.alive:
+                handle.kill()
+                until = time.monotonic() + KILL_CONFIRM_SECONDS
+                while time.monotonic() < until:
+                    event = handle.next_event(0.05)
+                    if event and event[0] in ("exit", "spawn_error", "lost"):
+                        break
+                else:
+                    pool.discard(sandbox, "search cleanup was not confirmed")
+            handle.release()
+            if context:
+                context.clear_process()
+        if context and context.cancelled:
+            status = "cancelled"
+        return _Run(status, exit_code, stderr.decode("utf-8", "replace").strip())
+
+    try:
+        return pool.run(network, run, deadline=deadline)
+    except (TimeoutError, SandboxStartError):
+        if time.monotonic() >= deadline:
+            return _Run("timeout", None, "")
+        raise
+
+
 class _Splitter:
     """Split a byte stream on a separator with a bounded record size."""
 
@@ -320,61 +407,55 @@ def _rg_text(value: dict) -> str:
     return base64.b64decode(value["bytes"]).decode("utf-8", errors="replace")
 
 
-def _search_rg(executor: BubblewrapBackend, rg: str, target: _Target, pattern: str,
+def _search_rg(executor: BubblewrapBackend, target: _Target, pattern: str,
                globs: list[str], mode: str, fixed_string: bool, results: _Results,
-               deadline: float) -> str:
-    runtime = search_runtime(rg)
-    binary_fd = os.open(runtime.binary, os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        if runtime_identity(binary_fd) != runtime.identity:
-            raise ValueError("ripgrep executable changed while preparing the search; retry")
-        cwd = target.virtual_dir
-        subject = PurePosixPath(target.relative).name if target.is_file else "."
-        argv = [*executor.search_args(runtime, binary_fd=binary_fd, mount_fd=target.mount_fd,
-                                      mount_point=target.virtual_root, cwd=cwd),
-                *_rg_arguments(mode, fixed_string, globs, target.file_limit), "--", pattern, subject]
+               deadline: float, network: bool) -> str:
+    cwd = target.virtual_dir
+    subject = PurePosixPath(target.relative).name if target.is_file else "."
+    argv = [SEARCH_BINARY_PATH, *_rg_arguments(mode, fixed_string, globs, target.file_limit),
+            "--", pattern, subject]
 
-        def virtual(raw: str) -> str:
-            relative = raw[2:] if raw.startswith("./") else raw
-            return str(PurePosixPath(cwd) / relative)
+    def virtual(raw: str) -> str:
+        if target.is_file:
+            return str(PurePosixPath(target.virtual_root) / target.relative)
+        relative = raw[2:] if raw.startswith("./") else raw
+        return str(PurePosixPath(cwd) / relative)
 
-        record_limit = target.file_limit * 8 + 65536
-        if mode == "content":
-            splitter = _Splitter(b"\n", record_limit)
+    record_limit = target.file_limit * 8 + 65536
+    if mode == "content":
+        splitter = _Splitter(b"\n", record_limit)
 
-            def consume(chunk: bytes) -> bool:
-                for raw in splitter.feed(chunk):
-                    record = json.loads(raw)
-                    if record.get("type") != "match":
-                        continue
-                    data = record["data"]
-                    line = _rg_text(data["lines"]).rstrip("\n").rstrip("\r")
-                    if len(line.encode("utf-8")) > rules_engine.LINE_BYTES:
-                        results.note(rules_engine.LINE_NOTE)
-                        line = line.encode("utf-8")[:rules_engine.LINE_BYTES].decode("utf-8", "ignore") + " [line truncated]"
-                    if not results.add(virtual(_rg_text(data["path"])), data["line_number"], line):
-                        return False
-                return True
-        elif mode == "files_with_matches":
-            splitter = _Splitter(b"\0", record_limit)
+        def consume(chunk: bytes) -> bool:
+            for raw in splitter.feed(chunk):
+                record = json.loads(raw)
+                if record.get("type") != "match":
+                    continue
+                data = record["data"]
+                line = _rg_text(data["lines"]).rstrip("\n").rstrip("\r")
+                if len(line.encode("utf-8")) > rules_engine.LINE_BYTES:
+                    results.note(rules_engine.LINE_NOTE)
+                    line = line.encode("utf-8")[:rules_engine.LINE_BYTES].decode("utf-8", "ignore") + " [line truncated]"
+                if not results.add(virtual(_rg_text(data["path"])), data["line_number"], line):
+                    return False
+            return True
+    elif mode == "files_with_matches":
+        splitter = _Splitter(b"\0", record_limit)
 
-            def consume(chunk: bytes) -> bool:
-                for raw in splitter.feed(chunk):
-                    if raw and not results.add(virtual(raw.decode("utf-8", "replace"))):
-                        return False
-                return True
-        else:
-            splitter = _CountSplitter(record_limit)
+        def consume(chunk: bytes) -> bool:
+            for raw in splitter.feed(chunk):
+                if raw and not results.add(virtual(raw.decode("utf-8", "replace"))):
+                    return False
+            return True
+    else:
+        splitter = _CountSplitter(record_limit)
 
-            def consume(chunk: bytes) -> bool:
-                for name, count in splitter.feed(chunk):
-                    if name and not results.add(virtual(name.decode("utf-8", "replace")), count=int(count)):
-                        return False
-                return True
+        def consume(chunk: bytes) -> bool:
+            for name, count in splitter.feed(chunk):
+                if name and not results.add(virtual(name.decode("utf-8", "replace")), count=int(count)):
+                    return False
+            return True
 
-        run = _stream(argv, consume, deadline=deadline, pass_fds=(target.mount_fd, binary_fd), env={})
-    finally:
-        os.close(binary_fd)
+    run = _stream_rg(executor, argv, target, consume, deadline=deadline, network=network)
     stderr = run.stderr.replace(str(target.root), target.virtual_root)[:2048]
     if run.status in ("cancelled", "timeout", "stopped"):
         return _finish(run.status, results)
@@ -384,9 +465,9 @@ def _search_rg(executor: BubblewrapBackend, rg: str, target: _Target, pattern: s
     if run.exit_code == 2:
         return "Error: ripgrep execution failed: " + (stderr or "exit status 2")
     if run.exit_code == 1 and stderr:
-        return "Error: ripgrep could not run in the read-only search sandbox: " + stderr
+        return "Error: ripgrep could not run in the persistent search sandbox: " + stderr
     if run.exit_code not in (0, 1) or (run.exit_code == 0 and results.empty):
-        return (f"Error: ripgrep could not run in the read-only search sandbox (exit status {run.exit_code})"
+        return (f"Error: ripgrep could not run in the persistent search sandbox (exit status {run.exit_code})"
                 + (": " + stderr if stderr else ""))
     return results.render()
 
@@ -435,7 +516,7 @@ def _finish(status: str, results: _Results) -> str:
 
 def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
            glob: str | list[str] | None, output_mode: str, max_count: int | None,
-           fixed_string: bool) -> str:
+           fixed_string: bool, *, network: bool = False) -> str:
     """Run one bounded, killable search; never use execute or a shell."""
     context = get_cancel_context()
     deadline = time.monotonic() + SEARCH_TIMEOUT
@@ -463,12 +544,12 @@ def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
             return "Error: Search cancelled."
         rg = resolve_rg()
         if rg and isinstance(backend.executor, BubblewrapBackend):
-            return _search_rg(backend.executor, rg, target, pattern, globs, output_mode,
-                              fixed_string, results, deadline)
+            return _search_rg(backend.executor, target, pattern, globs, output_mode,
+                              fixed_string, results, deadline, network)
         return _search_python(target, pattern, globs, output_mode, fixed_string, results, deadline)
     except FileNotFoundError:
         return "Error: search path not found"
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, SandboxStartError, SandboxLostError) as exc:
         # OSError includes host paths; never surface those to the model.
         detail = exc.strerror if isinstance(exc, OSError) else str(exc)
         return f"Error: {detail}"
@@ -479,7 +560,7 @@ def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
             os.close(target.mount_fd)
 
 
-def build_regex_grep_tool(backend: WorkspaceCompositeBackend) -> StructuredTool:
+def build_regex_grep_tool(backend: WorkspaceCompositeBackend, *, network: bool = False) -> StructuredTool:
     def grep(
         pattern: str,
         path: str | None = None,
@@ -520,6 +601,6 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend) -> StructuredTool:
         Prefer grep for locating source code. Use read_file with offset and
         limit to inspect surrounding code.
         """
-        return search(backend, pattern, path, glob, output_mode, max_count, fixed_string)
+        return search(backend, pattern, path, glob, output_mode, max_count, fixed_string, network=network)
 
     return StructuredTool.from_function(grep)

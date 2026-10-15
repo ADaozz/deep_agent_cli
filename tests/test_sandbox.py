@@ -455,153 +455,32 @@ def test_extra_mount_cannot_replace_worker(tmp_path: Path) -> None:
         select_backend(config, check=False)
 
 
-def test_search_args_are_read_only_offline_and_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent import sandbox
+def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
+    from agent.tools import grep
+    from agent.sandbox import SEARCH_BINARY_PATH
 
-    home = tmp_path / "home"
-    (home / ".ssh").mkdir(parents=True)
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    config = replace(
-        config_for(workspace),
-        extra_read_only_mounts=(BindMount(home / ".ssh", "/opt/keys"),),
-        extra_read_write_mounts=(BindMount(home, "/opt/home"),),
-        env_set={"OPENAI_API_KEY": "secret"},
-    )
-    backend = BubblewrapBackend(config, executable="/usr/bin/bwrap")
-    monkeypatch.setattr(sandbox, "_bwrap_has_bind_fd", lambda _executable: True)
-    runtime = sandbox.SearchRuntime("/venv/bin/rg", (0, 0, 0, 0), sandbox.SEARCH_BINARY_PATH)
-    args = backend.search_args(runtime, binary_fd=5, mount_fd=4, mount_point="/workspace", cwd="/workspace/src")
-    joined = " ".join(args)
-    assert args[:3] == ["/usr/bin/bwrap", "--die-with-parent", "--new-session"]
-    for flag in ("--unshare-net", "--unshare-pid", "--unshare-ipc", "--clearenv"):
-        assert flag in args
-    assert "--ro-bind-fd 4 /workspace --ro-bind-fd 5 /run/deep-agent/rg" in joined
-    assert "--chdir /workspace/src -- /run/deep-agent/rg" in joined
-    for forbidden in ("--bind", "--bind-fd", "--tmpfs", "--proc", "--dev", "--setenv", "--share-net",
-                      str(workspace), str(home), "/opt/keys", "/opt/home", "/usr", "/etc/resolv.conf",
-                      "OPENAI_API_KEY", "/skills"):
-        assert forbidden not in args, forbidden
-    assert "--unshare-user" not in args
-    skills = backend.search_args(runtime, binary_fd=5, mount_fd=4, mount_point="/skills", cwd="/skills")
-    assert "--ro-bind-fd 4 /skills" in " ".join(skills) and "/workspace" not in skills
-    monkeypatch.setattr(sandbox, "_bwrap_has_bind_fd", lambda _executable: False)
-    legacy = backend.search_args(runtime, binary_fd=5, mount_fd=4, mount_point="/workspace", cwd="/workspace")
-    assert "--ro-bind /proc/self/fd/4 /workspace --ro-bind /proc/self/fd/5 /run/deep-agent/rg" in " ".join(legacy)
-    for mount_point, cwd in (("/etc", "/etc"), ("/workspace", "/etc"), ("/workspace", "/workspace/../etc"),
-                             ("/skills", "/workspace")):
-        with pytest.raises(ValueError):
-            backend.search_args(runtime, binary_fd=5, mount_fd=4, mount_point=mount_point, cwd=cwd)
+    binary = tmp_path / "bin" / "rg"
+    binary.parent.mkdir()
+    binary.write_text("binary")
+    binary.chmod(0o755)
+    link = tmp_path / "rg-link"
+    link.symlink_to(binary)
+    monkeypatch.setattr(grep, "resolve_rg", lambda: str(link))
+    backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
+    for network in (False, True):
+        args = backend.worker_args(network)
+        index = args.index(SEARCH_BINARY_PATH)
+        assert args[index - 2:index + 1] == ["--ro-bind", str(binary), SEARCH_BINARY_PATH]
+        assert ("--unshare-net" in args) is not network
 
 
-def test_search_runtime_static_and_symlinked_rg(tmp_path: Path) -> None:
-    import os
+def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch):
+    from agent.tools import grep
+    from agent.sandbox import SEARCH_BINARY_PATH
 
-    from agent import sandbox
-    from agent.tools.grep import resolve_rg
-
-    rg = resolve_rg()
-    assert rg, "ripgrep-bin must provide rg"
-    real = os.path.realpath(rg)
-    if sandbox._elf_interpreter(real) is not None:
-        pytest.skip("installed rg is dynamically linked")
-    link = tmp_path / "bin" / "rg"
-    link.parent.mkdir()
-    link.symlink_to(rg)
-    runtime = sandbox.search_runtime(str(link))
-    assert runtime.binary == real
-    assert runtime.sandbox_path == sandbox.SEARCH_BINARY_PATH
-    assert runtime.libraries == ()
-
-
-def test_search_runtime_binds_exact_dynamic_libraries() -> None:
-    import os
-
-    from agent import sandbox
-
-    real = os.path.realpath("/bin/sh")
-    if sandbox._elf_interpreter(real) is None:
-        pytest.skip("/bin/sh is statically linked here")
-    runtime = sandbox.search_runtime("/bin/sh")
-    assert runtime.sandbox_path == real
-    sources = [source for source, _ in runtime.libraries]
-    destinations = [destination for _, destination in runtime.libraries]
-    assert sandbox._elf_interpreter(real) in destinations
-    assert any("libc.so" in destination for destination in destinations)
-    assert all(Path(source).is_file() for source in sources)
-    assert not any(Path(source).is_relative_to(Path.home()) for source in sources)
-
-
-def test_search_runtime_reports_missing_library_and_non_elf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import subprocess
-
-    from agent import sandbox
-
-    script = tmp_path / "rg"
-    script.write_text("#!/bin/sh\n")
-    with pytest.raises(ValueError, match="not an ELF binary"):
-        sandbox.search_runtime(str(script))
-    fake = tmp_path / "dynamic-rg"
-    fake.write_bytes(b"elf")
-    monkeypatch.setattr(sandbox, "_elf_interpreter", lambda _path: "/lib64/ld-linux-x86-64.so.2")
-    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a, 1, stdout="\tlibpcre2-8.so.0 => not found\n\tlibc.so.6 => /lib/libc.so.6 (0x1)\n", stderr=""))
-    with pytest.raises(ValueError, match="libpcre2-8.so.0 was not found"):
-        sandbox.search_runtime(str(fake))
-
-
-@pytest.mark.sandbox
-def test_real_search_sandbox_only_exposes_read_only_mount(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import os
-    import shutil
-    import subprocess
-
-    from agent import sandbox
-    from agent.tools._grep_worker import open_mount
-
-    executable = shutil.which("bwrap")
-    if executable is None:
-        if os.environ.get("REQUIRE_BWRAP_TEST"):
-            pytest.fail("bubblewrap is required in CI")
-        pytest.skip("UNSUPPORTED SANDBOX ENVIRONMENT [not_installed]: bubblewrap is not installed")
-    if sandbox._elf_interpreter(os.path.realpath("/bin/sh")) is None:
-        pytest.skip("/bin/sh is statically linked here")
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / "secret").write_text("home-secret")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("OPENAI_API_KEY", "api-key-secret")
-    workspace = tmp_path / "work"
-    workspace.mkdir()
-    (workspace / "a.txt").write_text("visible")
-    backend = BubblewrapBackend(config_for(workspace), executable=executable)
-    # A dynamic shell stands in for rg to inspect the very same sandbox from inside.
-    runtime = sandbox.search_runtime("/bin/sh")
-    mount_fd = open_mount(str(workspace))
-    binary_fd = os.open(runtime.binary, os.O_RDONLY)
-    script = (
-        "for f in /* /etc/* /workspace/*; do echo entry:$f; done; export -p; "
-        "if (echo x > /workspace/probe) 2>/dev/null; then echo WRITABLE; fi; "
-        "if [ -e /skills ] || [ -e /home ] || [ -e /proc/self ] || [ -e /tmp ]; then echo EXTRA; fi"
-    )
-    try:
-        result = subprocess.run(
-            [*backend.search_args(runtime, binary_fd=binary_fd, mount_fd=mount_fd,
-                                  mount_point="/workspace", cwd="/workspace"), "-c", script],
-            capture_output=True, text=True, pass_fds=(mount_fd, binary_fd), env={}, timeout=10,
-        )
-    finally:
-        os.close(mount_fd)
-        os.close(binary_fd)
-    assert result.returncode == 0, result.stderr
-    entries = {line[6:] for line in result.stdout.splitlines() if line.startswith("entry:")}
-    roots = {entry for entry in entries if entry.count("/") == 1}
-    assert roots <= {"/etc", "/lib", "/lib32", "/lib64", "/usr", "/workspace", "/run"}, roots
-    assert {entry for entry in entries if entry.startswith("/etc/")} <= {"/etc/ld.so.cache"}
-    assert "/workspace/a.txt" in entries
-    assert "WRITABLE" not in result.stdout and "EXTRA" not in result.stdout
-    assert "api-key-secret" not in result.stdout and str(home) not in result.stdout
-    assert not (workspace / "probe").exists()
+    monkeypatch.setattr(grep, "resolve_rg", lambda: None)
+    backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
+    assert SEARCH_BINARY_PATH not in backend.worker_args()
 
 
 def test_sandbox_start_failure_is_reported_not_run_on_host(tmp_path: Path) -> None:

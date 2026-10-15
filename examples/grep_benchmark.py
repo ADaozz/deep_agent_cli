@@ -8,17 +8,19 @@ Each dataset has exactly N files: N-2 Python sources, .gitignore and .git/HEAD
 (so ripgrep treats it as a repository). One file in the last directory holds
 the rare marker, forcing a full traversal; every tenth file holds "needle".
 
-Engines: ``new`` (this checkout, SANDBOXED bwrap + one rg), ``new-python``
+Engines: ``new`` (cold persistent sandbox + one rg), ``new-hot``
+(reuse an already-running sandbox + one rg), ``new-python``
 (this checkout, UNSANDBOXED descriptor-confined Python engine), ``baseline``
 (another checkout, e.g. a worktree of the previous PR #5 commit), ``rg``
 (direct host rg) and ``main`` (Deep Agents FilesystemBackend.grep, the backend
 used on main). Every measurement is the median of ``--repeat`` runs.
 
-``rg_starts`` comes from strace of one extra run. Tracing slows the old
-per-batch rg enough that a 40k-file baseline search hits the 10 second limit,
-so that count is only complete when the traced result itself is not a timeout.
-The batching rule verified on the completed sets is one probe plus one rg per
-64 files (201 files → 5, 4001 → 64, 40001 → 627).
+Process counts come from strace of one extra run. A new-hot trace includes
+one untimed warm-up and one measured search: two rg starts and one bwrap start.
+The hot search itself creates no bwrap. --help probes are excluded from bwrap
+starts. Cold runs each create one sandbox and close it after timing; hot runs
+reuse a sandbox and close it after all samples. Child CPU counts cover reaped
+host children, not commands reaped inside a persistent worker.
 """
 from __future__ import annotations
 
@@ -80,8 +82,9 @@ def _backend(kind: str, workspace: Path):
     return WorkspaceCompositeBackend(executor, skills_dir=None)
 
 
-def _measure_once(engine: str, workspace: Path, query: dict) -> tuple[float, float, float, str]:
+def _measure_once(engine: str, workspace: Path, query: dict, backend=None) -> tuple[float, float, float, str]:
     """Return wall seconds, supervisor CPU, child CPU and the result's status line."""
+    owned = None
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = time.process_time()
     start = time.perf_counter()
@@ -99,7 +102,9 @@ def _measure_once(engine: str, workspace: Path, query: dict) -> tuple[float, flo
     else:
         from agent.tools import grep as implementation
 
-        result = implementation.search(_backend("python" if engine == "new-python" else "rg", workspace),
+        if backend is None:
+            owned = backend = _backend("python" if engine == "new-python" else "rg", workspace)
+        result = implementation.search(backend,
                                        query["pattern"], None, None, query["output_mode"],
                                        query.get("max_count"), False)
         output_lines = result.splitlines()
@@ -111,11 +116,21 @@ def _measure_once(engine: str, workspace: Path, query: dict) -> tuple[float, flo
     wall = time.perf_counter() - start
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     child = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
-    return wall, time.process_time() - cpu, child, status
+    supervisor = time.process_time() - cpu
+    if owned is not None and hasattr(owned.executor, "pool"):
+        owned.executor.pool.shutdown("benchmark cold sample finished")
+    return wall, supervisor, child, status
 
 
 def measure(engine: str, workspace: Path, query: str, repeat: int) -> dict:
-    runs = [_measure_once(engine, workspace, QUERIES[query]) for _ in range(repeat)]
+    backend = _backend("rg", workspace) if engine == "new-hot" else None
+    try:
+        if backend is not None:
+            _measure_once(engine, workspace, QUERIES[query], backend)  # Untimed warm-up.
+        runs = [_measure_once(engine, workspace, QUERIES[query], backend) for _ in range(repeat)]
+    finally:
+        if backend is not None:
+            backend.executor.pool.shutdown("benchmark warm samples finished")
     return {
         "wall_ms": round(statistics.median(r[0] for r in runs) * 1000, 1),
         "supervisor_cpu_ms": round(statistics.median(r[1] for r in runs) * 1000, 1),
@@ -136,7 +151,14 @@ def _child(engine: str, workspace: Path, query: str, repeat: int, source: Path |
             subprocess.run(["strace", "-f", "-qq", "-s", "80", "-e", "trace=execve", "-o", trace.name, *argv],
                            env=env, check=True, capture_output=True, timeout=600)
             text = Path(trace.name).read_text(errors="replace")
-        return {"rg_starts": len(re.findall(r'execve\("[^"]+/rg"', text))}
+        rg_starts = len(re.findall(r'execve\("[^"]+/rg"', text))
+        bwrap = [line for line in text.splitlines() if re.search(r'execve\("[^"]+/bwrap"', line)
+                 and '"--help"' not in line]
+        searches = 2 if engine == "new-hot" else 1
+        return {"rg_starts": rg_starts, "bwrap_starts": len(bwrap), "traced_searches": searches,
+                "rg_per_search": rg_starts / searches,
+                "hot_bwrap_starts": 0 if engine == "new-hot" and len(bwrap) == 1 else None}
+
     output = subprocess.run(argv, env=env, check=True, capture_output=True, text=True, timeout=600).stdout
     return json.loads(output.splitlines()[-1])
 
@@ -166,6 +188,8 @@ def cancel_probe(workspace: Path) -> dict:
     leftovers = [p.name for p in Path("/proc").iterdir() if p.name.isdigit()
                  and RARE.encode() in _cmdline(p)]
     after = implementation.search(backend, RARE, None, None, "files_with_matches", None, False)
+    if hasattr(backend.executor, "pool"):
+        backend.executor.pool.shutdown("benchmark cancel probe finished")
     return {"return_ms": round((time.perf_counter() - start) * 1000, 1), "result": result[0] if result else None,
             "leftover_processes": leftovers, "next_search_ok": after.startswith("/workspace/")}
 
@@ -200,7 +224,7 @@ def run(root: Path, repeat: int, baseline: Path | None, engines: list[str]) -> d
                     measured = _child(engine, workspace, query, repeat, source)
                 except subprocess.SubprocessError as exc:
                     measured = {"error": str(exc)[:300]}
-                if has_strace and engine in ("new", "baseline") and query == "rare/files" and "error" not in measured:
+                if has_strace and engine in ("new", "new-hot", "baseline") and query == "rare/files" and "error" not in measured:
                     try:
                         measured.update(_child(engine, workspace, query, 1, source, strace=True))
                     except subprocess.SubprocessError as exc:
@@ -219,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--root", type=Path, required=True)
     run_parser.add_argument("--repeat", type=int, default=3)
     run_parser.add_argument("--baseline-source", type=Path)
-    run_parser.add_argument("--engines", default="baseline,new,new-python,rg,main")
+    run_parser.add_argument("--engines", default="baseline,new,new-hot,new-python,rg,main")
     run_parser.add_argument("--report", type=Path)
     child = sub.add_parser("measure")
     child.add_argument("--engine", required=True)

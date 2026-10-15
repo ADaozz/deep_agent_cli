@@ -114,18 +114,24 @@ command -v rg
 
 | 运行模式 | 搜索引擎 |
 |---|---|
-| SANDBOXED（Bubblewrap）且找到 `rg` | 每次搜索只启动一个 `rg`，运行在独立的只读搜索沙箱内 |
+| SANDBOXED（Bubblewrap）且找到 `rg` | 每次搜索只启动一个 `rg`，复用当前权限模式对应的持久沙箱 |
 | SANDBOXED 但找不到 `rg` | 宿主上的 Python `re` Worker，逐级以 `O_NOFOLLOW` 描述符打开文件；不继承 API key |
 | UNSANDBOXED | 同上，始终使用 Python `re` Worker，不在宿主直接运行可递归遍历的 `rg` |
 | 自定义非本地 Backend | 该 Backend 自身的 `grep` 接口 |
 
-只读搜索沙箱不同于 `execute` 沙箱：只挂载本次搜索的 `/workspace` 或 `/skills`（只读，
-通过已打开的目录描述符挂载，路径在校验后被替换为符号链接也不会改变挂载对象），以及
-`rg` 运行所需的文件。`ripgrep-bin` 提供的静态 `rg` 只挂载这一个文件；系统包的动态
-`rg` 只额外挂载动态加载器报告的共享库和 `/etc/ld.so.cache`，不挂载虚拟环境目录或 HOME。
-沙箱无网络、无可写目录、无 `/proc`、无额外挂载，环境变量全部清空，`rg` 以
-`--no-config` 运行，不读取用户级 ripgrep 配置或全局 Git ignore。缺少共享库或
-`rg` 不是 ELF 可执行文件时明确报错。
+`grep` 是免审批的只读探索工具，不调用 `execute` Tool 或 `backend.execute`，也不接收
+Shell 命令或 `network` 参数。`ask` 下使用无网持久沙箱，`allow` 下使用有网持久沙箱；
+与相同网络模式的 `execute` 复用 SandboxPool、Worker 和 Sandbox PID，首次使用时才启动。
+搜索结束、取消或超时只结束本次 `rg` 命令，持久沙箱继续可用；会话切换和关闭沿用原有清理机制。
+
+`rg` 在持久沙箱启动时只读挂载到 `/run/deep-agent/rg`，无需挂载整个 venv/pipx 目录，
+使用沙箱已有的运行时文件。原有虚拟路径约束、`O_NOFOLLOW` 校验仍然生效；Worker 在
+自己的挂载命名空间再次校验搜索根和目标，拒绝校验后被替换的挂载或符号链接。
+`rg` 以 `--no-config` 运行，不读取用户级 ripgrep 配置或全局 Git ignore。
+
+`execute` 的规则保持不变：`ask` 下每次都需要审批，获批的 `network=true` 使用有网沙箱；
+`allow` 下免审批且默认有网，包括显式传 `network=false` 的情况。两种沙箱仍然按需启动和复用，
+不再另建 grep 专用 Bubblewrap 沙箱。
 
 Rust Regex 与 Python `re` 的 Unicode 字符类等语法和行为存在差异；不支持的表达式
 会明确报错，不会转为字面量搜索。`rg` 执行失败、沙箱启动失败都会报错，不会显示为

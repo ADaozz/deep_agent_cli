@@ -1,6 +1,6 @@
 """Real subprocess tests for both engines, registration, and workspace boundaries.
 
-The ``rg`` engine runs inside the real read-only Bubblewrap search sandbox; the
+The ``rg`` engine runs inside the existing persistent Bubblewrap sandbox; the
 ``python`` engine is the descriptor-confined worker used for UNSANDBOXED.
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ from agent.permission import PermissionMode
 from agent.sandbox import BackendSelection, ExecutionMode, BubblewrapBackend, UnsandboxedShellBackend, WorkspaceCompositeBackend
 from agent.tools import grep as implementation
 from tests.conftest import graph_tool_names, scripted_model
+from agent.sandbox_pool import PersistentSandbox, _POOLS
 
 
 def usable_bwrap() -> str:
@@ -43,9 +44,18 @@ def usable_bwrap() -> str:
 def make_backend(engine: str, work: Path, skills: Path | None) -> WorkspaceCompositeBackend:
     if engine == "rg":
         executor = BubblewrapBackend(SandboxConfig(workspace=work), executable=usable_bwrap())
+        executor.skills_dir = skills  # Mirror the production workspace/skills mounts.
     else:
         executor = UnsandboxedShellBackend(SandboxConfig(workspace=work))
     return WorkspaceCompositeBackend(executor, skills_dir=skills)
+
+
+@pytest.fixture(autouse=True)
+def close_search_sandboxes():
+    before = set(_POOLS)
+    yield
+    for pool in set(_POOLS) - before:
+        pool.shutdown("grep test finished")
 
 
 @pytest.fixture(params=["rg", "python"])
@@ -202,22 +212,32 @@ def test_rg_failure_is_not_no_matches(workspace, monkeypatch):
     assert "ripgrep execution" in result and "No matches" not in result
 
 
-def test_rg_non_elf_executable_is_reported(workspace, monkeypatch, tmp_path):
+def test_rg_spawn_error_is_reported(workspace, monkeypatch):
     rg_workspace = (make_backend("rg", workspace[1], None), workspace[1], None)
-    script = tmp_path / "rg"
-    script.write_text("#!/bin/sh\nexit 0\n")
-    script.chmod(0o755)
-    monkeypatch.setattr(implementation, "resolve_rg", lambda: str(script))
+    original = PersistentSandbox.start_argv
+    def fail(self, argv, cwd, **kwargs):
+        return original(self, ["/nonexistent/rg", *argv[1:]], cwd, **kwargs)
+    monkeypatch.setattr(PersistentSandbox, "start_argv", fail)
     result = invoke(rg_workspace, pattern="foo")
-    assert result.startswith("Error:") and "ELF" in result
-    assert str(tmp_path) not in result
+    assert result.startswith("Error:") and "could not start" in result
+    assert "No matches" not in result
 
 
 def test_broken_sandbox_is_not_reported_as_no_matches(workspace):
     broken = (WorkspaceCompositeBackend(
         BubblewrapBackend(SandboxConfig(workspace=workspace[1]), executable="/bin/true"), skills_dir=None,
     ), workspace[1], None)
-    assert invoke(broken, pattern="foo").startswith("Error: ripgrep could not run")
+    assert invoke(broken, pattern="foo").startswith("Error:")
+
+
+def _record_argv(monkeypatch):
+    requests = []
+    original = PersistentSandbox.start_argv
+    def record(self, argv, cwd, **kwargs):
+        requests.append(argv)
+        return original(self, argv, cwd, **kwargs)
+    monkeypatch.setattr(PersistentSandbox, "start_argv", record)
+    return requests
 
 
 def _record_processes(monkeypatch):
@@ -274,14 +294,14 @@ def _hanging_rg(monkeypatch, work: Path, marker: str) -> None:
     """
     del marker
     os.mkfifo(work / "hang.fifo")
-    original = implementation._stream
+    original = PersistentSandbox.start_argv
 
-    def stream(argv, consume, **kwargs):
-        # The first "--" belongs to bwrap; rg's own "--" separates pattern and paths.
-        separator = argv.index("--", argv.index("--") + 1)
-        return original([*argv[:separator], "-j", "1", *argv[separator:], "hang.fifo"], consume, **kwargs)
+    def start(self, argv, cwd, **kwargs):
+        separator = argv.index("--")
+        kwargs["file"] = None  # This fixture intentionally adds a second explicit subject.
+        return original(self, [*argv[:separator], "-j", "1", *argv[separator:], "hang.fifo"], cwd, **kwargs)
 
-    monkeypatch.setattr(implementation, "_stream", stream)
+    monkeypatch.setattr(PersistentSandbox, "start_argv", start)
 
 
 def _wait_for(predicate, timeout=5.0):
@@ -293,7 +313,7 @@ def _wait_for(predicate, timeout=5.0):
     return False
 
 
-def test_cancel_reaps_bwrap_and_rg(tmp_path, monkeypatch):
+def test_cancel_reaps_rg_and_keeps_sandbox(tmp_path, monkeypatch):
     work = tmp_path / "work"
     work.mkdir()
     (work / "a.py").write_text("cancel-marker-1\n")
@@ -312,13 +332,15 @@ def test_cancel_reaps_bwrap_and_rg(tmp_path, monkeypatch):
     thread = threading.Thread(target=run)
     thread.start()
     assert _wait_for(lambda: any(name == "rg" for _, name in _search_processes(marker)))
-    assert any(name == "bwrap" for _, name in _search_processes(marker))
+    sandbox = backend.executor.pool.sandbox(False)
+    pid = sandbox.host_pid
     context.request_cancel()
     thread.join(3)
     assert not thread.is_alive()
     assert result == ["Error: Search cancelled."]
     searches = [process for process in processes if "--help" not in process.args]
-    assert len(searches) == 1 and searches[0].poll() is not None
+    assert len(searches) == 1 and searches[0].poll() is None
+    assert backend.executor.pool.sandbox(False).host_pid == pid
     assert _wait_for(lambda: not _search_processes(marker), 2), _search_processes(marker)
     monkeypatch.undo()
     assert implementation.search(backend, marker, None, None, "files_with_matches", None, False) == "/workspace/a.py"
@@ -330,7 +352,7 @@ def test_cancel_reaps_bwrap_and_rg(tmp_path, monkeypatch):
     # --null file lists are block-buffered, so rg does not flush the finished path.
     ("files_with_matches", None),
 ])
-def test_rg_timeout_reaps_sandbox_and_keeps_partial_results(tmp_path, monkeypatch, mode, line):
+def test_rg_timeout_keeps_sandbox_and_partial_results(tmp_path, monkeypatch, mode, line):
     work = tmp_path / "work"
     work.mkdir()
     (work / "a.py").write_text("timeout-marker-1\n")
@@ -347,7 +369,8 @@ def test_rg_timeout_reaps_sandbox_and_keeps_partial_results(tmp_path, monkeypatc
         assert result == implementation.TIMED_OUT
     else:
         assert result == f"{line}\n{implementation.PARTIAL_TIMEOUT}"
-    assert all(p.poll() is not None for p in processes)
+    assert len(processes) == 1 and processes[0].poll() is None
+    assert backend.executor.pool.sandbox(False) is not None
     assert _wait_for(lambda: not _search_processes(marker), 2), _search_processes(marker)
 
 
@@ -379,20 +402,18 @@ def test_rg_engine_starts_exactly_one_process(tmp_path, monkeypatch):
         (directory / f"f{index}.py").write_text("needle\n" if index % 3 == 0 else "hay\n")
     backend = make_backend("rg", work, None)
     processes = _record_processes(monkeypatch)
+    requests = _record_argv(monkeypatch)
     for mode in ("files_with_matches", "count", "content"):
-        processes.clear()
         result = implementation.search(backend, "needle", None, None, mode, None, False)
         assert "Error" not in result and "truncated" not in result
-        assert len(processes) == 1
-        argv = processes[0].args
-        assert argv[0] == backend.executor.executable
-        rg_argv = argv[argv.index("--") + 1:]
-        assert rg_argv[0].endswith("/rg") and rg_argv[-3:] == ["--", "needle", "."]
-        assert not any("/proc/self/fd/" in arg for arg in rg_argv)
+        argv = requests[-1]
+        assert argv[0] == "/run/deep-agent/rg" and argv[-3:] == ["--", "needle", "."]
         for absent in ("--no-ignore", "--hidden", "--follow", "--text", "--no-ignore-dot", "--no-ignore-vcs"):
-            assert absent not in rg_argv
-        assert "--no-config" in rg_argv and "--no-ignore-global" in rg_argv and "!.git" in rg_argv
+            assert absent not in argv
+        assert "--no-config" in argv and "--no-ignore-global" in argv and "!.git" in argv
+    assert len(processes) == 1 and len(requests) == 3
     assert len(implementation.search(backend, "needle", None, None, "files_with_matches", None, False).splitlines()) == 100
+    assert len(processes) == 1 and len(requests) == 4
 
 
 @pytest.mark.parametrize("permission", [PermissionMode.ASK, PermissionMode.ALLOW])
@@ -420,7 +441,10 @@ def test_model_schema_and_readonly_call(workspace, monkeypatch, permission):
     assert names.count("grep") == 1
     assert "write_todos" not in names
     grep = next(tool for tool in schemas[-1] if tool.name == "grep")
+    assert local.pool.sandbox(permission is PermissionMode.ALLOW) is not None
+    assert local.pool.sandbox(permission is not PermissionMode.ALLOW) is None
     properties = grep.args_schema.model_json_schema()["properties"]
+    assert "network" not in properties
     assert properties["fixed_string"]["default"] is False
     assert {"type": "array", "items": {"type": "string"}} in properties["glob"]["anyOf"]
     outputs = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
@@ -670,10 +694,10 @@ def test_globs_are_separate_rg_arguments(tmp_path, monkeypatch):
     work.mkdir()
     (work / "a.py").write_text("needle\n")
     backend = make_backend("rg", work, None)
-    processes = _record_processes(monkeypatch)
+    requests = _record_argv(monkeypatch)
     assert implementation.search(backend, "needle", None, ["*.py", "!**/tests/**", "!*.test.py"],
                                  "files_with_matches", None, False) == "/workspace/a.py"
-    argv = processes[0].args
+    argv = requests[0]
     globs = [argv[index + 1] for index, arg in enumerate(argv) if arg == "--glob"]
     assert globs == ["*.py", "!**/tests/**", "!*.test.py", "!.git"]
     assert ", " not in " ".join(globs)
@@ -784,6 +808,7 @@ def test_python_worker_does_not_inherit_secrets(workspace, monkeypatch):
 
 
 def test_repeated_searches_do_not_leak_descriptors(engine, workspace):
+    invoke(workspace, pattern="foo")  # The persistent control pipes are session resources.
     before = len(os.listdir("/proc/self/fd"))
     for _ in range(25):
         assert invoke(workspace, pattern="foo") == "\n".join([
@@ -795,9 +820,7 @@ def test_repeated_searches_do_not_leak_descriptors(engine, workspace):
 def test_dynamic_system_rg_runs_in_the_search_sandbox(tmp_path, monkeypatch):
     import os as operating_system
 
-    from agent.sandbox import _elf_interpreter
-
-    if not operating_system.path.isfile("/usr/bin/rg") or _elf_interpreter("/usr/bin/rg") is None:
+    if not operating_system.path.isfile("/usr/bin/rg"):
         pytest.skip("dynamically linked system rg is not installed")
     work = tmp_path / "work"
     work.mkdir()
@@ -836,11 +859,8 @@ def test_mount_fd_does_not_follow_a_swapped_root(engine, tmp_path, monkeypatch):
         if saved.exists() and not work.exists():
             os.rename(saved, work)
     assert "secret-marker" not in result and str(outside) not in result
-    if engine == "rg":
-        assert "safe-marker" in result
-    else:
-        # The worker re-opens the path and O_NOFOLLOW rejects the swapped symlink.
-        assert result.startswith("Error:")
+    # The shared worker refuses a mount whose inode differs from the validated root.
+    assert result.startswith("Error:")
 
 
 def test_symlink_swap_after_resolve_cannot_escape(engine, tmp_path, monkeypatch):
@@ -924,3 +944,48 @@ def test_fast_directory_search_starts_one_sandbox_process(tmp_path, monkeypatch)
     assert time.monotonic() - started < 2
     assert result == "/workspace/p11/f1199.py"
     assert len(processes) == 1 and processes[0].args[0] == backend.executor.executable
+
+
+def test_grep_deadline_includes_waiting_for_pool(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "a.py").write_text("needle\n")
+    backend = make_backend("rg", work, None)
+    monkeypatch.setattr(implementation, "SEARCH_TIMEOUT", 0.15)
+    result = []
+    pool = backend.executor.pool
+    # Another tool is acquiring/starting a sandbox; grep still has a total deadline.
+    with pool._lock:
+        thread = threading.Thread(target=lambda: result.append(
+            implementation.search(backend, "needle", None, None, "content", None, False)))
+        thread.start()
+        thread.join(1)
+        assert not thread.is_alive()
+        assert result == [implementation.TIMED_OUT]
+        assert not pool._sandboxes
+    monkeypatch.undo()
+    assert implementation.search(backend, "needle", None, None, "files_with_matches", None, False) == "/workspace/a.py"
+
+
+def test_grep_worker_loss_is_not_retried_and_next_search_recovers(tmp_path, monkeypatch):
+    import signal
+
+    work = tmp_path / "work"
+    work.mkdir()
+    marker = "lost-worker-grep-marker"
+    (work / "a.py").write_text(marker + "\n")
+    backend = make_backend("rg", work, None)
+    _hanging_rg(monkeypatch, work, marker)
+    result = []
+    thread = threading.Thread(target=lambda: result.append(
+        implementation.search(backend, marker, None, None, "content", None, False)))
+    thread.start()
+    assert _wait_for(lambda: any(name == "rg" for _, name in _search_processes(marker)))
+    sandbox = backend.executor.pool.sandbox(False)
+    os.killpg(sandbox.host_pid, signal.SIGKILL)
+    thread.join(3)
+    assert not thread.is_alive()
+    assert len(result) == 1 and result[0].startswith("Error:") and "not retried" in result[0]
+    monkeypatch.undo()
+    assert implementation.search(backend, marker, None, None, "files_with_matches", None, False) == "/workspace/a.py"
+    assert backend.executor.pool.sandbox(False).host_pid != sandbox.host_pid

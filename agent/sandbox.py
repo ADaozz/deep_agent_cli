@@ -4,7 +4,6 @@ from codecs import IncrementalDecoder, getincrementaldecoder
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-import functools
 import logging
 import os
 from pathlib import Path, PurePosixPath
@@ -12,7 +11,6 @@ import re
 import selectors
 import shutil
 import signal
-import struct
 import subprocess
 import tempfile
 import time
@@ -59,8 +57,6 @@ ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 WORKER_SOURCE_PATH = Path(__file__).with_name("sandbox_worker.py")
 WORKER_SANDBOX_PATH = "/run/deep-agent/sandbox_worker.py"
 SEARCH_BINARY_PATH = "/run/deep-agent/rg"
-SEARCH_MOUNTS = (SANDBOX_ROOT, SKILLS_ROOT)
-LOADER_CACHE = "/etc/ld.so.cache"
 KILL_CONFIRM_SECONDS = 5.0
 UNSANDBOXED_WARNING = (
     "UNSANDBOXED MODE: bubblewrap is unavailable. Agent commands will run "
@@ -272,7 +268,12 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
                 "python3 is required inside the sandbox for the persistent command worker, "
                 f"but none was found under {FIXED_PATH} resolving into {', '.join(RUNTIME_PATHS)}"
             )
+        from agent.tools.grep import resolve_rg
+
         mount = ["--ro-bind", str(WORKER_SOURCE_PATH), WORKER_SANDBOX_PATH]
+        rg = resolve_rg()
+        if rg is not None:
+            mount += ["--ro-bind", str(Path(rg).resolve()), SEARCH_BINARY_PATH]
         return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
 
     def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:
@@ -312,46 +313,6 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         for name, value in sorted(self._env.items()):
             args += ["--setenv", name, value]
         args += ["--chdir", SANDBOX_ROOT, "--"]
-        return args
-
-    def search_args(self, runtime: SearchRuntime, *, binary_fd: int, mount_fd: int,
-                    mount_point: str, cwd: str) -> list[str]:
-        """Offline, read-only bwrap prefix for one ripgrep process.
-
-        Deliberately not built on ``sandbox_args()``: no writable workspace, HOME,
-        /usr, network files or configured extra mounts. The search mount and rg
-        binary are bound from already-opened descriptors so swapping a path for
-        a symlink after validation cannot change what is mounted.
-        """
-        if mount_point not in SEARCH_MOUNTS:
-            raise ValueError("search sandbox can only mount /workspace or /skills")
-        target = PurePosixPath(cwd)
-        if ".." in target.parts or not (target == PurePosixPath(mount_point)
-                                        or PurePosixPath(mount_point) in target.parents):
-            raise ValueError("search directory must be inside the search mount")
-        bind_fd = _bwrap_has_bind_fd(self.executable)
-
-        def bind(fd: int, destination: str) -> list[str]:
-            if bind_fd:
-                return ["--ro-bind-fd", str(fd), destination]
-            return ["--ro-bind", f"/proc/self/fd/{fd}", destination]
-
-        args = [
-            self.executable,
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-pid",
-            "--unshare-ipc",
-            "--unshare-uts",
-            "--unshare-net",
-            "--unshare-cgroup-try",
-            "--cap-drop", "ALL",
-            *bind(mount_fd, mount_point),
-            *bind(binary_fd, runtime.sandbox_path),
-        ]
-        for source, destination in runtime.libraries:
-            args += ["--ro-bind", source, destination]
-        args += ["--clearenv", "--chdir", cwd, "--", runtime.sandbox_path]
         return args
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -529,127 +490,6 @@ def _sandbox_python() -> str | None:
         if any(resolved.is_relative_to(root) for root in RUNTIME_PATHS):
             return str(candidate)
     return None
-
-
-@dataclass(frozen=True)
-class SearchRuntime:
-    """Host ripgrep binary and the minimum files it needs inside the search sandbox."""
-
-    binary: str
-    identity: tuple[int, int, int, int]
-    sandbox_path: str
-    libraries: tuple[tuple[str, str], ...] = ()
-
-
-def search_runtime(executable: str) -> SearchRuntime:
-    """Resolve symlinks (venv/pipx shims) and the runtime of the rg ELF binary.
-
-    Static binaries (the ripgrep-bin wheel) need only themselves. Dynamic ones
-    get exactly the loader, shared libraries and loader cache that the system
-    loader reports, never whole directories such as a virtualenv or HOME.
-    """
-    real = os.path.realpath(executable)
-    info = os.stat(real)
-    return _search_runtime(real, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
-
-
-def runtime_identity(fd: int) -> tuple[int, int, int, int]:
-    info = os.fstat(fd)
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
-
-
-@functools.lru_cache(maxsize=8)
-def _search_runtime(real: str, identity: tuple[int, int, int, int]) -> SearchRuntime:
-    interpreter = _elf_interpreter(real)
-    if interpreter is None:
-        return SearchRuntime(real, identity, SEARCH_BINARY_PATH)
-    # Keep the host location so $ORIGIN-relative RUNPATH entries still resolve.
-    destination = real
-    if any(PurePosixPath(destination).is_relative_to(mount) for mount in (*SEARCH_MOUNTS, "/run/deep-agent")):
-        destination = SEARCH_BINARY_PATH
-    libraries = []
-    for path in sorted({interpreter, *_shared_libraries(real, interpreter)}):
-        if any(PurePosixPath(path).is_relative_to(mount) for mount in SEARCH_MOUNTS):
-            raise ValueError("ripgrep runtime libraries under /workspace or /skills are not supported")
-        libraries.append((os.path.realpath(path), path))
-    if Path(LOADER_CACHE).is_file():
-        libraries.append((LOADER_CACHE, LOADER_CACHE))
-    return SearchRuntime(real, identity, destination, tuple(libraries))
-
-
-def _elf_interpreter(path: str) -> str | None:
-    """Return PT_INTERP of an ELF executable, or None when statically linked."""
-    with open(path, "rb") as handle:
-        header = handle.read(64)
-        if len(header) < 52 or header[:4] != b"\x7fELF" or header[4] not in (1, 2) or header[5] not in (1, 2):
-            raise ValueError("ripgrep executable is not an ELF binary and cannot run in the read-only search sandbox")
-        wide = header[4] == 2
-        order = "<" if header[5] == 1 else ">"
-        if wide:
-            phoff, = struct.unpack_from(order + "Q", header, 0x20)
-            phentsize, phnum = struct.unpack_from(order + "HH", header, 0x36)
-        else:
-            phoff, = struct.unpack_from(order + "I", header, 0x1C)
-            phentsize, phnum = struct.unpack_from(order + "HH", header, 0x2A)
-        for index in range(min(phnum, 256)):
-            handle.seek(phoff + index * phentsize)
-            entry = handle.read(phentsize)
-            if len(entry) < (56 if wide else 32):
-                raise ValueError("ripgrep executable has a truncated ELF program header")
-            kind, = struct.unpack_from(order + "I", entry, 0)
-            if kind != 3:  # PT_INTERP
-                continue
-            if wide:
-                offset, = struct.unpack_from(order + "Q", entry, 8)
-                size, = struct.unpack_from(order + "Q", entry, 32)
-            else:
-                offset, = struct.unpack_from(order + "I", entry, 4)
-                size, = struct.unpack_from(order + "I", entry, 16)
-            handle.seek(offset)
-            interpreter = handle.read(min(size, 4096)).split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
-            if not interpreter.startswith("/"):
-                raise ValueError("ripgrep executable has an invalid ELF interpreter")
-            return interpreter
-    return None
-
-
-def _shared_libraries(binary: str, interpreter: str) -> list[str]:
-    ldd = shutil.which("ldd", path=FIXED_PATH)
-    command = [ldd, binary] if ldd else [interpreter, "--list", binary]
-    try:
-        listed = subprocess.run(  # noqa: S603
-            command, capture_output=True, text=True, timeout=5,
-            env={"PATH": FIXED_PATH, "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        LOG.warning("cannot list ripgrep shared libraries for %s: %s", binary, exc)
-        raise ValueError("cannot determine ripgrep runtime libraries for the search sandbox") from None
-    libraries = []
-    for line in listed.stdout.splitlines():
-        line = line.strip()
-        name, arrow, location = line.partition(" => ")
-        if arrow and location.startswith("not found"):
-            LOG.warning("ripgrep %s is missing runtime library %s", binary, name)
-            raise ValueError(f"ripgrep runtime library {name} was not found; "
-                             "install it or use the ripgrep-bin static rg")
-        candidate = (location if arrow else line).split(" (", 1)[0].strip()
-        if candidate.startswith("/"):
-            libraries.append(candidate)
-    if listed.returncode != 0 or not libraries:
-        LOG.warning("ldd failed for ripgrep %s: %s", binary, listed.stderr.strip())
-        raise ValueError("cannot determine ripgrep runtime libraries for the search sandbox")
-    return libraries
-
-
-@functools.lru_cache(maxsize=4)
-def _bwrap_has_bind_fd(executable: str) -> bool:
-    """--ro-bind-fd exists since bubblewrap 0.8; older ones bind the fd's /proc link."""
-    try:
-        listed = subprocess.run([executable, "--help"], capture_output=True, text=True,  # noqa: S603
-                                timeout=5, env={}, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return "--ro-bind-fd" in listed.stdout + listed.stderr
 
 
 def _resolve_executable(value: str) -> str | None:

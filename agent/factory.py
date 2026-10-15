@@ -134,7 +134,7 @@ def build_agent(
     if isinstance(fs_backend, WorkspaceCompositeBackend) and fs_backend.supports_regex_search:
         if any(tool.name == "grep" for tool in tools):
             raise ValueError("Cannot register an extra grep tool alongside workspace regex grep")
-        tools.append(build_regex_grep_tool(fs_backend))
+        tools.append(build_regex_grep_tool(fs_backend, network=permission is PermissionMode.ALLOW))
     else:
         # Preserve the backend's public grep contract for virtual/remote backends.
         filesystem_tools.insert(3, "grep")
