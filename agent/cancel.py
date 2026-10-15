@@ -16,6 +16,7 @@ class ToolCancelContext:
     tool_name: str
     tool_call_id: str
     cancel_event: threading.Event
+    generation: int | None = None
     token: str = field(default_factory=lambda: str(uuid4()))
     _callbacks: list[CancelCallback] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)

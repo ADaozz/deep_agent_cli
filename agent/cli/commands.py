@@ -27,6 +27,7 @@ def command_table() -> tuple[Command, ...]:
         Command("session", "Show current session information", _session),
         Command("resume", "List sessions with content (/resume or /resume <id-prefix>)", _resume),
         Command("model", "Select source, model, and reasoning effort (/model or /model <id-prefix>)", _model),
+        Command("mcp", "Select remote MCP tools (/mcp, /mcp add, /mcp none)", _mcp),
         Command("skill", "Select a skill for the next message", _skill),
         Command("compact", "Summarize older conversation when context permits", _compact),
         Command("image", "Attach an image (/image <path|clipboard>, /image, /image clear)", _image),
@@ -74,6 +75,10 @@ async def _resume(app: "CliApplication", arg: str) -> None:
 
 async def _model(app: "CliApplication", arg: str) -> None:
     await app.select_model(arg)
+
+
+async def _mcp(app: "CliApplication", arg: str) -> None:
+    await app.select_mcp(arg)
 
 
 async def _skill(app: "CliApplication", arg: str) -> None:

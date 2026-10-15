@@ -16,7 +16,7 @@ def _approval_summary(value: Any, kind: str = "command") -> str:
     command = str(value or "<not supplied>")
     # Do not add credential literals to the approval card. Full details remain
     # in the existing tool block; arbitrary JSON arguments are never rendered here.
-    if re.search(r"(?i)(api[_-]?key|authorization|bearer\s|password|secret|token\s*[=:]|--token\b|\bsk-[\w.-]+)", command):
+    if re.search(r"(?i)(api[_-]?key|authorization|bearer\s|password|secret|\btoken\b|--token\b|\bsk-[\w.-]+)", command):
         return f"[redacted: {kind} may contain credentials]"
     command = " ".join("".join(c if c.isprintable() else " " for c in command).split())
     return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
@@ -75,6 +75,11 @@ class InteractionController:
             name = " ".join(str(call.get("name") or "tool").split())[:80]
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
             details.append(f"Tool: {name}")
+            if call.get("mcp"):
+                import json
+                origin = call["mcp"]
+                details.append(f"MCP Profile: {origin['profile']}\nServer: {origin['url']}")
+                details.append(f"Arguments: {_approval_summary(json.dumps(args, ensure_ascii=False), kind='arguments')}")
             if name == "execute":
                 if network_requested(args):
                     details.append("Network: ON — allows access to host network (internet, localhost, LAN)")

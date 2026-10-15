@@ -40,10 +40,10 @@ class ActiveRun:
 
 
 def runner_factory(config: ServerConfig, project_id: str, session_id: str) -> AgentRunner:
-    return _runner_from_settings(config.settings_for(project_id), session_id)
+    return _runner_from_settings(config.settings_for(project_id), session_id, mcp_config=config.mcp_snapshot)
 
 
-def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
+def _runner_from_settings(settings: Settings, session_id: str, *, mcp_config=None) -> AgentRunner:
     store = SessionStore(settings.state_path)
     try:
         runner = AgentRunner(
@@ -51,8 +51,12 @@ def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
             thread_id=session_id, workspace=settings.sandbox.workspace,
         )
         runner.set_permission_mode(PermissionMode.ASK)
+        if mcp_config is not None and mcp_config.current != "none":
+            runner.load_mcp_snapshot(mcp_config)
         return runner
     except BaseException:
+        if "runner" in locals():
+            runner.close()
         store.close()
         raise
 
@@ -196,7 +200,8 @@ class RunManager:
         if state is None:
             raise ValueError("Session has no interruption to resume; submit a new text task")
         return RunResult(
-            status=state.kind.value, pending_tool_calls=list(state.pending_tools),
+            status=state.kind.value, pending_tool_calls=(runner.mcp_approval_calls(state.pending_tools)
+                                                       if hasattr(runner, "mcp_approval_calls") else list(state.pending_tools)),
             human_input=state.payload if state.kind.value == "waiting_human" else {},
         )
 
@@ -216,7 +221,8 @@ class RunManager:
         }
         try:
             if self.factory is runner_factory:
-                runner = _runner_from_settings(self.settings_by_project[session["project_id"]], session["id"])
+                runner = _runner_from_settings(self.settings_by_project[session["project_id"]], session["id"],
+                                               mcp_config=self.config.mcp_snapshot)
             else:
                 runner = self.factory(self.config, session["project_id"], session["id"])
             with self.lock:

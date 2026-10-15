@@ -37,6 +37,10 @@ deep-agent serve --config ~/.deep-agent/service.yaml --host 127.0.0.1 --port 808
 
 第一版使用一个进程和本地 SQLite。状态目录的文件锁会拒绝第二个服务进程；请勿使用多个 Uvicorn worker，也不要为同一批项目启动使用不同状态目录的服务。调用方只提交项目 ID，不能传宿主工作区路径。
 
+### MCP 工具环境
+
+服务默认禁用 MCP。在服务 YAML 中设置 `mcp_config: /home/user/.deep-agent/mcp.yaml` 可加载配置启动快照，配置文件必须在工作区外。TUI 后续修改不会影响服务；重启才重新读取。没有 MCP 管理接口，远程工具沿用现有 `ask` 审批和 Cancel 接口。审批调用附带 `mcp.profile` 与脱敏 `mcp.url`，Bubblewrap 不隔离远程 Server。详见 [MCP 接入](mcp.md)。
+
 ### 运行与隔离边界
 
 工作区文件工具仍可修改工作区内的 `.git`、`.env` 等文件，沙箱沿用现有项目的隔离边界。服务未增加 CPU、内存或磁盘配额。任务与事件暂不自动清理，部署时监控状态目录磁盘用量。

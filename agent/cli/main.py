@@ -21,6 +21,9 @@ from agent.session import SessionStore
 
 
 def create_runner(settings: Settings) -> AgentRunner:
+    from agent.mcp.config import config_directory
+    mcp_directory = config_directory(settings.config_dir)
+    require_keybindings_outside_workspace(mcp_directory, settings.sandbox.workspace)
     session_store = SessionStore.for_workspace(
         settings.sandbox.workspace,
         override=settings.state_path,
@@ -49,6 +52,17 @@ def create_runner(settings: Settings) -> AgentRunner:
             persist_on_first_message=True,
             workspace=settings.sandbox.workspace,
         )
+    mcp_path = mcp_directory / "mcp.yaml"
+    runner.mcp_config_path = mcp_path
+    try:
+        runner.load_mcp(mcp_path)
+    except Exception as exc:
+        from agent.mcp.config import MCPConfig
+        try:
+            runner.mcp_config = MCPConfig("none", MCPConfig.load(mcp_path).profiles)
+        except (OSError, ValueError):
+            pass
+        print(f"MCP startup failed ({type(exc).__name__}); built-in tools remain available. Use /mcp to configure.", file=sys.stderr)
     return runner
 
 
