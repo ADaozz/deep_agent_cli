@@ -78,7 +78,18 @@
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件。它们只接受 `/workspace/...` 和 `/skills/...` 路径：前者映射到工作区，后者只读；其他路径返回权限错误。单个文件读写上限 10 MB。
+`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件。它们只接受 `/workspace/...` 和 `/skills/...` 路径：前者映射到工作区，后者只读；其他路径返回权限错误。单个文件读写上限 10 MB。
+
+`grep` 是免审批探索工具：SANDBOXED 且有 rg 时，在现有 SandboxPool 的持久 Worker 中
+直接以 argv 运行一个 rg，不经过 Shell、execute Tool 或 backend.execute。ask 使用无网实例，
+allow 使用有网实例；与相同网络模式的 execute 复用，首次使用才启动，不创建专用 grep 沙箱。
+rg 从当前 Python 环境优先定位，并在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。
+搜索保留 `/workspace`、只读 `/skills` 的路径约束和符号链接校验。
+取消或超时仅结束该 rg 命令，沙箱继续可用；会话关闭沿用现有 SandboxPool 清理。
+UNSANDBOXED 或缺少 rg 时保留原有可终止 Python 正则回退。
+
+上述选择只适用于 grep；ask 下 execute(network=true) 仍可经审批使用有网实例，
+allow 下 execute 默认有网，execute 的 network 参数、权限和网络规则保持不变。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 

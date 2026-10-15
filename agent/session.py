@@ -388,7 +388,6 @@ def tool_message_is_error(message: ToolMessage) -> bool:
 def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
-    todo_call_ids: set[str] = set()
     for message in messages:
         if isinstance(message, HumanMessage):
             blocks.append(TranscriptBlock(
@@ -402,9 +401,6 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
-                if call.get("name") == "write_todos":
-                    todo_call_ids.add(str(call.get("id") or ""))
-                    continue
                 blocks.append(TranscriptBlock(
                     kind="tool",
                     tool_call_id=str(call.get("id") or ""),
@@ -415,8 +411,6 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
         elif isinstance(message, ToolMessage):
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
-            if getattr(message, "name", None) == "write_todos" or tool_call_id in todo_call_ids:
-                continue
             is_error = tool_message_is_error(message)
             artifact = getattr(message, "artifact", None)
             code = (

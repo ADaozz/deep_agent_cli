@@ -165,7 +165,6 @@ class InterruptState:
 class SessionSnapshot:
     info: SessionInfo
     transcript: list[TranscriptBlock]
-    todos: list[dict[str, str]] = field(default_factory=list)
     interrupt_kind: InterruptKind | None = None
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -217,7 +216,6 @@ class AgentRunner:
         self.on_event = on_event
         self._event_handler: RunEventHandler | None = None
         self._seen_tool_calls: set[str] = set()
-        self._todo_call_ids: set[str] = set()
         self.settings = settings
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
@@ -723,7 +721,6 @@ class AgentRunner:
         return SessionSnapshot(
             info=info,
             transcript=transcript,
-            todos=list((state.values or {}).get("todos", []) or []),
             interrupt_kind=interrupt.kind if interrupt is not None else None,
             human_input=interrupt.payload if interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN else {},
             pending_tool_calls=list(interrupt.pending_tools) if interrupt is not None else [],
@@ -1268,7 +1265,6 @@ class AgentRunner:
         self._event_handler = event_handler
         config = self._run_config(on_delta, on_event)
         self._seen_tool_calls.clear()
-        self._todo_call_ids.clear()
         run_control = self.control.begin_run()
         set_output_emitter(self._emit_tool_output)
         attachment_token = set_attachment_store(self.attachment_store)
@@ -1306,7 +1302,6 @@ class AgentRunner:
                 emit_turn_completed(result.output)
                 run_control = self.control.begin_run()
                 self._seen_tool_calls.clear()
-                self._todo_call_ids.clear()
                 turn_started = time.monotonic()
                 self._apply_pending_runtime_config(event_handler)
                 result = self._stream_once(
@@ -1347,7 +1342,6 @@ class AgentRunner:
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}
         state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
-        previous_todos = _todos_in_state(state_values)
         last_message_id = _last_message_id(state_values)
         try:
             for chunk in self.prepared.graph.stream(
@@ -1356,10 +1350,6 @@ class AgentRunner:
             ):
                 mode, payload = chunk
                 if mode == "values":
-                    todos = _todos_in_state(payload)
-                    if todos is not None and todos != previous_todos:
-                        _emit(event_handler, RunEvent(type="todos_updated", result=todos))
-                        previous_todos = todos
                     continue
                 chunk = payload
                 self._emit_update_events(chunk, event_handler)
@@ -1469,9 +1459,6 @@ class AgentRunner:
                     _emit(handler, RunEvent(type="usage", result=usage))
                 for call in message.tool_calls or []:
                     tool_call_id = str(call.get("id") or "")
-                    if call.get("name") == "write_todos":
-                        self._todo_call_ids.add(tool_call_id)
-                        continue
                     identity = tool_call_id or f"{call.get('name')}:{id(call)}"
                     if identity in self._seen_tool_calls:
                         continue
@@ -1485,10 +1472,6 @@ class AgentRunner:
                     ))
             elif isinstance(message, ToolMessage):
                 tool_name = str(getattr(message, "name", "") or "tool")
-                if tool_name == "write_todos" or str(
-                    getattr(message, "tool_call_id", "") or ""
-                ) in self._todo_call_ids:
-                    continue
                 content = _message_text(message)
                 artifact = getattr(message, "artifact", None)
                 is_error = tool_message_is_error(message)
@@ -1652,13 +1635,6 @@ def _messages_in_update(value: Any) -> list[BaseMessage]:
         for item in value:
             found.extend(_messages_in_update(item))
     return found
-
-
-def _todos_in_state(value: Any) -> list[dict[str, str]] | None:
-    """Project middleware-owned todos from a LangGraph values snapshot."""
-    if isinstance(value, dict) and isinstance(value.get("todos"), list):
-        return [dict(item) for item in value["todos"] if isinstance(item, dict)]
-    return None
 
 
 _USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")

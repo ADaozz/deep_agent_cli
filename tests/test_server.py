@@ -784,3 +784,40 @@ def test_cancel_racing_run_start_is_replayed(config):
         assert runners[0].cancelled.is_set()
         kinds = [kind for kind, _data in _events(client, rid)]
         assert kinds.count("run_finished") == 1
+
+
+def test_regex_grep_http_uses_same_readonly_tool(config):
+    from langchain_core.messages import AIMessage
+    from agent.config import SandboxConfig
+    from agent.runner import AgentRunner
+    from agent.sandbox import UnsandboxedShellBackend, WorkspaceCompositeBackend
+    from agent.session import SessionStore
+    from tests.conftest import scripted_model
+
+    runners = []
+    (config.projects["one"] / "code.py").write_text("def run():\n    pass\n")
+    def factory(config, project_id, session_id):
+        backend = WorkspaceCompositeBackend(
+            UnsandboxedShellBackend(SandboxConfig(workspace=config.projects[project_id])),
+            skills_dir=None,
+        )
+        runner = AgentRunner(model=scripted_model([
+            AIMessage(content="", tool_calls=[{"id": "grep-http", "name": "grep", "args": {
+                "pattern": r"def (run|execute)\(", "output_mode": "content",
+            }}]),
+            AIMessage(content="found"),
+        ]), backend=backend, session_store=SessionStore(config.state_dir / "grep.sqlite3"),
+            thread_id=session_id)
+        runners.append(runner)
+        return runner
+
+    with TestClient(create_app(config, factory=factory)) as client:
+        sid = session(client)
+        rid = submit(client, sid, "find functions")
+        run = wait(client, rid, "completed")
+        assert run["result"]["output"] == "found"
+        events = client.get(f"/v1/runs/{rid}/events", headers=AUTH).text
+        assert "/workspace/code.py" in events
+        assert "todos_updated" not in events
+        assert "waiting_confirmation" not in events
+        assert runners[0].prepared.exposed_tool_names.count("grep") == 1

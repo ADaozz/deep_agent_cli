@@ -17,7 +17,6 @@ from deepagents.middleware.summarization import (
     create_summarization_tool_middleware,
 )
 from deepagents._models import get_model_identifier, get_model_provider
-from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -43,11 +42,12 @@ from agent.sandbox import (
 )
 from agent.sandbox_pool import SandboxPool
 from agent.tools.execute import build_execute_tool
+from agent.tools.grep import build_regex_grep_tool
 from agent.tools.human_input import build_human_input_tools
 from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
 from agent.tools.web_search import build_web_search_tool
 
-DEFAULT_FS_TOOLS = ["ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"]
+DEFAULT_FS_TOOLS = ["ls", "read_file", "glob", "write_file", "edit_file", "delete"]
 DEFAULT_SYSTEM_PROMPT = (
     "你是使用 {model_name} 的 Coding Agent CLI。"
     "完成用户请求后直接报告结果。"
@@ -131,6 +131,13 @@ def build_agent(
         tools.append(build_web_search_tool(spec.web_search_api_key))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
+    if isinstance(fs_backend, WorkspaceCompositeBackend) and fs_backend.supports_regex_search:
+        if any(tool.name == "grep" for tool in tools):
+            raise ValueError("Cannot register an extra grep tool alongside workspace regex grep")
+        tools.append(build_regex_grep_tool(fs_backend, network=permission is PermissionMode.ALLOW))
+    else:
+        # Preserve the backend's public grep contract for virtual/remote backends.
+        filesystem_tools.insert(3, "grep")
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     if supports_execute:
         tools.append(build_execute_tool(
@@ -156,7 +163,6 @@ def build_agent(
             ToolArgHintMiddleware(),
             WriteOperationMiddleware(fs_backend),
             AttachmentMaterializationMiddleware(),
-            TodoListMiddleware(),
             WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
             compact_middleware,
         ],

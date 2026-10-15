@@ -56,6 +56,7 @@ NETWORK_FILES = ("/etc/hosts", "/etc/resolv.conf", "/etc/ssl")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 WORKER_SOURCE_PATH = Path(__file__).with_name("sandbox_worker.py")
 WORKER_SANDBOX_PATH = "/run/deep-agent/sandbox_worker.py"
+SEARCH_BINARY_PATH = "/run/deep-agent/rg"
 KILL_CONFIRM_SECONDS = 5.0
 UNSANDBOXED_WARNING = (
     "UNSANDBOXED MODE: bubblewrap is unavailable. Agent commands will run "
@@ -179,6 +180,32 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.skills_dir = skills_dir
 
     @property
+    def supports_regex_search(self) -> bool:
+        return isinstance(self.executor, (BubblewrapBackend, UnsandboxedShellBackend))
+
+    def regex_search_location(self, path: str | None) -> tuple[Path, str, str, int]:
+        """Validate a virtual mount path using the routed filesystem's checks.
+
+        Return the original relative path so the worker can reject symlinks
+        with descriptor-relative opens rather than trusting a resolved pathname.
+        """
+        if not self.supports_regex_search:
+            raise ValueError("Backend does not support local regex search")
+        virtual = path or SANDBOX_ROOT
+        if not virtual.startswith("/") or ".." in virtual or "~" in virtual or "\x00" in virtual:
+            raise ValueError("Permission denied: invalid virtual search path")
+        for mount, backend in self.routes.items():
+            prefix = mount.rstrip("/")
+            if virtual == prefix or virtual.startswith(mount):
+                relative = virtual[len(prefix):].lstrip("/")
+                try:
+                    backend._resolve_path(relative or "/")
+                except (ValueError, OSError):
+                    raise ValueError("Permission denied: search path escapes its authorized mount") from None
+                return backend.cwd, relative, prefix, backend.max_file_size_bytes
+        raise ValueError(_OUTSIDE_WORKSPACE_ERROR)
+
+    @property
     def id(self) -> str:
         return self.executor.id
 
@@ -241,7 +268,12 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
                 "python3 is required inside the sandbox for the persistent command worker, "
                 f"but none was found under {FIXED_PATH} resolving into {', '.join(RUNTIME_PATHS)}"
             )
+        from agent.tools.grep import resolve_rg
+
         mount = ["--ro-bind", str(WORKER_SOURCE_PATH), WORKER_SANDBOX_PATH]
+        rg = resolve_rg()
+        if rg is not None:
+            mount += ["--ro-bind", str(Path(rg).resolve()), SEARCH_BINARY_PATH]
         return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
 
     def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:
