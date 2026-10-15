@@ -36,7 +36,7 @@ agent/session_lock.py  每个会话一个 flock 锁
 - `web_search`（有 Tavily 密钥时注册）
 - 调用方通过 `extra_tools` 传入的工具
 
-文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供；本地工作区的 `grep` 单独注册为有界正则搜索工具，自定义非本地 Backend 保留其原有 `grep`，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。
+文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供；本地工作区的 `grep` 单独注册为有界正则搜索工具（见下文“grep 搜索”），自定义非本地 Backend 保留其原有 `grep`，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。
 
 Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profile），因此没有 `task` 工具。
 
@@ -66,6 +66,32 @@ Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profi
 - 其他路径 → 一律返回权限错误。
 
 `artifacts_root` 设为 `/workspace/.deepagents`，Deep Agents 的压缩历史等产物写在这里。
+
+## grep 搜索
+
+本地工作区的 `grep` 由 `agent/tools/grep.py` 实现，不经过 `execute`、Shell 或审批：
+
+```text
+grep 参数校验（pattern / max_count / glob 规则）
+  → WorkspaceCompositeBackend.regex_search_location() 校验虚拟路径
+  → 宿主以 O_NOFOLLOW 逐级打开挂载根与目标（拒绝符号链接）；直接文件先做 glob、大小、二进制检查
+  → SANDBOXED 且有 rg：BubblewrapBackend.search_args() 构造只读搜索沙箱，单个 rg 进程遍历并搜索
+    否则：一个 Python Worker（agent/tools/_grep_worker.py）基于目录描述符遍历并用 re 匹配
+  → 流式解析，按输出模式计数、去重与截断 → ToolMessage
+```
+
+- 搜索沙箱与 `execute` 的持久沙箱无关：每次搜索一次性启动 `bwrap`，以 `--ro-bind-fd`
+  挂载已打开的挂载根描述符（旧版 bwrap 使用该描述符的 `/proc/self/fd` 链接），只包含
+  `/workspace` 或 `/skills` 之一、`rg` 二进制（`sandbox.search_runtime()` 解析符号链接；
+  动态链接时附加加载器报告的共享库）；无网络、无可写挂载、无 `/proc`、清空环境变量，
+  不使用 `sandbox_args()` 和配置中的额外挂载。
+- `rg` 的工作目录是搜索目录，因此 Glob 相对 `path` 锚定，父目录中的 ignore 文件仍然生效；
+  结果路径在 `/workspace`、`/skills` 虚拟路径下拼接，不出现宿主路径。
+- Glob 规则在 `_grep_worker.parse_globs()` 中统一校验；`rg` 收到原始规则（每条一个 `--glob`），
+  Python 引擎按 ripgrep override 语义翻译成 wcmatch 模式，按顺序取最后命中的规则。
+- 每次搜索只有一个子进程（`bwrap` 或 Python Worker），以独立进程组启动。取消或超时时
+  杀掉进程组；`bwrap --die-with-parent` 随后结束沙箱 PID 命名空间中的 `rg`。
+  `rg` 的环境变量全部清空；Python Worker 只保留 `PATH` 与 UTF-8 locale，不继承 API key。
 
 ## 模型适配
 

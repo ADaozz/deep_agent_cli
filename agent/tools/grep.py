@@ -1,29 +1,48 @@
-"""Bounded regex search for the local workspace and read-only skills mounts."""
+"""Bounded regex search for the local workspace and read-only skills mounts.
+
+SANDBOXED: one ripgrep process inside a dedicated read-only, offline bwrap
+sandbox that only contains the searched mount and the rg runtime. rg walks the
+tree itself (ignore files, hidden files, binary and size filtering).
+UNSANDBOXED, or rg unavailable: one Python worker that opens every component
+relative to a directory descriptor with O_NOFOLLOW.
+"""
 from __future__ import annotations
 
+import base64
+from dataclasses import dataclass, field
+import errno
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import sysconfig
 import time
-from typing import Literal
+from typing import Callable, Literal
 
-from deepagents.backends.utils import compile_grep_include_glob, format_grep_matches
 from langchain_core.tools import StructuredTool
 
 from agent.cancel import get_cancel_context
-from agent.sandbox import WorkspaceCompositeBackend
+from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend, runtime_identity, search_runtime
+from agent.tools import _grep_worker as rules_engine
 
 SEARCH_TIMEOUT = 10.0
 DEFAULT_MAX_COUNT = 1000
 MAX_OUTPUT_BYTES = 64 * 1024
-MAX_RECORD_BYTES = 32 * 1024
+NOTE_RESERVE = 1024
+MAX_STDERR_BYTES = 8 * 1024
 TRUNCATED = "Results truncated: maximum match count reached."
+FILES_TRUNCATED = "Results truncated: maximum file count reached."
+BYTES_TRUNCATED = "Results truncated: maximum output size reached."
+TIMED_OUT = "Error: Search timed out; search processes terminated."
+PARTIAL_TIMEOUT = "Results incomplete: search timed out; search processes terminated."
+RG_PARTIAL = "Results incomplete: ripgrep could not search some files."
+WORKER_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONUTF8": "1"}
+OutputMode = Literal["files_with_matches", "content", "count"]
 
 
 def resolve_rg() -> str | None:
@@ -46,27 +65,365 @@ class _SearchProcessHandle:
         self.process = process
 
     def cancel_execution(self) -> None:
-        # Let the worker reap rg; the supervisor enforces a short kill deadline.
-        _signal_group(self.process, signal.SIGTERM)
+        # The supervisor loop notices cancellation and reaps the process group.
+        _signal_group(self.process, signal.SIGKILL)
 
 
 def _stop(process: subprocess.Popen) -> None:
-    _signal_group(process, signal.SIGTERM)
-    try:
-        process.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
+    # Signal the group before reaping so its id cannot have been reused.
+    # bwrap --die-with-parent then tears down the whole sandbox PID namespace.
+    if process.returncode is None:
         _signal_group(process, signal.SIGKILL)
-        process.wait()
-    # Clean up any descendants even after an unexpected worker exit.
-    _signal_group(process, signal.SIGKILL)
+    process.wait()
+
+
+@dataclass
+class _Results:
+    """Mode-aware accumulation: max_count counts lines (content) or files (others)."""
+
+    mode: str
+    limit: int
+    budget: int = MAX_OUTPUT_BYTES - NOTE_RESERVE
+    lines: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
+    total: int = 0
+    size: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def note(self, text: str) -> None:
+        if text not in self.notes:
+            self.notes.append(text)
+
+    @property
+    def empty(self) -> bool:
+        return not self.lines and not self.counts
+
+    def add(self, path: str, line: int = 0, text: str = "", count: int = 0) -> bool:
+        """Record one result; return False once a limit stops the search."""
+        if self.mode == "content":
+            if self.total >= self.limit:
+                self.note(TRUNCATED)
+                return False
+            cost = len(text.encode("utf-8", "replace")) + len(str(line)) + 5
+            if path not in self.lines:
+                cost += len(path.encode("utf-8", "replace")) + 2
+        else:
+            if path in self.counts:
+                return True
+            if len(self.counts) >= self.limit:
+                self.note(FILES_TRUNCATED)
+                return False
+            cost = len(path.encode("utf-8", "replace")) + 1 + (len(str(count)) + 2 if self.mode == "count" else 0)
+        if self.size + cost > self.budget:
+            self.note(BYTES_TRUNCATED)
+            return False
+        self.size += cost
+        if self.mode == "content":
+            self.lines.setdefault(path, []).append((line, text))
+            self.total += 1
+        else:
+            self.counts[path] = count
+        return True
+
+    def render(self) -> str:
+        if self.mode == "content":
+            out = []
+            for path in sorted(self.lines):
+                out.append(f"{path}:")
+                out.extend(f"  {number}: {text}" for number, text in sorted(self.lines[path]))
+        elif self.mode == "count":
+            out = [f"{path}: {self.counts[path]}" for path in sorted(self.counts)]
+        else:
+            out = sorted(self.counts)
+        body = "\n".join(out) if out else "No matches found"
+        return "\n".join([body, *self.notes])
+
+
+@dataclass
+class _Run:
+    status: str  # "exited" | "stopped" | "timeout" | "cancelled"
+    exit_code: int | None
+    stderr: str
+
+
+def _stream(argv: list[str], consume: Callable[[bytes], bool], *, deadline: float,
+            pass_fds: tuple[int, ...] = (), stdin: bytes | None = None,
+            env: dict[str, str] | None = None) -> _Run:
+    """Run one search process, feed stdout chunks to ``consume`` and always reap it."""
+    context = get_cancel_context()
+    process = subprocess.Popen(  # noqa: S603 - argv list, never a shell
+        argv, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=pass_fds,
+        start_new_session=True, env=env,
+    )
+    stderr = bytearray()
+    status = "exited"
+    try:
+        if context:
+            context.register_process(_SearchProcessHandle(process))
+        if stdin is not None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(stdin)
+            except BrokenPipeError:
+                pass
+            finally:
+                process.stdin.close()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, "out")
+            selector.register(process.stderr, selectors.EVENT_READ, "err")
+            while selector.get_map():
+                if context and context.cancelled:
+                    status = "cancelled"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    status = "timeout"
+                    break
+                for key, _ in selector.select(min(remaining, 0.05)):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    elif key.data == "err":
+                        stderr += chunk[:max(0, MAX_STDERR_BYTES - len(stderr))]
+                    elif not consume(chunk):
+                        status = "stopped"
+                        break
+                if status == "stopped":
+                    break
+        if status == "exited":
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                status = "timeout"
+    finally:
+        _stop(process)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream:
+                stream.close()
+        if context:
+            context.clear_process()
+    if context and context.cancelled:
+        status = "cancelled"
+    return _Run(status, process.returncode, stderr.decode("utf-8", "replace").strip())
+
+
+class _Splitter:
+    """Split a byte stream on a separator with a bounded record size."""
+
+    def __init__(self, separator: bytes, limit: int) -> None:
+        self.separator = separator
+        self.limit = limit
+        self.buffer = bytearray()
+
+    def feed(self, chunk: bytes):
+        self.buffer += chunk
+        start = 0
+        while (end := self.buffer.find(self.separator, start)) != -1:
+            yield bytes(self.buffer[start:end])
+            start = end + 1
+        del self.buffer[:start]
+        if len(self.buffer) > self.limit:
+            raise ValueError("search output record exceeded the size limit")
+
+
+@dataclass
+class _Target:
+    root: Path
+    relative: str
+    virtual_root: str
+    file_limit: int
+    mount_fd: int
+    is_file: bool
+
+    @property
+    def virtual_dir(self) -> str:
+        directory = PurePosixPath(self.virtual_root) / self.relative
+        return str(directory.parent if self.is_file else directory)
+
+
+def _open_target(backend: WorkspaceCompositeBackend, path: str | None) -> tuple[_Target, int]:
+    root, relative, virtual_root, file_limit = backend.regex_search_location(path)
+    mount_fd = -1
+    try:
+        mount_fd = rules_engine.open_mount(str(root))
+        target_fd = rules_engine.open_below(mount_fd, tuple(p for p in relative.split("/") if p))
+    except OSError as exc:
+        if mount_fd != -1:
+            os.close(mount_fd)
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("Permission denied: search path must not traverse symlinks") from None
+        raise
+    mode = os.fstat(target_fd).st_mode
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        os.close(target_fd)
+        os.close(mount_fd)
+        raise ValueError("search path must be a regular file or directory")
+    return _Target(root, relative, virtual_root, file_limit, mount_fd, stat.S_ISREG(mode)), target_fd
+
+
+def _explicit_file_excluded(target: _Target, target_fd: int, rules: list, results: _Results) -> bool:
+    """Apply globs, size and binary checks that rg skips for explicit file paths."""
+    name = PurePosixPath(target.relative).name
+    if rules_engine.override_match(rules, name, False) == rules_engine.IGNORE:
+        return True
+    if os.fstat(target_fd).st_size > target.file_limit:
+        results.note(rules_engine.LARGE_FILE_NOTE)
+        return True
+    data = os.read(target_fd, target.file_limit + 1)
+    if len(data) > target.file_limit:
+        results.note(rules_engine.LARGE_FILE_NOTE)
+        return True
+    return b"\x00" in data
+
+
+def _rg_arguments(mode: str, fixed_string: bool, globs: list[str], file_limit: int) -> list[str]:
+    args = ["--no-config", "--no-ignore-global", "--max-filesize", str(file_limit),
+            "--color", "never", "--line-buffered"]
+    if mode == "content":
+        args.append("--json")
+    elif mode == "files_with_matches":
+        # Newline-separated and line-buffered so a timeout keeps finished paths.
+        # --null would block-buffer them until rg exits.
+        args.append("--files-with-matches")
+    else:
+        args += ["--count", "--with-filename", "--null"]
+    if fixed_string:
+        args.append("--fixed-strings")
+    for glob in globs:
+        args += ["--glob", glob]
+    # Appended last so it wins over any include rule, as in the Python engine.
+    return args + ["--glob", "!" + rules_engine.ALWAYS_SKIPPED]
+
+
+def _rg_text(value: dict) -> str:
+    if "text" in value:
+        return value["text"]
+    return base64.b64decode(value["bytes"]).decode("utf-8", errors="replace")
+
+
+def _search_rg(executor: BubblewrapBackend, rg: str, target: _Target, pattern: str,
+               globs: list[str], mode: str, fixed_string: bool, results: _Results,
+               deadline: float) -> str:
+    runtime = search_runtime(rg)
+    binary_fd = os.open(runtime.binary, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        if runtime_identity(binary_fd) != runtime.identity:
+            raise ValueError("ripgrep executable changed while preparing the search; retry")
+        cwd = target.virtual_dir
+        subject = PurePosixPath(target.relative).name if target.is_file else "."
+        argv = [*executor.search_args(runtime, binary_fd=binary_fd, mount_fd=target.mount_fd,
+                                      mount_point=target.virtual_root, cwd=cwd),
+                *_rg_arguments(mode, fixed_string, globs, target.file_limit), "--", pattern, subject]
+
+        def virtual(raw: str) -> str:
+            relative = raw[2:] if raw.startswith("./") else raw
+            return str(PurePosixPath(cwd) / relative)
+
+        record_limit = target.file_limit * 8 + 65536
+        if mode == "content":
+            splitter = _Splitter(b"\n", record_limit)
+
+            def consume(chunk: bytes) -> bool:
+                for raw in splitter.feed(chunk):
+                    record = json.loads(raw)
+                    if record.get("type") != "match":
+                        continue
+                    data = record["data"]
+                    line = _rg_text(data["lines"]).rstrip("\n").rstrip("\r")
+                    if len(line.encode("utf-8")) > rules_engine.LINE_BYTES:
+                        results.note(rules_engine.LINE_NOTE)
+                        line = line.encode("utf-8")[:rules_engine.LINE_BYTES].decode("utf-8", "ignore") + " [line truncated]"
+                    if not results.add(virtual(_rg_text(data["path"])), data["line_number"], line):
+                        return False
+                return True
+        elif mode == "files_with_matches":
+            splitter = _Splitter(b"\n", record_limit)
+
+            def consume(chunk: bytes) -> bool:
+                for raw in splitter.feed(chunk):
+                    if raw and not results.add(virtual(raw.decode("utf-8", "replace"))):
+                        return False
+                return True
+        else:
+            splitter = _Splitter(b"\n", record_limit)
+
+            def consume(chunk: bytes) -> bool:
+                for raw in splitter.feed(chunk):
+                    name, _, count = raw.rpartition(b"\0")
+                    if not results.add(virtual(name.decode("utf-8", "replace")), count=int(count)):
+                        return False
+                return True
+
+        run = _stream(argv, consume, deadline=deadline, pass_fds=(target.mount_fd, binary_fd), env={})
+    finally:
+        os.close(binary_fd)
+    stderr = run.stderr.replace(str(target.root), target.virtual_root)[:2048]
+    if run.status in ("cancelled", "timeout", "stopped"):
+        return _finish(run.status, results)
+    if run.exit_code == 2 and not results.empty:
+        results.note(RG_PARTIAL)
+        return results.render()
+    if run.exit_code == 2:
+        return "Error: ripgrep execution failed: " + (stderr or "exit status 2")
+    if run.exit_code == 1 and stderr:
+        return "Error: ripgrep could not run in the read-only search sandbox: " + stderr
+    if run.exit_code not in (0, 1) or (run.exit_code == 0 and results.empty):
+        return (f"Error: ripgrep could not run in the read-only search sandbox (exit status {run.exit_code})"
+                + (": " + stderr if stderr else ""))
+    return results.render()
+
+
+def _search_python(target: _Target, pattern: str, globs: list[str], mode: str,
+                   fixed_string: bool, results: _Results, deadline: float) -> str:
+    payload = dict(root=str(target.root), relative=target.relative, virtual_root=target.virtual_root,
+                   pattern=pattern, globs=globs, fixed_string=fixed_string, output_mode=mode,
+                   file_limit=target.file_limit)
+    splitter = _Splitter(b"\n", target.file_limit * 8 + 65536)
+    errors: list[str] = []
+
+    def consume(chunk: bytes) -> bool:
+        for raw in splitter.feed(chunk):
+            record = json.loads(raw)
+            if "error" in record:
+                errors.append(record["error"])
+                return False
+            if "warning" in record:
+                results.note(record["warning"])
+            elif not results.add(record["path"], record.get("line", 0), record.get("text", ""),
+                                 record.get("count", 0)):
+                return False
+        return True
+
+    run = _stream([sys.executable, str(Path(__file__).with_name("_grep_worker.py"))], consume,
+                  deadline=deadline, stdin=json.dumps(payload).encode(), env=WORKER_ENV)
+    if errors:
+        return "Error: " + errors[0]
+    if run.status in ("cancelled", "timeout", "stopped"):
+        return _finish(run.status, results)
+    if run.exit_code != 0 or splitter.buffer:
+        return "Error: Search worker failed."
+    return results.render()
+
+
+def _finish(status: str, results: _Results) -> str:
+    if status == "cancelled":
+        return "Error: Search cancelled."
+    if status == "timeout":
+        if results.empty:
+            return TIMED_OUT
+        results.note(PARTIAL_TIMEOUT)
+    return results.render()
 
 
 def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
-           glob: str | None, output_mode: str, max_count: int | None,
+           glob: str | list[str] | None, output_mode: str, max_count: int | None,
            fixed_string: bool) -> str:
-    """Run one killable search; never use execute or a shell."""
-    process = None
+    """Run one bounded, killable search; never use execute or a shell."""
     context = get_cancel_context()
+    deadline = time.monotonic() + SEARCH_TIMEOUT
+    target_fd = -1
+    target = None
     try:
         if len(pattern.encode("utf-8")) > 16 * 1024 or "\x00" in pattern or "\n" in pattern:
             raise ValueError("pattern must be a single line of at most 16384 bytes without NUL")
@@ -75,95 +432,42 @@ def search(backend: WorkspaceCompositeBackend, pattern: str, path: str | None,
             raise ValueError("max_count must be positive")
         if output_mode not in {"files_with_matches", "content", "count"}:
             raise ValueError("invalid output_mode")
-        if glob is not None:
-            if len(glob.encode("utf-8")) > 16 * 1024:
-                raise ValueError("glob exceeds 16384 bytes")
-            compile_grep_include_glob(glob)
-        root, relative, virtual_root, file_limit = backend.regex_search_location(path)
+        rules = rules_engine.parse_globs(glob)
+        globs = [rule.source for rule in rules]
+        target, target_fd = _open_target(backend, path)
+        results = _Results(output_mode, limit)
+        if target.is_file:
+            excluded = _explicit_file_excluded(target, target_fd, rules, results)
+            if excluded:
+                return results.render()
+        os.close(target_fd)
+        target_fd = -1
         if context and context.cancelled:
             return "Error: Search cancelled."
-        payload = dict(root=str(root), relative=relative, virtual_root=virtual_root,
-                       pattern=pattern, glob=glob, fixed_string=fixed_string,
-                       rg=resolve_rg(), file_limit=file_limit)
-        deadline = time.monotonic() + SEARCH_TIMEOUT
-        process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).with_name("_grep_worker.py"))],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        if context:
-            context.register_process(_SearchProcessHandle(process))
-        assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(json.dumps(payload).encode())
-        process.stdin.close()
-        matches = []
-        size = 0
-        buffer = b""
-        note = ""
-        done = False
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while not done:
-                if context and context.cancelled:
-                    return "Error: Search cancelled."
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return "Error: Search timed out; search processes terminated."
-                if not selector.select(min(remaining, 0.05)):
-                    continue
-                chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
-                    if context and context.cancelled:
-                        return "Error: Search cancelled."
-                    if buffer or process.wait() != 0:
-                        return "Error: Search worker failed."
-                    break
-                buffer += chunk
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    record = json.loads(line)
-                    if "error" in record:
-                        return "Error: " + record["error"]
-                    if "warning" in record:
-                        note = record["warning"]
-                        continue
-                    record_size = len(line) + 32
-                    if size + record_size > MAX_OUTPUT_BYTES - 1024:
-                        note = "Results truncated: maximum output size reached."
-                        done = True
-                        break
-                    size += record_size
-                    matches.append(record)
-                    if len(matches) >= limit:
-                        note = TRUNCATED
-                        done = True
-                        break
-                if len(buffer) > MAX_RECORD_BYTES:
-                    return "Error: Search worker record exceeded the size limit."
-        result = format_grep_matches(matches, output_mode)
-        return result + ("\n" if result and note else "") + note
+        rg = resolve_rg()
+        if rg and isinstance(backend.executor, BubblewrapBackend):
+            return _search_rg(backend.executor, rg, target, pattern, globs, output_mode,
+                              fixed_string, results, deadline)
+        return _search_python(target, pattern, globs, output_mode, fixed_string, results, deadline)
+    except FileNotFoundError:
+        return "Error: search path not found"
     except (OSError, ValueError) as exc:
         # OSError includes host paths; never surface those to the model.
         detail = exc.strerror if isinstance(exc, OSError) else str(exc)
         return f"Error: {detail}"
     finally:
-        if process is not None:
-            # Kill the whole group even if the worker has exited: it may have rg children.
-            _stop(process)
-            if process.stdout:
-                process.stdout.close()
-            if process.stdin:
-                process.stdin.close()
-            if context:
-                context.clear_process()
+        if target_fd != -1:
+            os.close(target_fd)
+        if target is not None:
+            os.close(target.mount_fd)
 
 
 def build_regex_grep_tool(backend: WorkspaceCompositeBackend) -> StructuredTool:
     def grep(
         pattern: str,
         path: str | None = None,
-        glob: str | None = None,
-        output_mode: Literal["files_with_matches", "content", "count"] = "files_with_matches",
+        glob: str | list[str] | None = None,
+        output_mode: OutputMode = "files_with_matches",
         max_count: int | None = None,
         fixed_string: bool = False,
     ) -> str:
@@ -175,14 +479,27 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend) -> StructuredTool:
         - Uses ripgrep when available.
         - Falls back to Python regex search when ripgrep is unavailable.
         - Searches /workspace by default; /skills is available when mounted.
+        - Like ripgrep, skips hidden files, .gitignore/.ignore/.rgignore matches,
+          symlinks, binary files and files over 10 MiB. .git is always skipped.
+
+        glob: one ripgrep glob or a list of them, relative to the search path.
+        - "*.py" searches only Python files (no "/" matches at any depth).
+        - "!*.test.py" excludes files; "!**/node_modules/**" excludes a directory.
+        - ["*.py", "!**/tests/**"]: Python files outside tests/.
+        - Rules apply in order and the last matching rule wins, so
+          ["!**/tests/**", "*.py"] includes tests/*.py again.
+        - Prefer "!**/.git/**" over "!*/.git/*": a "/" anchors the glob to the
+          search path, so "*/.git/*" only matches one directory level deep.
+        - Include globs can override ignore rules for matching files.
 
         Output modes:
         - files_with_matches: Return matching file paths.
         - content: Return matching lines with line numbers.
         - count: Return matching line counts grouped by file.
 
-        Use glob to restrict file types. Use max_count to limit large searches
-        (default 1000 matching lines). Results are bounded by size and time.
+        max_count (default 1000) limits matching lines in content mode and
+        files in files_with_matches/count mode; counts per file are complete.
+        Results are bounded by size and time and truncation is reported.
         Prefer grep for locating source code. Use read_file with offset and
         limit to inspect surrounding code.
         """
