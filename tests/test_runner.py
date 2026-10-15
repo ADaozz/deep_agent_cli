@@ -23,7 +23,8 @@ from agent.runner import (
 from tests.conftest import graph_tool_names, scripted_model
 
 
-def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
+def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == []
     assert prepared.interrupt_on == ASK_INTERRUPT_ON

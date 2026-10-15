@@ -320,7 +320,8 @@ def test_default_skills_ignore_project_directory(tmp_path: Path, monkeypatch: py
     assert _default_skill_sources(backend) == ["/skills/"]
 
 
-def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
+def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     config = replace(config_for(tmp_path), bwrap_path="/bin/true")
     selected = select_backend(config, check=False)
     assert isinstance(selected.backend, SandboxBackendProtocol)
