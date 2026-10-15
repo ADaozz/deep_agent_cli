@@ -184,6 +184,8 @@ class RunController:
                 return None
             if not self._steering:
                 return None
+            if self._follow_ups and self._follow_ups[0].order < self._steering[0].order:
+                return None
             message = self._steering.popleft()
         self._emit("steering_applied", {"content": message.text, "id": message.id})
         return message.text
@@ -196,11 +198,18 @@ class RunController:
         with self._lock:
             return len(self._follow_ups)
 
+    def pending_message_texts(self) -> list[str]:
+        with self._lock:
+            messages = sorted((*self._steering, *self._follow_ups), key=lambda item: item.order)
+            return [message.text for message in messages]
+
     def pop_follow_up(self) -> str | None:
         with self._lock:
             if not self._follow_ups:
                 return None
-            return self._follow_ups.popleft().text
+            message = self._follow_ups.popleft()
+        self._emit("steering_applied", {"content": message.text, "id": message.id})
+        return message.text
 
     def take_unapplied(self) -> list[QueuedMessage]:
         """Alt+Up: reclaim steering/follow-up that has not entered a checkpoint yet."""

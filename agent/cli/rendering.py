@@ -21,6 +21,7 @@ from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
+from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -48,8 +49,9 @@ _PREVIEW_LINE_STYLES: dict[str, str] = {
     "plain": "",
     "dim": "dim",
     "hunk": "bold cyan",
-    "add": "white on #245c38",
-    "delete": "white on #4a2028",
+    # Use exact xterm-256 colors: muted RGB shades quantize to grayscale.
+    "add": "white on #005f00",
+    "delete": "white on #5f0000",
     "error": "red",
     "url": "bright_cyan",
 }
@@ -133,7 +135,7 @@ def transcript_units(
     while index < len(blocks):
         block = blocks[index]
         if isinstance(block, MessageBlock):
-            units.append(_message_unit(block, state.thinking_collapsed, limits))
+            units.append(_message_unit(block, state.thinking_collapsed, limits, state.messages_expanded))
             index += 1
             continue
         if isinstance(block, TurnSummaryBlock):
@@ -185,11 +187,13 @@ def transcript_units(
     return units
 
 
-def _message_unit(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits) -> TranscriptUnit:
+def _message_unit(
+    block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits, messages_expanded: bool = False,
+) -> TranscriptUnit:
     return TranscriptUnit(
         key=("message", id(block)),
-        fingerprint=(block.revision, thinking_collapsed, limits),
-        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits)),
+        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False),
+        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded)),
         owner=block,
     )
 
@@ -482,7 +486,30 @@ def _user_message_content(text: str) -> Markdown:
     return _SkillMessageMarkdown(displayed, labels) if labels else Markdown(text)
 
 
-def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[Any]:
+@dataclass(frozen=True)
+class _UserMessagePreview:
+    content: Any
+    expanded: bool
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        rows = console.render_lines(self.content, options.update(overflow="fold", no_wrap=False), pad=False)
+        hidden = max(0, len(rows) - 3)
+        for row in rows if self.expanded else rows[:3]:
+            yield from row
+            yield Segment.line()
+        if hidden:
+            hint = "Ctrl+B to collapse" if self.expanded else f"… Ctrl+B to expand · {hidden} more lines"
+            yield Text(hint, style="dim", no_wrap=True, overflow="ellipsis")
+
+
+def render_queued_messages(messages: list[str], width: int) -> str:
+    return _capture(Padding(Group(*(Text(f"{index}. {text}") for index, text in enumerate(messages, 1))), (0, 1)), width)
+
+
+def _message(
+    block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    *, messages_expanded: bool = False,
+) -> list[Any]:
     items: list[Any] = []
     if block.kind == "user":
         style = "white on #404040" if block.pending else "white on #303030"
@@ -490,7 +517,7 @@ def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLim
         message = Table.grid(expand=True, padding=0)
         message.add_column(width=2, no_wrap=True)
         message.add_column(ratio=1)
-        message.add_row(Text("› "), _user_message_content(label))
+        message.add_row(Text("› "), _UserMessagePreview(_user_message_content(label), messages_expanded))
         content: list[Any] = [message]
         for index, ref in enumerate(block.attachments, 1):
             content.append(Text(

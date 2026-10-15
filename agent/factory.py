@@ -54,6 +54,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "如果继续执行需要用户提供信息或从多个选项中做决定，调用 request_human_input 暂停等待回答。"
     "如果你主动给用户列出多个后续操作供其选择，也必须调用 request_human_input，"
     "用 fields 的 single_select 或 multi_select 表达选项；不要只在普通回复中写编号菜单。"
+    "每道选择题最多提供 3 个选项；Other 由系统自动添加，不计入这 3 个，不要自行提供。"
 )
 
 

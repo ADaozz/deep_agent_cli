@@ -62,6 +62,7 @@ class CliState:
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
+    messages_expanded: bool = False
     # Held by reference, not index: app-side filtering of `blocks` would
     # otherwise silently redirect stream deltas into an unrelated block.
     active_block: MessageBlock | None = None
@@ -204,15 +205,12 @@ class CliState:
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
             mode = ""
-            message_id = ""
             if isinstance(event.result, dict):
                 mode = str(event.result.get("mode") or "")
-                message_id = str(event.result.get("id") or "")
             if mode == "steer" and event.content:
-                self.add_user(event.content, pending=True, message_id=message_id)
                 self.status = "Steering queued"
             elif mode == "followUp":
-                self.status = f"Follow-up queued ({event.content[:40]})"
+                self.status = "Follow-up queued"
         elif event.type == "steering_applied":
             message_id = ""
             if isinstance(event.result, dict):
@@ -223,6 +221,8 @@ class CliState:
                     if isinstance(block, MessageBlock) and block.id == block_id:
                         touch(block).pending = False
                         break
+            elif event.content:
+                self.add_user(event.content, message_id=message_id)
         elif event.type == "run_cancelling":
             self.status = "Cancelling…"
         elif event.type == "interaction_requested":

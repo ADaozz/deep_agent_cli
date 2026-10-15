@@ -207,6 +207,7 @@ web_search:
 | `review_diff` | `c-r` |
 | `reopen_interaction` | `f2` |
 | `thinking_toggle` | `c-t` |
+| `messages_toggle` | `c-b` |
 | `dequeue` | `alt+up` |
 | `image_paste` | `ctrl+v`, `alt+v` |
 | `model_cycle_forward` | `ctrl+p` |

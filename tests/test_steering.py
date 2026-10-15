@@ -43,7 +43,10 @@ def test_steering_before_tools_skips_proposed_tools_before_replanning() -> None:
         ],
     )]))
     assert response.model_response.result[0].tool_calls == []
-    assert response.command.update["jump_to"] == "model"
+    assert response.command.update["steering_replan"] is True
+    assert middleware.after_model(response.command.update, None) == {
+        "steering_replan": False, "jump_to": "model",
+    }
     assert response.command.update["messages"][0].content == "change direction"
 
 
@@ -79,6 +82,7 @@ def test_steer_during_model_skips_tool_and_reaches_next_model() -> None:
     with patch.object(type(model), "_generate", generate):
         result = runner.invoke("start", on_event=on_event)
     assert result.status == "completed"
+    assert result.output == "after correction"
     state = runner.prepared.graph.get_state(runner._thread_config())
     messages = state.values.get("messages", [])
     assert "/workspace/should-not-exist.txt" not in state.values.get("files", {})
@@ -158,6 +162,18 @@ def test_alt_up_takes_unapplied_only() -> None:
     assert [item.text for item in taken] == ["b", "a"]
     assert controller.pending_steering_count() == 0
     assert controller.pending_follow_up_count() == 0
+
+
+def test_steering_does_not_overtake_an_older_follow_up() -> None:
+    controller = RunController()
+    controller.follow_up("first")
+    controller.steer("second")
+    controller.follow_up("third")
+    assert controller.pending_message_texts() == ["first", "second", "third"]
+    assert controller.pop_steering() is None
+    assert controller.pop_follow_up() == "first"
+    assert controller.pop_steering() == "second"
+    assert controller.pop_follow_up() == "third"
 
 
 def test_new_session_requires_reclaiming_unapplied_input() -> None:

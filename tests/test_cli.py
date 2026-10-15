@@ -91,6 +91,67 @@ def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
     assert all("48;2;48;48;48" in line for line in lines)
 
 
+@pytest.mark.parametrize("content", ["长消息" * 180, "```\n" + "\n".join(f"line {i}" for i in range(12)) + "\n```"], ids=["chinese", "code"])
+@pytest.mark.parametrize("width", [20, 50])
+def test_long_user_messages_collapse_after_wrapping_and_expand_without_losing_content(content, width) -> None:
+    state = CliState()
+    state.add_user(content)
+    renderer = TranscriptRenderer()
+    collapsed, _ = renderer.render(state, width)
+    collapsed_text = "".join(part[1] for part in collapsed)
+    assert "Ctrl+B" in collapsed_text
+    if width == 50:
+        assert "Ctrl+B to expand" in collapsed_text
+        assert "more lines" in collapsed_text
+    state.messages_expanded = True
+    expanded, _ = renderer.render(state, width)
+    expanded_text = "".join(part[1] for part in expanded)
+    assert "Ctrl+B" in expanded_text
+    assert expanded_text.count("\n") > collapsed_text.count("\n")
+    assert state.blocks[0].content == content
+    state.messages_expanded = False
+    assert renderer.render(state, width)[0] == collapsed
+
+
+def test_ctrl_b_expands_queue_below_status_and_scrolls_without_editing_input() -> None:
+    def scenario(app: CliApplication) -> None:
+        text = "\n".join(f"queue line {index:03d}" for index in range(80))
+        app.runner.control.follow_up(text)
+        app.state.add_user("sent content " * 80)
+        app.buffer.text = "draft stays here"
+        status = "".join(part[1] for part in app._status_text())
+        assert "Ctrl+B expand" in status
+        assert "queue line 079" not in status
+        binding = next(item for item in app.bindings.bindings if item.keys == ("c-b",))
+        binding.handler(None)
+        _paint(app)
+        assert app._queue_expanded()
+        assert app.buffer.text == "draft stays here"
+        assert "queue line 079" in "".join(part[1] for part in app._queue_text())
+        positions = app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert app.queue_window in positions
+        assert positions[app.queue_window].height <= app.application.output.get_size().rows // 3
+        app._scroll_queue(1000)
+        _paint(app)
+        assert app.queue_window.vertical_scroll > 0
+        screen = app.application.renderer._last_screen
+        assert any(
+            "queue line 079" in "".join(screen.data_buffer[y][x].char for x in range(app._width()))
+            for y in range(app.application.output.get_size().rows)
+        )
+        app._scroll_queue(-1000)
+        _paint(app)
+        assert app.queue_window.vertical_scroll == 0
+        binding.handler(None)
+        _paint(app)
+        assert app.queue_window not in app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert not app.state.messages_expanded
+        assert app.runner.control.pending_message_texts() == [text]
+        assert app.state.blocks[-1].content == "sent content " * 80
+
+    _with_painted_app("queue-expand", scenario)
+
+
 def test_editor_has_matching_blank_rows_and_prefix() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
@@ -936,9 +997,9 @@ def test_diff_background_fills_each_visual_row_in_preview_and_review(monkeypatch
         )]), 40),
         render_review([("write_file", {"file_path": "/workspace/new.md", "content": "new"})], 40),
     ):
-        for color in ("74;32;40", "36;92;56"):
+        for color in ("95;0;0", "0;95;0"):
             rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
-            if color == "36;92;56":
+            if color == "0;95;0":
                 assert rows
             if rows:
                 assert all(len(row) == 39 for row in rows)
@@ -958,7 +1019,7 @@ def test_large_write_preview_has_numbered_full_width_green_rows(monkeypatch) -> 
     assert re.search(r"(?m)^\s+1 \+#!/usr/bin/env node", plain)
     assert re.search(r"(?m)^\s+2 \+/\*\*", plain)
     assert "… 112 lines hidden · Ctrl+R to review" in plain
-    green_rows = re.findall(r"\x1b\[[0-9;]*48;2;36;92;56m([^\n]*?)\x1b\[0m", rendered)
+    green_rows = re.findall(r"\x1b\[[0-9;]*48;2;0;95;0m([^\n]*?)\x1b\[0m", rendered)
     assert green_rows and all(len(row) == 59 for row in green_rows)
 
     review = _plain(render_review([("write_file", block.arguments)], 60))
@@ -980,9 +1041,43 @@ def test_edit_context_stays_unhighlighted_while_changed_rows_fill_width(monkeypa
     assert "\x1b[48;2;" not in next(
         line for line in rendered.splitlines() if "keep" in line
     )
-    for color in ("74;32;40", "36;92;56"):
+    for color in ("95;0;0", "0;95;0"):
         rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
         assert rows and all(len(row) == 49 for row in rows)
+
+
+@pytest.mark.parametrize("view", ["preview", "review"])
+@pytest.mark.parametrize("depth,green,red", [
+    ("DEPTH_4_BIT", "42", "41"),
+    ("DEPTH_8_BIT", "48;5;22", "48;5;52"),
+    ("DEPTH_24_BIT", "48;2;0;95;0", "48;2;95;0;0"),
+])
+def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, green, red) -> None:
+    from io import StringIO
+    from prompt_toolkit import ANSI
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.formatted_text import to_formatted_text
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.styles import Style
+
+    block = ToolBlock("edit-colors", "edit_file", {
+        "file_path": "/workspace/example.py", "old_string": "old", "new_string": "new",
+    }, status="completed")
+    if view == "preview":
+        fragments, _ = TranscriptRenderer().render(CliState(blocks=[block]), 60)
+    else:
+        fragments = to_formatted_text(ANSI(render_review([("edit_file", block.arguments)], 60)))
+    stream = StringIO()
+    terminal = Vt100_Output(stream, lambda: Size(rows=24, columns=60), term="xterm-256color")
+    style = Style.from_dict({})
+    for fragment_style, text in fragments:
+        terminal.set_attributes(style.get_attrs_for_style_str(fragment_style), ColorDepth(depth))
+        terminal.write(text)
+    terminal.flush()
+    sequences = re.findall(r"\x1b\[([0-9;]+)m", stream.getvalue())
+    for expected in (green, red):
+        assert any(f";{expected};" in f";{sequence};" for sequence in sequences)
 
 
 def test_edit_review_keeps_context_headers_and_full_diff() -> None:
@@ -3106,7 +3201,8 @@ def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch
         assert f"{app.state.status} · queued {steering + follow_up}" in text()
         app._apply_event(RunEvent(type="run_completed"))
         assert app._status_visible()
-        assert text().strip() == f"queued {steering + follow_up}"
+        preview = " | ".join(["steer"] * steering + ["follow up"] * follow_up)
+        assert text().strip() == f"queued {steering + follow_up}: {preview}"
         monkeypatch.setattr(app, "_width", lambda: 7)
         assert text() == " queue…"
         for _ in range(steering):
@@ -3624,10 +3720,118 @@ def test_cli_steer_and_follow_up_use_run_controller() -> None:
         app.buffer.text = "steer now"
         app._submit_buffer("steer")
         assert runner.control.pending_steering_count() == 1
-        assert any(getattr(block, "pending", False) for block in app.state.blocks)
+        assert not app.state.blocks
         app.buffer.text = "later"
         app._submit_buffer("followUp")
         assert runner.control.pending_follow_up_count() == 1
+        assert not app.state.blocks
+        assert "queued 2: steer now | later" in "".join(value for _, value in app._status_text())
+        assert runner.control.pop_steering() == "steer now"
+        assert [block.content for block in app.state.blocks] == ["steer now"]
+        assert "queued 1: later" in "".join(value for _, value in app._status_text())
+        assert runner.control.pop_follow_up() == "later"
+        assert [block.content for block in app.state.blocks] == ["steer now", "later"]
+        assert runner.control.pending_message_texts() == []
+        assert " · queued " not in "".join(value for _, value in app._status_text())
+
+
+@pytest.mark.parametrize("propose_tools", [False, True])
+def test_cli_enter_during_stream_replans_before_tools(monkeypatch, propose_tools) -> None:
+    from threading import Event
+    from langchain_core.messages import AIMessageChunk, HumanMessage
+    from langchain_core.outputs import ChatGenerationChunk
+
+    streaming = Event()
+    submitted = Event()
+    calls = []
+    model = scripted_model([])
+    object.__setattr__(model, "streaming", True)
+    model.model_fields_set.add("streaming")
+
+    def stream(self, messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="Working"))
+            streaming.set()
+            assert submitted.wait(5), "UI did not submit while the model was streaming"
+            if propose_tools:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "write_file", "args": '{"file_path":"/stale.txt","content":"stale"}',
+                    "id": "stale-call", "index": 0,
+                }]))
+        else:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="Corrected"))
+
+    monkeypatch.setattr(type(model), "_stream", stream)
+    runner = AgentRunner(model=model, backend=StateBackend())
+
+    async def scenario():
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            try:
+                app._start_run("start")
+                assert await _await_cli_io(asyncio.to_thread(streaming.wait, 5), timeout=6)
+                app.buffer.text = "change direction"
+                app._submit_buffer("steer")
+                assert runner.control.pending_steering_count() == 1
+                submitted.set()
+                await _await_cli_io(app._run_task, timeout=10)
+                assert len(calls) == 2, runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+                assert any(isinstance(m, HumanMessage) and m.content == "change direction" for m in calls[1])
+                assert runner.control.pending_steering_count() == 0
+                assert not any(isinstance(block, ToolBlock) for block in app.state.blocks)
+                assert [block.content for block in app.state.blocks if isinstance(block, MessageBlock) and block.kind == "user"] == ["start", "change direction"]
+            finally:
+                submitted.set()
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["steer", "followUp"])
+def test_cli_drains_input_arriving_after_worker_completion(mode) -> None:
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="first done"), AIMessage(content="queued done"),
+    ]), backend=StateBackend())
+
+    async def scenario():
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            try:
+                result = runner.invoke("first")
+                # The worker returned, but the UI has not handled its result.
+                app.state.running = True
+                app.buffer.text = "late input"
+                app._submit_buffer(mode)
+                assert runner.control.pending_message_texts() == ["late input"]
+                app._handle_result(result)
+                assert app._run_task is not None
+                await _await_cli_io(app._run_task)
+                assert runner.control.pending_message_texts() == []
+                messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+                assert messages[-1].content == "queued done"
+                assert [block.content for block in app.state.blocks if isinstance(block, MessageBlock) and block.kind == "user"] == ["late input"]
+            finally:
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+def test_cli_new_input_appends_to_existing_queue_when_idle(monkeypatch) -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_start_queued_run", lambda: None)
+        runner.follow_up("older")
+        app.buffer.text = "newer"
+        app._submit_buffer("steer")
+        assert runner.control.pending_message_texts() == ["older", "newer"]
+        assert not app.state.blocks
+        assert app.buffer.text == ""
 
 
 def test_cli_esc_requests_cancel() -> None:

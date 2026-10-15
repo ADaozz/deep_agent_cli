@@ -63,6 +63,7 @@ from agent.cli.rendering import (
     TranscriptDocument,
     TranscriptRenderer,
     render_interaction,
+    render_queued_messages,
     render_review,
 )
 from agent.cli.session_controller import SessionController
@@ -341,15 +342,19 @@ class _TranscriptWindow(Window):
     outright and skips the cursor-chasing arithmetic entirely.
     """
 
-    def __init__(self, *args: Any, viewport: Any = None, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, viewport: Any = None, scroll_offset: Any = None, **kwargs: Any) -> None:
         self._viewport = viewport
+        self._scroll_offset = scroll_offset
         super().__init__(*args, **kwargs)
 
     def _scroll(self, ui_content: Any, width: int, height: int) -> None:
         self.horizontal_scroll = 0
         self.vertical_scroll_2 = 0
         maximum = max(0, ui_content.line_count - height)
-        self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
+        if self._scroll_offset is not None:
+            self.vertical_scroll = self._scroll_offset(maximum)
+        else:
+            self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
 
 class CliApplication:
     """pi-inspired terminal presentation over the existing synchronous runner."""
@@ -394,6 +399,8 @@ class CliApplication:
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
+        self._queue_scroll = 0
+        self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
         self._selection_start: tuple[int, int] | None = None
         self._selection_end: tuple[int, int] | None = None
         self._selection_dragging = False
@@ -446,6 +453,14 @@ class CliApplication:
         self.status_control = _ScrollableTextControl(
             text=self._status_text, focusable=False, on_scroll=self.scroll_transcript,
             on_select_outside=self._select_below_transcript,
+        )
+        self.queue_control = _ScrollableTextControl(
+            text=self._queue_text, focusable=False, on_scroll=self._scroll_queue,
+        )
+        self.queue_window = _TranscriptWindow(
+            self.queue_control, scroll_offset=self._queue_offset,
+            height=self._queue_height, wrap_lines=False, always_hide_cursor=True,
+            dont_extend_height=True, style="class:status",
         )
         self.back_to_bottom_control = _BackToBottomControl(
             text=lambda: FormattedText([("class:back-to-bottom", "↓ Back to bottom · esc")])
@@ -556,6 +571,7 @@ class CliApplication:
                 ),
                 filter=Condition(self._status_visible),
             ),
+            ConditionalContainer(self.queue_window, filter=Condition(self._queue_expanded)),
             ConditionalContainer(
                 self.interaction_bottom_divider_window,
                 filter=interaction_visible | Condition(lambda: self.state.status == "Waiting for input"),
@@ -818,7 +834,7 @@ class CliApplication:
             "Keyboard\n"
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
-            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · "
+            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · Ctrl+B messages · "
             "Mouse drag selects and copies across history · "
             "Ctrl+V/Alt+V paste image/text · "
             "Ctrl+C clear/exit · Ctrl+D exit\n\n"
@@ -1527,11 +1543,40 @@ class CliApplication:
             or self.runner.control.pending_follow_up_count()
         )
 
+    def _queue_expanded(self) -> bool:
+        return self.state.messages_expanded and bool(self.runner.control.pending_message_texts())
+
+    def _queue_text(self) -> FormattedText:
+        key = (tuple(self.runner.control.pending_message_texts()), self._width())
+        if self._queue_preview_cache is None or self._queue_preview_cache[0] != key:
+            text = render_queued_messages(list(key[0]), key[1]) if key[0] else ""
+            self._queue_preview_cache = (key, to_formatted_text(ANSI(text)), text.count("\n") + 1)
+            self._queue_scroll = 0
+        return self._queue_preview_cache[1]
+
+    def _queue_height(self) -> Dimension:
+        self._queue_text()
+        rows = self.application.output.get_size().rows
+        height = min(self._queue_preview_cache[2], max(1, rows // 3))
+        return Dimension.exact(height)
+
+    def _queue_offset(self, maximum: int) -> int:
+        self._queue_scroll = max(0, min(self._queue_scroll, maximum))
+        return self._queue_scroll
+
+    def _scroll_queue(self, delta: int) -> None:
+        self._queue_text()
+        maximum = max(0, self._queue_preview_cache[2] - self._queue_height().preferred)
+        self._queue_offset(maximum)
+        self._queue_scroll = max(0, min(maximum, self._queue_scroll + delta))
+        self.application.invalidate()
+
     def _status_text(self) -> FormattedText:
         if not self._status_visible():
             self._working_messages.reset()
             return FormattedText([])
-        pending = self.runner.control.pending_steering_count() + self.runner.control.pending_follow_up_count()
+        queued = self.runner.control.pending_message_texts()
+        pending = len(queued)
         active = self.state.running and self.interaction is None and not self.state.status.startswith("Cancelling")
         now = monotonic()
         message = self._working_messages.current(active, now)
@@ -1541,8 +1586,16 @@ class CliApplication:
         if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
         if pending:
-            label = f"{label} · queued {pending}" if label else f"queued {pending}"
-        status = _truncate_cells(f" {spinner}{label}", width)
+            preview = " | ".join(" ".join(text.split()) for text in queued)
+            queue_label = f"queued {pending} · Ctrl+B collapse" if self.state.messages_expanded else f"queued {pending}: {preview}"
+            label = f"{label} · {queue_label}" if label else queue_label
+        raw_status = f" {spinner}{label}"
+        if pending and not self.state.messages_expanded and get_cwidth(raw_status) > width and width >= 20:
+            hint = " · Ctrl+B expand" if width >= 32 else " · Ctrl+B"
+            status = _truncate_cells(raw_status, max(1, width - get_cwidth(hint))) + hint
+            status = _truncate_cells(status, width)
+        else:
+            status = _truncate_cells(raw_status, width)
         fragments = [("class:status", status)]
         remaining = width - get_cwidth(status)
         if message is not None and remaining > 3:
@@ -1698,11 +1751,11 @@ class CliApplication:
 
         @kb.add("pageup")
         def page_up(event) -> None:  # type: ignore[no-untyped-def]
-            self.scroll_transcript(-10)
+            self._scroll_queue(-10) if self._queue_expanded() else self.scroll_transcript(-10)
 
         @kb.add("pagedown")
         def page_down(event) -> None:  # type: ignore[no-untyped-def]
-            self.scroll_transcript(10)
+            self._scroll_queue(10) if self._queue_expanded() else self.scroll_transcript(10)
 
         @kb.add("c-home")
         def scroll_top(event) -> None:  # type: ignore[no-untyped-def]
@@ -1832,6 +1885,13 @@ class CliApplication:
             self.state.thinking_collapsed = not self.state.thinking_collapsed
             self.set_status(f"Thinking: {'collapsed' if self.state.thinking_collapsed else 'expanded'}")
 
+        @bind("messages_toggle")
+        def messages_toggle(event) -> None:  # type: ignore[no-untyped-def]
+            self.state.messages_expanded = not self.state.messages_expanded
+            self._queue_scroll = 0
+            self.clear_transcript_selection()
+            self.application.invalidate()
+
         @bind("dequeue")
         def dequeue(event) -> None:  # type: ignore[no-untyped-def]
             restored = self._restore_queued_to_editor(event.current_buffer)
@@ -1911,7 +1971,7 @@ class CliApplication:
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
             return
-        if self.state.running:
+        if self.state.running or self.runner.control.pending_message_texts():
             if self.state.attachments:
                 self.set_status("Wait for the active run before sending images")
                 return
@@ -1922,6 +1982,8 @@ class CliApplication:
             else:
                 self.runner.steer(text)
                 self.set_status("Steering queued")
+            if not self.state.running and (self._run_task is None or self._run_task.done()):
+                self._start_queued_run()
             self.application.invalidate()
             return
         self._reset_submitted_buffer(text)
@@ -1996,6 +2058,18 @@ class CliApplication:
                     self._cancel_sent = False
 
         self._run_task = asyncio.create_task(work())
+
+    def _start_queued_run(self) -> None:
+        if self.interaction is not None or self.runner.current_interrupt() is not None:
+            return
+        text = self.runner.control.pop_steering()
+        if text is None:
+            text = self.runner.control.pop_follow_up()
+        if text is not None:
+            # The applied event records the user message in the transcript.
+            self._start_run("", resume_call=partial(
+                self.runner.invoke, text, on_event=self._on_event_thread,
+            ))
 
     async def image_command(self, arg: str) -> None:
         value = arg.strip()
@@ -2181,6 +2255,10 @@ class CliApplication:
             self.interaction = self._deferred_config_interaction
             self._deferred_config_interaction = None
             self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
+        elif result.status == "completed":
+            # Input can arrive after the worker's final queue check, while
+            # the UI still considers that worker to be running.
+            self._start_queued_run()
         self.application.invalidate()
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:

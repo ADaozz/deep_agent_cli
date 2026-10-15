@@ -44,6 +44,18 @@ def test_tool_body_error_is_not_blamed_on_arguments() -> None:
     assert ToolArgHintMiddleware().wrap_tool_call(request, lambda _: original) is original
 
 
+def test_excessive_choices_tell_model_to_shorten_options() -> None:
+    tool = build_human_input_tools()[0]
+    request = _Request(tool, {"reason": "r", "question": "q", "fields": [{
+        "type": "single_select", "options": [{"value": str(index)} for index in range(4)],
+    }]})
+    result = ToolArgHintMiddleware().wrap_tool_call(request, lambda _: _error_message(tool))
+    assert result.status == "error"
+    assert "fields.0.options" in result.content
+    assert "精简后重新调用" in result.content
+    assert '"maxItems":3' in result.content.replace(" ", "")
+
+
 def test_successful_result_is_passed_through() -> None:
     tool = build_human_input_tools()[0]
     request = _Request(tool, {"reason": "r", "question": "q", "fields": "bad"})
