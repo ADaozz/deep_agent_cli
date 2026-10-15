@@ -68,22 +68,24 @@ deep-agent
 
 ### 2. 配置模型
 
-在 `~/.deep-agent/config.yaml` 中配置模型端点。以下示例使用本地 Chat Completions 服务，`local-model` 应与端点提供的模型 ID 一致：
+在 `~/.deep-agent/config.yaml` 中配置模型端点。以下示例与默认配置模板一致，通过 `TOKEN_PLAN_API_KEY` 环境变量读取密钥：
 
 ```yaml
 llm:
-  default: local/local-model
+  default: token-plan/qwen3.8-flash
   models:
-    local:
-      base_url: http://localhost:8000/v1
-      api_key: sk-local
+    token-plan:
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: ${TOKEN_PLAN_API_KEY}
       api: chat_completions
+      reasoning_efforts: [none, low, medium, xhigh]
       models:
-        local-model:
-          input: [text]
+        qwen3.8-flash:
+          input: [text, image]
+          context_window: 1m
 ```
 
-远程端点可通过 `api_key: ${MODEL_API_KEY}` 引用环境变量。仅声明端点实际支持的输入模态、上下文窗口和推理强度；`api` 省略时默认为 `responses`，不会按模型名或 URL 自动判断协议。完整字段与服务商示例见 [配置参考](docs/configuration.md)。
+`llm.default` 使用“来源/模型”标识。模型项省略的字段继承来源级配置，模型级配置可覆盖来源级配置。使用其他端点时，应同步调整端点、密钥、模型 ID、输入模态、上下文窗口和推理强度；`api` 省略时默认为 `responses`，不会按模型名或 URL 自动判断协议。完整字段与服务商示例见 [配置参考](docs/configuration.md)。
 
 ### 3. 在项目目录启动
 
