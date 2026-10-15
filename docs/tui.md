@@ -28,6 +28,7 @@ deep-agent --version
 | `/new` | 新建会话（首次发送消息后才保存） |
 | `/resume` | 列出有内容的会话并选择；`/resume <id前缀>` 直接切换 |
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
+| `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
@@ -52,7 +53,7 @@ deep-agent --version
 | `Ctrl+R` | 查看 `write_file` / `edit_file` / `delete` 的完整改动 |
 | `Ctrl+P` / `Alt+P` | 切换到下一个 / 上一个模型 |
 | `Ctrl+V` / `Alt+V` | 粘贴图片或文本 |
-| `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；0.5 秒内再按一次退出 |
+| `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；1 秒内再按一次退出 |
 | `Ctrl+D` | 退出 |
 | 滚轮、`PgUp` / `PgDn`、`Ctrl+Home` / `Ctrl+End` | 滚动转录区；`Ctrl+End` 回到底部并恢复跟随 |
 | 鼠标左键拖动 | 选择转录内容，松开后复制到系统剪贴板；拖到边缘会自动滚动 |
@@ -81,6 +82,12 @@ deep-agent --version
 - `ask` 模式下，需要审批的工具调用会弹出面板，选择 Run 或 Reject。
 - Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔。每道选择题最多 3 个模型提供的选项，系统另行附带 `Other:` 用于自定义输入，不计入这 3 个。超过上限时工具参数校验失败，模型需精简后重新提交。
 - 关掉面板后，待处理提示显示在原 Working 状态栏位置，不单独追加到聊天记录；按 `F2` 重新打开。
+
+## Skills
+
+`/skill` 只在空闲且没有待处理交互时可用，不接受参数。选择后在输入框插入 `[Skill: 名称]` 块，可在其后追加任务说明。提交时还原为“使用技能 …，先读取 /skills/…/SKILL.md 并遵循其说明。”；编辑该标记后需还原或删除才能提交。
+
+缺少有效 `name` / `description` 的技能目录不进入列表。Skills 目录以只读方式映射到 `/skills`。Skill 提供操作说明，不负责安装执行工具；沙箱挂载见 [sandbox.md](sandbox.md#playwright-与有头-x11)。
 
 ## 图片
 

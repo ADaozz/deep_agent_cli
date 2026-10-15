@@ -2,7 +2,7 @@
 
 `deep-agent` 是面向 Linux 和 WSL2 的终端 Coding Agent，基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建，支持 OpenAI 兼容模型服务，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。工作区默认为启动目录，也可通过配置指定。
 
-当前版本为 0.1.6，处于早期开发阶段。稳定版发布前，配置格式、会话存储格式和 Python API 可能出现不兼容变更。
+当前版本为 0.1.7，处于早期开发阶段。稳定版发布前，配置格式、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 功能
 
@@ -126,41 +126,21 @@ deep-agent resume 01a08aae   # 替换为已有会话的 ID 或前缀
 | `Ctrl+B` | 展开 / 收起排队消息和已发送的长消息 |
 | `/quit` | 退出 |
 
-完整命令、按键、显示和取消行为见 [终端界面](docs/tui.md)。HTTP 取消为异步操作，以最终 Run 状态及 `run_finished` 事件为准，见 [服务接口](docs/server.md)。
-
-模型提问时，每道选择题最多提供 3 个选项；系统另行添加 `Other:` 供自定义输入，不计入这 3 个。
-
-### 排队与长消息
-
-- 运行中按 `Enter` 追加指令，在下一次模型调用前，或当前模型回复结束、工具尚未进入审批或执行时交给 Agent；已经开始执行的工具会先完成。按 `Alt+Enter` 排队的后续任务，等当前任务完成后执行。已有队列时，新消息继续追加到队尾，按入队顺序处理。
-- `queued N` 表示还有 N 条消息尚未被取用。消息内容在提示旁以一行截断预览，实际取用后才进入对话区。
-- `Alt+↑` 会将尚未取用的消息移出队列并放回输入框，之后不会自动发送；编辑后需再次按 `Enter` 提交。已经被 Agent 取用的消息无法通过此快捷键撤回。
-- 已发送的长消息默认显示前 3 个终端显示行。按 `Ctrl+B` 统一展开或收起长消息与队列；展开的队列可用滚轮或 `PgUp/PgDn` 滚动查看。截断仅影响显示，发送给模型和会话中保存的内容保持完整。
+完整命令、按键、排队、长消息、Skills、显示和取消行为见 [终端界面](docs/tui.md)。HTTP 取消为异步操作，以最终 Run 状态及 `run_finished` 事件为准，见 [服务接口](docs/server.md)。
 
 ## 正则搜索
 
-`grep` 默认使用正则表达式；搜索包含正则元字符的普通文本时，设置 `fixed_string=true`：
-
-```text
-grep(pattern="def (run|execute)\\(", output_mode="content", glob="*.py")
-grep(pattern="config.yaml", fixed_string=true)
-```
-
-旧版 grep 默认按字面量匹配，包含 `.`, `*`, `+`, `[` 等字符的表达式需要注意语义变化。本地工具支持 `files_with_matches`、`content`、`count` 三种模式，结果与执行时间均有上限。Python 回退与 rg 的正则和 ignore 行为存在差异；非本地自定义 Backend 保留自身接口。
-
-rg 定位与验证、备选系统安装、组合/否定 Glob、忽略规则和输出限制见 [正则搜索](docs/search.md)。
+`grep` 默认使用正则表达式；搜索普通文本时设置 `fixed_string=true`。本地工具默认 `output_mode=files_with_matches`，结果与执行时间均有上限。rg 定位、Glob、ignore 和输出限制见 [正则搜索](docs/search.md)。
 
 ## 使用 Skills
 
-每个 Skill 位于 `~/.deep-agent/skills/<技能目录>/`，入口为 `SKILL.md`，YAML 头部包含 `name` 和 `description`。缺少有效元数据的目录不进入技能列表。
-
-`/skill` 选择后在输入框插入技能块，可追加任务说明：
+每个 Skill 位于 `~/.deep-agent/skills/<技能目录>/`，入口为 `SKILL.md`，YAML 头部包含 `name` 和 `description`。`/skill` 选择后插入技能块，可追加说明：
 
 ```text
 [Skill: playwright-cli] 检查当前项目的登录流程并记录截图。
 ```
 
-Skills 目录以只读方式映射到 `/skills`，模型按需读取入口与参考文件。Skill 提供操作说明，不负责安装执行工具；Node、Playwright、浏览器等需预先安装，并通过沙箱配置暴露。[Playwright CLI 官方安装](https://github.com/microsoft/playwright-cli#installing-skills) 生成的 `playwright-cli` 技能目录需复制到 `~/.deep-agent/skills/`。本项目的挂载与有头浏览器配置见 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)，选择器行为见 [终端界面](docs/tui.md)。
+Skills 只读映射到 `/skills`。Skill 提供操作说明，不安装执行工具；Node、Playwright、浏览器等需预先安装并通过沙箱暴露。[Playwright CLI 官方安装](https://github.com/microsoft/playwright-cli#installing-skills) 生成的目录需复制到 `~/.deep-agent/skills/`。选择器见 [终端界面](docs/tui.md#skills)，挂载见 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)。
 
 ## 安全边界与限制
 
@@ -193,11 +173,11 @@ git clone https://github.com/ADaozz/deep_agent_cli.git
 cd deep_agent_cli
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,server]"
 pytest -q
 ```
 
-自动化测试不调用真实模型；真实模型冒烟需单独配置和运行。环境要求与验证方法见 [开发文档](docs/development.md)。
+自动化测试不调用真实模型。环境、冒烟脚本、CI 与发布见 [开发文档](docs/development.md)。
 
 ## 许可证
 

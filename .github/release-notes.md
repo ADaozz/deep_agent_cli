@@ -1,23 +1,29 @@
-## v0.1.6 更新内容
+## v0.1.7 更新内容
 
-### 模型流取消与执行状态一致性
+### 正则搜索与沙箱复用
 
-- 修复内置模型在 SSE 静默、网络读取长期等待时无法被 `Esc` 或 HTTP Cancel 终止的问题。同步 LangGraph Runner 通过可取消的异步模型流关闭底层请求；继续保留现有 `SqliteSaver`、Session Checkpoint、同步 Python API 和沙箱架构。
-- 强化取消与自然完成之间的竞态处理。模型最终回答已提交时，迟到取消不会覆盖 `completed` / `STOP`；取消、失败、完成由 Runner 的最终执行路径裁决，异常退出则由已有的 `PENDING` 恢复机制提示。
-- 修复运行开始前取消可能丢失的问题；按 Run Generation 绑定模型流、预约与取消。上一轮结束清理不会删除下一轮预约；CLI 过滤上一轮迟到事件，HTTP 取消支持幂等请求并在清理完成后公布终态。
-- 在真正确认模型请求关闭之前，不将取消视为完全完成；不能确认清理时明确报告错误并保留 Session Lease，避免新任务并发修改同一 Checkpoint。
+- `grep` 默认使用正则表达式，支持 `fixed_string=true` 字面量匹配，以及 `files_with_matches`、`content`、`count` 三种输出模式。
+- 随 Python 依赖安装 ripgrep，优先使用当前 Python 环境中的 `rg`；支持否定 Glob、组合过滤和有界输出。
+- 沙箱内搜索复用现有持久 Worker，以 argv 直接运行 rg；取消、超时或截断只清理当前搜索进程。无 rg 或非沙箱模式使用可终止的 Python 回退。
+- 使用 NUL 分隔文件名结果，正确处理包含换行符的路径；补充性能、安全与过滤规则回归测试。
 
-### 验证
+### 消息排队与终端交互
 
-- 真实本地 HTTP SSE 故障注入覆盖两种 API 协议、TUI 与 HTTP 服务、静默取消、连接释放、反复取消、会话后续执行和并发隔离。
-- 真实 TokenPlan `qwen3.8-flash` 验收覆盖 Chat Completions 与 Responses：流式 Reasoning、Tool Calls、API Usage、沙箱 Coding 任务、首包后取消和完成竞态。验证记录见 [PR #3](https://github.com/ADaozz/deep_agent_cli/pull/3)。
-- GitHub Actions 在 Python 3.12 / 3.13 上的相关自动回归通过。
+- 修复追加指令未继续调用模型、任务结束时队列滞留的问题，按入队顺序处理消息。
+- 状态栏显示排队内容，支持 `Ctrl+B` 展开长消息与队列，并滚动查看排队消息。
+- 修复 edit 差异背景在 256 色终端下变灰的问题。
+- 每道选择题最多提供 3 个模型选项，系统单独添加 `Other:` 自定义输入，并提供参数纠错提示。
 
-### 已知限制
+### 接口与文档整理
 
-- 非流式模型请求与外部自定义 `BaseChatModel` 不能保证硬取消。
-- 取消不会撤销已执行的文件修改或外部工具副作用；恢复前应检查工作区。
-- 本次未进行 `graph.astream()` 全面迁移，也不改变沙箱网络隔离边界。
+- 清理旧接口别名、历史兼容逻辑与冗余 TodoListMiddleware；Python API 使用方升级前请检查调用方式。
+- 精简 README，将搜索、Skills、终端操作和沙箱说明集中到对应文档，校正显示行数、快捷键与开发环境说明。
+- 补充 Harness 架构、HTTP 服务契约及沙箱网络边界说明。
+
+### 升级注意
+
+- `grep` 已从旧版字面量匹配改为默认正则匹配；搜索含 `.`, `*`, `+`, `[` 等字符的普通文本时，请设置 `fixed_string=true`。
+- Python 回退与 ripgrep 的正则语法和 ignore 行为存在差异，详见 [搜索文档](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.7/docs/search.md)。
 
 ### 安装与升级
 

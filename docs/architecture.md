@@ -170,7 +170,7 @@ sequenceDiagram
 
 默认 `/workspace` 可写，系统运行时目录和 Skills 只读；沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
 
-无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网。共享工作区中的 Unix socket、FIFO 或普通文件可能成为与宿主或有网进程通信的通道。当前也没有资源硬配额；这些是部署与信任模型的边界，不能靠提示词补足。
+无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网；共享工作区中的 Unix socket、FIFO 或普通文件可能成为通信通道。当前也没有资源硬配额。部署边界以 [sandbox.md](sandbox.md#网络) 为准，不能靠提示词补足。
 
 ## grep 搜索
 
@@ -187,19 +187,15 @@ sequenceDiagram
   → 流式解析、计数、去重、截断 → 工具结果
 ```
 
-`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 优先检查当前解释器 `sysconfig.get_path("scripts")` 下可执行的 `rg`，再查系统 PATH；均不可用时使用 Python 回退。运行时不下载二进制、不修改 PATH。
+`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
 
-沙箱启动时将 rg 只读挂载到 `/run/deep-agent/rg`，复用已有系统运行时。工厂内部按权限选择 Pool：`ask` 使用无网实例，`allow` 使用有网实例；与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
+沙箱启动时将 rg 只读挂载到 `/run/deep-agent/rg`。工厂按权限选择 Pool：`ask` 使用无网实例，`allow` 使用有网实例；与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
 
 `start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
 
-**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消、超时或截断只清理本条 rg；Worker 失效则沿用 Pool 的丢失与替换机制。
+**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消、超时或截断只清理本条 rg；Worker 失效则沿用 Pool 的丢失与替换机制。搜索总预算 10 秒，包含 Pool 等待和冷启动。
 
-rg 的工作目录是搜索目录，Glob 相对 `path` 锚定，父目录的 ignore 文件仍可生效；返回路径使用 `/workspace` 或 `/skills`。Glob 在 `_grep_worker.parse_globs()` 统一校验，rg 接收原始 `--glob` 规则，Python 回退按 override 顺序匹配。
-
-结果保留三种模式：`files_with_matches` 返回文件路径，`content` 返回匹配行及行号，`count` 返回每文件的匹配行数。默认 `max_count=1000`，content 按匹配行限制，其他模式按文件限制；总返回上限 64 KiB，单文件上限 10 MiB，搜索总预算 10 秒，包含 Pool 等待和冷启动。超时、截断、部分搜索失败均有明确提示，不把执行故障当作无匹配。
-
-Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历限制文件访问，不具备 Bubblewrap 隔离。Python `re` 与 Rust Regex 存在语法和性能差异，回退也不完整解析 `.gitignore` 等忽略文件。这些差异不通过静默字面量匹配掩盖。
+Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历限制文件访问，不具备 Bubblewrap 隔离。Python `re` 与 Rust Regex、ignore 解析的差异见 [search.md](search.md)；不通过静默字面量匹配掩盖。
 
 ## 模型适配
 

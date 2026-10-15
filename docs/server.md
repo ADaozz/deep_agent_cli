@@ -1,6 +1,6 @@
 # HTTP 服务与前端接入
 
-本文涵盖 HTTP 服务的安装配置、接口及业务行为，可作为聊天、工具审批和人工输入界面的开发契约。接口对应当前 `v0.1.5` 已实现的能力，复用 CLI 的执行逻辑，CLI 继续使用原来的启动方式。接口实现位于 [`agent/server/app.py`](../agent/server/app.py)，任务行为位于 [`agent/server/runtime.py`](../agent/server/runtime.py)。
+本文涵盖 HTTP 服务的安装配置、接口及业务行为，可作为聊天、工具审批和人工输入界面的开发契约。接口对应当前 `0.1.7` 已实现的能力，复用 CLI 的执行逻辑，CLI 继续使用原来的启动方式。接口实现位于 [`agent/server/app.py`](../agent/server/app.py)，任务行为位于 [`agent/server/runtime.py`](../agent/server/runtime.py)。
 
 ## 1. 安装与启动
 
