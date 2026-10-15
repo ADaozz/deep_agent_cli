@@ -208,8 +208,10 @@ Python 回退引擎（UNSANDBOXED 或未找到 `rg`）实现相同的 Glob、隐
 - `Results truncated: maximum match count reached.`：`content` 达到 `max_count`。
 - `Results truncated: maximum file count reached.`：其他模式达到 `max_count`。
 - `Results truncated: maximum output size reached.`：达到 64 KiB。
-- `Results incomplete: search timed out; ...`：超时，返回超时前已完成的部分结果；
-  没有任何结果时返回 `Error: Search timed out`。
+- `Results incomplete: search timed out; ...`：超时，返回超时前已经写出的部分结果；
+  没有任何结果时返回 `Error: Search timed out`。`files_with_matches` 用 NUL 分隔路径，
+  以免文件名中的换行被拆成两个结果；ripgrep 会缓冲这路输出，超时可能不带上尚未写出的路径。
+  `count` 的记录是 `路径\0次数\n`，路径同样可以包含换行。
 - `Results incomplete: ripgrep could not search some files.`：部分文件不可读。
 - `Results incomplete: files larger than 10 MiB skipped.`：直接指定的文件或 Python
   引擎遍历中的大文件被跳过（`rg` 遍历时静默跳过大文件）。

@@ -227,6 +227,24 @@ class _Splitter:
             raise ValueError("search output record exceeded the size limit")
 
 
+class _CountSplitter:
+    """Split ``path\\0count\\n`` records. The path may itself contain newlines."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.buffer = bytearray()
+
+    def feed(self, chunk: bytes):
+        self.buffer += chunk
+        while (nul := self.buffer.find(b"\0")) != -1 and (nl := self.buffer.find(b"\n", nul + 1)) != -1:
+            path = bytes(self.buffer[:nul])
+            count = bytes(self.buffer[nul + 1:nl])
+            del self.buffer[:nl + 1]
+            yield path, count
+        if len(self.buffer) > self.limit:
+            raise ValueError("search output record exceeded the size limit")
+
+
 @dataclass
 class _Target:
     root: Path
@@ -283,9 +301,9 @@ def _rg_arguments(mode: str, fixed_string: bool, globs: list[str], file_limit: i
     if mode == "content":
         args.append("--json")
     elif mode == "files_with_matches":
-        # Newline-separated and line-buffered so a timeout keeps finished paths.
-        # --null would block-buffer them until rg exits.
-        args.append("--files-with-matches")
+        # NUL-delimited: a newline is legal in a Linux filename and must stay one path.
+        # rg block-buffers this stream, so a timeout may not yet include finished paths.
+        args += ["--files-with-matches", "--null"]
     else:
         args += ["--count", "--with-filename", "--null"]
     if fixed_string:
@@ -338,7 +356,7 @@ def _search_rg(executor: BubblewrapBackend, rg: str, target: _Target, pattern: s
                         return False
                 return True
         elif mode == "files_with_matches":
-            splitter = _Splitter(b"\n", record_limit)
+            splitter = _Splitter(b"\0", record_limit)
 
             def consume(chunk: bytes) -> bool:
                 for raw in splitter.feed(chunk):
@@ -346,12 +364,11 @@ def _search_rg(executor: BubblewrapBackend, rg: str, target: _Target, pattern: s
                         return False
                 return True
         else:
-            splitter = _Splitter(b"\n", record_limit)
+            splitter = _CountSplitter(record_limit)
 
             def consume(chunk: bytes) -> bool:
-                for raw in splitter.feed(chunk):
-                    name, _, count = raw.rpartition(b"\0")
-                    if not results.add(virtual(name.decode("utf-8", "replace")), count=int(count)):
+                for name, count in splitter.feed(chunk):
+                    if name and not results.add(virtual(name.decode("utf-8", "replace")), count=int(count)):
                         return False
                 return True
 

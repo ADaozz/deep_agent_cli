@@ -326,8 +326,9 @@ def test_cancel_reaps_bwrap_and_rg(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("mode,line", [
     ("count", "/workspace/a.py: 1"),
-    ("files_with_matches", "/workspace/a.py"),
     ("content", "/workspace/a.py:\n  1: timeout-marker-1"),
+    # --null file lists are block-buffered, so rg does not flush the finished path.
+    ("files_with_matches", None),
 ])
 def test_rg_timeout_reaps_sandbox_and_keeps_partial_results(tmp_path, monkeypatch, mode, line):
     work = tmp_path / "work"
@@ -342,7 +343,10 @@ def test_rg_timeout_reaps_sandbox_and_keeps_partial_results(tmp_path, monkeypatc
     # An explicit file keeps rg sequential: a.py is printed before it blocks on the FIFO.
     result = implementation.search(backend, marker, "/workspace/a.py", None, mode, None, False)
     assert time.monotonic() - start < 3
-    assert result == f"{line}\n{implementation.PARTIAL_TIMEOUT}"
+    if line is None:
+        assert result == implementation.TIMED_OUT
+    else:
+        assert result == f"{line}\n{implementation.PARTIAL_TIMEOUT}"
     assert all(p.poll() is not None for p in processes)
     assert _wait_for(lambda: not _search_processes(marker), 2), _search_processes(marker)
 
@@ -731,6 +735,21 @@ def test_explicit_git_directory_is_searchable_and_default_search_skips_it(engine
     assert implementation.search(backend, "needle", None, None, "files_with_matches", None, False) == "/workspace/a.py"
     assert implementation.search(backend, "needle", "/workspace/.git", None, "files_with_matches", None, False) == \
         "/workspace/.git/HEAD"
+
+
+def test_newline_in_filename_stays_one_result(engine, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    name = "strange\nname.py"
+    (work / name).write_text("needle\nneedle\n")
+    backend = make_backend(engine, work, None)
+    path = f"/workspace/{name}"
+    assert implementation.search(backend, "needle", None, None, "files_with_matches", None, False) == path
+    assert implementation.search(backend, "needle", None, None, "count", None, False) == f"{path}: 2"
+    assert implementation.search(backend, "needle", None, None, "content", None, False) == (
+        f"{path}:\n  1: needle\n  2: needle"
+    )
+    assert implementation.search(backend, "needle", path, None, "count", None, False) == f"{path}: 2"
 
 
 def test_count_is_complete_per_file_and_max_count_limits_files(engine, workspace):
