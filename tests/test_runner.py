@@ -5,7 +5,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import interrupt
 
 from agent.factory import create_agent
 from agent.config import SandboxConfig, Settings
@@ -187,33 +186,6 @@ def test_human_input_rejects_wrong_interrupt_entry() -> None:
     assert resumed.output == "不应继续。"
 
 
-def test_removed_handoff_session_has_clear_resume_error() -> None:
-    def handoff_to_human(reason: str, question: str) -> str:
-        return str(interrupt({"type": "human_input", "reason": reason, "question": question}))
-
-    saver = InMemorySaver()
-    old_prepared = create_agent(
-        model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "old-handoff", "name": "handoff_to_human",
-            "args": {"reason": "缺信息", "question": "选哪个？"},
-        }])]),
-        backend=StateBackend(), skills=[], checkpointer=saver,
-        extra_tools=[StructuredTool.from_function(
-            func=handoff_to_human, name="handoff_to_human", description="Old human input tool",
-        )],
-    )
-    old_runner = AgentRunner(prepared=old_prepared, thread_id="old-human")
-    assert old_runner.invoke("问用户").status == "waiting_human"
-    old_runner.close()
-
-    current = AgentRunner(
-        model=scripted_model([AIMessage(content="done")]), backend=StateBackend(),
-        checkpointer=saver, thread_id="old-human",
-    )
-    with pytest.raises(RuntimeError, match="removed handoff_to_human"):
-        current.submit_human_input({"text": "A"})
-
-
 def test_execute_tool_event_uses_artifact_status() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     events = []
@@ -375,7 +347,7 @@ def test_request_human_input_recovers_from_stringified_fields() -> None:
                     "question": "demo 用哪种 SDK 形态？",
                     "fields": json.dumps([{
                         "id": "sdk_choice", "type": "single_select", "label": "SDK 形态",
-                        "options": [{"id": "deepagents", "label": "官方 deepagents 包"}],
+                        "options": [{"value": "deepagents", "label": "官方 deepagents 包"}],
                     }], ensure_ascii=False),
                     "impact": json.dumps(["SDK 选择决定依赖清单"], ensure_ascii=False),
                 },

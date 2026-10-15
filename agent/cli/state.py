@@ -191,7 +191,7 @@ class CliState:
                 tool.artifact = artifact
             if event.name == "execute" and artifact is not None:
                 if artifact.get("truncated") and not had_tail_snapshot and event.content:
-                    # Legacy/no-stream fallback: the final result has the tail.
+                    # Without streamed output, the final result contains the tail.
                     tool.output = event.content
                 elif not tool.output:
                     tool.output = event.content

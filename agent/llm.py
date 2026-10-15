@@ -306,24 +306,6 @@ class ResponsesChatOpenAI(ProtocolChatOpenAI):
         return self
 
 
-
-def chat_openai(
-    *,
-    model: str,
-    api_key: str,
-    base_url: str,
-    streaming: bool = True,
-    attachment_store: AttachmentStore | None = None,
-    reasoning_effort: str | None = None,
-) -> ResponsesChatOpenAI:
-    """Legacy Responses constructor; prefer build_chat_model with an API profile."""
-    return build_chat_model(
-        ModelProfile("legacy", model, api_key=api_key, base_url=base_url, api="responses",
-                     reasoning_efforts=(reasoning_effort,) if reasoning_effort else ()),
-        streaming=streaming, attachment_store=attachment_store, reasoning_effort=reasoning_effort,
-    )
-
-
 def _optional_reasoning(fields: Any) -> tuple[str, str] | None:
     # 兼容端点采用两种字段名；保留实际字段名用于历史回传，避免重复拼接。
     if not isinstance(fields, dict):
@@ -387,7 +369,7 @@ class ChatCompletionsChatOpenAI(ProtocolChatOpenAI):
                     reasoning = original.additional_kwargs.get("reasoning_content")
                     if isinstance(reasoning, str) and reasoning:
                         fields = original.response_metadata.get("deep_agent_reasoning_fields")
-                        # 旧会话无标记时沿用 reasoning_content；两个别名均出现时优先使用它。
+                        # 无来源字段标记时使用 reasoning_content；两个字段均出现时优先使用它。
                         uses_reasoning = (
                             isinstance(fields, dict)
                             and fields.get("reasoning") is True
@@ -396,13 +378,6 @@ class ChatCompletionsChatOpenAI(ProtocolChatOpenAI):
                         field = "reasoning" if uses_reasoning else "reasoning_content"
                         outbound[field] = reasoning
         return payload
-
-
-# Deprecated Python aliases retained for existing integrations. Use the protocol names.
-QwenChatOpenAI = ResponsesChatOpenAI
-TokenPlanChatOpenAI = ChatCompletionsChatOpenAI
-ReasoningChatOpenAI = ChatCompletionsChatOpenAI
-normalize_qwen_responses_event = normalize_responses_event
 
 
 def build_chat_model(

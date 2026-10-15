@@ -84,7 +84,7 @@ def test_stringified_fields_are_decoded() -> None:
         "question": "demo 用哪种 SDK 形态？",
         "fields": json.dumps([{
             "id": "sdk_choice", "type": "single_select", "label": "SDK 形态",
-            "options": [{"id": "deepagents", "label": "官方 deepagents 包"}],
+            "options": [{"value": "deepagents", "label": "官方 deepagents 包"}],
         }], ensure_ascii=False),
         "recommendation": json.dumps({"value": "deepagents", "reason": "内置规划与子代理"}, ensure_ascii=False),
         "impact": json.dumps(["SDK 选择决定依赖清单"], ensure_ascii=False),
@@ -111,3 +111,12 @@ def test_unparsable_fields_still_raise_validation_error() -> None:
     with pytest.raises(ValidationError) as excinfo:
         HumanInputArgs.model_validate({"reason": "r", "question": "q", "fields": "五个字段，见上文"})
     assert excinfo.value.errors()[0]["type"] == "list_type"
+
+
+def test_option_id_is_not_accepted_as_value() -> None:
+    with pytest.raises(ValidationError):
+        HumanInputArgs.model_validate({
+            "reason": "r", "question": "q",
+            "fields": [{"id": "choice", "type": "single_select",
+                        "options": [{"id": "old-option", "label": "Old option"}]}],
+        })

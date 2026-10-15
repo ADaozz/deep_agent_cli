@@ -76,4 +76,4 @@ prepared = create_agent(
 - `runner.list_sessions()`、`runner.new_session()`、`runner.switch_session(id)`。
 - 目标会话被其他进程持有时，`switch_session` 抛出 `SessionLockBusyError`。
 - 切换会话前需要先用 `runner.take_unapplied_messages()` 取回未生效的 steering / follow-up，否则抛出 `RuntimeError`。
-- `request_human_input` 取代了已移除的 `handoff_to_human`；停在旧工具上的会话恢复时会报错，需要新建会话。
+- 人工输入仅使用 `request_human_input`；不提供旧工具或旧数据库格式的兼容恢复。

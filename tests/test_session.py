@@ -103,53 +103,6 @@ def test_session_catalog_sorted_and_prefix_resolve(tmp_path: Path) -> None:
     assert store.resolve_prefix(first.id[:4]) is None
 
 
-def test_legacy_catalog_migrates_once_and_derives_status(tmp_path: Path) -> None:
-    db = tmp_path / "legacy.sqlite3"
-    conn = sqlite3.connect(db)
-    conn.execute(
-        "CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
-        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL, "
-        "model_id TEXT, permission_mode TEXT, last_run_status TEXT)"
-    )
-    conn.execute(
-        "INSERT INTO session_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("old", "work", "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00",
-         "running", "model-a", "ask", "deferred"),
-    )
-    conn.commit()
-    conn.close()
-
-    for _ in range(2):
-        store = SessionStore(db)
-        info = store.get("old")
-        assert info is not None
-        assert (info.status, info.last_run_status, info.model_id) == ("waiting", StopReason.DEFERRED, "model-a")
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(session_catalog)")}
-        assert "status" not in columns
-        assert {"pending_model_id", "pending_permission_mode", "reasoning_effort", "pending_reasoning_effort"} <= columns
-        assert info.reasoning_effort == "default"
-        assert info.pending_reasoning_effort is None
-        store.close()
-
-
-def test_existing_catalog_adds_pending_columns(tmp_path: Path) -> None:
-    db = tmp_path / "old-current.sqlite3"
-    conn = sqlite3.connect(db)
-    conn.execute(
-        "CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
-        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, model_id TEXT, "
-        "permission_mode TEXT, last_run_status TEXT NOT NULL)"
-    )
-    conn.commit()
-    conn.close()
-    store = SessionStore(db)
-    info = store.create_session()
-    store.set_pending_config(info.id, model_id="beta", permission_mode="allow")
-    assert store.get(info.id).pending_model_id == "beta"
-    assert store.get(info.id).pending_permission_mode == "allow"
-    store.close()
-
-
 def test_runner_rejects_a_second_checkpointer_for_persistent_session(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions.sqlite3")
     try:
@@ -425,3 +378,25 @@ def test_context_usage_restore_requires_completed_current_model(tmp_path, aborte
     finally:
         resumed.close()
         reopened.close()
+
+
+@pytest.mark.parametrize("columns", [
+    "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL",
+    "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, model_id TEXT, permission_mode TEXT, last_run_status TEXT NOT NULL",
+])
+def test_unsupported_catalog_is_rejected_without_migration(tmp_path: Path, columns: str) -> None:
+    db = tmp_path / "unsupported.sqlite3"
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"CREATE TABLE session_catalog ({columns})")
+        status_column = "status" if ", status TEXT" in columns else "last_run_status"
+        conn.execute(
+            f"INSERT INTO session_catalog (id, title, created_at, updated_at, {status_column}) "
+            "VALUES ('saved', 'keep', '2026-10-15T00:00:00+00:00', '2026-10-15T00:00:00+00:00', 'completed')"
+        )
+        original_schema = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'session_catalog'").fetchone()[0]
+        original_rows = conn.execute("SELECT * FROM session_catalog").fetchall()
+    with pytest.raises(ValueError, match="Unsupported session catalog schema"):
+        SessionStore(db)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT sql FROM sqlite_master WHERE name = 'session_catalog'").fetchone()[0] == original_schema
+        assert conn.execute("SELECT * FROM session_catalog").fetchall() == original_rows

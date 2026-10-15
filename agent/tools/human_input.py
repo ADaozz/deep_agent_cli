@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import interrupt
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent.tools.human_interaction import (
     FIELD_TYPES,
@@ -30,9 +30,7 @@ class FieldOption(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     value: str = Field(
-        default="",
         description="选项值，用户选中后按这个值回传",
-        validation_alias=AliasChoices("value", "id"),
     )
     label: str = Field(default="", description="展示给用户的选项文案")
     description: str = Field(default="", description="选项补充说明，可留空")

@@ -4214,3 +4214,21 @@ def test_unconfirmed_cancel_cleanup_is_reported() -> None:
         assert app.state.status == "Cancel cleanup not confirmed"
         assert any("did not confirm" in getattr(block, "content", "") for block in app.state.blocks)
     runner.close()
+
+
+def test_removed_tool_argument_aliases_do_not_create_diff_previews() -> None:
+    from agent.cli.previews import build_diff_preview
+
+    assert build_diff_preview("edit_file", {
+        "file_path": "/workspace/a.py", "old_text": "old", "new_text": "new",
+    }) is None
+
+
+def test_web_search_preview_does_not_parse_output_for_missing_artifact() -> None:
+    from agent.cli.previews import build_web_search_preview
+
+    preview = build_web_search_preview(ToolBlock(
+        "search", "web_search", {"query": "example"}, status="completed",
+        output="Web search results for: example\n5 results",
+    ))
+    assert preview.detail == ""

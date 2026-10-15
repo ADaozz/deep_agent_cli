@@ -124,8 +124,11 @@ class SessionStore:
             pass
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL;")
-        self._conn.executescript(_CATALOG_DDL)
-        self._migrate_catalog()
+        try:
+            self._initialize_catalog()
+        except Exception:
+            self._conn.close()
+            raise
         if self.path.exists():
             try:
                 os.chmod(self.path, 0o600)
@@ -172,55 +175,20 @@ class SessionStore:
         self.attachment_store.close()
         self._conn.close()
 
-    def _migrate_catalog(self) -> None:
-        # Hold a write reservation while checking the schema so concurrent
-        # processes cannot both decide to migrate the same workspace database.
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
-            if "status" in columns:
-                model = "model_id" if "model_id" in columns else "NULL"
-                permission = "permission_mode" if "permission_mode" in columns else "NULL"
-                last = "last_run_status" if "last_run_status" in columns else "NULL"
-                reason = (
-                    f"CASE WHEN {last} IN ('pending', 'stop', 'error', 'aborted', 'deferred') THEN {last} "
-                    "WHEN status = 'completed' OR status IN ('length', 'tool_use') THEN 'stop' "
-                    "WHEN status = 'cancelled' THEN 'aborted' "
-                    "WHEN status = 'failed' THEN 'error' "
-                    "WHEN status IN ('waiting', 'interrupted') THEN 'deferred' "
-                    "ELSE 'pending' END"
-                )
-                self._conn.execute(
-                    "CREATE TABLE session_catalog_new ("
-                    "id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, "
-                    "updated_at TEXT NOT NULL, model_id TEXT, permission_mode TEXT, "
-                    "pending_model_id TEXT, pending_permission_mode TEXT, last_run_status TEXT NOT NULL)"
-                )
-                self._conn.execute(
-                    "INSERT INTO session_catalog_new "
-                    "(id, title, created_at, updated_at, model_id, permission_mode, last_run_status) "
-                    f"SELECT id, title, created_at, updated_at, {model}, {permission}, {reason} "
-                    "FROM session_catalog"
-                )
-                self._conn.execute("DROP TABLE session_catalog")
-                self._conn.execute("ALTER TABLE session_catalog_new RENAME TO session_catalog")
-                self._conn.execute(
-                    "CREATE INDEX session_catalog_updated_idx ON session_catalog (updated_at DESC)"
-                )
-            else:
-                if "pending_model_id" not in columns:
-                    self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_model_id TEXT")
-                if "pending_permission_mode" not in columns:
-                    self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_permission_mode TEXT")
-            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
-            if "reasoning_effort" not in columns:
-                self._conn.execute("ALTER TABLE session_catalog ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'default'")
-            if "pending_reasoning_effort" not in columns:
-                self._conn.execute("ALTER TABLE session_catalog ADD COLUMN pending_reasoning_effort TEXT")
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+
+    def _initialize_catalog(self) -> None:
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
+        expected = {
+            "id", "title", "created_at", "updated_at", "model_id", "permission_mode",
+            "pending_model_id", "pending_permission_mode", "reasoning_effort",
+            "pending_reasoning_effort", "last_run_status",
+        }
+        if columns and columns != expected:
+            raise ValueError(
+                "Unsupported session catalog schema; automatic migration is not supported. "
+                "Use a separate state database for this version."
+            )
+        self._conn.executescript(_CATALOG_DDL)
 
     def attachment_storage_keys(self) -> set[str]:
         """Return references from every retained checkpoint and pending write."""
@@ -343,10 +311,7 @@ class SessionStore:
 
 
 def _session_info(row: Any) -> SessionInfo:
-    try:
-        reason = StopReason(row[6])
-    except ValueError:
-        reason = StopReason.PENDING
+    reason = StopReason(row[6])
     return SessionInfo(
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
         status=_status_for_reason(reason), model_id=row[4], permission_mode=row[5], last_run_status=reason,

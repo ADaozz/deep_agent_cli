@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -111,17 +110,9 @@ def test_configured_instructions_reach_runner_and_create_agent(tmp_path: Path) -
         create_agent(system_prompt="旧参数")  # type: ignore[call-arg]
 
 
-def test_legacy_catalog_migrates_and_resume_restores_model(tmp_path: Path) -> None:
+def test_session_restores_model(tmp_path: Path) -> None:
     db = tmp_path / "sessions.sqlite3"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE session_catalog (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, status TEXT NOT NULL)")
-    conn.execute("INSERT INTO session_catalog VALUES ('legacy', 'old', '2025-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00', 'completed')")
-    conn.execute("INSERT INTO session_catalog VALUES ('legacy-running', 'old', '2025-01-01T00:00:00+00:00', '2025-01-01T00:00:00+00:00', 'running')")
-    conn.commit()
-    conn.close()
     store = SessionStore(db)
-    assert store.get("legacy").last_run_status is StopReason.STOP
-    assert store.get("legacy-running").last_run_status is StopReason.PENDING
     settings = _settings(tmp_path)
     runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
                          settings=settings, session_store=store)

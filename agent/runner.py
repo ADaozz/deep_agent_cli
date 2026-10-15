@@ -521,8 +521,8 @@ class AgentRunner:
                 return {}
             model_id = last.response_metadata.get("deep_agent_model_id")
             if model_id != self._current_model_id:
-                # Legacy checkpoints remain readable; without a source ID their
-                # usage cannot be safely attributed after a model/source switch.
+                # Without a source ID, usage cannot be safely attributed
+                # after a model/source switch.
                 return {}
             if self.session_store is not None:
                 saved = self.session_store.get(self.thread_id)
@@ -1108,11 +1108,6 @@ class AgentRunner:
     ) -> RunResult:
         self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_HUMAN, "submit_human_input")
-        if _has_pending_legacy_handoff(self.prepared.graph, self._thread_config()):
-            raise RuntimeError(
-                "This session uses the removed handoff_to_human tool. "
-                "Start a new session and ask again with request_human_input."
-            )
         validate_human_input_values(values, state.payload)
         envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
         if state.payload.get("interactionId"):
@@ -1664,16 +1659,6 @@ def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:
         except Exception:  # noqa: BLE001
             # Presentation observers must never change Agent/Tool execution semantics.
             pass
-
-
-def _has_pending_legacy_handoff(graph: Any, config: dict[str, Any]) -> bool:
-    state = graph.get_state(config)
-    if not getattr(state, "interrupts", ()):
-        return False
-    for message in reversed((state.values or {}).get("messages", []) or []):
-        if isinstance(message, AIMessage):
-            return any(call.get("name") == "handoff_to_human" for call in message.tool_calls or [])
-    return False
 
 
 def _tool_decisions(

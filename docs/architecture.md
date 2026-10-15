@@ -208,7 +208,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 - `responses` → `ResponsesChatOpenAI`。将已知非标准 `response.reasoning_text.*` 事件规范化为 LangChain 支持的 `response.reasoning_summary_text.*`，标准事件继续由上游解析。
 - `chat_completions` → `ChatCompletionsChatOpenAI`。兼容 `reasoning_content` / `reasoning`，统一保存思考正文，并保留来源字段名用于历史回传。
 
-两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试、请求序列化和附件解析。Responses 继续复用 LangChain 的完整解析循环、工具调用拼接与异常映射；SDK 的结构化 parse 与 create 路径共用 usage 规范化。旧厂商类名暂作为弃用 Python 别名保留，内部不据此选择协议。
+两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试、请求序列化和附件解析。Responses 继续复用 LangChain 的完整解析循环、工具调用拼接与异常映射；SDK 的结构化 parse 与 create 路径共用 usage 规范化。模型客户端统一使用协议类名，不保留旧厂商别名。
 
 图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/stream.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
 
@@ -227,7 +227,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 默认每个工作区对应 `~/.deep-agent/sessions/` 中的一份 SQLite 数据库；作为库使用且未传入持久 checkpointer 时，工厂使用 `InMemorySaver`。持久会话包含：
 
 - LangGraph `SqliteSaver` checkpoint：消息、图状态、中断；禁用 pickle fallback。
-- `session_catalog`：标题、时间、模型、推理强度、权限、待切换配置和上轮结束原因。数据库使用 WAL、权限 `0600`，旧表结构在打开时迁移。
+- `session_catalog`：标题、时间、模型、推理强度、权限、待切换配置和上轮结束原因。数据库使用 WAL、权限 `0600`，仅接受当前表结构，不自动迁移旧数据库。
 - `<db>.locks/`：每 thread 一个 `flock` 独占租约，退出时由内核释放；锁文件保留，描述符 close-on-exec。
 - `<db>.attachments/`：按内容哈希保存的图片附件。
 

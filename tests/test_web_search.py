@@ -248,6 +248,10 @@ def test_web_search_tui_collapses_to_result_count() -> None:
     block = ToolBlock(
         tool_call_id="call-1", name="web_search", arguments={"query": "python release"},
         output="Web search results for: python release\n2 results\n\n1. First\n   URL: https://example.com/first",
+        artifact={"provider": "tavily", "results": [
+            {"title": "First", "url": "https://example.com/first"},
+            {"title": "Second", "url": "https://example.com/second"},
+        ]},
         status="completed",
     )
     collapsed = _capture(_tool(block, False), 100)

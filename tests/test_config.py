@@ -7,7 +7,7 @@ import pytest
 from langchain_openai import ChatOpenAI
 
 from agent.config import Settings, UiDisplayLimits, require_keybindings_outside_workspace, resolve_config_path
-from agent.llm import QwenChatOpenAI, build_chat_model
+from agent.llm import ResponsesChatOpenAI, build_chat_model
 
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
 
@@ -489,7 +489,7 @@ def test_api_selects_compatible_chatopenai_and_rejects_unknown(tmp_path: Path) -
     path.write_text("llm:\n  default: gateway/compatible\n  models:\n    gateway:\n      api: unknown\n      models:\n        compatible: {}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="api"):
         Settings.load(path)
-    assert isinstance(build_chat_model(Settings().active_profile), QwenChatOpenAI)
+    assert isinstance(build_chat_model(Settings().active_profile), ResponsesChatOpenAI)
 
 
 def test_model_source_is_loaded_for_display(tmp_path: Path) -> None:

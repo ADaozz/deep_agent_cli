@@ -36,11 +36,11 @@ from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableErr
 from tests.conftest import scripted_model
 
 
-def test_parse_permission_aliases() -> None:
+def test_parse_permission_modes() -> None:
     assert parse_permission_mode("ask") is PermissionMode.ASK
-    assert parse_permission_mode("all-approve") is PermissionMode.ASK
+    assert parse_permission_mode("all-approve") is None
     assert parse_permission_mode("allow") is PermissionMode.ALLOW
-    assert parse_permission_mode("yolo") is PermissionMode.ALLOW
+    assert parse_permission_mode("yolo") is None
     assert parse_permission_mode("nope") is None
 
 
@@ -660,7 +660,11 @@ def test_approval_file_tool_shows_only_target(tool, key) -> None:
             "old_string": "private old text", "new_string": "private new text"}
     ui = InteractionController.approval([{"toolCallId": "file-1", "name": tool, "args": args}])
     assert f"Tool: {tool}" in ui.question
-    assert "Target: /workspace/report.md" in ui.question
+    if key == "file_path":
+        assert "Target: /workspace/report.md" in ui.question
+    else:
+        assert "Target: <not supplied>" in ui.question
+        assert "/workspace/report.md" not in ui.question
     assert "private" not in ui.question
     assert ui.tool_call_ids == ["file-1"]
     assert ui.option_index == 0

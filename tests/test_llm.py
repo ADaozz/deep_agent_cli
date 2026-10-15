@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_openai import ChatOpenAI
 
-from agent.llm import QwenChatOpenAI, TokenPlanChatOpenAI, normalize_qwen_responses_event
+from agent.llm import ResponsesChatOpenAI, ChatCompletionsChatOpenAI, normalize_responses_event
 
 
 def _convert(event: object):
@@ -25,7 +25,7 @@ def test_qwen_reasoning_delta_is_normalized_without_mutating_sdk_event() -> None
     # Regression baseline: stock LangChain 1.6.x ignores this Qwen event name.
     assert _convert(raw) is None
 
-    normalized = normalize_qwen_responses_event(raw)
+    normalized = normalize_responses_event(raw)
     assert normalized.type == "response.reasoning_summary_text.delta"
     assert normalized.summary_index == 0
     assert normalized.item_id == "rs_1"
@@ -69,7 +69,7 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
         responses = FakeResponses()
         with_raw_response = SimpleNamespace(responses=responses)
 
-    llm = QwenChatOpenAI(
+    llm = ResponsesChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
@@ -133,7 +133,7 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
         responses = FakeAsyncResponses()
         with_raw_response = SimpleNamespace(responses=responses)
 
-    llm = QwenChatOpenAI(
+    llm = ResponsesChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
@@ -144,7 +144,7 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
     # _stream is served by the cancellable async bridge; the plain sync
     # stream must produce the same chunks.
     for chunks in (list(llm._stream([HumanMessage(content="x")])),
-                   list(super(QwenChatOpenAI, llm)._stream([HumanMessage(content="x")]))):
+                   list(super(ResponsesChatOpenAI, llm)._stream([HumanMessage(content="x")]))):
         blocks = [chunk.message.content[0] for chunk in chunks]
         assert chunks[0].message.response_metadata["headers"]["x-test"] == "sync"
         assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
@@ -153,14 +153,14 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
 
 
 def test_responses_extra_body_uses_standard_sdk_envelope() -> None:
-    llm = QwenChatOpenAI(
+    llm = ResponsesChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, extra_body={"enable_thinking": True},
     )
     assert llm._get_request_payload([HumanMessage(content="x")])["extra_body"] == {
         "enable_thinking": True
     }
-    assert QwenChatOpenAI._generate is ChatOpenAI._generate
+    assert ResponsesChatOpenAI._generate is ChatOpenAI._generate
 
 
 def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
@@ -179,7 +179,7 @@ def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
                 "context_length_exceeded", response=response, body={},
             )
 
-    llm = QwenChatOpenAI(
+    llm = ResponsesChatOpenAI(
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True,
     )
@@ -188,7 +188,7 @@ def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
     with pytest.raises(lc_base.OpenAIContextOverflowError):
         list(llm._stream([HumanMessage(content="x")]))
     with pytest.raises(lc_base.OpenAIContextOverflowError):
-        list(super(QwenChatOpenAI, llm)._stream([HumanMessage(content="x")]))
+        list(super(ResponsesChatOpenAI, llm)._stream([HumanMessage(content="x")]))
 
 
 def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_differ() -> None:
@@ -198,7 +198,7 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
     qwen = build_chat_model(ModelProfile("qwen", "qwen3.5-plus"))
     compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", api="chat_completions"))
     assert isinstance(qwen, ChatOpenAI)
-    assert isinstance(compatible, TokenPlanChatOpenAI)
+    assert isinstance(compatible, ChatCompletionsChatOpenAI)
     assert "input" in qwen._get_request_payload([HumanMessage(content="hello")])
     assert "messages" in compatible._get_request_payload([HumanMessage(content="hello")])
     assert compatible.use_responses_api is False
@@ -212,7 +212,7 @@ def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
         "plan/auto", "auto", api="chat_completions",
         base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     ))
-    assert isinstance(model, TokenPlanChatOpenAI)
+    assert isinstance(model, ChatCompletionsChatOpenAI)
     chunk = model._convert_chunk_to_generation_chunk({
         "choices": [{"delta": {"role": "assistant", "reasoning_content": "先分析"}}],
     }, AIMessageChunk, None)
@@ -251,8 +251,8 @@ def test_compatible_profiles_preserve_reasoning_for_all_hosts() -> None:
         "generic/auto", "auto", api="chat_completions",
         base_url="https://example.com/v1",
     ))
-    assert isinstance(token_plan, TokenPlanChatOpenAI)
-    assert isinstance(generic, TokenPlanChatOpenAI)
+    assert isinstance(token_plan, ChatCompletionsChatOpenAI)
+    assert isinstance(generic, ChatCompletionsChatOpenAI)
 
 
 @pytest.mark.parametrize("provider", ["responses", "chat_completions"])
@@ -306,7 +306,7 @@ def test_unconfigured_reasoning_effort_is_rejected() -> None:
 
 def test_baseline_standard_responses_event_is_unchanged() -> None:
     event = SimpleNamespace(type="response.output_text.delta", delta="answer")
-    assert normalize_qwen_responses_event(event) is event
+    assert normalize_responses_event(event) is event
 
 
 def test_baseline_chat_tool_chunks_and_usage() -> None:
