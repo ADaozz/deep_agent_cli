@@ -69,6 +69,9 @@ class CliState:
     pending_user_ids: dict[str, str] = field(default_factory=dict)
     attachments: list[ImageAttachmentRef] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    # Separate a never-started conversation from missing model usage.
+    # Clearing the visible transcript must not reset this session property.
+    context_pristine: bool = True
 
     def add_user(
         self,
@@ -98,6 +101,7 @@ class CliState:
 
     def load_transcript(self, blocks: list[TranscriptBlock]) -> None:
         self.clear()
+        self.context_pristine = not bool(blocks)
         for item in blocks:
             if item.kind == "user":
                 self.blocks.append(MessageBlock(
@@ -123,6 +127,7 @@ class CliState:
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
         if event.type == "run_started":
+            self.context_pristine = False
             self.running = True
             self.status = "Working…  Esc to cancel"
             self.active_block = None

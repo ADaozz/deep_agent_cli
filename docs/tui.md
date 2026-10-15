@@ -107,11 +107,12 @@ deep-agent --version
 
 ## 显示
 
+- **标题**：显示 `DeepAgentCLI v<版本号>`，版本与 `deep-agent --version` 使用同一来源；顶部不再显示第二行快捷键提示，完整操作见 `/help`。
 - **思考区**：默认折叠，保留按当前终端宽度折行后的最后 5 行正文（`ui.thinking_tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
 - **用户长消息**：发送后默认显示前 3 个终端显示行，超出时显示隐藏行数和 `Ctrl+B` 提示。`Ctrl+B` 统一切换长消息与队列的展开状态；只改变显示，发送给模型和会话中保存的内容保持完整。
-- **命令输出**：实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
-- **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并为 `Explored N items`。
-- **文件写入**：新建显示 `Create <路径>`，连续新建合并为 `Create N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
+- **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
+- **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。
+- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。
@@ -120,7 +121,7 @@ deep-agent --version
 
 - 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、排队数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。
 - 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
-- 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。
+- 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。
 - 上下文占用 = 模型最近一次返回的 token usage / `context_window`。端点不返回 usage 时只显示窗口大小；`context_window` 为 0 时不显示。
 - Git 状态每 5 秒在后台刷新，单次探测最长 10 秒。可能的显示：`⎇ checking git`、`⎇ no git`、`git unavailable`、`git error`、`git timeout`。

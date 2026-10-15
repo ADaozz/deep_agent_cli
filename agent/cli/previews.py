@@ -351,7 +351,7 @@ def build_review_mutation(name: str, args: dict[str, Any]) -> FileMutationPrevie
 
 
 def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
-    verb = {"create": "Create", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
+    verb = {"create": "Created", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
     detail = ""
     if mutation.operation == "modify" and mutation.diff:
         detail = f"(+{mutation.diff.added or 0} -{mutation.diff.deleted or 0})"

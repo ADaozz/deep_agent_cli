@@ -50,6 +50,24 @@ flowchart TB
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，TUI 和 HTTP 各自转换和展示。
 
+### 状态文案设计规范
+
+工具卡片和聚合摘要的状态标题统一遵循：**运行中使用进行式（`-ing`），成功完成后使用过去式；等待、失败、取消及完成未确认时不使用成功文案。** 新增或调整状态展示时沿用此口径。
+
+| 操作 | 运行中 | 成功完成后 |
+|---|---|---|
+| 命令执行 | `Running <命令>` | `Ran <命令>` |
+| 编辑文件 | `Editing <路径>` | `Edited <路径>` |
+| 写入文件 | `Writing <路径>` | 根据结果显示 `Created <路径>` 或 `Wrote <路径>` |
+| 删除文件 | `Deleting <路径>` | `Deleted <路径>` |
+| 探索分组 | `Exploring N items` | `Explored N items`（单项用 `item`） |
+
+- **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。
+- **等待与异常单独表达**：等待执行使用中性动作名和 `waiting for input`；完成未确认使用 `interrupted (completion unconfirmed)`。命令失败、超时、取消、启动失败分别显示 `Failed`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
+- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续新建合并为 `Created N files`。
+- **区分动作标签与状态标题**：工具名、审批动作和探索明细中的 `Read`、`Search`、`List` 等动作标签不承担完成状态；成功与否由状态标题、标记及异常提示表达。
+- **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
+
 ## 构图
 
 `factory.build_agent()` 是统一的图装配入口，调用上游 `create_deep_agent()`；`create_agent()` 是便捷入口。`AgentSpec` 描述 instructions、扩展工具、Skills、Backend、沙箱配置和搜索密钥；`PreparedAgent` 保存图、模型、工具注册信息、审批规则、checkpointer、控制器和 SandboxPool 等装配结果。

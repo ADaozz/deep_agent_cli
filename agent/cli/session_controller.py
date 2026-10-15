@@ -73,6 +73,7 @@ class SessionController:
         app._clear_skill_draft()
         app.clear_transcript_selection()
         app.state.clear()
+        app.state.context_pristine = True
         app.state.attachments.clear()
         app.interaction = None
         app._deferred_config_interaction = None

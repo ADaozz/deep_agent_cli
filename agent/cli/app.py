@@ -101,6 +101,15 @@ def _call_in_run_epoch(epoch: int, func: Callable[..., Any], /, *args: Any, **kw
     return copy_context().run(call)
 
 
+def format_workspace_path(path: Path) -> str:
+    """Abbreviate the current user's home directory for display only."""
+    try:
+        relative = path.relative_to(Path.home())
+    except ValueError:
+        return str(path)
+    return "~/" if relative == Path(".") else f"~/{relative}"
+
+
 def format_context_window(window: int) -> str:
     """1000000 -> "1.0m", 200000 -> "200k"."""
     if window >= 1_000_000:
@@ -110,12 +119,14 @@ def format_context_window(window: int) -> str:
     return str(window)
 
 
-def format_context_usage(usage: dict[str, int], window: int) -> str:
+def format_context_usage(usage: dict[str, int], window: int, *, empty_session: bool = False) -> str:
     """Right-hand footer label, empty when the profile declares no window."""
     if window <= 0:
         return ""
     label = f"{format_context_window(window)} Context"
     used = usage.get("input_tokens")
+    if empty_session and not usage:
+        used = 0
     if type(used) is not int or used < 0:
         return f"{label} · Unknown"
     percent = used / window * 100
@@ -374,6 +385,7 @@ class CliApplication:
             require_keybindings_outside_workspace(config_dir, workspace)
         _register_terminal_sequences()
         self.state = CliState()
+        self.state.context_pristine = not runner.thread_has_content()
         self.commands = command_table()
         self.command_by_name = {item.name: item for item in self.commands}
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
@@ -1619,7 +1631,10 @@ class CliApplication:
         elif pending_effort is not None:
             model_label += f" → {pending_effort} (pending)"
         resume_id = self.runner.thread_id[:8]
-        context = format_context_usage(self.state.usage, self.runner.context_window())
+        context = format_context_usage(
+            self.state.usage, self.runner.context_window(),
+            empty_session=self.state.context_pristine and not self.state.running,
+        )
         # Row 1: workspace · model · resume on the left, git on the right.
         # Row 2: sandbox/permission on the left, context on the right.
         # The left side always truncates before the right side.
@@ -1638,7 +1653,7 @@ class CliApplication:
             model_width = max(1, available - get_cwidth(resume_id) - 6)
             model_fit = _truncate_cells(model_label, model_width)
             workspace_width = max(1, available - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
-            workspace_fit = _truncate_cells(f" {self._workspace()}", workspace_width)
+            workspace_fit = _truncate_cells(f" {format_workspace_path(self._workspace())}", workspace_width)
             left_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
             first_padding = " " * max(1, width - left_width - get_cwidth(git_fit))
             if workspace_fit.startswith(" "):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from importlib.metadata import PackageNotFoundError, version
 from dataclasses import replace
 from prompt_toolkit import PromptSession
 from prompt_toolkit.validation import Validator
@@ -18,6 +17,7 @@ from agent.config import ConfigError, Settings, require_keybindings_outside_work
 from agent.runner import AgentRunner
 from agent.sandbox import ExecutionMode, SandboxUnavailableError, UNSANDBOXED_WARNING
 from agent.session import SessionStore
+from agent.version import package_version
 
 
 def create_runner(settings: Settings) -> AgentRunner:
@@ -68,13 +68,6 @@ def _confirm_unsandboxed(error: str) -> None:
         PromptSession().prompt("Confirm: ", validator=validator, validate_while_typing=False)
     except (EOFError, KeyboardInterrupt) as exc:
         raise SystemExit("Startup cancelled.") from exc
-
-
-def package_version() -> str:
-    try:
-        return version("deep-agent-cli")
-    except PackageNotFoundError:
-        return "unknown (source checkout; install the package to read its version)"
 
 
 def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:

@@ -43,6 +43,7 @@ from agent.cli.previews import (
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.cli.skills import skill_message_display
 from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
+from agent.version import package_version
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {
@@ -243,7 +244,7 @@ def _create_group(blocks: list[ToolBlock], expanded: bool, width: int, *, limits
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
         return _tool(blocks[-1], expanded, width, limits=limits)
-    title = Text.assemble(("● ", "green"), (f"Create {len(mutation.paths)} files", "bold"))
+    title = Text.assemble(("● ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
     rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
     for row in (title, *rows):
         row.truncate(max(1, width - 1), overflow="ellipsis")
@@ -555,12 +556,12 @@ def _turn_summary(block: TurnSummaryBlock, timezone: ZoneInfo) -> Any:
 
 
 def _header() -> list[Any]:
-    title = Text.assemble(("DeepAgent", "bold bright_cyan"), ("  terminal coding agent", "dim"))
-    hints = Text(
-        "Esc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands",
-        style="dim",
+    title = Text.assemble(
+        ("DeepAgentCLI", "bold bright_cyan"),
+        (f" v{package_version()}", "dim"),
+        ("  terminal coding agent", "dim"),
     )
-    items: list[Any] = [title, hints]
+    items: list[Any] = [title]
     items.extend([Rule(style="#303030"), Text("")])
     return items
 
@@ -587,9 +588,10 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
     marker_status = "error" if failed or interrupted else "running" if running else "waiting" if waiting else "completed"
     symbol, color = _tool_status_marker(marker_status)
     count = len(blocks)
+    verb = "Exploring" if running else "Explore" if waiting or interrupted or failed else "Explored"
     title = Text.assemble(
         (f" {symbol} ", color),
-        (f"Explored {count} {'item' if count == 1 else 'items'}", "bold"),
+        (f"{verb} {count} {'item' if count == 1 else 'items'}", "bold"),
         (f" · {len(failed)} failed", "dim") if failed else ("", ""),
         (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
         (suffix, "dim"),
@@ -649,7 +651,10 @@ def render_tool_preview(
         else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
         else ""
     )
-    summary = f"{preview.verb} {preview.target}".strip()
+    verb = preview.verb
+    if block.status == "running":
+        verb = {"edit_file": "Editing", "write_file": "Writing", "delete": "Deleting"}.get(block.name, verb)
+    summary = f"{verb} {preview.target}".strip()
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
     mutation = preview.file_mutation
     if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
@@ -691,7 +696,7 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     """Render the current output snapshot; every delta rebuilds this card."""
     status = preview.status
     verb = {
-        "running": "execute", "waiting": "execute", "interrupted": "execute",
+        "running": "Running", "waiting": "execute", "interrupted": "execute",
         "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
         "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
     }[status]

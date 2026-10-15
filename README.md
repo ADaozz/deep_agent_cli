@@ -1,30 +1,38 @@
+<div align="center">
+
 # deep-agent-cli
 
-`deep-agent` 是面向 Linux 和 WSL2 的终端 Coding Agent，基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 构建，支持 OpenAI 兼容模型服务，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。工作区默认为启动目录，也可通过配置指定。
+**在终端中理解代码、审阅修改、运行命令。**
 
-当前版本为 0.1.7，处于早期开发阶段。稳定版发布前，配置格式、会话存储格式和 Python API 可能出现不兼容变更。
+Linux / WSL2 · Python 3.12+<br>
+OpenAI 兼容接口 · Bubblewrap
 
-## 功能
+[快速开始](#快速开始) · [常用操作](#常用操作) · [架构与安全](#架构与安全) · [文档](#文档)
 
-- **代码与文件**：目录浏览、读取、编辑、写入、删除，以及默认正则搜索。
-- **命令执行与审批**：使用会话内的持久沙箱；默认 `ask` 模式在命令执行、文件变更和 Web 搜索前等待审批。
-- **模型与上下文**：支持 Chat Completions / Responses、流式思考与回答、模型和推理强度切换、自动与手动上下文压缩。
-- **交互控制**：运行中追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
-- **会话与附件**：按工作区保存 SQLite 会话，支持恢复；具备图片输入能力的模型可接收图片附件。
-- **项目扩展**：加载 `~/.deep-agent/skills/` 中的 Skills 和工作区根目录的 `AGENTS.md`；配置 Tavily key 后提供 `web_search`。
-- **HTTP 服务**：可选服务复用 Runner，提供文字任务、SSE、审批、人工输入与恢复。接口范围见 [HTTP 服务](docs/server.md)。
+</div>
 
-## 运行要求
+<p align="center">
+  <img src="终端.png" width="760" alt="deep-agent 真实终端空闲界面，底栏显示工作区、模型来源、SANDBOXED 和 perm:ask。">
+</p>
 
-- Linux 或 WSL2；原生 Windows、macOS 和 WSL1 不支持 Bubblewrap 沙箱。
-- Python 3.12+；CI 覆盖 Python 3.12 和 3.13。
-- Bubblewrap 及可用的非特权 user namespace；Ubuntu / WSL2 的限制与处理见 [沙箱排查](docs/sandbox.md#排查ubuntu--wsl2)。
-- 支持 Chat Completions 或 Responses 的模型端点及相应凭据。
-- CLI 需要交互式终端；非交互接入使用 [HTTP 服务](docs/server.md) 或 [Python API](docs/library.md)。
+`deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
-ripgrep（`rg`）由项目的 `ripgrep-bin` Python 依赖自动安装，无需默认执行系统安装步骤。定位顺序为当前 Python 环境 scripts 目录、系统 PATH、Python 正则回退；运行时不自动下载二进制或修改 PATH。备选安装与验证见 [正则搜索](docs/search.md)。
+> 当前版本 **0.1.8**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
-## 安装
+## 能做什么
+
+- **查代码、改文件** — 浏览、读取、正则搜索、编辑和删除；`Ctrl+R` 审阅完整改动，`F2` 处理审批。
+- **运行项目命令** — 实时查看输出，会话内复用持久沙箱；默认审批、隔离直接 IP 网络。
+- **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
+- **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
+
+支持通过 Skills 和 `AGENTS.md` 扩展项目指令。可选 [HTTP 服务](docs/server.md) 与 [Python API](docs/library.md) 复用运行核心。
+
+## 快速开始
+
+需要 **Linux / WSL2、Python 3.12+、Bubblewrap**，以及支持 Chat Completions 或 Responses 的模型端点。CLI 需要交互式终端；原生 Windows、macOS 和 WSL1 不支持这套沙箱。Ubuntu / WSL2 的 user namespace 限制见 [沙箱排查](docs/sandbox.md#排查ubuntu--wsl2)。
+
+### 1. 安装
 
 Debian / Ubuntu：
 
@@ -36,39 +44,33 @@ pipx install deep-agent-cli
 deep-agent --version
 ```
 
-系统默认 Python 低于 3.12 时，可指定已安装的解释器，不替换发行版的 `/usr/bin/python3`：
+系统默认 Python 低于 3.12 时，使用 `pipx install --python /path/to/python3.12 deep-agent-cli` 指定已安装的解释器。ripgrep 随 Python 依赖安装，无需另行安装。
+
+### 2. 初始化与配置
+
+从项目目录启动，首次运行会创建 `~/.deep-agent/config.yaml` 和 Skills 目录，然后退出。已有配置不会被覆盖；设置了 `DEEP_AGENT_CONFIG` 时使用指定配置。
 
 ```bash
-pipx install --python /path/to/python3.12 deep-agent-cli
-```
-
-也可使用虚拟环境：
-
-```bash
-python3.12 -m venv ~/.venvs/deep-agent
-~/.venvs/deep-agent/bin/pip install deep-agent-cli
-~/.venvs/deep-agent/bin/deep-agent --version
-```
-
-升级现有 pipx 安装：
-
-```bash
-pipx upgrade deep-agent-cli
-```
-
-## 快速开始
-
-### 1. 生成配置
-
-```bash
+cd ~/projects/my-app  # 替换为你的项目目录
 deep-agent
 ```
 
-未指定 `DEEP_AGENT_CONFIG` 且默认配置不存在时，首次运行创建 `~/.deep-agent/config.yaml` 和 Skills 目录，然后退出。已存在的配置不会被模板覆盖。
+配置、Skills 和按键配置目录必须位于工作区之外，**不要将家目录或其上层目录作为工作区**。
 
-### 2. 配置模型
+默认模板使用 `token-plan/qwen3.8-flash`。在启动 Agent 的同一个 Bash 终端中输入对应密钥：
 
-在 `~/.deep-agent/config.yaml` 中配置模型端点。以下示例与默认配置模板一致，通过 `TOKEN_PLAN_API_KEY` 环境变量读取密钥：
+```bash
+read -rsp 'Token Plan API key: ' TOKEN_PLAN_API_KEY
+export TOKEN_PLAN_API_KEY
+printf '\n'
+```
+
+使用其他模型服务时，编辑 `~/.deep-agent/config.yaml`，调整端点、密钥、模型 ID 及能力配置。`api` 必须与端点匹配；省略时默认为 `responses`，不会自动判断。
+
+<details>
+<summary>查看模型配置示例</summary>
+
+以下与默认模板一致；`llm.default` 使用“来源/模型”标识，模型项继承来源级字段，并可单独覆盖。
 
 ```yaml
 llm:
@@ -85,88 +87,108 @@ llm:
           context_window: 1m
 ```
 
-`llm.default` 使用“来源/模型”标识。模型项省略的字段继承来源级配置，模型级配置可覆盖来源级配置。使用其他端点时，应同步调整端点、密钥、模型 ID、输入模态、上下文窗口和推理强度；`api` 省略时默认为 `responses`，不会按模型名或 URL 自动判断协议。完整字段与服务商示例见 [配置参考](docs/configuration.md)。
+端点、上下文窗口、输入模态和推理强度取决于所选服务，完整说明见 [配置参考](docs/configuration.md)。
 
-### 3. 在项目目录启动
+</details>
 
-```bash
-cd ~/projects/my-app
-deep-agent
+### 3. 开始第一个任务
+
+在项目目录再次运行 `deep-agent`，输入：
+
+```text
+阅读当前项目，列出程序入口、关键模块和测试命令，并注明对应文件。
+暂不修改文件或执行命令。
 ```
 
-启动时检查配置与沙箱。默认在沙箱不可用时拒绝启动；宿主执行回退需要显式授权，见 [沙箱与权限](docs/sandbox.md)。主配置、Skills 和按键配置目录必须位于工作区之外，因此不能将家目录或其上层目录作为工作区。
+获得项目概览后，可以继续要求一次小范围修改。默认 `ask` 下，文件变更会等待审批：`Ctrl+R` 查看改动，`F2` 打开审批面板。启动检查失败时默认拒绝进入宿主执行，见 [沙箱与权限](docs/sandbox.md)。
 
-终端界面接受自然语言任务，以 `/` 开头的输入用于调用 CLI 命令。
-
-### 4. 恢复会话
+<details>
+<summary>恢复会话、升级与虚拟环境安装</summary>
 
 ```bash
 deep-agent resume           # 选择已保存的会话
-deep-agent resume 01a08aae   # 替换为已有会话的 ID 或前缀
+deep-agent resume 01a08aae   # 换成已有会话的 ID 或前缀
+pipx upgrade deep-agent-cli
 ```
 
-恢复加载会话状态，不自动继续未完成任务。仅支持当前会话数据库结构，不自动迁移旧格式。取消不会回滚已经发生的文件修改或外部副作用，恢复后需核对实际状态。
+恢复只加载状态，不自动继续未完成任务；旧数据库格式不自动迁移。取消不回滚已发生的文件修改或外部副作用。
+
+不使用 pipx 时，也可安装到虚拟环境：
+
+```bash
+python3.12 -m venv ~/.venvs/deep-agent
+~/.venvs/deep-agent/bin/pip install deep-agent-cli
+~/.venvs/deep-agent/bin/deep-agent --version
+```
+
+</details>
 
 ## 常用操作
 
 | 操作 | 用途 |
 |---|---|
-| `/help`、`/status` | 查看帮助、模型、权限和执行状态 |
-| `/model` | 选择模型与推理强度 |
-| `/permission ask\|allow` | 切换审批模式与后续命令的网络策略 |
-| `/resume`、`/new` | 切换或新建会话 |
-| `/skill` | 选择 Skill 并插入输入框 |
-| `/image <路径>` | 附加图片 |
-| `/compact` | 手动压缩上下文 |
-| `Enter` / `Alt+Enter` | 提交任务或运行中追加指令 / 排队后续任务 |
-| `Alt+↑` | 将尚未取用的排队消息移回输入框，停止自动发送 |
+| `/model` | 切换模型与推理强度 |
+| `Ctrl+R` / `F2` | 审阅文件改动 / 处理审批与提问 |
+| `Enter` / `Alt+Enter` | 提交或运行中追加指令 / 排队后续任务 |
 | `Esc` | 请求取消当前任务 |
-| `F2` | 打开待处理的审批或人工输入面板 |
-| `Ctrl+O` / `Ctrl+T` | 展开工具详情 / 思考内容 |
-| `Ctrl+B` | 展开 / 收起排队消息和已发送的长消息 |
-| `/quit` | 退出 |
+| `Ctrl+O` / `Ctrl+T` | 展开工具输出 / 思考内容 |
+| `/resume` / `/new` | 恢复或新建会话 |
+| `/help` / `/status` | 查看完整操作与当前状态 |
 
-完整命令、按键、排队、长消息、Skills、显示和取消行为见 [终端界面](docs/tui.md)。HTTP 取消为异步操作，以最终 Run 状态及 `run_finished` 事件为准，见 [服务接口](docs/server.md)。
+更多按键、图片附件、队列、Skills 和显示设置见 [终端界面](docs/tui.md)。
 
-## 正则搜索
+## 架构与安全
 
-`grep` 默认使用正则表达式；搜索普通文本时设置 `fixed_string=true`。本地工具默认 `output_mode=files_with_matches`，结果与执行时间均有上限。rg 定位、Glob、ignore 和输出限制见 [正则搜索](docs/search.md)。
+**审批决定是否执行，隔离决定命令能访问哪些资源。** 文件工具和命令走不同通路：
 
-## 使用 Skills
+- **文件工具 → 宿主进程**：Backend 将 `/workspace` 映射到工作区，`/skills` 只读，拒绝其他虚拟路径。
+- **命令 → Bubblewrap**：`execute` 经沙箱池运行，会话内按需复用有网、无网 Worker。模型与 Tavily 请求从宿主发送，不受命令网络策略约束。
 
-每个 Skill 位于 `~/.deep-agent/skills/<技能目录>/`，入口为 `SKILL.md`，YAML 头部包含 `name` 和 `description`。`/skill` 选择后插入技能块，可追加说明：
+<details>
+<summary>展开运行架构图</summary>
 
-```text
-[Skill: playwright-cli] 检查当前项目的登录流程并记录截图。
-```
+![TUI 或 HTTP 进入共享的 AgentRunner 和 Deep Agents / LangGraph；普通文件工具在宿主进程访问授权路径，execute 经 SandboxPool 进入 Bubblewrap Worker。](assets/readme/runtime-map.svg)
 
-Skills 只读映射到 `/skills`。Skill 提供操作说明，不安装执行工具；Node、Playwright、浏览器等需预先安装并通过沙箱暴露。[Playwright CLI 官方安装](https://github.com/microsoft/playwright-cli#installing-skills) 生成的目录需复制到 `~/.deep-agent/skills/`。选择器见 [终端界面](docs/tui.md#skills)，挂载见 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)。
+SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模式下有 rg 时复用沙箱池，否则使用宿主 Python 正则回退。完整分层与生命周期见 [架构文档](docs/architecture.md)。
 
-## 安全边界与限制
+</details>
 
-- **审批与隔离独立**：`ask` 默认审批命令、Web 搜索及文件变更；`allow` 仅支持沙箱模式，免审批且所有 execute 使用有网实例。切换权限不停止此前的后台进程。
-- **路径与挂载**：普通文件工具在宿主进程执行，访问受 Backend 路径约束；命令在 Bubblewrap 内访问授权挂载。工作区内的 `.git`、`.env` 等也在可访问范围内，Skills 只读。额外挂载会扩大访问范围。
-- **网络**：`ask` 下 execute 默认无直接 IP 网络，可为单条命令声明 `network=true` 并审批；无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的一切间接通信。模型与 Tavily 请求在宿主发送，不受该命令网络策略约束。
-- **资源与生命周期**：没有 CPU、内存、磁盘或进程数硬配额。会话内按需复用有网/无网沙箱，模型和权限切换不重建实例；会话切换及关闭时清理。
-- **本地状态**：同一会话同时只允许一个进程持有；工作区可能生成 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **客户端限制**：模型和 Tavily 请求不读取代理环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加图片；当前不提供 MCP 或子 Agent。
+| 模式 | 审批 | 命令网络 |
+|---|---|---|
+| **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
+| 沙箱 + `allow` | 所有工具免审批 | 所有 execute 共享宿主网络 |
+| 宿主回退 + `ask` | 显式授权回退后，仍需审批 | 以宿主用户权限执行，无沙箱网络隔离 |
 
-隔离范围、环境变量、工具链挂载、宿主回退及排查步骤以 [沙箱与权限](docs/sandbox.md) 为准。
+只读文件工具与 `grep` 免审批；`allow` 仅限沙箱模式。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
+
+<details>
+<summary>更多边界与当前限制</summary>
+
+- **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。会话切换及关闭时清理沙箱。
+- **挂载与资源**：额外挂载会扩大访问范围；没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
+- **本地状态**：同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **HTTP 接入**：固定 `ask`、强制沙箱。服务级 Bearer 令牌不区分最终用户，接入方需校验登录、项目权限和会话归属，见 [服务接入边界](docs/server.md#推荐连接方式)。
+- **客户端**：模型与 Tavily 请求忽略代理环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加；当前不提供 MCP 或子 Agent。
+
+完整隔离范围、环境变量与宿主回退说明见 [沙箱与权限](docs/sandbox.md)。
+
+</details>
 
 ## 文档
 
-| 文档 | 内容 |
-|---|---|
-| [配置参考](docs/configuration.md) | 模型、推理强度、Web 搜索、路径与环境变量 |
-| [终端界面](docs/tui.md) | 命令、快捷键、图片、Skills 和会话操作 |
-| [正则搜索](docs/search.md) | rg 安装定位、搜索模式、Glob、ignore 和结果限制 |
-| [沙箱与权限](docs/sandbox.md) | 隔离、网络、日志、工具链和系统排查 |
-| [HTTP 服务](docs/server.md) | 部署、接口、审批、人工输入、SSE 与恢复 |
-| [Python API](docs/library.md) | AgentRunner、事件、自定义工具与 Backend |
-| [架构](docs/architecture.md) | Harness 分层、运行边界、Middleware 和持久化 |
-| [开发](docs/development.md) | 测试、冒烟、CI 与发布 |
+- **使用**：[配置参考](docs/configuration.md) · [终端界面](docs/tui.md) · [正则搜索](docs/search.md)
+- **机制**：[沙箱与权限](docs/sandbox.md) · [架构设计](docs/architecture.md)
+- **集成**：[HTTP 服务](docs/server.md) · [Python API](docs/library.md) · [开发指南](docs/development.md)
 
-## 开发
+<details>
+<summary>扩展 Skills 与网页搜索</summary>
+
+Skills 位于 `~/.deep-agent/skills/<技能目录>/SKILL.md`，使用 `/skill` 选择；配置 Tavily key 后启用 `web_search`。外部工具与浏览器需预先安装并通过沙箱挂载，见 [Skills 用法](docs/tui.md#skills) 与 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)。
+
+</details>
+
+<details>
+<summary>从源码开发</summary>
 
 ```bash
 git clone https://github.com/ADaozz/deep_agent_cli.git
@@ -177,8 +199,8 @@ pip install -e ".[dev,server]"
 pytest -q
 ```
 
-自动化测试不调用真实模型。环境、冒烟脚本、CI 与发布见 [开发文档](docs/development.md)。
+自动化测试不调用真实模型；CI 覆盖 Python 3.12 和 3.13。更多说明见 [开发指南](docs/development.md)。
 
-## 许可证
+</details>
 
-[MIT](LICENSE)
+[MIT License](LICENSE)
