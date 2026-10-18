@@ -188,7 +188,8 @@ class RunManager:
             settings = self._model_settings(project_id)
             return {"models": [{"id": profile.id, "model": profile.model,
                                 "source": profile.source or profile.id.split("/", 1)[0],
-                                "reasoning_efforts": list(profile.reasoning_efforts) or ["default"]}
+                                "reasoning_efforts": list(profile.reasoning_efforts) or ["default"],
+                                "input": list(profile.input)}
                                for profile in settings.list_profiles()],
                     "current": self._model_selection(settings, settings.llm_default, "default")}
 

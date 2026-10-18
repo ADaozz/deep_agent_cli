@@ -99,7 +99,7 @@ def service(base):
     import yaml
     (base/'model.yaml').write_text(yaml.safe_dump({
         'llm': {'default': 'OrgA/model-one', 'models': {
-            'OrgA': {'api_key': 'model-test-secret', 'models': {'model-one': {'reasoning_efforts': ['low', 'high']}, 'model-two': {}}},
+            'OrgA': {'api_key': 'model-test-secret', 'models': {'model-one': {'input': ['text', 'image'], 'reasoning_efforts': ['low', 'high']}, 'model-two': {}}},
             'OrgB': {'api_key': 'model-test-secret-b', 'models': {'model-three': {'reasoning_efforts': ['medium', 'high']}}},
         }},
         'paths': {'config_dir': str(base/'agent-config')},

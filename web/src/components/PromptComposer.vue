@@ -45,20 +45,32 @@ const emit = defineEmits<{
 const area = ref<HTMLTextAreaElement | null>(null)
 const plusOpen = ref(false)
 const skillsOpen = ref(false)
-watch(plusOpen, () => { skillsOpen.value = false })
+const attachmentError = ref('')
+watch(plusOpen, () => { skillsOpen.value = false; attachmentError.value = '' })
 function selectSkill(skill: SkillReference): void {
   if (!props.skills.some(item => item.path === skill.path)) emit('update:skills', [...props.skills, skill])
   plusOpen.value = false
 }
 const pathKind = ref<'file' | 'image' | null>(null)
 watch(() => props.draftKey, () => { pathKind.value = null; plusOpen.value = false })
-function pickPath(kind: 'file' | 'image'): void { plusOpen.value = false; pathKind.value = kind }
+function pickPath(kind: 'file' | 'image'): void {
+  if (!supportsImages.value) { attachmentError.value = '请切换到支持图片理解的模型'; return }
+  plusOpen.value = false
+  pathKind.value = kind
+}
 function addPaths(paths: PathReference[]): void {
   emit('update:paths', [...props.paths, ...paths.filter(p => !props.paths.some(existing => existing.path === p.path))])
   pathKind.value = null
 }
 const modelProject = computed(() => app.view === 'thread' ? currentRecord.value?.session.project_id || '' : app.draftProjectId || app.projects[0]?.id || '')
 const modelSession = computed(() => app.view === 'thread' ? app.sessionId : '')
+
+const supportsImages = computed(() => {
+  const catalog = models.catalogs[modelProject.value]
+  const selection = modelSession.value ? models.sessions[modelSession.value] : models.drafts[modelProject.value] || catalog?.current
+  return catalog?.models.find(model => model.id === selection?.model_id)?.input?.includes('image') || false
+})
+watch(supportsImages, () => { attachmentError.value = '' })
 
 const canSend = computed(() => !props.disabled && !props.running && !props.busy && !models.changing[modelSession.value] && (props.modelValue.trim().length > 0 || props.paths.length > 0 || props.skills.length > 0))
 const pill = computed(() => props.variant === 'pill')
@@ -131,16 +143,17 @@ function onRound(): void {
           <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
             <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
             <template v-else>
-              <button class="pop-item" type="button" @click="pickPath('file')">
+              <button class="pop-item" type="button" :aria-disabled="!supportsImages" @click="pickPath('file')">
                 <Icon name="file" :size="13" />
                 <span class="grow">上传文件</span>
               </button>
-              <button class="pop-item" type="button" @click="pickPath('image')">
+              <button class="pop-item" type="button" :aria-disabled="!supportsImages" @click="pickPath('image')">
                 <Icon name="image" :size="13" />
                 <span class="grow">上传图片</span>
               </button>
               <button class="pop-item" type="button" :disabled="disabled || running || busy" @click="skillsOpen = true"><span class="grow">Skills</span><Icon name="chevronRight" :size="11" /></button>
             </template>
+            <p v-if="attachmentError" class="pop-note model-error" role="alert">{{ attachmentError }}</p>
           </Popover>
         </span>
 
@@ -169,16 +182,17 @@ function onRound(): void {
         <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
           <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
           <template v-else>
-            <button class="pop-item" type="button" @click="pickPath('file')">
+            <button class="pop-item" type="button" :aria-disabled="!supportsImages" @click="pickPath('file')">
               <Icon name="file" :size="13" />
               <span class="grow">上传文件</span>
             </button>
-            <button class="pop-item" type="button" @click="pickPath('image')">
+            <button class="pop-item" type="button" :aria-disabled="!supportsImages" @click="pickPath('image')">
               <Icon name="image" :size="13" />
               <span class="grow">上传图片</span>
             </button>
             <button class="pop-item" type="button" :disabled="disabled || running || busy" @click="skillsOpen = true"><span class="grow">Skills</span><Icon name="chevronRight" :size="11" /></button>
           </template>
+          <p v-if="attachmentError" class="pop-note model-error" role="alert">{{ attachmentError }}</p>
         </Popover>
       </span>
 

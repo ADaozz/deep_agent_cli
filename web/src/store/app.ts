@@ -1,3 +1,5 @@
+import { clearDrafts } from './drafts'
+import { readThreadLocation, writeThreadLocation } from './threadLocation'
 import { applyDraftPermission } from './capabilities'
 import { computed, reactive } from 'vue'
 import { recentWorkspacePaths, rememberWorkspace } from './workspaces'
@@ -22,15 +24,10 @@ import {
 } from '../lib/runView'
 import { STATUS_UI } from '../lib/timeline'
 import {
-  clearRecords,
-  loadLastSessionId,
-  loadRecords,
   makeRunRecord,
-  saveLastSessionId,
-  saveRecords,
   type RecordMap,
 } from './records'
-import { PROXY_BASE_URL, apiConfig, persistSettings, settings } from './settings'
+import { PROXY_BASE_URL, apiConfig, settings } from './settings'
 
 export type StreamPhase = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'closed'
 
@@ -61,7 +58,7 @@ export const app = reactive({
   view: 'home' as AppView,
   /** Repository picked for the next new chat on the home screen. */
   draftProjectId: '',
-  records: loadRecords() as RecordMap,
+  records: {} as RecordMap,
   conn: { health: false, authorized: false, error: '', checkedAt: '' },
   banner: null as Banner | null,
   busy: { submit: false, resume: false, cancel: false, session: false },
@@ -206,7 +203,6 @@ export function runBannerAction(action: BannerAction): void {
       break
     case 'use-proxy':
       settings.baseUrl = PROXY_BASE_URL
-      persistSettings()
       app.settingsDirty += 1
       setBanner('info', '已切换到 /api/agent 代理——正在重连…')
       void connect()
@@ -349,7 +345,6 @@ export async function loadSessions(): Promise<void> {
       const existing = app.records[session.id]
       if (existing) existing.session = session
     }
-    saveRecords(app.records)
   } catch (error) {
     showError(error, '加载会话')
   } finally {
@@ -365,7 +360,7 @@ export function setProjectFilter(projectId: string): void {
 /** Re-open the session the user was looking at before reloading the page. */
 function restoreSelection(): void {
   if (app.sessionId) return
-  const saved = loadLastSessionId()
+  const saved = readThreadLocation()
   if (saved && (app.records[saved] || app.sessions.some((item) => item.id === saved))) {
     selectSession(saved)
     // Reopening the page lands on the thread the user was reading, like the real page.
@@ -386,7 +381,7 @@ function restoreSelection(): void {
 export function goHome(): void {
   app.sessionId = ''
   app.view = 'home'
-  saveLastSessionId('')
+  writeThreadLocation('')
 }
 
 export function openSession(sessionId: string): void {
@@ -424,7 +419,7 @@ export async function sendFromHome(text: string): Promise<boolean> {
     if (!app.sessions.some((item) => item.id === session.id)) {
       app.sessions = [session, ...app.sessions]
     }
-    saveRecords(app.records, true)
+
     selectSession(session.id)
     await applyDraftModel(projectId, session.id)
     await applyDraftPermission(projectId, session.id)
@@ -457,7 +452,6 @@ export async function createSession(explicitProjectId?: string): Promise<void> {
       // keep any running stream of the previous session alive
     }
     const record = ensureRecord(session)
-    saveRecords(app.records, true)
     if (!app.sessions.some((item) => item.id === session.id)) {
       app.sessions = [session, ...app.sessions]
     }
@@ -474,7 +468,7 @@ export async function createSession(explicitProjectId?: string): Promise<void> {
 
 export function selectSession(sessionId: string): void {
   app.sessionId = sessionId
-  saveLastSessionId(sessionId)
+  writeThreadLocation(sessionId)
   let record = app.records[sessionId]
   if (!record) {
     const session = app.sessions.find((item) => item.id === sessionId)
@@ -503,7 +497,6 @@ export function attachRun(record: SessionRecord, runRecord: RunRecord): void {
   if (!target.title && runRecord.prompt && !runRecord.prompt.startsWith('原始指令不可用')) {
     target.title = runRecord.prompt.replace(/\s+/g, ' ').trim().slice(0, 80)
   }
-  saveRecords(app.records, true)
 }
 
 /** Fetch server summaries and replay logs even for completed runs. */
@@ -530,7 +523,6 @@ export async function loadSessionHistory(sessionId: string, more = false): Promi
       }
     }
     app.history[sessionId].cursor = page.next_cursor
-    saveRecords(app.records, true)
   } finally {
     if (app.history[sessionId]) app.history[sessionId].loading = false
   }
@@ -547,7 +539,7 @@ async function discoverActiveRuns(): Promise<void> {
     if (!app.sessionId) {
       app.sessionId = session.id
       app.view = 'thread'
-      saveLastSessionId(session.id)
+      writeThreadLocation(session.id)
     }
   }
 }
@@ -612,7 +604,7 @@ function canonicalRun(runRecord: RunRecord): RunRecord {
   return findRunRecord(runRecord.id) ?? runRecord
 }
 
-export function applyRunSnapshot(runRecord: RunRecord, snapshot: Run, fromEvent = false): void {
+export function applyRunSnapshot(runRecord: RunRecord, snapshot: Run): void {
   const target = canonicalRun(runRecord)
   // Never let an older snapshot (e.g. a slow poll) roll the UI back.
   if (snapshot.updated_at && target.run?.updated_at && snapshot.updated_at < target.run.updated_at) {
@@ -625,7 +617,6 @@ export function applyRunSnapshot(runRecord: RunRecord, snapshot: Run, fromEvent 
     target.view.rejected = ''
   }
   if (isTerminal(snapshot.status)) finalizeRecord(target)
-  saveRecords(app.records, fromEvent)
 }
 
 export async function syncRun(runRecord: RunRecord): Promise<void> {
@@ -730,7 +721,6 @@ export async function refreshCurrent(): Promise<void> {
     const session = await api.getSession(apiConfig(), record.session.id)
     record.session = session
     await loadSessionHistory(session.id)
-    saveRecords(app.records, true)
   } catch (error) {
     showError(error, '刷新会话')
   }
@@ -763,7 +753,6 @@ async function runStreamLoop(record: RunRecord, signal: AbortSignal): Promise<vo
         runRecord.cursor = message.id
         app.stream = { phase: 'live', runId: runRecord.id, note: '' }
         attempt = 0
-        saveRecords(app.records)
         if (message.event === 'run_finished') {
           break
         }
@@ -773,7 +762,6 @@ async function runStreamLoop(record: RunRecord, signal: AbortSignal): Promise<vo
       await syncRun(runRecord).catch(() => undefined)
       if (isTerminal(runRecord.run.status)) {
         runRecord.replayComplete = true
-        saveRecords(app.records, true)
         break
       }
       note = '事件流结束，将从上次游标继续'
@@ -841,7 +829,6 @@ export function startPolling(): void {
 }
 
 export function stopStreams(): void {
-  saveRecords(app.records, true)
   for (const controller of streamHandles.values()) controller.abort()
   streamHandles.clear()
   if (pollTimer) {
@@ -853,13 +840,13 @@ export function stopStreams(): void {
 /** Wipe the browser-side transcripts (the service keeps its own state). */
 export function resetRecords(): void {
   stopStreams()
-  clearRecords()
+  clearDrafts()
+  writeThreadLocation('')
   app.records = {}
   app.history = {}
   startPolling()
   app.sessionId = ''
   app.view = 'home'
-  saveRecords(app.records, true)
 }
 
 export function initApp(): void {

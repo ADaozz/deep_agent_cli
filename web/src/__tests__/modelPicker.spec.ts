@@ -63,3 +63,11 @@ describe('CLI-style model picker', () => {
     expect(w.get('.model-pick').text()).toBe('model-one')
   })
 })
+
+it('uses the configured default even when it is not the first model in the catalog', async () => {
+  const change = vi.spyOn(api, 'selectModel')
+  vi.mocked(api.models).mockResolvedValue({ ...catalog, current: {model_id:'OrgB/two',model:'model-two',source:'OrgB',reasoning_effort:'default'} })
+  const { w } = await setup('')
+  expect(w.get('.model-pick').text()).toBe('model-two')
+  expect(change).not.toHaveBeenCalled()
+})

@@ -1939,3 +1939,5 @@ a {
 .attachment-path-input { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 10px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
 
 .composer.is-pill.has-paths { border-radius: var(--radius-card); }
+
+.pop-item[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }

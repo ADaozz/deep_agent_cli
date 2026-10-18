@@ -134,7 +134,7 @@ function clearRecords(): void {
             {{ testResult.text }}
           </p>
           <p class="help">
-            本机保存提问和草稿；清除后仍可从服务恢复运行记录与日志，但无法恢复原始提问。
+            localStorage 仅保存未发送的输入框草稿，发送成功即删除。会话记录和显示设置仅在当前页面内存中；刷新后从服务恢复运行日志。
           </p>
         </div>
       </div>

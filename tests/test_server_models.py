@@ -21,7 +21,7 @@ def model_config(tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump({
         'llm': {'default': 'OrgA/one', 'models': {
             'OrgA': {'api_key': 'never-return-this-key', 'base_url': 'http://private.example/v1', 'models': {
-                'one': {'model': 'model-one', 'reasoning_efforts': ['low', 'high']}, 'two': {'model': 'model-two'},
+                'one': {'model': 'model-one', 'input': ['text', 'image'], 'reasoning_efforts': ['low', 'high']}, 'two': {'model': 'model-two'},
             }},
             'OrgB': {'api_key': 'other-secret-key', 'models': {'three': {'model': 'model-three', 'reasoning_efforts': ['medium', 'high']}}},
         }},
@@ -43,6 +43,8 @@ def test_catalog_filters_credentials_and_validates_choice(model_config):
         data = response.json()
         assert [(m['source'], m['model']) for m in data['models']] == [('OrgA', 'model-one'), ('OrgA', 'model-two'), ('OrgB', 'model-three')]
         assert data['models'][1]['reasoning_efforts'] == ['default']
+        assert data['models'][0]['input'] == ['text', 'image']
+        assert data['models'][1]['input'] == ['text']
         assert data['current']['model_id'] == 'OrgA/one'
         sid = client.post('/v1/sessions', json={'project_id': 'app'}, headers=AUTH).json()['id']
         for body in ({'model_id': 'missing', 'reasoning_effort': 'high'}, {'model_id': 'OrgA/one', 'reasoning_effort': 'extreme'}, {'model_id': 'OrgA/o', 'reasoning_effort': 'low'}):
@@ -152,3 +154,22 @@ def test_permission_busy_validation_and_unknown_session(model_config):
             assert client.post(endpoint, headers=AUTH, json={'mode': 'ask'}).status_code == 409
         finally:
             client.app.state.manager.active.pop('reserved')
+
+
+def test_new_web_session_uses_configured_default_not_first_catalog_entry(model_config):
+    from agent.server.runtime import _runner_from_settings
+    config = yaml.safe_load(model_config.model_config.read_text())
+    config['llm']['default'] = 'OrgB/three'
+    model_config.model_config.write_text(yaml.safe_dump(config))
+    with TestClient(create_app(model_config)) as client:
+        catalog = client.get('/v1/projects/app/models', headers=AUTH).json()
+        assert catalog['models'][0]['id'] == 'OrgA/one'
+        assert catalog['current']['model_id'] == 'OrgB/three'
+        sid = client.post('/v1/sessions', json={'project_id':'app'}, headers=AUTH).json()['id']
+        assert client.get(f'/v1/sessions/{sid}/model', headers=AUTH).json()['model_id'] == 'OrgB/three'
+        runner = _runner_from_settings(model_config.settings_for('app'), sid)
+        try:
+            assert runner.current_model().id == 'OrgB/three'
+        finally:
+            runner.close()
+            runner.session_store.close()

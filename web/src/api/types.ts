@@ -154,6 +154,7 @@ export interface ModelSelection {
   reasoning_effort: string
 }
 export interface ModelProfile {
+  input?: ('text' | 'image')[]
   id: string
   model: string
   source: string
