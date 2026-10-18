@@ -58,7 +58,8 @@ HTTP 服务复用 CLI 的 `AgentRunner`、模型调用、工具、审批、人�
 | 继续已有暂停或配置边界中断 | 支持 | 对相应状态调用 continue |
 | 服务重启后恢复中断会话 | 支持 | 在原会话创建 `resume=true` 的新任务 |
 | 会话任务列表、项目活动任务 | 支持 | 只读任务摘要分页和活动任务查询，见 [Web 集成新增的只读查询](#web-集成新增的只读查询) |
-| 会话标题、搜索、删除、消息列表 | 未提供 | 会话接口只有 ID、项目和创建时间；调用方保存展示记录 |
+| 会话标题、删除空会话 | 支持 | 标题来自第一条提问或 CLI 目录；没有任务的会话可删除 |
+| 会话搜索、消息列表 | 未提供 | 不提供全文搜索或独立消息接口；展示从任务事件恢复 |
 | 模型/思考强度切换 | 已提供 | 从配置目录选择组织、模型、强度，空闲会话可切换并持久化 |
 | 权限模式切换 | 扩展 GET/POST session permission 接口 | 复用原生 ask/allow；ALLOW 仅沙箱模式并需精确确认 |
 | 主动暂停、手动压缩、运行中追加/插入消息 | 未提供 | 不显示相应 HTTP 操作按钮 |
@@ -95,7 +96,7 @@ Content-Type: application/json
 - `201` 表示会话创建成功；`202` 表示动作已受理，不表示 Agent 已完成。
 - 所有写请求均没有客户端幂等键。发送超时不表示服务器没有执行，不自动重发文字任务。
 - 服务不自动排队。等待审批、等待人工输入和暂停都算占用项目和运行容量。
-- 服务状态目录中的会话与 CLI 默认数据库分开，不把 CLI 会话 ID 直接当成服务会话。
+- 会话目录与 CLI 相同：使用该 workspace 的 `SessionStore`（配置了 `paths.state_path` 时用该文件，否则用 `~/.deep-agent/sessions/<workspace 哈希>.sqlite3`）。HTTP 的 run 和事件仍写在服务状态目录的 `service.sqlite3`。`deep-agent resume <会话 ID>` 可以打开 Web 创建的线程，Web 列表也能看到 CLI 已经写入目录的会话。
 
 ### 数据结构
 
@@ -235,13 +236,15 @@ GET /v1/projects
 }
 ```
 
-仅创建服务会话目录项；不调用模型，不占用运行容量，也不创建一个已完成的 Agent 任务。项目不存在返回 `404`。会话项目不能更改。
+用 CLI 的 `SessionStore` 新建线程，并在 HTTP 会话表写入同一个 ID。不调用模型，不占用运行容量，也不创建一个已完成的 Agent 任务。项目不存在返回 `404`。会话项目不能更改。
 
 **列表**：`GET /v1/sessions` 或 `GET /v1/sessions?project_id=app`。
 
-返回 `200 {"sessions":[Session, ...]}`。按创建时间倒序，最多 100 条，没有分页参数；不按最后聊天时间排序。过滤条件不存在返回 `404`，只返回目前配置中仍存在的项目会话。页面不能据此判断项目是否空闲。
+返回 `200 {"sessions":[Session, ...]}`。按创建时间倒序，最多 100 条，没有分页参数；不按最后聊天时间排序。每项多一个 `title`：有 HTTP 提问时用第一条非空提问折叠空白后的前 80 字；否则用 CLI 目录标题。目录里的默认 `New session` 和空标题都返回空字符串。列表合并当前配置里的 CLI 会话。过滤条件不存在返回 `404`。页面不能据此判断项目是否空闲。
 
 **详情**：`GET /v1/sessions/{session_id}`，返回 `200 Session`。会话不存在，或其项目已经移出当前配置，返回 `404`。
+
+**丢弃空会话**：`DELETE /v1/sessions/{session_id}`。只有还没有任何任务的 HTTP 会话会被删除，并清掉没有 checkpoint 的 CLI 目录项，返回 `{"deleted": true}`。已有任务返回 `409`，未知会话返回 `404`。这只用于提交被拒绝后的清理，不是会话归档接口。
 
 ### 4.4 提交文字任务 / 恢复中断
 
@@ -261,7 +264,7 @@ POST /v1/sessions/{session_id}/runs
 
 | 字段 | 类型与默认值 | 约束 |
 | --- | --- | --- |
-| `text` | string 或 null；默认 null | 无 file_paths 时必填，长度 1–100000；有路径时可为空或省略 |
+| `text` | string 或 null；默认 null | 无 file_paths 时必填，长度 1–100000；有路径时可为空或省略。受理后与路径一起写入该 run 的 `prompt`，GET run 会返回；列表摘要不含这段文字。`resume=true` 的 `prompt` 为空 |
 | `file_paths` | string[]；默认 [] | 最多 100 个单行路径；后缀与模型能力校验见 Web 扩展接口 |
 | `resume` | boolean；默认 false | true 时不能同时提供非 null 的 text 或非空 file_paths；用于恢复 checkpoint 中已有中断 |
 
@@ -628,7 +631,7 @@ FastAPI/Pydantic 的参数校验错误使用数组型 detail，例如：
 用户提交 approvals → running → completed
 ```
 
-恢复不保证工具恰好执行一次。取消、崩溃或请求超时后，之前的文件修改和外部副作用可能已经发生，恢复前检查工作区。服务的项目互斥也不约束 CLI 或其他程序，对同目录的写操作由业务系统协调。
+恢复不保证工具恰好执行一次。取消、崩溃或请求超时后，之前的文件修改和外部副作用可能已经发生，恢复前检查工作区。同一个 workspace 同时只能有一个 Deep Agent 在操作：CLI 启动时占用，HTTP 任务从受理到结束占用。另一端再打开或提交时，CLI 直接退出，HTTP 返回 `409`「这个 workspace 正在被另一个 Deep Agent 使用」。
 
 ## 8. 调用示例
 
@@ -847,7 +850,7 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 `GET /v1/projects/{project_id}/git`（网关 `/api/agent/projects/{project_id}/git`）读取对应工作区的 Git 元数据，复用 main CLI 的分支/变更数量解析。没有仓库或 Git 不可用时返回 `{available:false}`，前端隐藏 diff、分支与合并信息。
 
-可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的实际 `git diff --numstat`，包括暂存与未暂存修改；未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
+可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的 `git diff -M --numstat`，包括暂存与未暂存修改，并检测重命名。纯重命名计为 0/0，内容改动只计实际增删；首页卡片的合计与文件列表使用同一组数字。未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
 
 `files` 各项除 `path`、`added`、`removed`、`status`、`binary` 外，还包含 `staged`、`unstaged`、`untracked` 和重命名/复制时的 `old_path`。文件列表用 `git status --porcelain=v1 -z --untracked-files=all` 解析，因此空格、引号和换行文件名按原始路径返回，未跟踪目录会展开为其中的文件。`changed` 仍沿用 CLI 的分支状态行计数。
 

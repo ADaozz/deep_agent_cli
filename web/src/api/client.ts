@@ -133,6 +133,12 @@ export const api = {
   getSession: (config: ApiConfig, sessionId: string) =>
     request<Session>(config, `/v1/sessions/${encodeURIComponent(sessionId)}`),
 
+  deleteSession: (config: ApiConfig, sessionId: string) =>
+    request<{ deleted: boolean }>(config, `/v1/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      body: {},
+    }),
+
   getRun: (config: ApiConfig, runId: string) =>
     request<Run>(config, `/v1/runs/${encodeURIComponent(runId)}`),
 

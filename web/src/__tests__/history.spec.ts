@@ -40,7 +40,80 @@ it('paginates server history, preserves local prompts and fully replays terminal
   await vi.waitFor(() => expect(record.runs[0].replayComplete).toBe(true))
   expect(record.runs.map(run => run.id)).toEqual(['old', 'new'])
   expect(record.runs[0].prompt).toContain('原始指令不可用')
+  expect(record.title).toBe('locally remembered prompt')
   expect(record.runs[0].view.tools.t.content).toBe('real-output')
   expect(store.app.history.s.cursor).toBeNull()
   expect(fetch.mock.calls.some(([url]) => url.includes('cursor=PAGE_2'))).toBe(true)
+})
+
+it('restores a persisted prompt into the thread and the sidebar title', async () => {
+  vi.resetModules()
+  const session = { id: 's', project_id: 'app', created_at: '2026-10-18T00:00:00Z', title: '审查登录' }
+  const run: Run = { id: 'r', session_id: 's', project_id: 'app', status: 'completed', created_at: '2026-10-18T00:01:00Z', updated_at: '2026-10-18T00:01:30Z', result: { output: 'done' }, interrupt_id: null, prompt: '审查登录流程' }
+  vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+    const url = String(input)
+    if (url.endsWith('/sessions')) return new Response(JSON.stringify({ sessions: [session] }))
+    if (url.includes('/sessions/s/runs')) return new Response(JSON.stringify({ runs: [run], next_cursor: null }))
+    if (url.includes('/events')) return new Response('')
+    return new Response(JSON.stringify(run))
+  }))
+  const store = await import('../store/app')
+  stop = store.stopStreams
+  await store.loadSessions()
+  expect(store.sessionRows.value.find((row) => row.id === 's')?.title).toBe('审查登录')
+  await store.loadSessionHistory('s')
+  expect(store.app.records.s.runs[0].prompt).toBe('审查登录流程')
+})
+
+it('removes the empty session when the first run is rejected', async () => {
+  vi.resetModules()
+  const calls: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const method = init?.method || 'GET'
+    calls.push(`${method} ${String(input)}`)
+    if (method === 'POST' && String(input).endsWith('/sessions')) {
+      return new Response(JSON.stringify({ id: 'empty', project_id: 'app', created_at: '2026-10-18T00:00:00Z' }), { status: 201 })
+    }
+    if (method === 'POST' && String(input).includes('/runs')) {
+      return new Response(JSON.stringify({ detail: 'Project already has an unfinished run' }), { status: 409 })
+    }
+    if (method === 'DELETE') return new Response(JSON.stringify({ deleted: true }))
+    return new Response('{}', { status: 404 })
+  }))
+  const store = await import('../store/app')
+  stop = store.stopStreams
+  store.app.projects = [{ id: 'app', path: '/repo' }]
+  store.app.draftProjectId = 'app'
+  expect(await store.sendFromHome('hello')).toBe(false)
+  expect(store.app.sessions.some((item) => item.id === 'empty')).toBe(false)
+  expect(store.app.sessionId).toBe('')
+  expect(calls.some((call) => call.startsWith('DELETE '))).toBe(true)
+})
+
+it('appends to the URL thread instead of creating a session during connect', async () => {
+  vi.resetModules()
+  window.location.hash = 'thread=existing'
+  const existing = { id: 'existing', project_id: 'app', created_at: '2026-10-18T00:00:00Z', title: '已有' }
+  const run: Run = { id: 'run', session_id: 'existing', project_id: 'app', status: 'completed', created_at: '2026-10-18T00:02:00Z', updated_at: '2026-10-18T00:02:00Z', result: { output: 'ok' }, interrupt_id: null, prompt: '追加' }
+  const calls: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const url = String(input)
+    const method = init?.method || 'GET'
+    calls.push(`${method} ${url}`)
+    if (url.endsWith('/health')) return new Response(JSON.stringify({ status: 'ok' }))
+    if (url.endsWith('/workspaces')) return new Response(JSON.stringify({ workspaces: [{ id: 'app', path: '/repo' }] }))
+    if (method === 'GET' && url.endsWith('/sessions')) return new Response(JSON.stringify({ sessions: [existing] }))
+    if (url.includes('/active-run')) return new Response(JSON.stringify({ run: null }))
+    if (method === 'GET' && url.includes('/sessions/existing/runs')) return new Response(JSON.stringify({ runs: [], next_cursor: null }))
+    if (method === 'POST' && url.includes('/sessions/existing/runs')) return new Response(JSON.stringify(run), { status: 202 })
+    if (url.includes('/events')) return new Response('')
+    if (method === 'GET' && url.includes('/runs/run')) return new Response(JSON.stringify(run))
+    return new Response(JSON.stringify({ detail: 'unexpected' }), { status: 404 })
+  }))
+  const store = await import('../store/app')
+  stop = store.stopStreams
+  expect(await store.sendFromHome('追加')).toBe(true)
+  expect(store.app.sessionId).toBe('existing')
+  expect(calls.some((call) => call === 'POST /api/agent/sessions')).toBe(false)
+  expect(calls.some((call) => call.startsWith('POST /api/agent/sessions/existing/runs'))).toBe(true)
 })

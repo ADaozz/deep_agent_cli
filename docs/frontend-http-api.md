@@ -12,11 +12,11 @@ RunSummary只有 `id,session_id,project_id,status,created_at,updated_at`。任�
 - 认证：两接口需要 Bearer；BFF在服务端注入，浏览器不能持有令牌。未知/移除项目、会话404；未授权401。
 - 分页：`limit=50`，1～100；游标由最后一项时间/ID/会话编码生成，作为opaque值传回，错误或跨会话游标422。排序 `(created_at DESC,id DESC)`，同时间以ID稳定排序，使用键集而非offset。
 - 活跃：持 RunManager 锁读取实际 worker 槽位及已提交的任务状态。running/waiting_confirmation/waiting_human/paused/runtime_config_boundary/cancelling均可返回；completed/failed/cancelled/interrupted不作为活跃。无任务run=null；清理失败残留占用返回run=null且blocked=true。
-- 新浏览器先发现 active-run，再定位其 Session 和 Run；选择普通会话后读取摘要、详情和保留的SSE事件。标题只用会话ID片段，没有原始prompt时明确显示不可用。
+- 新浏览器先发现 active-run，再定位其 Session 和 Run；选择普通会话后读取摘要、详情和保留的SSE事件。会话列表带首条提问截断后的 `title`。GET run 含已保存的 `prompt`；更早没有该字段的运行仍显示不可用。
 - 原始协议差异：实际 Runner 的 `delta.kind=assistant/reasoning` 是累计文本；前端assistant替换，reasoning不展开。参考 `answer` 增量例子独立兼容。终态 output 权威覆盖，未知kind不猜为回答。
 - Other：当前 Runner 返回自由文本本身，multi_select包含原选项值与自由文本；不会发送 `__other__` marker 代替用户输入。已由真实 Runner 集成测试确认。
 
-早期 M3 只新增读端点和一个索引；后续模型和 Git 查询见下文。没有会话命名/删除、prompt 持久化、权限切换、多模态或文件下载 API。部署仍限本地单用户，Unix socket 间接通信及 OUTPUT-PERSIST-01 限制见原服务文档。
+早期 M3 只新增读端点和一个索引；后续模型和 Git 查询见下文。没有会话改名、多模态或文件下载 API。没有任务的会话可以用 `DELETE /v1/sessions/{session_id}` 丢弃（已有任务返回 409）。提交文字会写入 run 的 `prompt`，列表摘要仍不含长文本。部署仍限本地单用户，Unix socket 间接通信及 OUTPUT-PERSIST-01 限制见原服务文档。
 
 ## 当前 Web 适配
 

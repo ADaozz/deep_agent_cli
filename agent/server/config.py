@@ -82,7 +82,8 @@ class ServerConfig:
             # Skills and runtime settings must remain outside every writable project.
             for workspace in self.projects.values():
                 require_outside_workspace(path, workspace, label="agent config directory")
+        # Same session database as the CLI: an explicit paths.state_path, otherwise
+        # one file per workspace under ~/.deep-agent/sessions.
         return replace(
             settings, sandbox=replace(settings.sandbox, workspace=root, allow_unsandboxed=False),
-            state_path=self.state_dir / "projects" / project_id / "sessions.sqlite3",
         )

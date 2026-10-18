@@ -53,7 +53,15 @@ function renderInline(source: string): string {
     keep(`${lead}<em>${body}</em>`),
   )
 
-  return text.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => slots[Number(index)] ?? '')
+  // A slot kept inside bold/italic still contains its own placeholder. Restore
+  // until the text is stable so nested inline code is not left as an index.
+  let restored = text
+  for (let pass = 0; pass <= slots.length; pass += 1) {
+    const next = restored.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => slots[Number(index)] ?? '')
+    if (next === restored) break
+    restored = next
+  }
+  return restored
 }
 
 const HEADING = /^(#{1,6})\s+(.*)$/

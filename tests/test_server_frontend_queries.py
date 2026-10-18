@@ -59,6 +59,94 @@ def test_active_run_returns_real_nonterminal_snapshot(config,text,status):
         assert client.get('/v1/projects/one/active-run',headers=AUTH).json()=={'run':None}
 
 
+def test_session_catalog_is_shared_and_workspace_operation_is_exclusive(config):
+    from agent.session import SessionStore, try_acquire_workspace
+    with TestClient(create_app(config, factory=lambda *args: FakeRunner())) as client:
+        sid = session(client)
+        catalog = SessionStore.for_workspace(config.projects['one'])
+        try:
+            assert catalog.get(sid) is not None
+            cli = catalog.create_session(title='来自终端')
+        finally:
+            catalog.close()
+        listed = client.get('/v1/sessions?project_id=one', headers=AUTH).json()['sessions']
+        assert any(item['id'] == cli.id and item['title'] == '来自终端' for item in listed)
+        assert client.get(f'/v1/sessions/{cli.id}', headers=AUTH).status_code == 200
+        held = try_acquire_workspace(config.projects['one'])
+        assert held is not None
+        try:
+            rejected = client.post(f'/v1/sessions/{sid}/runs', json={'text': '占用中'}, headers=AUTH)
+            assert rejected.status_code == 409
+            assert 'workspace' in rejected.json()['detail']
+        finally:
+            held.release()
+        continued = submit(client, cli.id, '终端会话继续')
+        wait(client, continued, 'completed')
+        assert client.get(f'/v1/runs/{continued}', headers=AUTH).json()['prompt'] == '终端会话继续'
+        titled = client.get('/v1/sessions?project_id=one', headers=AUTH).json()['sessions']
+        assert any(item['id'] == cli.id and item['title'] == '终端会话继续' for item in titled)
+        assert client.request('DELETE', f'/v1/sessions/{sid}', headers=AUTH).json() == {'deleted': True}
+        reopened = SessionStore.for_workspace(config.projects['one'])
+        try:
+            assert reopened.get(sid) is None
+            assert reopened.get(cli.id) is not None
+        finally:
+            reopened.close()
+
+
+def test_submitted_prompt_is_restored_and_empty_sessions_can_be_discarded(config):
+    with TestClient(create_app(config, factory=lambda *args: FakeRunner())) as client:
+        sid = session(client)
+        rid = submit(client, sid, '审查登录流程')
+        wait(client, rid, 'completed')
+        run = client.get(f'/v1/runs/{rid}', headers=AUTH).json()
+        assert run['prompt'] == '审查登录流程'
+        listed = client.get('/v1/sessions?project_id=one', headers=AUTH).json()['sessions']
+        assert listed[0]['id'] == sid and listed[0]['title'] == '审查登录流程'
+        summary = client.get(f'/v1/sessions/{sid}/runs', headers=AUTH).json()['runs'][0]
+        assert 'prompt' not in summary
+        empty = session(client)
+        assert client.request('DELETE', f'/v1/sessions/{empty}', headers=AUTH).json() == {'deleted': True}
+        assert client.get(f'/v1/sessions/{empty}', headers=AUTH).status_code == 404
+        assert client.request('DELETE', f'/v1/sessions/{sid}', headers=AUTH).status_code == 409
+        resumed = client.post(f'/v1/sessions/{sid}/runs', json={'resume': True}, headers=AUTH)
+        assert resumed.status_code == 202
+        assert resumed.json()['prompt'] == ''
+
+
+def test_old_database_gains_prompt_without_rewriting_history(tmp_path):
+    path = tmp_path / 'old.sqlite3'
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project_id TEXT NOT NULL,
+            status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            result TEXT NOT NULL DEFAULT '{}', interrupt_id TEXT
+        );
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL
+        );
+    """)
+    conn.execute("INSERT INTO sessions VALUES ('s','p','2026-10-18T00:00:00+00:00')")
+    conn.execute(
+        "INSERT INTO runs(id,session_id,project_id,status,created_at,updated_at,result) "
+        "VALUES ('r','s','p','completed','2026-10-18T00:00:00+00:00','2026-10-18T00:00:01+00:00','{\"output\":\"old\"}')"
+    )
+    conn.commit()
+    conn.close()
+    store = ServiceStore(path, secrets=('sk-live-secret',))
+    try:
+        assert store.run('r')['prompt'] == ''
+        assert store.run('r')['result']['output'] == 'old'
+        created = store.create_run('r2', store.session('s'), 'token sk-live-secret stays hidden')
+        assert created['prompt'] == 'token [REDACTED] stays hidden'
+        assert store.sessions(None)[0]['title'] == 'token [REDACTED] stays hidden'
+        assert store.delete_empty_session('s') is False
+    finally:
+        store.close()
+
+
 def test_old_sqlite_additive_index_does_not_change_history(tmp_path):
     path=tmp_path/'old.sqlite3'
     store=ServiceStore(path);store.create_session('s','p');run=store.create_run('r',store.session('s'));store.finish('r','completed',{'output':'old'});before=store.events('r',0);store.close()

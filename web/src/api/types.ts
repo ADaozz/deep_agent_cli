@@ -37,6 +37,8 @@ export interface Session {
   id: string
   project_id: string
   created_at: string
+  /** First submitted prompt, collapsed and capped. Empty when the service has none. */
+  title?: string
 }
 
 export interface PendingTool {
@@ -97,6 +99,8 @@ export interface Run {
   updated_at: string
   result: Partial<RunResult>
   interrupt_id: string | null
+  /** Submitted text persisted with the run. Absent on older rows. */
+  prompt?: string
 }
 
 /** `agent_event.data` payload (§5 "Agent 事件"). */

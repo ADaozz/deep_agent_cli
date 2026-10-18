@@ -6,8 +6,6 @@ from contextlib import asynccontextmanager
 import hmac
 import json
 from typing import Annotated, Any, Literal
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -189,19 +187,24 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
 
     @api.post("/sessions", status_code=201)
     def create_session(body: CreateSession, service: RunManager = Depends(manager)):
-        service.require_project(body.project_id)
-        return service.store.create_session(str(uuid4()), body.project_id)
+        return service.create_shared_session(body.project_id)
 
     @api.get("/sessions")
     def sessions(project_id: str | None = None, service: RunManager = Depends(manager)):
         if project_id is not None:
             service.require_project(project_id)
-        return {"sessions": [session for session in service.store.sessions(project_id)
-                             if session["project_id"] in config.projects]}
+        return {"sessions": service.list_sessions(project_id)}
 
     @api.get("/sessions/{session_id}")
     def session(session_id: str, service: RunManager = Depends(manager)):
         return service.session(session_id)
+
+    @api.delete("/sessions/{session_id}")
+    def discard_session(session_id: str, service: RunManager = Depends(manager)):
+        try:
+            return service.discard_shared_session(session_id)
+        except ServiceError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
 
     @api.get("/sessions/{session_id}/runs")
     def session_runs(session_id: str, limit: int = Query(default=50, ge=1, le=100),

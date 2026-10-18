@@ -16,7 +16,7 @@ from agent.permission import PermissionMode, allow_mode_available, PERMISSION_AL
 from agent.runner import AgentRunner, RunResult
 from agent.tools.human_interaction import validate_human_input_values
 from agent.sandbox import select_backend, sandbox_pool_of
-from agent.session import SessionStore
+from agent.session import SessionStore, try_acquire_workspace
 from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
 from agent.server.workspaces import restore_workspaces, prepare_workspace, save_workspace
@@ -39,14 +39,20 @@ class ActiveRun:
     cancelled: Event = field(default_factory=Event)
     runner: Any = None
     thread: Thread | None = None
+    workspace_lease: Any = None
 
 
 def runner_factory(config: ServerConfig, project_id: str, session_id: str) -> AgentRunner:
     return _runner_from_settings(config.settings_for(project_id), session_id)
 
 
+def open_session_store(settings: Settings) -> SessionStore:
+    """The CLI session catalog for this workspace. See SessionStore.for_workspace."""
+    return SessionStore.for_workspace(settings.sandbox.workspace, override=settings.state_path)
+
+
 def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
-    store = SessionStore(settings.state_path)
+    store = open_session_store(settings)
     try:
         runner = AgentRunner(
             settings=settings, sandbox_config=settings.sandbox, session_store=store,
@@ -110,12 +116,81 @@ class RunManager:
         if project_id not in self.config.projects:
             raise ServiceError(404, "Unknown project")
 
+    def _catalog(self, project_id: str) -> SessionStore:
+        settings = self.settings_by_project.get(project_id)
+        override = settings.state_path if settings is not None else None
+        return SessionStore.for_workspace(self.config.projects[project_id], override=override)
+
+    def _catalog_session(self, session_id: str) -> dict[str, Any] | None:
+        for project_id in self.config.projects:
+            catalog = self._catalog(project_id)
+            try:
+                info = catalog.get(session_id)
+            finally:
+                catalog.close()
+            if info is None:
+                continue
+            title = "" if info.title in ("", "New session") else info.title
+            return {
+                "id": info.id, "project_id": project_id,
+                "created_at": info.created_at.isoformat(), "title": title,
+            }
+        return None
+
     def session(self, session_id: str) -> dict[str, Any]:
         session = self.store.session(session_id)
+        if session is None:
+            session = self._catalog_session(session_id)
         if session is None:
             raise ServiceError(404, "Unknown session")
         self.require_project(session["project_id"])
         return session
+
+    def create_shared_session(self, project_id: str) -> dict[str, Any]:
+        """Create one thread in the CLI session catalog and remember it for HTTP runs."""
+        self.require_project(project_id)
+        catalog = self._catalog(project_id)
+        try:
+            info = catalog.create_session()
+        finally:
+            catalog.close()
+        record = self.store.create_session(info.id, project_id)
+        record["title"] = ""
+        return record
+
+    def list_sessions(self, project_id: str | None) -> list[dict[str, Any]]:
+        rows = {
+            row["id"]: row for row in self.store.sessions(project_id)
+            if row["project_id"] in self.config.projects
+        }
+        projects = [project_id] if project_id else list(self.config.projects)
+        for pid in projects:
+            catalog = self._catalog(pid)
+            try:
+                for info in catalog.list_sessions(limit=100):
+                    title = "" if info.title in ("", "New session") else info.title
+                    current = rows.get(info.id)
+                    if current is None:
+                        rows[info.id] = {
+                            "id": info.id, "project_id": pid,
+                            "created_at": info.created_at.isoformat(), "title": title,
+                        }
+                    elif title and not current.get("title"):
+                        current["title"] = title
+            finally:
+                catalog.close()
+        return sorted(rows.values(), key=lambda row: row["created_at"], reverse=True)[:100]
+
+    def discard_shared_session(self, session_id: str) -> dict[str, Any]:
+        found = self.session(session_id)
+        if not self.store.delete_empty_session(session_id):
+            raise ServiceError(409, "会话已有任务，不能删除")
+        catalog = self._catalog(found["project_id"])
+        try:
+            catalog.delete_unused(session_id)
+        finally:
+            catalog.close()
+        return {"deleted": True}
 
     def run(self, run_id: str) -> dict[str, Any]:
         run = self.store.run(run_id)
@@ -198,14 +273,13 @@ class RunManager:
             session = self.session(session_id)
             settings = self._model_settings(session["project_id"])
             model_id, effort = settings.llm_default, "default"
-            if settings.state_path is not None and settings.state_path.exists():
-                store = SessionStore(settings.state_path)
-                try:
-                    saved = store.get(session_id)
-                    if saved is not None:
-                        model_id, effort = saved.model_id or model_id, saved.reasoning_effort
-                finally:
-                    store.close()
+            store = open_session_store(settings)
+            try:
+                saved = store.get(session_id)
+                if saved is not None:
+                    model_id, effort = saved.model_id or model_id, saved.reasoning_effort
+            finally:
+                store.close()
             return self._model_selection(settings, model_id, effort)
 
     def change_session_model(self, session_id: str, model_id: str, effort: str) -> dict[str, Any]:
@@ -293,14 +367,13 @@ class RunManager:
             session = self.session(session_id)
             settings = self._model_settings(session["project_id"])
             mode = "ask"
-            if settings.state_path.exists():
-                store = SessionStore(settings.state_path)
-                try:
-                    saved = store.get(session_id)
-                    if saved is not None:
-                        mode = saved.permission_mode or "ask"
-                finally:
-                    store.close()
+            store = open_session_store(settings)
+            try:
+                saved = store.get(session_id)
+                if saved is not None:
+                    mode = saved.permission_mode or "ask"
+            finally:
+                store.close()
             return {"mode": mode}
 
     def change_session_permission(self, session_id: str, mode: str, confirmation: str) -> dict[str, Any]:
@@ -369,15 +442,25 @@ class RunManager:
                 raise ServiceError(409, "Project already has an unfinished run")
             if len(self.active) >= self.config.max_runs:
                 raise ServiceError(429, "Run capacity reached")
+            settings = self.settings_by_project.get(session["project_id"])
+            lease = try_acquire_workspace(
+                self.config.projects[session["project_id"]],
+                state_path=None if settings is None else settings.state_path,
+            )
+            if lease is None:
+                raise ServiceError(409, "这个 workspace 正在被另一个 Deep Agent 使用")
+            if self.store.session(session["id"]) is None:
+                self.store.create_session(session["id"], session["project_id"])
             run_id = str(uuid4())
-            result = self.store.create_run(run_id, session)
-            active = ActiveRun(session["project_id"])
+            result = self.store.create_run(run_id, session, "" if resume or not text else text)
+            active = ActiveRun(session["project_id"], workspace_lease=lease)
             self.active[run_id] = active
             self.store.emit(run_id, "run_started", result)
             active.thread = Thread(target=self._work, args=(run_id, session, active, text, resume), daemon=True)
             try:
                 active.thread.start()
             except BaseException:
+                lease.release()
                 del self.active[run_id]
                 self.store.finish(run_id, "failed", {"status": "failed", "error": "Unable to start worker"})
                 raise
@@ -503,10 +586,14 @@ class RunManager:
                         runner.session_store.close()
                 except Exception:
                     LOG.error("Runner cleanup failed (%s)", run_id)
-                    # Retain admission reservation: unsafe to admit another writer.
+                    # Keep the workspace lease and the admission slot until restart.
                     with self.lock:
                         self.store.finish(run_id, "failed", {"status": "failed", "error": "Runner cleanup failed; restart service"})
                     return
+            lease = active.workspace_lease
+            if lease is not None:
+                lease.release()
+                active.workspace_lease = None
             with self.lock:
                 self.store.finish(run_id, final.status, final)
                 self.active.pop(run_id, None)

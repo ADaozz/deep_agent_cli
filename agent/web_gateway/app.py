@@ -28,6 +28,7 @@ ROUTES = (
     ("GET", "/sessions", "/v1/sessions"),
     ("POST", "/sessions", "/v1/sessions"),
     ("GET", "/sessions/{session_id}", "/v1/sessions/{session_id}"),
+    ("DELETE", "/sessions/{session_id}", "/v1/sessions/{session_id}"),
     ("GET", "/sessions/{session_id}/runs", "/v1/sessions/{session_id}/runs"),
     ("POST", "/sessions/{session_id}/runs", "/v1/sessions/{session_id}/runs"),
     ("GET", "/projects/{project_id}/active-run", "/v1/projects/{project_id}/active-run"),

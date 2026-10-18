@@ -52,7 +52,8 @@ class ServiceStore:
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project_id TEXT NOT NULL,
                 status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                result TEXT NOT NULL DEFAULT '{}', interrupt_id TEXT
+                result TEXT NOT NULL DEFAULT '{}', interrupt_id TEXT,
+                prompt TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
@@ -62,6 +63,9 @@ class ServiceStore:
             CREATE INDEX IF NOT EXISTS runs_session_created ON runs(session_id, created_at DESC, id DESC);
         """)
         with self.lock:
+            columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
+            if "prompt" not in columns:
+                self.conn.execute("ALTER TABLE runs ADD COLUMN prompt TEXT NOT NULL DEFAULT ''")
             for row in self.conn.execute("SELECT id FROM runs").fetchall():
                 if self.run(row["id"])["status"] not in TERMINAL:
                     self.finish(row["id"], "interrupted", {"status": "interrupted", "error": "Service restarted; resume the session explicitly"})
@@ -90,19 +94,44 @@ class ServiceStore:
                 "SELECT * FROM sessions WHERE (? IS NULL OR project_id=?) ORDER BY created_at DESC LIMIT 100",
                 (project_id, project_id),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            if result:
+                ids = [row["id"] for row in result]
+                marks = ",".join("?" * len(ids))
+                prompts = self.conn.execute(
+                    f"SELECT session_id, prompt FROM runs WHERE session_id IN ({marks}) "
+                    "AND prompt != '' ORDER BY created_at ASC, id ASC",
+                    ids,
+                ).fetchall()
+                titles: dict[str, str] = {}
+                for item in prompts:
+                    titles.setdefault(item["session_id"], " ".join(item["prompt"].split())[:80])
+                for row in result:
+                    row["title"] = titles.get(row["id"], "")
+            return result
 
     def create_session(self, session_id: str, project_id: str) -> dict[str, Any]:
         with self.lock, self.conn:
             self.conn.execute("INSERT INTO sessions VALUES (?,?,?)", (session_id, project_id, now()))
         return self.session(session_id)
 
-    def create_run(self, run_id: str, session: dict[str, Any]) -> dict[str, Any]:
+    def delete_empty_session(self, session_id: str) -> bool:
+        """Remove a session that never accepted a run. A session with runs stays."""
+        with self.lock, self.conn:
+            if self.conn.execute("SELECT 1 FROM runs WHERE session_id=? LIMIT 1", (session_id,)).fetchone():
+                return False
+            deleted = self.conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            return deleted.rowcount > 0
+
+    def create_run(self, run_id: str, session: dict[str, Any], prompt: str = "") -> dict[str, Any]:
         stamp = now()
+        stored = prompt if isinstance(prompt, str) else ""
+        for secret in self.secrets:
+            stored = stored.replace(secret, "[REDACTED]")
         with self.lock, self.conn:
             self.conn.execute(
-                "INSERT INTO runs(id,session_id,project_id,status,created_at,updated_at) VALUES (?,?,?,'running',?,?)",
-                (run_id, session["id"], session["project_id"], stamp, stamp),
+                "INSERT INTO runs(id,session_id,project_id,status,created_at,updated_at,prompt) VALUES (?,?,?,'running',?,?,?)",
+                (run_id, session["id"], session["project_id"], stamp, stamp, stored),
             )
         return self.run(run_id)
 
