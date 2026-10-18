@@ -72,7 +72,7 @@ const tracked = computed(() => files.value.filter((file) => {
   return true
 }))
 
-const untrackedFiles = computed(() => (scope.value === 'staged' ? [] : files.value.filter(isUntracked)))
+const untrackedFiles = computed(() => (scope.value === 'unstaged' ? files.value.filter(isUntracked) : []))
 const groups = computed(() => [
   { label: '', files: tracked.value },
   { label: '未跟踪', files: untrackedFiles.value },
@@ -353,7 +353,7 @@ async function copyPaths(): Promise<void> {
             </article>
           </div>
           <p class="panel-empty">
-            来自 {{ title }} 工作区。整体差异比较工作区与 {{ git.head ? 'HEAD' : '空树' }}，已暂存比较索引，未暂存比较工作区与索引。未跟踪文件单独列出。
+            来自 {{ title }} 工作区。整体差异比较工作区与 {{ git.head ? 'HEAD' : '空树' }}，已暂存比较索引，未暂存比较工作区与索引。未跟踪文件只在未暂存中列出。
           </p>
         </template>
         <p v-else class="panel-empty">{{ emptyText }}</p>
