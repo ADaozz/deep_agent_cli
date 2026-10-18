@@ -849,7 +849,13 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的实际 `git diff --numstat`，包括暂存与未暂存修改；未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
 
-查询不 fetch、不 checkout、不提交，也不创建或恢复文件快照。旧的轮次代码快照/回退接口已删除，返回 404。任务执行、审批、取消与清理沿用 main，前端不维护另一套修改/回退机制。
+`files` 各项除 `path`、`added`、`removed`、`status`、`binary` 外，还包含 `staged`、`unstaged`、`untracked` 和重命名/复制时的 `old_path`。文件列表用 `git status --porcelain=v1 -z --untracked-files=all` 解析，因此空格、引号和换行文件名按原始路径返回，未跟踪目录会展开为其中的文件。`changed` 仍沿用 CLI 的分支状态行计数。
+
+`GET /v1/projects/{project_id}/git/diff?path=&scope=all|staged|unstaged&full=0|1`（网关同样路径，允许且仅允许这三个查询参数）返回该文件的统一差异。`all` 比较工作区与 HEAD；没有提交时比较空树。`staged` 比较索引与 HEAD，无提交时比较索引与空树。`unstaged` 比较工作区与索引。未跟踪文件不进入已暂存范围，只在 `all` 和 `unstaged` 中按新增内容返回，不计入行数统计。重命名会带上原路径并启用 Git 的重命名检测。
+
+路径必须是目标 workspace 内的相对文件路径。绝对路径、`..`、越界符号链接和目录返回 422；当前范围没有该变更返回 404。符号链接只返回链接文本，不读取链接目标。二进制文件返回 `binary:true` 且 `hunks` 为空。Git 命令有执行时间上限，预览和完整差异分别限制输出字节与行数，超出时 `truncated:true`。`full=1` 提高上限，仍超过时继续截断。查询不 fetch、不 checkout、不提交，也不创建或恢复文件快照。
+
+响应在 `available:true` 时包含 `path`、`scope`、`status`、`old_path`、`binary`、`symlink`、`target`、`untracked`、`truncated` 和 `hunks`。每个 hunk 含 `header`、起止行数和 `lines`；行的 `kind` 为 `context`、`add`、`delete` 或 `meta`，并带 `old_no` 与 `new_no`。Git 不可用、超时或命令失败时返回 `{available:false}`。旧的轮次代码快照/回退接口已删除，返回 404。任务执行、审批、取消与清理沿用 main，前端不维护另一套修改/回退机制。
 
 ## Workspace 路径与分支选择
 

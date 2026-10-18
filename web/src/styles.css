@@ -1700,11 +1700,16 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 6px;
+  border: 0;
   border-radius: var(--radius-row);
+  background: transparent;
   color: var(--t2);
+  font: inherit;
   font-size: 13px;
   line-height: 18px;
+  text-align: left;
 }
 
 .file-row:hover {
@@ -1728,6 +1733,118 @@ a {
   color: var(--t3);
   font-size: 12px;
   line-height: 16px;
+}
+
+.diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.diff-scopes {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.diff-count {
+  flex: none;
+  color: var(--t3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.diff-view {
+  margin: 0 0 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.diff-note {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.hunk + .hunk {
+  border-top: 1px solid var(--line);
+}
+
+.hunk-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  background: var(--bg-app);
+  color: var(--t3);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: left;
+}
+
+.hunk-header {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hunk-lines {
+  overflow-x: auto;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 3.2em 1.1em minmax(0, max-content);
+  gap: 6px;
+  padding: 0 10px;
+  color: var(--t2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 18px;
+}
+
+.diff-line.is-add {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.diff-line.is-delete {
+  background: #fdecec;
+  color: var(--danger);
+}
+
+.diff-line.is-meta {
+  color: var(--t4);
+}
+
+.diff-no,
+.diff-mark {
+  color: var(--t4);
+  text-align: right;
+}
+
+.diff-line.is-add .diff-mark,
+.diff-line.is-delete .diff-mark {
+  color: inherit;
+}
+
+.diff-code {
+  white-space: pre;
+}
+
+.diff-full {
+  margin: 8px 10px;
 }
 
 /* ----------------------------------------------------------------- dialog */

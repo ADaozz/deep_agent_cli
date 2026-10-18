@@ -16,6 +16,7 @@ ROUTES = (
     ("POST", "/workspaces", "/v1/workspaces"),
     ("POST", "/workspace-directories", "/v1/workspace-directories"),
     ("POST", "/projects/{project_id}/git/branch", "/v1/projects/{project_id}/git/branch"),
+    ("GET", "/projects/{project_id}/git/diff", "/v1/projects/{project_id}/git/diff"),
     ("GET", "/projects", "/v1/projects"),
     ("GET", "/projects/{project_id}/git", "/v1/projects/{project_id}/git"),
     ("GET", "/projects/{project_id}/capabilities", "/v1/projects/{project_id}/capabilities"),
@@ -36,7 +37,8 @@ ROUTES = (
        for action in ("approvals", "human-input", "continue", "cancel") ),
 )
 QUERY = {"/sessions": {"project_id"}, "/sessions/{session_id}/runs": {"limit", "cursor"},
-         "/runs/{run_id}/events": {"after"}}
+         "/runs/{run_id}/events": {"after"},
+         "/projects/{project_id}/git/diff": {"path", "scope", "full"}}
 
 
 def create_app(config: GatewayConfig, *, transport=None) -> FastAPI:

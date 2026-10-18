@@ -165,6 +165,17 @@ export interface ModelCatalog {
   current: ModelSelection
 }
 
+export interface GitFileEntry {
+  path: string
+  added: number | null
+  removed: number | null
+  status: string
+  binary: boolean
+  staged?: boolean
+  unstaged?: boolean
+  untracked?: boolean
+  old_path?: string | null
+}
 export interface WorkspaceGit {
   available: boolean
   branch?: string
@@ -175,7 +186,36 @@ export interface WorkspaceGit {
   merged?: boolean | null
   added?: number | null
   removed?: number | null
-  files?: { path: string; added: number | null; removed: number | null; status: string; binary: boolean }[]
+  files?: GitFileEntry[]
+}
+export type GitDiffScope = 'all' | 'staged' | 'unstaged'
+export interface GitDiffLine {
+  kind: 'context' | 'add' | 'delete' | 'meta'
+  text: string
+  old_no: number | null
+  new_no: number | null
+}
+export interface GitDiffHunk {
+  header: string
+  old_start: number
+  old_count: number
+  new_start: number
+  new_count: number
+  lines: GitDiffLine[]
+}
+export interface GitFileDiff {
+  available: boolean
+  path?: string
+  scope?: GitDiffScope
+  status?: string
+  old_path?: string | null
+  binary?: boolean
+  symlink?: boolean
+  target?: string | null
+  untracked?: boolean
+  truncated?: boolean
+  hunks?: GitDiffHunk[]
+  error?: string
 }
 
 export interface Workspace extends Project { path: string }

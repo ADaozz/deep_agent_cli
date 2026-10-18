@@ -268,6 +268,7 @@ async function copySession(): Promise<void> {
     <SidePanel
       v-if="panelOpen"
       :git="workspaceGit[currentRecord?.session.project_id || '']"
+      :project-id="currentRecord?.session.project_id || ''"
       :title="repo"
       :subtitle="sessionId ? sessionId.slice(0, 8) : ''"
       @close="emit('toggle-panel')"
