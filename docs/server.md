@@ -1,6 +1,6 @@
 # HTTP 服务与前端接入
 
-本文涵盖 HTTP 服务的安装配置、接口及业务行为，可作为聊天、工具审批和人工输入界面的开发契约。基础接口对应 `v0.1.5`，并包含当前 `web_beta` 的只读查询和轮次代码回退扩展，复用 CLI 的执行逻辑，CLI 继续使用原来的启动方式。接口实现位于 [`agent/server/app.py`](../agent/server/app.py)，任务行为位于 [`agent/server/runtime.py`](../agent/server/runtime.py)。
+本文涵盖 HTTP 服务的安装配置、接口及业务行为，可作为聊天、工具审批和人工输入界面的开发契约。接口对应当前 `0.1.7` 已实现的能力，复用 CLI 的执行逻辑，CLI 继续使用原来的启动方式。接口实现位于 [`agent/server/app.py`](../agent/server/app.py)，任务行为位于 [`agent/server/runtime.py`](../agent/server/runtime.py)。
 
 ## 1. 安装与启动
 
@@ -466,6 +466,13 @@ POST /v1/runs/{run_id}/cancel
 
 无请求体，返回 `202 Run`，一般为 `cancelling`。运行中、等待审批、等待回答和暂停的活动任务都可取消。服务请求 Runner 停止，解除等待，并等待 worker 清理；后续通常到达 `cancelled`，清理失败可能变为 `failed`。
 
+终态只裁决一次，以 Runner 实际到达的执行边界为准：
+
+- 本轮已经结束（最终回答已写入 checkpoint）后才生效的取消不覆盖结果，`cancelling` 之后仍可能到达 `completed`。
+- 取消在本轮结束前生效时到达 `cancelled`。此前已完成的工具调用（包括文件写入）保留，其结果已记录在 checkpoint 中，下一轮可见。
+- 取消已生效但无法确认模型请求已关闭时到达 `failed`，`result.error` 说明原因；若 worker 清理时仍无法确认，则按 `Runner cleanup failed; restart service` 保留项目占用。
+- 等待审批时取消、且审批尚未被处理，工具不执行，审批中断保留，该会话需用 `resume=true` 恢复。
+
 已终止或无活动 worker 返回 `409 Run has already ended`。取消处理中重复请求可能再次返回 `202`，前端只发送一次并禁用按钮。断开事件流、离开页面、AbortController 中止浏览器请求，都不是服务取消操作。取消不回滚工作区修改，也不撤销已经完成的外部副作用。
 
 ## 5. SSE 事件协议
@@ -551,7 +558,6 @@ interface AgentEvent {
 | `tool_output_delta` | `tool_call_id/content/stream`；普通 merged 输出按增量追加，tail_snapshot 替换当前有界输出并标记截断 |
 | `tool_completed` | `content/result/is_error/artifact`，结束对应工具卡片；不把 artifact 任意字符串当下载地址 |
 | `usage` | `result` 可能含 input_tokens/output_tokens/total_tokens，也可能为 {}；不是会话累计费用 |
-| `todos_updated` | `result` 为任务项数组，替换当前待办展示 |
 | `compaction_started` / `compaction_finished` | 自动压缩进度；不表示当前 run 已结束 |
 | `turn_completed` | `content` 为该轮回答，`result` 含 elapsed_seconds/finished_at；可显示耗时 |
 | 其他事件 | 忽略不识别的展示事件，保留原始记录；任务状态仍从服务快照读取 |

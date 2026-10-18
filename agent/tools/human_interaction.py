@@ -104,7 +104,7 @@ def _normalize_options(options: Any) -> list[dict[str, Any]]:
     for item in options:
         if not isinstance(item, dict):
             continue
-        value = str(item.get("value") or item.get("id") or "").strip()
+        value = str(item.get("value") or "").strip()
         label = str(item.get("label") or value).strip()
         if not value or not label:
             continue

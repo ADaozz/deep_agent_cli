@@ -36,7 +36,7 @@ runner.close()
 |---|---|
 | `completed` | 正常结束，回答在 `result.output` |
 | `failed` | 出错，原因在 `result.error` |
-| `cancelled` | 被 `request_cancel()` 取消 |
+| `cancelled` | 被 `request_cancel()` 取消，本轮在取消生效前未产生最终回答；若无法确认模型请求已关闭，`result.error` 非空。最终回答已写入 checkpoint 后才到达的取消不改变 `completed` |
 | `waiting_confirmation` | 等待审批：`runner.approve_tool(tool_call_id)` 或 `runner.reject_tool(tool_call_id, message)`；待审批调用在 `result.pending_tool_calls` |
 | `waiting_human` | 等待回答：`runner.submit_human_input(values)`；问题在 `result.human_input`。只有自由文本框时传 `{"text": "..."}`，有字段时按字段 `id` 传值 |
 | `paused` | 已暂停：`runner.continue_run()` |
@@ -76,4 +76,4 @@ prepared = create_agent(
 - `runner.list_sessions()`、`runner.new_session()`、`runner.switch_session(id)`。
 - 目标会话被其他进程持有时，`switch_session` 抛出 `SessionLockBusyError`。
 - 切换会话前需要先用 `runner.take_unapplied_messages()` 取回未生效的 steering / follow-up，否则抛出 `RuntimeError`。
-- `request_human_input` 取代了已移除的 `handoff_to_human`；停在旧工具上的会话恢复时会报错，需要新建会话。
+- 人工输入仅使用 `request_human_input`；不提供旧工具或旧数据库格式的兼容恢复。

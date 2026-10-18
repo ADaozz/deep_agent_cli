@@ -173,13 +173,23 @@ class PersistentSandbox:
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
 
     def start_command(self, command: str) -> RemoteCommand:
+        return self._start({"op": "run", "command": command})
+
+    def start_argv(self, argv: list[str], cwd: str, *,
+                   mount_identity: tuple[str, int, int] | None = None,
+                   file: str | None = None) -> RemoteCommand:
+        """Run argv directly; optional search paths are opened without following links."""
+        return self._start({"op": "run_argv", "argv": argv, "cwd": cwd,
+                            "mount_identity": mount_identity, "file": file})
+
+    def _start(self, request: dict[str, Any]) -> RemoteCommand:
         with self._lock:
             if self.lost_reason is not None:
                 raise SandboxLostError(self.lost_reason)
             handle = RemoteCommand(self, next(self._ids))
             self._commands[handle.request_id] = handle
         try:
-            self._send({"op": "run", "id": handle.request_id, "command": command})
+            self._send({**request, "id": handle.request_id})
         except SandboxLostError:
             handle.release()
             raise
@@ -266,7 +276,8 @@ class PersistentSandbox:
                 if handle is None:
                     continue
                 if op == "out":
-                    handle._deliver(("out", base64.b64decode(message["data"])))
+                    handle._deliver(("err" if message.get("stream") == "stderr" else "out",
+                                     base64.b64decode(message["data"])))
                 elif op == "exit":
                     handle._deliver(("exit", int(message["code"])))
                 elif op == "spawn_error":
@@ -310,9 +321,15 @@ class SandboxPool:
             current = self._sandboxes.get(network)
             return current if current is not None and current.alive else None
 
-    def run(self, network: bool, fn: Callable[[PersistentSandbox], T]) -> T:
-        with self._lock:
-            sandbox = self._acquire(network)
+    def run(self, network: bool, fn: Callable[[PersistentSandbox], T], *, deadline: float | None = None) -> T:
+        if deadline is None:
+            self._lock.acquire()
+        elif not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("sandbox acquisition timed out")
+        try:
+            sandbox = self._acquire(network, deadline=deadline)
+        finally:
+            self._lock.release()
         return fn(sandbox)
 
     def discard(self, sandbox: PersistentSandbox, reason: str) -> None:
@@ -335,7 +352,7 @@ class SandboxPool:
         for sandbox in sandboxes:
             sandbox.stop(reason)
 
-    def _acquire(self, network: bool) -> PersistentSandbox:
+    def _acquire(self, network: bool, *, deadline: float | None = None) -> PersistentSandbox:
         current = self._sandboxes.get(network)
         if current is not None and current.alive:
             return current
@@ -344,8 +361,13 @@ class SandboxPool:
             LOG.warning("sandbox %s is unhealthy (%s); starting a new one", current.id, current.lost_reason)
             del self._sandboxes[network]
             current.stop(current.lost_reason or "sandbox unhealthy")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("sandbox acquisition timed out")
         sandbox = PersistentSandbox(self._launch_args(network), network=network)
-        sandbox.start()
+        if deadline is None:
+            sandbox.start()
+        else:
+            sandbox.start(timeout=min(START_TIMEOUT_SECONDS, max(0.0, deadline - time.monotonic())))
         self._sandboxes[network] = sandbox
         return sandbox
 

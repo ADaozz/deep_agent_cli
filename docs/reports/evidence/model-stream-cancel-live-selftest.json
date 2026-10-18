@@ -1,0 +1,396 @@
+{
+  "commit": "6ce182b",
+  "model": "qwen3.8-flash",
+  "self_test": true,
+  "endpoint": "local scripted",
+  "apis": {
+    "chat_completions": {
+      "parity": {
+        "text": {
+          "bridged": {
+            "chunks": 4,
+            "seconds": 0.022,
+            "text": "pong",
+            "reasoning_chars": 0,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "original_sync": {
+            "chunks": 4,
+            "seconds": 0.003,
+            "text": "pong",
+            "reasoning_chars": 0,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true
+          },
+          "pass": true
+        },
+        "tool": {
+          "bridged": {
+            "chunks": 4,
+            "seconds": 0.005,
+            "text": "",
+            "reasoning_chars": 0,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "original_sync": {
+            "chunks": 4,
+            "seconds": 0.003,
+            "text": "",
+            "reasoning_chars": 0,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true,
+            "tool_args_complete": true
+          },
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 0.1
+      },
+      "coding": {
+        "status": "completed",
+        "elapsed_s": 0.12,
+        "model_requests": 3,
+        "tokens": {
+          "input_tokens": 63,
+          "output_tokens": 21,
+          "total_tokens": 84
+        },
+        "tools": [
+          "write_file",
+          "execute"
+        ],
+        "script_output": "0 1 1 2 3 5 8 13 21 34",
+        "reply_has_output": true,
+        "pass": true,
+        "seconds": 0.2
+      },
+      "cancel": {
+        "first_delta": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.003,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "after_0.5s": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.005,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 0.7
+      },
+      "race": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.04,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.08,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.12,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.16,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.2,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 0.7
+      }
+    },
+    "responses": {
+      "parity": {
+        "text": {
+          "bridged": {
+            "chunks": 3,
+            "seconds": 0.469,
+            "text": "pong",
+            "reasoning_chars": 0,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "original_sync": {
+            "chunks": 3,
+            "seconds": 0.005,
+            "text": "pong",
+            "reasoning_chars": 0,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true
+          },
+          "pass": true
+        },
+        "tool": {
+          "bridged": {
+            "chunks": 4,
+            "seconds": 0.007,
+            "text": "",
+            "reasoning_chars": 0,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "original_sync": {
+            "chunks": 4,
+            "seconds": 0.004,
+            "text": "",
+            "reasoning_chars": 0,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 21,
+              "output_tokens": 7,
+              "total_tokens": 28
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true,
+            "tool_args_complete": true
+          },
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 0.5
+      },
+      "coding": {
+        "status": "completed",
+        "elapsed_s": 0.12,
+        "model_requests": 3,
+        "tokens": {
+          "input_tokens": 63,
+          "output_tokens": 21,
+          "total_tokens": 84
+        },
+        "tools": [
+          "write_file",
+          "execute"
+        ],
+        "script_output": "0 1 1 2 3 5 8 13 21 34",
+        "reply_has_output": true,
+        "pass": true,
+        "seconds": 0.2
+      },
+      "cancel": {
+        "first_delta": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.004,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "after_0.5s": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.004,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 0.9
+      },
+      "race": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.04,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.08,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.12,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.16,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 0.2,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 0.7
+      }
+    }
+  }
+}

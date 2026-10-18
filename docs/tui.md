@@ -28,6 +28,7 @@ deep-agent --version
 | `/new` | 新建会话（首次发送消息后才保存） |
 | `/resume` | 列出有内容的会话并选择；`/resume <id前缀>` 直接切换 |
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
+| `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
@@ -48,10 +49,11 @@ deep-agent --version
 | `F2` | 重新打开待处理的审批或提问 |
 | `Ctrl+O` | 展开 / 收起工具详情 |
 | `Ctrl+T` | 展开 / 收起思考内容 |
+| `Ctrl+B` | 展开 / 收起排队消息和已发送的长消息 |
 | `Ctrl+R` | 查看 `write_file` / `edit_file` / `delete` 的完整改动 |
 | `Ctrl+P` / `Alt+P` | 切换到下一个 / 上一个模型 |
 | `Ctrl+V` / `Alt+V` | 粘贴图片或文本 |
-| `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；0.5 秒内再按一次退出 |
+| `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；1 秒内再按一次退出 |
 | `Ctrl+D` | 退出 |
 | 滚轮、`PgUp` / `PgDn`、`Ctrl+Home` / `Ctrl+End` | 滚动转录区；`Ctrl+End` 回到底部并恢复跟随 |
 | 鼠标左键拖动 | 选择转录内容，松开后复制到系统剪贴板；拖到边缘会自动滚动 |
@@ -62,6 +64,8 @@ deep-agent --version
 
 - **Steering**（`Enter`）：在下一次模型调用之前或模型提出的工具调用开始之前交给 Agent。若模型返回时已有 steering 在排队，这批尚未进入审批或执行的工具调用会被丢弃，模型带着新输入重新推理。已经在等待审批的调用仍需处理，已经开始执行的工具会先完成。
 - **Follow-up**（`Alt+Enter`）：当前任务结束后作为新一轮输入执行。
+- 已有排队消息时，后续输入继续追加到队尾；steering 不会越过更早入队的 follow-up。
+- 排队消息显示在输入框上方，例如 `queued 2: 第一条 | 第二条`；多行内容合并预览，超宽截断。按 `Ctrl+B` 在提示下方展开完整队列，展开时用滚轮或 `PgUp/PgDn` 滚动查看，再按一次收起。实际取用后才进入对话区。任务结束交接期间收到的消息也会自动继续处理。
 - **取消**（`Esc`）：终止正在运行的命令（向进程组发送 `SIGKILL`），结束本轮。
 - 切换或新建会话时，未生效的 steering / follow-up 会退回输入框。
 
@@ -76,8 +80,14 @@ deep-agent --version
 ## 审批与提问
 
 - `ask` 模式下，需要审批的工具调用会弹出面板，选择 Run 或 Reject。
-- Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔。选择题自动附带 `Other:` 选项用于自定义输入。
+- Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔。每道选择题最多 3 个模型提供的选项，系统另行附带 `Other:` 用于自定义输入，不计入这 3 个。超过上限时工具参数校验失败，模型需精简后重新提交。
 - 关掉面板后，待处理提示显示在原 Working 状态栏位置，不单独追加到聊天记录；按 `F2` 重新打开。
+
+## Skills
+
+`/skill` 只在空闲且没有待处理交互时可用，不接受参数。选择后在输入框插入 `[Skill: 名称]` 块，可在其后追加任务说明。提交时还原为“使用技能 …，先读取 /skills/…/SKILL.md 并遵循其说明。”；编辑该标记后需还原或删除才能提交。
+
+缺少有效 `name` / `description` 的技能目录不进入列表。Skills 目录以只读方式映射到 `/skills`。Skill 提供操作说明，不负责安装执行工具；沙箱挂载见 [sandbox.md](sandbox.md#playwright-与有头-x11)。
 
 ## 图片
 
@@ -97,11 +107,12 @@ deep-agent --version
 
 ## 显示
 
+- **标题**：显示 `DeepAgentCLI v<版本号>`，版本与 `deep-agent --version` 使用同一来源；顶部不再显示第二行快捷键提示，完整操作见 `/help`。
 - **思考区**：默认折叠，保留按当前终端宽度折行后的最后 5 行正文（`ui.thinking_tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
-- **命令输出**：实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
-- **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并为 `Explored N items`。
-- **文件写入**：新建显示 `Create <路径>`，连续新建合并为 `Create N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
-- **任务计划**：Agent 调用 `write_todos` 时显示当前计划，恢复会话时一并恢复。
+- **用户长消息**：发送后默认显示前 3 个终端显示行，超出时显示隐藏行数和 `Ctrl+B` 提示。`Ctrl+B` 统一切换长消息与队列的展开状态；只改变显示，发送给模型和会话中保存的内容保持完整。
+- **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
+- **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。
+- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。
@@ -110,7 +121,7 @@ deep-agent --version
 
 - 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、排队数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。
 - 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
-- 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。
+- 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。
 - 上下文占用 = 模型最近一次返回的 token usage / `context_window`。端点不返回 usage 时只显示窗口大小；`context_window` 为 0 时不显示。
 - Git 状态每 5 秒在后台刷新，单次探测最长 10 秒。可能的显示：`⎇ checking git`、`⎇ no git`、`git unavailable`、`git error`、`git timeout`。

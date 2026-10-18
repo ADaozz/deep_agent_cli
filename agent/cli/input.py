@@ -16,6 +16,7 @@ DEFAULT_BINDINGS: dict[str, list[str]] = {
     "review_diff": ["c-r"],
     "reopen_interaction": ["f2"],
     "thinking_toggle": ["c-t"],
+    "messages_toggle": ["c-b"],
     "dequeue": ["alt+up"],
     # Windows Terminal may reserve Ctrl+V for terminal paste. Alt+V is the
     # reliable application-level image clipboard fallback.

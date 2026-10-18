@@ -21,6 +21,7 @@ from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
+from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -42,14 +43,16 @@ from agent.cli.previews import (
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.cli.skills import skill_message_display
 from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
+from agent.version import package_version
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {
     "plain": "",
     "dim": "dim",
     "hunk": "bold cyan",
-    "add": "white on #245c38",
-    "delete": "white on #4a2028",
+    # Use exact xterm-256 colors: muted RGB shades quantize to grayscale.
+    "add": "white on #005f00",
+    "delete": "white on #5f0000",
     "error": "red",
     "url": "bright_cyan",
 }
@@ -71,7 +74,7 @@ def render_transcript(
 
 # --- Incremental transcript rendering -------------------------------------
 #
-# The transcript is split into render units: the header, the plan, one message,
+# The transcript is split into render units: the header, one message,
 # one tool, or one collapsed explore group. A unit is pushed through Rich and
 # parsed into prompt_toolkit fragments exactly once, then replayed from cache
 # until its fingerprint changes. While streaming, only the active block is
@@ -128,22 +131,12 @@ def transcript_units(
     units: list[TranscriptUnit] = [
         TranscriptUnit("header", (), lambda: Group(*_header())),
     ]
-    if state.todos:
-        todos = [dict(item) for item in state.todos]
-        units.append(TranscriptUnit(
-            "todos",
-            (
-                tuple((item.get("content"), item.get("status")) for item in todos),
-                _spinner_tick() if any(item.get("status") == "in_progress" for item in todos) else None,
-            ),
-            lambda: _todos(todos),
-        ))
     index = 0
     blocks = state.blocks
     while index < len(blocks):
         block = blocks[index]
         if isinstance(block, MessageBlock):
-            units.append(_message_unit(block, state.thinking_collapsed, limits))
+            units.append(_message_unit(block, state.thinking_collapsed, limits, state.messages_expanded))
             index += 1
             continue
         if isinstance(block, TurnSummaryBlock):
@@ -195,11 +188,13 @@ def transcript_units(
     return units
 
 
-def _message_unit(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits) -> TranscriptUnit:
+def _message_unit(
+    block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits, messages_expanded: bool = False,
+) -> TranscriptUnit:
     return TranscriptUnit(
         key=("message", id(block)),
-        fingerprint=(block.revision, thinking_collapsed, limits),
-        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits)),
+        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False),
+        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded)),
         owner=block,
     )
 
@@ -249,7 +244,7 @@ def _create_group(blocks: list[ToolBlock], expanded: bool, width: int, *, limits
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
         return _tool(blocks[-1], expanded, width, limits=limits)
-    title = Text.assemble(("● ", "green"), (f"Create {len(mutation.paths)} files", "bold"))
+    title = Text.assemble(("● ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
     rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
     for row in (title, *rows):
         row.truncate(max(1, width - 1), overflow="ellipsis")
@@ -306,7 +301,7 @@ class TranscriptRenderer:
             self._width = width
         units = transcript_units(state, self._timezone, width, limits=self._limits)
         live_ids = {id(block) for block in state.blocks}
-        live = {"header", "todos"}
+        live = {"header"}
         live.update(key for key in self._cache if isinstance(key, tuple) and len(key) > 1 and key[1] in live_ids)
         for key in [key for key in self._cache if key not in live]:
             del self._cache[key]
@@ -492,7 +487,30 @@ def _user_message_content(text: str) -> Markdown:
     return _SkillMessageMarkdown(displayed, labels) if labels else Markdown(text)
 
 
-def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[Any]:
+@dataclass(frozen=True)
+class _UserMessagePreview:
+    content: Any
+    expanded: bool
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        rows = console.render_lines(self.content, options.update(overflow="fold", no_wrap=False), pad=False)
+        hidden = max(0, len(rows) - 3)
+        for row in rows if self.expanded else rows[:3]:
+            yield from row
+            yield Segment.line()
+        if hidden:
+            hint = "Ctrl+B to collapse" if self.expanded else f"… Ctrl+B to expand · {hidden} more lines"
+            yield Text(hint, style="dim", no_wrap=True, overflow="ellipsis")
+
+
+def render_queued_messages(messages: list[str], width: int) -> str:
+    return _capture(Padding(Group(*(Text(f"{index}. {text}") for index, text in enumerate(messages, 1))), (0, 1)), width)
+
+
+def _message(
+    block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    *, messages_expanded: bool = False,
+) -> list[Any]:
     items: list[Any] = []
     if block.kind == "user":
         style = "white on #404040" if block.pending else "white on #303030"
@@ -500,7 +518,7 @@ def _message(block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLim
         message = Table.grid(expand=True, padding=0)
         message.add_column(width=2, no_wrap=True)
         message.add_column(ratio=1)
-        message.add_row(Text("› "), _user_message_content(label))
+        message.add_row(Text("› "), _UserMessagePreview(_user_message_content(label), messages_expanded))
         content: list[Any] = [message]
         for index, ref in enumerate(block.attachments, 1):
             content.append(Text(
@@ -538,27 +556,14 @@ def _turn_summary(block: TurnSummaryBlock, timezone: ZoneInfo) -> Any:
 
 
 def _header() -> list[Any]:
-    title = Text.assemble(("DeepAgent", "bold bright_cyan"), ("  terminal coding agent", "dim"))
-    hints = Text(
-        "Esc interrupt · F2 pending · Ctrl+O tools · Ctrl+R review · / commands",
-        style="dim",
+    title = Text.assemble(
+        ("DeepAgentCLI", "bold bright_cyan"),
+        (f" v{package_version()}", "dim"),
+        ("  terminal coding agent", "dim"),
     )
-    items: list[Any] = [title, hints]
+    items: list[Any] = [title]
     items.extend([Rule(style="#303030"), Text("")])
     return items
-
-
-def _todos(todos: list[dict[str, str]]) -> Any:
-    lines: list[Text] = [Text("Plan", style="bold bright_cyan")]
-    for item in todos:
-        status = item.get("status")
-        marker_status = {
-            "in_progress": "running", "pending": "waiting", "blocked": "waiting",
-            "failed": "error", "completed": "completed",
-        }.get(status or "", "waiting")
-        symbol, style = _tool_status_marker(marker_status)
-        lines.append(Text.assemble((f"{symbol} ", style), (str(item.get("content") or ""), style)))
-    return Padding(Group(*lines), (0, 1, 1, 1))
 
 
 def _is_explore(block: Any) -> TypeGuard[ToolBlock]:
@@ -583,9 +588,10 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
     marker_status = "error" if failed or interrupted else "running" if running else "waiting" if waiting else "completed"
     symbol, color = _tool_status_marker(marker_status)
     count = len(blocks)
+    verb = "Exploring" if running else "Explore" if waiting or interrupted or failed else "Explored"
     title = Text.assemble(
         (f" {symbol} ", color),
-        (f"Explored {count} {'item' if count == 1 else 'items'}", "bold"),
+        (f"{verb} {count} {'item' if count == 1 else 'items'}", "bold"),
         (f" · {len(failed)} failed", "dim") if failed else ("", ""),
         (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
         (suffix, "dim"),
@@ -645,7 +651,10 @@ def render_tool_preview(
         else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
         else ""
     )
-    summary = f"{preview.verb} {preview.target}".strip()
+    verb = preview.verb
+    if block.status == "running":
+        verb = {"edit_file": "Editing", "write_file": "Writing", "delete": "Deleting"}.get(block.name, verb)
+    summary = f"{verb} {preview.target}".strip()
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
     mutation = preview.file_mutation
     if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
@@ -687,7 +696,7 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     """Render the current output snapshot; every delta rebuilds this card."""
     status = preview.status
     verb = {
-        "running": "execute", "waiting": "execute", "interrupted": "execute",
+        "running": "Running", "waiting": "execute", "interrupted": "execute",
         "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
         "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
     }[status]

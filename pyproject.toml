@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deep-agent-cli"
-version = "0.1.5"
+version = "0.1.8"
 description = "A sandboxed coding agent CLI for Linux and WSL2"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -18,6 +18,7 @@ classifiers = [
   "Topic :: Software Development",
 ]
 dependencies = [
+  "ripgrep-bin>=15.2.0,<16",
   "deepagents>=0.7.17,<0.8.0",
   "langchain>=1.0,<2.0",
   "langchain-core>=1.0,<2.0",
@@ -42,5 +43,5 @@ packages = ["agent"]
 core-metadata-version = "2.4"
 
 [tool.hatch.build.targets.sdist]
-include = ["/agent", "/README.md", "/LICENSE", "/pyproject.toml"]
+include = ["/agent", "/README.md", "/LICENSE", "/pyproject.toml", "/终端.png", "/assets/readme/runtime-map.svg"]
 core-metadata-version = "2.4"

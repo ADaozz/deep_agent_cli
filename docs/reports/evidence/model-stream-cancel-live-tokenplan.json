@@ -1,0 +1,587 @@
+{
+  "commit": "109e3b4",
+  "model": "qwen3.8-flash",
+  "endpoint": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "self_test": false,
+  "note": "Merged from three live TokenPlan runs. Parity was re-run without tool_choice (thinking mode rejects required/object). Race/HTTP used a fresh session per round.",
+  "apis": {
+    "chat_completions": {
+      "parity": {
+        "text": {
+          "bridged": {
+            "chunks": 13,
+            "seconds": 2.653,
+            "text": "pong",
+            "reasoning_chars": 106,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 66,
+              "output_tokens": 29,
+              "total_tokens": 95
+            }
+          },
+          "original_sync": {
+            "chunks": 12,
+            "seconds": 2.428,
+            "text": "pong",
+            "reasoning_chars": 97,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 66,
+              "output_tokens": 26,
+              "total_tokens": 92
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true
+          },
+          "pass": true
+        },
+        "tool": {
+          "bridged": {
+            "chunks": 42,
+            "seconds": 2.678,
+            "text": "",
+            "reasoning_chars": 444,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 351,
+              "output_tokens": 139,
+              "total_tokens": 490
+            }
+          },
+          "original_sync": {
+            "chunks": 20,
+            "seconds": 1.824,
+            "text": "",
+            "reasoning_chars": 79,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 351,
+              "output_tokens": 64,
+              "total_tokens": 415
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true,
+            "tool_args_complete": true
+          },
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 9.6
+      },
+      "coding": {
+        "status": "completed",
+        "elapsed_s": 18.06,
+        "model_requests": 5,
+        "tokens": {
+          "input_tokens": 25953,
+          "output_tokens": 581,
+          "total_tokens": 26534
+        },
+        "tools": [
+          "write_file",
+          "ls",
+          "read_file",
+          "execute"
+        ],
+        "script_output": "0 1 1 2 3 5 8 13 21 34",
+        "reply_has_output": true,
+        "pass": true,
+        "seconds": 18.2
+      },
+      "cancel": {
+        "first_delta": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.005,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "after_0.5s": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.004,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 12.1
+      },
+      "race": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 1.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 2.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 3.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 4.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 5.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 6.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 7.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 28.8
+      },
+      "http": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "pending",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 1.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 2.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 3.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 4.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 5.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 6.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 7.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 29.3
+      }
+    },
+    "responses": {
+      "parity": {
+        "text": {
+          "bridged": {
+            "chunks": 16,
+            "seconds": 2.06,
+            "text": "pong",
+            "reasoning_chars": 100,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 98,
+              "output_tokens": 26,
+              "total_tokens": 124
+            }
+          },
+          "original_sync": {
+            "chunks": 14,
+            "seconds": 2.078,
+            "text": "pong",
+            "reasoning_chars": 76,
+            "tool_calls": [],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 98,
+              "output_tokens": 21,
+              "total_tokens": 119
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true
+          },
+          "pass": true
+        },
+        "tool": {
+          "bridged": {
+            "chunks": 20,
+            "seconds": 2.185,
+            "text": "",
+            "reasoning_chars": 78,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 383,
+              "output_tokens": 64,
+              "total_tokens": 447
+            }
+          },
+          "original_sync": {
+            "chunks": 19,
+            "seconds": 1.32,
+            "text": "",
+            "reasoning_chars": 86,
+            "tool_calls": [
+              {
+                "name": "save_note",
+                "args_keys": [
+                  "body",
+                  "title"
+                ],
+                "args_valid": true
+              }
+            ],
+            "invalid_tool_calls": 0,
+            "usage": {
+              "input_tokens": 383,
+              "output_tokens": 66,
+              "total_tokens": 449
+            }
+          },
+          "checks": {
+            "usage_reported": true,
+            "reasoning_presence": true,
+            "tool_calls": true,
+            "no_invalid_tool_calls": true,
+            "tool_args_complete": true
+          },
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 7.7
+      },
+      "coding": {
+        "status": "completed",
+        "elapsed_s": 15.32,
+        "model_requests": 5,
+        "tokens": {
+          "input_tokens": 26140,
+          "output_tokens": 620,
+          "total_tokens": 26760
+        },
+        "tools": [
+          "write_file",
+          "execute",
+          "read_file",
+          "execute"
+        ],
+        "script_output": "0 1 1 2 3 5 8 13 21 34",
+        "reply_has_output": true,
+        "pass": true,
+        "seconds": 15.4
+      },
+      "cancel": {
+        "first_delta": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.004,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "after_0.5s": {
+          "saw_delta": true,
+          "cancel_to_return_s": 0.006,
+          "status": "cancelled",
+          "error": "",
+          "live_streams_after": 0,
+          "run_cancelled_events": 1,
+          "session_status_after_cancel": "aborted",
+          "partial_answer_saved": false,
+          "follow_up_status": "completed",
+          "follow_up_output": "ok",
+          "prompt_kept": true,
+          "pass": true
+        },
+        "pass": true,
+        "seconds": 11.1
+      },
+      "race": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 1.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 2.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 3.0,
+            "status": "cancelled",
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true
+          },
+          {
+            "delay_s": 4.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 5.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 6.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          },
+          {
+            "delay_s": 7.0,
+            "status": "completed",
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 29.3
+      },
+      "http": {
+        "rounds": [
+          {
+            "delay_s": 0.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "pending",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 1.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 2.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 3.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 4.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 5.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 6.0,
+            "http_status": "cancelled",
+            "cancel_http": 202,
+            "answered": false,
+            "session_status": "aborted",
+            "consistent": true,
+            "error": ""
+          },
+          {
+            "delay_s": 7.0,
+            "http_status": "completed",
+            "cancel_http": 409,
+            "answered": true,
+            "session_status": "stop",
+            "consistent": true,
+            "error": ""
+          }
+        ],
+        "pass": true,
+        "both_outcomes_seen": true,
+        "seconds": 29.1
+      }
+    }
+  }
+}

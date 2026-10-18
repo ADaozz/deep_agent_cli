@@ -82,7 +82,7 @@ class InteractionController:
                     details.append("Network: OFF" + (" (default)" if "network" not in args else ""))
                 details.append(f"Command: {_approval_summary(args.get('command'))}")
             elif name in {"write_file", "edit_file", "delete"}:
-                target = args.get("file_path") or args.get("path")
+                target = args.get("file_path")
                 details.append(f"Target: {_approval_summary(target, kind='target')}")
             elif name == "web_search":
                 details.append("Network: public web search via Tavily")

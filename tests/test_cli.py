@@ -25,6 +25,7 @@ from agent.cli.app import (
     CliApplication,
     format_context_usage,
     format_context_window,
+    format_workspace_path,
 )
 from agent.cli.previews import (
     CommandExecutionPreview,
@@ -89,6 +90,67 @@ def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
     assert _plain(lines[1]).lstrip().startswith("› hello")
     assert _plain(lines[2]).strip() == ""
     assert all("48;2;48;48;48" in line for line in lines)
+
+
+@pytest.mark.parametrize("content", ["长消息" * 180, "```\n" + "\n".join(f"line {i}" for i in range(12)) + "\n```"], ids=["chinese", "code"])
+@pytest.mark.parametrize("width", [20, 50])
+def test_long_user_messages_collapse_after_wrapping_and_expand_without_losing_content(content, width) -> None:
+    state = CliState()
+    state.add_user(content)
+    renderer = TranscriptRenderer()
+    collapsed, _ = renderer.render(state, width)
+    collapsed_text = "".join(part[1] for part in collapsed)
+    assert "Ctrl+B" in collapsed_text
+    if width == 50:
+        assert "Ctrl+B to expand" in collapsed_text
+        assert "more lines" in collapsed_text
+    state.messages_expanded = True
+    expanded, _ = renderer.render(state, width)
+    expanded_text = "".join(part[1] for part in expanded)
+    assert "Ctrl+B" in expanded_text
+    assert expanded_text.count("\n") > collapsed_text.count("\n")
+    assert state.blocks[0].content == content
+    state.messages_expanded = False
+    assert renderer.render(state, width)[0] == collapsed
+
+
+def test_ctrl_b_expands_queue_below_status_and_scrolls_without_editing_input() -> None:
+    def scenario(app: CliApplication) -> None:
+        text = "\n".join(f"queue line {index:03d}" for index in range(80))
+        app.runner.control.follow_up(text)
+        app.state.add_user("sent content " * 80)
+        app.buffer.text = "draft stays here"
+        status = "".join(part[1] for part in app._status_text())
+        assert "Ctrl+B expand" in status
+        assert "queue line 079" not in status
+        binding = next(item for item in app.bindings.bindings if item.keys == ("c-b",))
+        binding.handler(None)
+        _paint(app)
+        assert app._queue_expanded()
+        assert app.buffer.text == "draft stays here"
+        assert "queue line 079" in "".join(part[1] for part in app._queue_text())
+        positions = app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert app.queue_window in positions
+        assert positions[app.queue_window].height <= app.application.output.get_size().rows // 3
+        app._scroll_queue(1000)
+        _paint(app)
+        assert app.queue_window.vertical_scroll > 0
+        screen = app.application.renderer._last_screen
+        assert any(
+            "queue line 079" in "".join(screen.data_buffer[y][x].char for x in range(app._width()))
+            for y in range(app.application.output.get_size().rows)
+        )
+        app._scroll_queue(-1000)
+        _paint(app)
+        assert app.queue_window.vertical_scroll == 0
+        binding.handler(None)
+        _paint(app)
+        assert app.queue_window not in app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert not app.state.messages_expanded
+        assert app.runner.control.pending_message_texts() == [text]
+        assert app.state.blocks[-1].content == "sent content " * 80
+
+    _with_painted_app("queue-expand", scenario)
 
 
 def test_editor_has_matching_blank_rows_and_prefix() -> None:
@@ -328,65 +390,25 @@ def test_turn_summary_is_after_answer_and_uses_configured_timezone() -> None:
     assert shanghai.index("done") < shanghai.index("Worked for")
 
 
-def test_write_todos_renders_current_plan_and_restores_from_checkpoint(tmp_path) -> None:
-    store = SessionStore(tmp_path / "plan.sqlite3")
-    first_plan = [
-        {"content": "Inspect files", "status": "in_progress"},
-        {"content": "Run tests", "status": "pending"},
-    ]
-    updated_plan = [
-        {"content": "Inspect files", "status": "completed"},
-        {"content": "Run tests", "status": "in_progress"},
-    ]
-    runner = AgentRunner(model=scripted_model([
-        AIMessage(content="", tool_calls=[{"id": "todo-1", "name": "write_todos", "args": {"todos": first_plan}}]),
-        AIMessage(content="", tool_calls=[{"id": "todo-2", "name": "write_todos", "args": {"todos": updated_plan}}]),
-        AIMessage(content="working"),
-    ]), backend=StateBackend(), session_store=store)
+def test_session_restores_without_plan_tool(tmp_path) -> None:
+    store = SessionStore(tmp_path / "session.sqlite3")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="working")]),
+                         backend=StateBackend(), session_store=store)
     events: list[RunEvent] = []
-    assert runner.invoke("plan the work", on_event=events.append).status == "completed"
-    assert [event.result for event in events if event.type == "todos_updated"] == [first_plan, updated_plan]
-    assert all(event.name != "write_todos" for event in events if event.type.startswith("tool_"))
-    live_state = CliState()
-    for event in events:
-        live_state.apply(event)
-    assert live_state.todos == updated_plan
-    snapshot = runner.load_session(runner.thread_id)
-    assert snapshot is not None
-    assert snapshot.todos == updated_plan
-    assert all(block.name != "write_todos" for block in snapshot.transcript if block.kind == "tool")
-    with create_pipe_input() as pipe:
-        app = CliApplication(runner, input=pipe, output=DummyOutput())
-        app._apply_session_snapshot(snapshot)
-        rendered = _plain(render_transcript(app.state, 80))
-        assert rendered.count("Plan") == 1
-        assert "● Inspect files" in rendered
-        assert re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Run tests", rendered)
+    assert runner.invoke("work", on_event=events.append).status == "completed"
+    assert not [event for event in events if event.type == "todos_updated"]
+    assert "Plan" not in _plain(render_transcript(CliState(), 80))
     thread = runner.thread_id
     runner.close()
     store.close()
-    reopened = SessionStore(tmp_path / "plan.sqlite3")
-    resumed = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
+    reopened = SessionStore(tmp_path / "session.sqlite3")
+    resumed = AgentRunner(model=scripted_model([AIMessage(content="continued")]),
                           backend=StateBackend(), session_store=reopened)
-    assert resumed.switch_session(thread).todos == updated_plan
+    snapshot = resumed.switch_session(thread)
+    assert any(block.content == "working" for block in snapshot.transcript)
+    assert resumed.invoke("continue").output == "continued"
     resumed.close()
     reopened.close()
-
-
-def test_plan_ignores_tool_calls_and_update_envelopes() -> None:
-    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
-    events: list[RunEvent] = []
-    plan = [{"content": "Inspect files", "status": "in_progress"}]
-    runner._emit_update_events({
-        "model": {"messages": [AIMessage(content="", tool_calls=[{
-            "id": "todo-1", "name": "write_todos", "args": {"todos": plan},
-        }])]},
-    }, events.append)
-    runner._emit_update_events({
-        "tools": {"messages": [ToolMessage(content="ok", tool_call_id="todo-1", name="write_todos")]},
-    }, events.append)
-    runner._emit_update_events({"tools": {"todos": plan}}, events.append)
-    assert not [event for event in events if event.type != "usage"]
 
 
 def test_cli_state_updates_streaming_block_in_place() -> None:
@@ -423,7 +445,8 @@ def test_thinking_collapses_to_latest_five_lines_by_default() -> None:
 
 
 def test_explore_tools_collapse_into_summary() -> None:
-    assert {"ls", "read_file", "glob", "grep"}.issubset(DEFAULT_FS_TOOLS)
+    assert {"ls", "read_file", "glob"}.issubset(DEFAULT_FS_TOOLS)
+    assert "grep" not in DEFAULT_FS_TOOLS  # Registered separately for local workspaces.
     state = CliState(blocks=[
         ToolBlock(
             tool_call_id="r1", name="read_file",
@@ -520,7 +543,7 @@ def test_running_explore_group_does_not_fill_terminal_width() -> None:
     ]
     for count in (4, 6, 8, 10):
         rendered = _plain(_capture(_explore_group(blocks[:count], width=245), 245))
-        assert f"Explored {count} items" in rendered
+        assert f"Exploring {count} items" in rendered
         if count > 5:
             assert f"… {count - 5} more" in rendered
         assert all(len(line) < 245 for line in rendered.splitlines())
@@ -535,6 +558,43 @@ def test_explore_preview_truncates_long_paths_before_terminal_edge() -> None:
     rendered = _plain(_capture(_explore_group([block], width=20), 20))
     assert all(len(line) < 20 for line in rendered.splitlines())
     assert "Ctrl+O to expand" in rendered
+
+
+@pytest.mark.parametrize(("status", "is_error", "expected"), [
+    ("running", False, "Exploring 1 item"),
+    ("waiting", False, "Explore 1 item — waiting for input"),
+    ("completed", False, "Explored 1 item"),
+    ("interrupted", False, "Explore 1 item · 1 interrupted"),
+    ("error", True, "Explore 1 item · 1 failed"),
+])
+def test_explore_title_reflects_execution_state(status, is_error, expected) -> None:
+    block = ToolBlock("read", "read_file", {"file_path": "app.py"}, status=status, is_error=is_error)
+    rendered = _plain(_capture(_explore_group([block]), 100))
+    assert expected in rendered
+    if status != "completed":
+        assert "Explored" not in rendered
+
+
+@pytest.mark.parametrize(("name", "arguments", "artifact", "running", "completed"), [
+    ("edit_file", {"file_path": "notes", "old_string": "old", "new_string": "new"}, {}, "Editing", "Edited"),
+    ("write_file", {"file_path": "notes", "content": "new"}, {"operation": "create"}, "Writing", "Created"),
+    ("write_file", {"file_path": "notes", "content": "new"}, {"operation": "overwrite"}, "Writing", "Wrote"),
+    ("delete", {"file_path": "notes"}, {}, "Deleting", "Deleted"),
+])
+def test_file_tool_title_changes_only_after_success(name, arguments, artifact, running, completed) -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="file", name=name, arguments=arguments))
+    for expanded in (False, True):
+        state.tools_expanded = expanded
+        rendered = _plain(render_transcript(state, 100))
+        assert f"{running} notes" in rendered
+        assert f"{completed} notes" not in rendered
+    state.apply(RunEvent(type="tool_completed", tool_call_id="file", name=name, artifact=artifact))
+    for expanded in (False, True):
+        state.tools_expanded = expanded
+        rendered = _plain(render_transcript(state, 100))
+        assert f"{completed} notes" in rendered
+        assert f"{running} notes" not in rendered
 
 
 def test_running_tool_card_does_not_fill_terminal_width() -> None:
@@ -626,7 +686,7 @@ def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:
     blocks[0].output = "Error: permission denied"
     group = _explore_group(blocks, 100)
     rendered = _plain(_capture(group, 100))
-    assert "Explored 8 items · 1 failed" in rendered
+    assert "Explore 8 items · 1 failed" in rendered
     assert "… 3 more" in rendered
     assert "└ Read file-7.py" in rendered
     assert "Failed (exit 1) Read file-0.py: Error: permission denied" in rendered
@@ -639,7 +699,7 @@ def test_explore_group_caps_failure_preview_and_terminal_width() -> None:
         output="Error: search failed", status="error", is_error=True,
     ) for index in range(10)]
     rendered = _plain(_capture(_explore_group(blocks, 80), 80))
-    assert "Explored 10 items · 10 failed" in rendered
+    assert "Explore 10 items · 10 failed" in rendered
     assert "… 7 more failed" in rendered
     assert rendered.count("Failed (exit 1)") == 3
     assert all(len(line) < 80 for line in rendered.splitlines())
@@ -691,10 +751,14 @@ def test_execute_running_tail_and_expanded_output_update_with_stream() -> None:
         type="tool_started", tool_call_id="stream", name="execute",
         arguments={"command": "pytest -q"},
     ))
+    started = _plain(render_transcript(state, 100))
+    assert "Running pytest -q" in started
+    assert "Ran pytest -q" not in started
     for index in range(6):
         state.apply(RunEvent(type="tool_output_delta", tool_call_id="stream", content=f"line {index}\n"))
     collapsed = _plain(render_transcript(state, 100))
-    assert "execute pytest -q" in collapsed
+    assert "Running pytest -q" in collapsed
+    assert "Ran pytest -q" not in collapsed
     assert "└ output" in collapsed
     assert "2 earlier output lines hidden · Ctrl+O to expand" in collapsed
     assert "line 2" in collapsed and "line 5" in collapsed
@@ -709,6 +773,8 @@ def test_execute_running_tail_and_expanded_output_update_with_stream() -> None:
     assert "line 0" in _plain(render_transcript(state, 100))
     state.apply(RunEvent(type="tool_output_delta", tool_call_id="stream", content="line 7\n"))
     expanded = _plain(render_transcript(state, 100))
+    assert "Running pytest -q" in expanded
+    assert "Ran pytest -q" not in expanded
     assert "line 0" in expanded and "line 7" in expanded
     assert "earlier output lines hidden" not in expanded
 
@@ -716,6 +782,16 @@ def test_execute_running_tail_and_expanded_output_update_with_stream() -> None:
     collapsed = _plain(render_transcript(state, 100))
     assert "4 earlier output lines hidden" in collapsed
     assert "line 4" in collapsed and "line 7" in collapsed
+
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="stream", name="execute",
+        artifact={"exit_code": 0},
+    ))
+    for expanded in (False, True):
+        state.tools_expanded = expanded
+        completed = _plain(render_transcript(state, 100))
+        assert "Ran pytest -q" in completed
+        assert "Running pytest -q" not in completed
 
 
 def test_execute_stream_invalidates_collapsed_and_expanded_document_cache() -> None:
@@ -975,9 +1051,9 @@ def test_diff_background_fills_each_visual_row_in_preview_and_review(monkeypatch
         )]), 40),
         render_review([("write_file", {"file_path": "/workspace/new.md", "content": "new"})], 40),
     ):
-        for color in ("74;32;40", "36;92;56"):
+        for color in ("95;0;0", "0;95;0"):
             rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
-            if color == "36;92;56":
+            if color == "0;95;0":
                 assert rows
             if rows:
                 assert all(len(row) == 39 for row in rows)
@@ -997,7 +1073,7 @@ def test_large_write_preview_has_numbered_full_width_green_rows(monkeypatch) -> 
     assert re.search(r"(?m)^\s+1 \+#!/usr/bin/env node", plain)
     assert re.search(r"(?m)^\s+2 \+/\*\*", plain)
     assert "… 112 lines hidden · Ctrl+R to review" in plain
-    green_rows = re.findall(r"\x1b\[[0-9;]*48;2;36;92;56m([^\n]*?)\x1b\[0m", rendered)
+    green_rows = re.findall(r"\x1b\[[0-9;]*48;2;0;95;0m([^\n]*?)\x1b\[0m", rendered)
     assert green_rows and all(len(row) == 59 for row in green_rows)
 
     review = _plain(render_review([("write_file", block.arguments)], 60))
@@ -1019,9 +1095,43 @@ def test_edit_context_stays_unhighlighted_while_changed_rows_fill_width(monkeypa
     assert "\x1b[48;2;" not in next(
         line for line in rendered.splitlines() if "keep" in line
     )
-    for color in ("74;32;40", "36;92;56"):
+    for color in ("95;0;0", "0;95;0"):
         rows = re.findall(rf"\x1b\[[0-9;]*48;2;{color}m([^\n]*?)\x1b\[0m", rendered)
         assert rows and all(len(row) == 49 for row in rows)
+
+
+@pytest.mark.parametrize("view", ["preview", "review"])
+@pytest.mark.parametrize("depth,green,red", [
+    ("DEPTH_4_BIT", "42", "41"),
+    ("DEPTH_8_BIT", "48;5;22", "48;5;52"),
+    ("DEPTH_24_BIT", "48;2;0;95;0", "48;2;95;0;0"),
+])
+def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, green, red) -> None:
+    from io import StringIO
+    from prompt_toolkit import ANSI
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.formatted_text import to_formatted_text
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.vt100 import Vt100_Output
+    from prompt_toolkit.styles import Style
+
+    block = ToolBlock("edit-colors", "edit_file", {
+        "file_path": "/workspace/example.py", "old_string": "old", "new_string": "new",
+    }, status="completed")
+    if view == "preview":
+        fragments, _ = TranscriptRenderer().render(CliState(blocks=[block]), 60)
+    else:
+        fragments = to_formatted_text(ANSI(render_review([("edit_file", block.arguments)], 60)))
+    stream = StringIO()
+    terminal = Vt100_Output(stream, lambda: Size(rows=24, columns=60), term="xterm-256color")
+    style = Style.from_dict({})
+    for fragment_style, text in fragments:
+        terminal.set_attributes(style.get_attrs_for_style_str(fragment_style), ColorDepth(depth))
+        terminal.write(text)
+    terminal.flush()
+    sequences = re.findall(r"\x1b\[([0-9;]+)m", stream.getvalue())
+    for expected in (green, red):
+        assert any(f";{expected};" in f";{sequence};" for sequence in sequences)
 
 
 def test_edit_review_keeps_context_headers_and_full_diff() -> None:
@@ -1088,7 +1198,7 @@ def test_consecutive_creates_collapse_and_ctrl_o_expands_file_list() -> None:
     ) for index in range(18)]
     state = CliState(blocks=blocks)
     collapsed = _plain(render_transcript(state, 100))
-    assert collapsed.count("Create 18 files") == 1
+    assert collapsed.count("Created 18 files") == 1
     assert "├ … 13 more" in collapsed
     assert "└ /workspace/file-17.md" in collapsed
     assert "/workspace/file-0.md" not in collapsed
@@ -1096,7 +1206,7 @@ def test_consecutive_creates_collapse_and_ctrl_o_expands_file_list() -> None:
 
     state.tools_expanded = True
     expanded = _plain(render_transcript(state, 100))
-    assert "Create 18 files" in expanded
+    assert "Created 18 files" in expanded
     assert all(f"/workspace/file-{index}.md" in expanded for index in range(18))
     assert "more" not in expanded
     assert "Ctrl+O to expand" not in expanded
@@ -1119,7 +1229,7 @@ def test_write_operation_artifact_controls_create_and_overwrite_titles() -> None
         {"file_path": path, "old_string": "", "new_string": "hello"},
         artifact={"operation": "create"}, status="completed",
     )
-    assert "● Create /workspace/report.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
+    assert "● Created /workspace/report.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
     assert "● Wrote /workspace/report.md" in _plain(render_transcript(CliState(blocks=[overwritten]), 100))
     assert "● write workspace/report.md" in _plain(render_transcript(CliState(blocks=[unknown]), 100))
     assert "● Edited /workspace/report.md" in _plain(render_transcript(CliState(blocks=[edited]), 100))
@@ -1372,7 +1482,7 @@ def test_write_empty_file_has_no_fabricated_diff() -> None:
         tool_call_id="write-empty-created", name="write_file", arguments=args,
         artifact={"operation": "create"}, status="completed",
     )
-    assert "● Create /workspace/empty.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
+    assert "● Created /workspace/empty.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
 
 
 def test_edit_preview_counts_added_deleted() -> None:
@@ -1995,9 +2105,13 @@ def test_restored_interrupted_write_has_static_gray_status() -> None:
 
 
 def test_transcript_header_avoids_duplicate_runtime_context() -> None:
-    rendered = render_transcript(CliState(), 120)
-    assert "DeepAgent" in rendered
-    assert "Ctrl+O tools" in rendered
+    from agent.version import package_version
+
+    rendered = _plain(render_transcript(CliState(), 120))
+    assert f"DeepAgentCLI v{package_version()}" in rendered
+    assert "terminal coding agent" in rendered
+    for hint in ("Esc interrupt", "F2 pending", "Ctrl+O tools", "Ctrl+R review", "/ commands"):
+        assert hint not in rendered
     assert "/workspace/project · SANDBOXED · perm:ask" not in rendered
 
 
@@ -3145,7 +3259,8 @@ def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch
         assert f"{app.state.status} · queued {steering + follow_up}" in text()
         app._apply_event(RunEvent(type="run_completed"))
         assert app._status_visible()
-        assert text().strip() == f"queued {steering + follow_up}"
+        preview = " | ".join(["steer"] * steering + ["follow up"] * follow_up)
+        assert text().strip() == f"queued {steering + follow_up}: {preview}"
         monkeypatch.setattr(app, "_width", lambda: 7)
         assert text() == " queue…"
         for _ in range(steering):
@@ -3216,6 +3331,22 @@ def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, w
                 assert any(message.display in line for message in FGO_LINES)
 
 
+@pytest.mark.parametrize(("path", "expected"), [
+    ("/home/neo", "~/"),
+    ("/home/neo/project/app", "~/project/app"),
+    ("/home/neo/中文项目", "~/中文项目"),
+    ("/home/neon/project", "/home/neon/project"),
+    ("/home/other/project", "/home/other/project"),
+    ("/srv/project", "/srv/project"),
+    ("relative/project", "relative/project"),
+])
+def test_workspace_path_abbreviates_only_current_home(monkeypatch, path, expected) -> None:
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/neo")))
+    assert format_workspace_path(Path(path)) == expected
+
+
 def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
@@ -3229,7 +3360,7 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         footer = "".join(fragment[1] for fragment in app._footer_text())
         lines = footer.splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-m")
+        assert lines[0].startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-m")
         assert lines[0].rstrip().endswith("⎇ checking git")
         assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
@@ -3251,9 +3382,9 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypa
         monkeypatch.setattr(app, "_width", lambda: 140)
         fragments = list(app._footer_text())
         first_line = "".join(value for _, value in fragments).splitlines()[0]
-        assert first_line.startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-c")
+        assert first_line.startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-c")
         assert first_line.rstrip().endswith("⎇ checking git")
-        assert any(style == "class:footer-workspace" and str(app._workspace()) in value for style, value in fragments)
+        assert any(style == "class:footer-workspace" and format_workspace_path(app._workspace()) in value for style, value in fragments)
         assert ("class:footer-resume-id", "footer-c") in fragments
         assert ("class:footer-model", "qwen3.5-plus · default") in fragments
         for label, color in (
@@ -3319,7 +3450,7 @@ def test_footer_hides_context_meter_without_a_configured_window(monkeypatch) -> 
         app.state.apply(RunEvent(type="usage", result={"total_tokens": 500}))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].startswith(f" {app._workspace()} · qwen3.5-plus · default · footer-u")
+        assert lines[0].startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-u")
         assert "Context" not in lines[1]
 
 
@@ -3342,7 +3473,19 @@ def test_footer_places_context_on_execution_settings_line_when_git_unavailable()
         assert len(lines) == FOOTER_LINES
         assert "token-plan · auto · default" in lines[0]
         assert lines[0].rstrip().endswith("⎇ no git")
-        assert lines[1].rstrip().endswith("1.0m Context · Unknown")
+        assert lines[1].rstrip().endswith("1.0m Context · 0.0% used")
+
+        app.state.apply(RunEvent(type="run_started"))
+        assert "1.0m Context · Unknown" in "".join(part[1] for part in app._footer_text())
+        app.state.apply(RunEvent(type="run_completed"))
+        app.state.clear()
+        assert "1.0m Context · Unknown" in "".join(part[1] for part in app._footer_text())
+        app.new_session()
+        assert "1.0m Context · 0.0% used" in "".join(part[1] for part in app._footer_text())
+        app.state.load_transcript([TranscriptBlock(kind="user", content="previous task")])
+        assert "1.0m Context · Unknown" in "".join(part[1] for part in app._footer_text())
+        app.state.apply(RunEvent(type="usage", result={"input_tokens": 10_000}))
+        assert "1.0m Context · 1.0% used" in "".join(part[1] for part in app._footer_text())
 
 
 def test_context_usage_formatting() -> None:
@@ -3351,6 +3494,8 @@ def test_context_usage_formatting() -> None:
     assert format_context_window(8_000) == "8k"
     assert format_context_usage({}, 0) == ""
     assert format_context_usage({}, 128_000) == "128k Context · Unknown"
+    assert format_context_usage({}, 128_000, empty_session=True) == "128k Context · 0.0% used"
+    assert format_context_usage({}, 0, empty_session=True) == ""
     assert format_context_usage({"input_tokens": 5_000}, 128_000) == "128k Context · 3.9% used"
     assert format_context_usage({"input_tokens": 9_000_000}, 1_000_000) == "1.0m Context · 900.0% used"
 
@@ -3636,7 +3781,6 @@ def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None
 def test_transcript_renderer_matches_uncached_render() -> None:
     state = CliState()
     state.add_user("hello there")
-    state.todos = [{"content": "Inspect files", "status": "completed"}]
     state.blocks.append(ToolBlock(
         tool_call_id="t1", name="execute", arguments={"command": "pytest -q"},
         output="ok\nfailed", status="completed",
@@ -3664,10 +3808,118 @@ def test_cli_steer_and_follow_up_use_run_controller() -> None:
         app.buffer.text = "steer now"
         app._submit_buffer("steer")
         assert runner.control.pending_steering_count() == 1
-        assert any(getattr(block, "pending", False) for block in app.state.blocks)
+        assert not app.state.blocks
         app.buffer.text = "later"
         app._submit_buffer("followUp")
         assert runner.control.pending_follow_up_count() == 1
+        assert not app.state.blocks
+        assert "queued 2: steer now | later" in "".join(value for _, value in app._status_text())
+        assert runner.control.pop_steering() == "steer now"
+        assert [block.content for block in app.state.blocks] == ["steer now"]
+        assert "queued 1: later" in "".join(value for _, value in app._status_text())
+        assert runner.control.pop_follow_up() == "later"
+        assert [block.content for block in app.state.blocks] == ["steer now", "later"]
+        assert runner.control.pending_message_texts() == []
+        assert " · queued " not in "".join(value for _, value in app._status_text())
+
+
+@pytest.mark.parametrize("propose_tools", [False, True])
+def test_cli_enter_during_stream_replans_before_tools(monkeypatch, propose_tools) -> None:
+    from threading import Event
+    from langchain_core.messages import AIMessageChunk, HumanMessage
+    from langchain_core.outputs import ChatGenerationChunk
+
+    streaming = Event()
+    submitted = Event()
+    calls = []
+    model = scripted_model([])
+    object.__setattr__(model, "streaming", True)
+    model.model_fields_set.add("streaming")
+
+    def stream(self, messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="Working"))
+            streaming.set()
+            assert submitted.wait(5), "UI did not submit while the model was streaming"
+            if propose_tools:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[{
+                    "name": "write_file", "args": '{"file_path":"/stale.txt","content":"stale"}',
+                    "id": "stale-call", "index": 0,
+                }]))
+        else:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="Corrected"))
+
+    monkeypatch.setattr(type(model), "_stream", stream)
+    runner = AgentRunner(model=model, backend=StateBackend())
+
+    async def scenario():
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            try:
+                app._start_run("start")
+                assert await _await_cli_io(asyncio.to_thread(streaming.wait, 5), timeout=6)
+                app.buffer.text = "change direction"
+                app._submit_buffer("steer")
+                assert runner.control.pending_steering_count() == 1
+                submitted.set()
+                await _await_cli_io(app._run_task, timeout=10)
+                assert len(calls) == 2, runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+                assert any(isinstance(m, HumanMessage) and m.content == "change direction" for m in calls[1])
+                assert runner.control.pending_steering_count() == 0
+                assert not any(isinstance(block, ToolBlock) for block in app.state.blocks)
+                assert [block.content for block in app.state.blocks if isinstance(block, MessageBlock) and block.kind == "user"] == ["start", "change direction"]
+            finally:
+                submitted.set()
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["steer", "followUp"])
+def test_cli_drains_input_arriving_after_worker_completion(mode) -> None:
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="first done"), AIMessage(content="queued done"),
+    ]), backend=StateBackend())
+
+    async def scenario():
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            try:
+                result = runner.invoke("first")
+                # The worker returned, but the UI has not handled its result.
+                app.state.running = True
+                app.buffer.text = "late input"
+                app._submit_buffer(mode)
+                assert runner.control.pending_message_texts() == ["late input"]
+                app._handle_result(result)
+                assert app._run_task is not None
+                await _await_cli_io(app._run_task)
+                assert runner.control.pending_message_texts() == []
+                messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+                assert messages[-1].content == "queued done"
+                assert [block.content for block in app.state.blocks if isinstance(block, MessageBlock) and block.kind == "user"] == ["late input"]
+            finally:
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+def test_cli_new_input_appends_to_existing_queue_when_idle(monkeypatch) -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_start_queued_run", lambda: None)
+        runner.follow_up("older")
+        app.buffer.text = "newer"
+        app._submit_buffer("steer")
+        assert runner.control.pending_message_texts() == ["older", "newer"]
+        assert not app.state.blocks
+        assert app.buffer.text == ""
 
 
 def test_cli_esc_requests_cancel() -> None:
@@ -4165,3 +4417,110 @@ def test_context_ignores_usage_without_valid_input_tokens(usage):
     assert state.usage == {"input_tokens": 500, "output_tokens": 10, "total_tokens": 510}
     state.apply(RunEvent(type="usage", result={"input_tokens": 750}))
     assert state.usage == {"input_tokens": 750}
+
+
+def test_escape_before_worker_starts_cancels_the_dispatched_run() -> None:
+    """C16 in the TUI: Esc lands after running=True but before begin_run."""
+    import threading
+
+    calls = []
+
+    class CountingModel(type(scripted_model([]))):
+        def _generate(self, *args, **kwargs):
+            calls.append(1)
+            return super()._generate(*args, **kwargs)
+
+    runner = AgentRunner(model=CountingModel(messages=iter([AIMessage(content="never")])),
+                         backend=StateBackend(), thread_id="esc-before-start")
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app._loop = asyncio.get_running_loop()
+            gate = threading.Event()
+            blockers = [app._io_executor.submit(gate.wait, 5) for _ in range(2)]
+            app._start_run("dispatched")
+            assert app.state.running
+            _escape(app)
+            _escape(app)
+            gate.set()
+            for blocker in blockers:
+                blocker.result(5)
+            await asyncio.wait_for(app._run_task, 5)
+            assert not app.state.running
+            assert app.state.status == "Cancelled"
+            assert calls == []
+            assert any("Operation cancelled." in getattr(block, "content", "") for block in app.state.blocks)
+            app._io_executor.shutdown(wait=True)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        runner.close()
+
+
+def test_repeated_escape_sends_one_cancel_per_run() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="esc-once")
+    sent = []
+    runner.request_cancel = lambda: sent.append(1)  # type: ignore[method-assign]
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.state.running = True
+        for _ in range(4):
+            _escape(app)
+        assert sent == [1]
+        assert "Cancelling" in app.state.status
+        app._cancel_sent = False
+        app.state.running = False
+    runner.close()
+
+
+def test_stale_run_events_do_not_reach_the_current_run() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="stale-events")
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app._run_epoch = 2
+        app.state.running = True
+        app._apply_run_event(RunEvent(type="run_cancelled"), 1)
+        app._apply_run_event(RunEvent(type="assistant_delta", content="old run text"), 1)
+        assert app.state.running
+        assert not any("old run text" in getattr(block, "content", "") for block in app.state.blocks)
+        app._apply_run_event(RunEvent(type="assistant_delta", content="current text"), 2)
+        assert any(getattr(block, "content", "") == "current text" for block in app.state.blocks)
+        # Control events from the UI thread carry no epoch and always apply.
+        app._apply_run_event(RunEvent(type="run_cancelling"), None)
+        assert app.state.status == "Cancelling…"
+    runner.close()
+
+
+def test_unconfirmed_cancel_cleanup_is_reported() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(),
+                         thread_id="cancel-unclosed")
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.state.running = True
+        app._handle_result(RunResult(status="cancelled", error="Cancelled, but the model request did not confirm it stopped"))
+        assert not app.state.running
+        assert app.state.status == "Cancel cleanup not confirmed"
+        assert any("did not confirm" in getattr(block, "content", "") for block in app.state.blocks)
+    runner.close()
+
+
+def test_removed_tool_argument_aliases_do_not_create_diff_previews() -> None:
+    from agent.cli.previews import build_diff_preview
+
+    assert build_diff_preview("edit_file", {
+        "file_path": "/workspace/a.py", "old_text": "old", "new_text": "new",
+    }) is None
+
+
+def test_web_search_preview_does_not_parse_output_for_missing_artifact() -> None:
+    from agent.cli.previews import build_web_search_preview
+
+    preview = build_web_search_preview(ToolBlock(
+        "search", "web_search", {"query": "example"}, status="completed",
+        output="Web search results for: example\n5 results",
+    ))
+    assert preview.detail == ""

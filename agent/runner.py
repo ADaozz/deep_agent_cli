@@ -36,6 +36,7 @@ from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
+from agent.llm_stream import ModelStreamCancelled, reset_stream_owner, set_stream_owner
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
 from agent.permission import (
@@ -67,6 +68,10 @@ HUMAN_TOOLS = frozenset({"request_human_input"})
 # releases the session lease early: close() raises, keeps the lease, and can be
 # retried once the run finally drained.
 CLOSE_DRAIN_SECONDS = 30.0
+# How long a cancelled run waits for its model HTTP request to confirm it has
+# closed before reporting the cleanup as unconfirmed.
+MODEL_STREAM_CLOSE_SECONDS = 5.0
+MODEL_STREAM_UNCLOSED = "Cancelled, but the model request did not confirm it stopped"
 
 
 def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -76,9 +81,16 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
             raise RuntimeError("Runner is closed")
         if not self._operation_lock.acquire(blocking=False):
             raise RuntimeError("Runner already has an active operation")
+        # The reservation in force on entry was made for this operation. One
+        # made while it runs belongs to the caller's next run and must survive.
+        reservation = self.control.reserved_generation
         try:
             return method(self, *args, **kwargs)
         finally:
+            # An operation that ended before begin_run must not leave its
+            # reservation (and a cancel aimed at it) for a later run.
+            if reservation is not None:
+                self.control.release_reservation(reservation)
             self._operation_lock.release()
     return guarded
 
@@ -153,7 +165,6 @@ class InterruptState:
 class SessionSnapshot:
     info: SessionInfo
     transcript: list[TranscriptBlock]
-    todos: list[dict[str, str]] = field(default_factory=list)
     interrupt_kind: InterruptKind | None = None
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -205,7 +216,6 @@ class AgentRunner:
         self.on_event = on_event
         self._event_handler: RunEventHandler | None = None
         self._seen_tool_calls: set[str] = set()
-        self._todo_call_ids: set[str] = set()
         self.settings = settings
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
@@ -511,8 +521,8 @@ class AgentRunner:
                 return {}
             model_id = last.response_metadata.get("deep_agent_model_id")
             if model_id != self._current_model_id:
-                # Legacy checkpoints remain readable; without a source ID their
-                # usage cannot be safely attributed after a model/source switch.
+                # Without a source ID, usage cannot be safely attributed
+                # after a model/source switch.
                 return {}
             if self.session_store is not None:
                 saved = self.session_store.get(self.thread_id)
@@ -637,10 +647,22 @@ class AgentRunner:
         self.control.request_pause()
 
     def request_cancel(self) -> None:
-        """Request hard cancel for execute / cancellable tools and drain the graph."""
+        """Request hard cancel of the model stream, cancellable tools, and the graph.
+
+        Returns without waiting; the operation in progress reports the outcome.
+        Also cancels a run reserved with ``reserve_run`` that has not started.
+        Only the run's own exit path records its stop reason: the cancel may
+        arrive after the run already finished, and a run that never reaches
+        that path stays PENDING, which recovery already handles.
+        """
         self.control.cancel()
-        if self._busy:
-            self._touch_status(StopReason.ABORTED)
+
+    def reserve_run(self) -> int:
+        """Mark that the caller is dispatching a run so an early cancel is not lost."""
+        return self.control.reserve_run()
+
+    def release_run_reservation(self, reservation: int) -> None:
+        self.control.release_reservation(reservation)
 
     def steer(self, text: str) -> None:
         # No _exclusive_operation: steering must enter while a run holds the
@@ -699,7 +721,6 @@ class AgentRunner:
         return SessionSnapshot(
             info=info,
             transcript=transcript,
-            todos=list((state.values or {}).get("todos", []) or []),
             interrupt_kind=interrupt.kind if interrupt is not None else None,
             human_input=interrupt.payload if interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN else {},
             pending_tool_calls=list(interrupt.pending_tools) if interrupt is not None else [],
@@ -914,6 +935,11 @@ class AgentRunner:
                 "Runner close timed out with a run still active; the session "
                 "lease is kept until the run drains and close is retried"
             )
+        if not self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS):
+            raise RuntimeError(
+                "Runner close could not confirm the model request stopped; the "
+                "session lease is kept until it closes and close is retried"
+            )
         self._close_completed = True
         self._runtime.close()
         if self._attachment_tempdir is not None:
@@ -1082,11 +1108,6 @@ class AgentRunner:
     ) -> RunResult:
         self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_HUMAN, "submit_human_input")
-        if _has_pending_legacy_handoff(self.prepared.graph, self._thread_config()):
-            raise RuntimeError(
-                "This session uses the removed handoff_to_human tool. "
-                "Start a new session and ask again with request_human_input."
-            )
         validate_human_input_values(values, state.payload)
         envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
         if state.payload.get("interactionId"):
@@ -1239,11 +1260,11 @@ class AgentRunner:
         self._event_handler = event_handler
         config = self._run_config(on_delta, on_event)
         self._seen_tool_calls.clear()
-        self._todo_call_ids.clear()
         run_control = self.control.begin_run()
         set_output_emitter(self._emit_tool_output)
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
+        stream_owner_token = set_stream_owner(self.control)
         self._busy = True
         self._context_usage_invalidated = True
         _emit(event_handler, RunEvent(type="run_started"))
@@ -1276,7 +1297,6 @@ class AgentRunner:
                 emit_turn_completed(result.output)
                 run_control = self.control.begin_run()
                 self._seen_tool_calls.clear()
-                self._todo_call_ids.clear()
                 turn_started = time.monotonic()
                 self._apply_pending_runtime_config(event_handler)
                 result = self._stream_once(
@@ -1297,6 +1317,7 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
+            reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)
             if (result is not None and result.status == "completed") or (
@@ -1315,9 +1336,8 @@ class AgentRunner:
         interrupted = ""
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}
-        previous_todos = _todos_in_state(
-            self.prepared.graph.get_state(self._thread_config()).values or {}
-        )
+        state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
+        last_message_id = _last_message_id(state_values)
         try:
             for chunk in self.prepared.graph.stream(
                 graph_input, config, stream_mode=["updates", "values"], control=run_control,
@@ -1325,10 +1345,6 @@ class AgentRunner:
             ):
                 mode, payload = chunk
                 if mode == "values":
-                    todos = _todos_in_state(payload)
-                    if todos is not None and todos != previous_todos:
-                        _emit(event_handler, RunEvent(type="todos_updated", result=todos))
-                        previous_todos = todos
                     continue
                 chunk = payload
                 self._emit_update_events(chunk, event_handler)
@@ -1347,23 +1363,24 @@ class AgentRunner:
                     if interrupt.kind is InterruptKind.WAITING_HUMAN:
                         human_input = interrupt.payload
         except GraphDrained:
-            _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status(StopReason.ABORTED)
-            return RunResult(status="cancelled")
+            if self._final_answer_committed(last_message_id):
+                return RunResult(status="completed",
+                                 output=_final_output(self.prepared.graph, self._thread_config()))
+            return self._cancelled_result(event_handler)
         except Exception as exc:  # noqa: BLE001
+            # A ModelStreamCancelled without a cancel request of this run is
+            # not a user cancel and stays a failure, like any network error.
             if self.control.cancel_requested:
-                _emit(event_handler, RunEvent(type="run_cancelled"))
-                self._touch_status(StopReason.ABORTED)
-                return RunResult(status="cancelled")
+                return self._cancelled_result(event_handler)
+            if isinstance(exc, ModelStreamCancelled):
+                exc = RuntimeError(f"Model stream stopped unexpectedly: {exc}")
             _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
             self._touch_status(StopReason.ERROR)
             return RunResult(status="failed", error=str(exc))
 
-        if self.control.cancel_requested and not interrupted:
-            _emit(event_handler, RunEvent(type="run_cancelled"))
-            self._touch_status(StopReason.ABORTED)
-            return RunResult(status="cancelled")
-
+        # graph.stream returned without GraphDrained: the graph reached its end
+        # and the final message is already checkpointed. A cancel that arrived
+        # after the last step does not undo that, so the run stays completed.
         if interrupted:
             self.control.set_defer_steering(True)
             self._touch_status(StopReason.DEFERRED)
@@ -1377,6 +1394,32 @@ class AgentRunner:
 
         output = _final_output(self.prepared.graph, self._thread_config())
         return RunResult(status="completed", output=output)
+
+    def _final_answer_committed(self, last_message_id: str | None) -> bool:
+        """Whether this run checkpointed a final answer before it was drained.
+
+        After an answer without tool calls only no-op middleware hooks remain
+        (or a steering continuation, which the cancel stops), so the turn is
+        complete and the late cancel must not report it as cancelled.
+        """
+        values = self.prepared.graph.get_state(self._thread_config()).values or {}
+        messages = values.get("messages") or []
+        if not messages or _last_message_id(values) == last_message_id:
+            return False
+        return isinstance(messages[-1], AIMessage) and not messages[-1].tool_calls
+
+    def _cancelled_result(self, event_handler: RunEventHandler | None) -> RunResult:
+        """Finish a cancelled run once its model request is confirmed closed.
+
+        graph.stream has returned, so no node can still write a checkpoint.
+        An unconfirmed close is reported on the result and makes close() keep
+        the session lease.
+        """
+        closed = self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS)
+        self._touch_status(StopReason.ABORTED)
+        error = "" if closed else MODEL_STREAM_UNCLOSED
+        _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
+        return RunResult(status="cancelled", error=error)
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
@@ -1411,9 +1454,6 @@ class AgentRunner:
                     _emit(handler, RunEvent(type="usage", result=usage))
                 for call in message.tool_calls or []:
                     tool_call_id = str(call.get("id") or "")
-                    if call.get("name") == "write_todos":
-                        self._todo_call_ids.add(tool_call_id)
-                        continue
                     identity = tool_call_id or f"{call.get('name')}:{id(call)}"
                     if identity in self._seen_tool_calls:
                         continue
@@ -1427,10 +1467,6 @@ class AgentRunner:
                     ))
             elif isinstance(message, ToolMessage):
                 tool_name = str(getattr(message, "name", "") or "tool")
-                if tool_name == "write_todos" or str(
-                    getattr(message, "tool_call_id", "") or ""
-                ) in self._todo_call_ids:
-                    continue
                 content = _message_text(message)
                 artifact = getattr(message, "artifact", None)
                 is_error = tool_message_is_error(message)
@@ -1550,6 +1586,11 @@ def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> InterruptSt
     return classify_interrupt(interrupts, graph, config)
 
 
+def _last_message_id(values: dict[str, Any]) -> str | None:
+    messages = values.get("messages") or []
+    return getattr(messages[-1], "id", None) if messages else None
+
+
 def _final_output(graph: Any, config: dict[str, Any]) -> str:
     state = graph.get_state(config)
     messages = state.values.get("messages", [])
@@ -1591,13 +1632,6 @@ def _messages_in_update(value: Any) -> list[BaseMessage]:
     return found
 
 
-def _todos_in_state(value: Any) -> list[dict[str, str]] | None:
-    """Project middleware-owned todos from a LangGraph values snapshot."""
-    if isinstance(value, dict) and isinstance(value.get("todos"), list):
-        return [dict(item) for item in value["todos"] if isinstance(item, dict)]
-    return None
-
-
 _USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
 
 
@@ -1625,16 +1659,6 @@ def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:
         except Exception:  # noqa: BLE001
             # Presentation observers must never change Agent/Tool execution semantics.
             pass
-
-
-def _has_pending_legacy_handoff(graph: Any, config: dict[str, Any]) -> bool:
-    state = graph.get_state(config)
-    if not getattr(state, "interrupts", ()):
-        return False
-    for message in reversed((state.values or {}).get("messages", []) or []):
-        if isinstance(message, AIMessage):
-            return any(call.get("name") == "handoff_to_human" for call in message.tool_calls or [])
-    return False
 
 
 def _tool_decisions(

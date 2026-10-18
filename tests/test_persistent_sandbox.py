@@ -637,3 +637,104 @@ def test_shared_workspace_unix_socket_can_relay_host_network(backend, workspace)
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def _command_events(handle):
+    events = []
+    deadline = time.monotonic() + 5
+    try:
+        while time.monotonic() < deadline:
+            event = handle.next_event(0.1)
+            if event is not None:
+                events.append(event)
+                if event[0] in ("exit", "spawn_error", "lost"):
+                    break
+        assert events and events[-1] == ("exit", 0), events
+        return events
+    finally:
+        handle.release()
+
+
+def test_worker_argv_and_shell_share_ids_and_keep_streams_separate(backend, workspace):
+    sandbox = _pool(backend).run(False, lambda current: current)
+    shell = sandbox.start_command("sleep 0.1; printf shell; printf shellerr >&2")
+    literal = "$(touch INJECTED); `touch INJECTED`; 中文\n'\""
+    argv = sandbox.start_argv([
+        "python3", "-c", "import sys; print(sys.argv[1]); print('error', file=sys.stderr)", literal,
+    ], "/workspace")
+    assert argv.request_id == shell.request_id + 1
+    direct = _command_events(argv)
+    assert b"".join(data for kind, data in direct if kind == "out").decode() == literal + "\n"
+    assert b"".join(data for kind, data in direct if kind == "err") == b"error\n"
+    legacy = _command_events(shell)
+    assert {kind for kind, _ in legacy} == {"out", "exit"}
+    assert b"".join(data for kind, data in legacy if kind == "out") == b"shellshellerr"
+    assert not (workspace / "INJECTED").exists()
+    assert _pool(backend).sandbox(False) is sandbox
+
+
+def test_persistent_rg_mount_is_read_only(backend):
+    from agent.sandbox import SEARCH_BINARY_PATH
+
+    sandbox = _pool(backend).run(False, lambda current: current)
+    result = _command_events(sandbox.start_argv([SEARCH_BINARY_PATH, "--version"], "/workspace"))
+    assert b"ripgrep " in b"".join(data for kind, data in result if kind == "out")
+    assert run(backend, f"test -x {SEARCH_BINARY_PATH} && ! (printf bad > {SEARCH_BINARY_PATH}) 2>/dev/null").exit_code == 0
+
+
+def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypatch):
+    import json
+    from agent.sandbox_pool import PersistentSandbox
+
+    (workspace / "a.py").write_text("needle\n")
+    def call(identifier, name, args):
+        return AIMessage(content="", tool_calls=[{"id": identifier, "name": name, "args": args}])
+    grep_args = {"pattern": "needle"}
+    runner = _sandbox_runner(workspace, [
+        call("g1", "grep", grep_args),
+        call("off", "execute", {"command": "printf offline", "network": False}),
+        call("g2", "grep", grep_args),
+        call("net", "execute", {"command": "printf online", "network": True}),
+        call("g3", "grep", grep_args), AIMessage(content="ask done"),
+        call("g4", "grep", grep_args),
+        call("allowed", "execute", {"command": "printf allowed", "network": False}),
+        call("g5", "grep", grep_args), AIMessage(content="allow done"),
+        call("g6", "grep", grep_args), AIMessage(content="ask again"),
+    ])
+    started = []
+    original = PersistentSandbox.start
+    def record(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        started.append((self.network, self.host_pid))
+        return result
+    monkeypatch.setattr(PersistentSandbox, "start", record)
+    events = []
+    pool = runner.sandbox_pool
+    try:
+        assert runner.invoke("ask search and execute", on_event=events.append).status == "waiting_confirmation"
+        offline = pool.sandbox(False)
+        assert offline is not None and pool.sandbox(True) is None
+        assert runner.current_interrupt().pending_tools[0]["name"] == "execute"
+        assert runner.approve_tool("off", on_event=events.append).status == "waiting_confirmation"
+        assert pool.sandbox(False) is offline and pool.sandbox(True) is None
+        assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "net"
+        assert runner.approve_tool("net", on_event=events.append).status == "completed"
+        online = pool.sandbox(True)
+        assert online is not None and pool.sandbox(False) is offline
+        runner.set_permission_mode("allow")
+        assert runner.invoke("allow search and execute", on_event=events.append).status == "completed"
+        assert pool.sandbox(True) is online
+        runner.set_permission_mode("ask")
+        assert runner.invoke("ask search again", on_event=events.append).status == "completed"
+        assert pool.sandbox(False) is offline and pool.sandbox(True) is online
+        assert started == [(False, offline.host_pid), (True, online.host_pid)]
+        # Only the three explicitly scripted execute calls appear; grep creates none.
+        assert {event.tool_call_id for event in events if event.type == "tool_started" and event.name == "execute"} == {"off", "net", "allowed"}
+        assert {event.tool_call_id for event in events if event.type == "tool_completed" and event.name == "grep"} == {"g1", "g2", "g3", "g4", "g5", "g6"}
+        print(json.dumps({"ask_grep_and_approved_execute_pid": offline.host_pid,
+                          "allow_grep_and_execute_pid": online.host_pid,
+                          "ask_allow_ask_reused": True, "new_bwrap_instances": len(started)}))
+    finally:
+        runner.close()
+    assert not offline.alive and not online.alive
+    assert pool.sandbox(False) is None and pool.sandbox(True) is None

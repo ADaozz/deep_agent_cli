@@ -1,0 +1,176 @@
+{
+  "label": "baseline-tui-chat",
+  "mode": "tui",
+  "api": "chat_completions",
+  "repo_commit": "c4f4ce1",
+  "scenario": "mixed",
+  "samples_s": [
+    5.0,
+    15.0,
+    30.0
+  ],
+  "started_at": 1791947302.232669,
+  "summary": {
+    "cycles_run": 1,
+    "server_saw_close": 0,
+    "max_close_s": null,
+    "open_model_tcp_at_last_sample": 1,
+    "follow_ups_completed": 0,
+    "normal_mean_s": 0.084,
+    "normal_requests": 3,
+    "normal_request_bytes": 71262,
+    "normal_reported_tokens": 84,
+    "follow_mean_s": 20.018,
+    "threads": [
+      2,
+      6
+    ],
+    "stopped_early": "follow-up task after cycle 0 did not complete"
+  },
+  "pid": 27138,
+  "normal_tasks": [
+    {
+      "marker": "NORMAL-0",
+      "completed": true,
+      "elapsed_s": 0.117,
+      "requests": 1,
+      "request_bytes": 23620,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-1",
+      "completed": true,
+      "elapsed_s": 0.067,
+      "requests": 1,
+      "request_bytes": 23754,
+      "reported_tokens": 28
+    },
+    {
+      "marker": "NORMAL-2",
+      "completed": true,
+      "elapsed_s": 0.068,
+      "requests": 1,
+      "request_bytes": 23888,
+      "reported_tokens": 28
+    }
+  ],
+  "cycles": [
+    {
+      "index": 0,
+      "scenario": "before_first_chunk",
+      "before_cancel": {
+        "threads": 6,
+        "python_threads": {
+          "names": {
+            "MainThread": 1,
+            "ThreadPoolExecutor-4_0": 1,
+            "ThreadPoolExecutor-4_1": 1,
+            "ThreadPoolExecutor-4_2": 1,
+            "deep-agent-io_0": 1,
+            "deep-agent-sandbox-launcher": 1
+          },
+          "in_http_client": [
+            "deep-agent-io_0"
+          ]
+        },
+        "agent_model_tcp_established": 1,
+        "server_open_requests": 1,
+        "server_errors": 0,
+        "held_session_leases": 1,
+        "session_status": [
+          "pending"
+        ],
+        "screen_tail": [
+          "› cancel probe 0",
+          "⠦ Working…  Esc to cancel · 问题在本地无法复现，它可能不喜欢我的工位。",
+          "›",
+          "/tmp/cancel-fi-pl7n0vbk/workspace · local · stream · default · 2a0ccb0b                                                            ⎇ no git",
+          "SANDBOXED · perm:ask"
+        ]
+      },
+      "samples": {
+        "5s": {
+          "threads": 6,
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "› cancel probe 0",
+            "⠦ Cancelling…",
+            "›",
+            "/tmp/cancel-fi-pl7n0vbk/workspace · local · stream · default · 2a0ccb0b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "15s": {
+          "threads": 6,
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "› cancel probe 0",
+            "⠦ Cancelling…",
+            "›",
+            "/tmp/cancel-fi-pl7n0vbk/workspace · local · stream · default · 2a0ccb0b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        },
+        "30s": {
+          "threads": 6,
+          "python_threads": {
+            "names": {
+              "MainThread": 1,
+              "ThreadPoolExecutor-4_0": 1,
+              "ThreadPoolExecutor-4_1": 1,
+              "ThreadPoolExecutor-4_2": 1,
+              "deep-agent-io_0": 1,
+              "deep-agent-sandbox-launcher": 1
+            },
+            "in_http_client": [
+              "deep-agent-io_0"
+            ]
+          },
+          "agent_model_tcp_established": 1,
+          "server_open_requests": 1,
+          "server_errors": 0,
+          "held_session_leases": 1,
+          "session_status": [
+            "aborted"
+          ],
+          "screen_tail": [
+            "› cancel probe 0",
+            "⠦ Cancelling…",
+            "›",
+            "/tmp/cancel-fi-pl7n0vbk/workspace · local · stream · default · 2a0ccb0b                                                            ⎇ no git",
+            "SANDBOXED · perm:ask"
+          ]
+        }
+      },
+      "server_saw_close_after_s": null,
+      "ui_showed_cancelled": false,
+      "follow_up": {
+        "marker": "FOLLOW-0",
+        "completed": false,
+        "elapsed_s": 20.018,
+        "requests": 0,
+        "request_bytes": 0,
+        "reported_tokens": 0
+      },
+      "follow_up_has_cancelled_prompt": false,
+      "follow_up_has_abort_note": false
+    }
+  ],
+  "baseline_threads": 2,
+  "stopped_early": "follow-up task after cycle 0 did not complete",
+  "exit_code": -9,
+  "leases_after_exit": 0,
+  "final_screen": "                                                                                                                                            \n NORMAL-0 done                                                                                                                              \n Worked for 0s · 11:08                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n › reply with NORMAL-1                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n NORMAL-1 done                                                                                                                              \n Worked for 0s · 11:08                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n › reply with NORMAL-2                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n NORMAL-2 done                                                                                                                              \n Worked for 0s · 11:08                                                                                                                      \n                                                                                                                                            \n                                                                                                                                            \n › cancel probe 0                                                                                                                           \n                                                                                                                                            \n                                                                                                                                            \n › ⟳ reply with FOLLOW-0                                                                                                                    \n                                                                                                                                            \n ⠹ Cancelling… · queued 1                                                                                                                   \n                                                                                                                                            \n›                                                                                                                                           \n                                                                                                                                            \n /tmp/cancel-fi-pl7n0vbk/workspace · local · stream · default · 2a0ccb0b                                                            ⎇ no git\n SANDBOXED · perm:ask                                                                                                                       \n                                                                                                                                            \n                                                                                                                                            \n                                                                                                                                            \n                                                                                                                                            \nTo continue this session, run:                                                                                                              \n                                                                                                                                            \n  deep-agent resume 2a0ccb0b-fc36-436d-adda-f27ffbd02180                                                                                    \n                                                                                                                                            \nOr run deep-agent resume and select. Model: local · stream · default                                                                        \n                                                                                                                                            "
+}

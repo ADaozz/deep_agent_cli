@@ -66,6 +66,8 @@ llm:
 
 ### Context 与 Token Usage
 
+全新会话（首次启动或 `/new` 后尚未运行任务）显示 `0.0% used`。这表示当前对话尚未使用窗口，不是对系统提示词或首个请求 token 数的估算；首次任务开始后，没有有效用量时仍显示 `Unknown`。恢复有内容的会话或仅清空屏幕不会触发新会话的零值显示。
+
 Chat Completions 固定请求 `stream_options.include_usage=true`；Responses 从完成事件读取 usage。服务端明确拒绝该参数时报告错误，不会关闭参数重试。普通响应缺失 usage 不影响调用成功。
 
 Context 百分比只使用最近一次 API 响应的 `usage_metadata.input_tokens / context_window * 100`，不使用 `total_tokens`、累计用量、Tokenizer 或字符估算。输入为零显示 `0.0%`；缺失时显示 `Unknown`。生成过程中在服务端返回 usage 前显示 `Unknown`，收到 usage-only 数据块立即更新。
@@ -163,7 +165,7 @@ web_search:
 
 ## 界面（`ui`）
 
-修改后重启 CLI 生效。所有数量都是正整数，按逻辑行（换行符）计数，不计终端自动折行。
+修改后重启 CLI 生效。数量字段均为正整数（`edit_preview_changed_lines` 至少为 2）。带 `_lines` 的折叠项默认按换行符切分的逻辑行计数；`thinking_tail_lines` 例外，按当前终端宽度折行后的显示行计算。带 `_items` 的字段按条目计数。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
@@ -207,6 +209,7 @@ web_search:
 | `review_diff` | `c-r` |
 | `reopen_interaction` | `f2` |
 | `thinking_toggle` | `c-t` |
+| `messages_toggle` | `c-b` |
 | `dequeue` | `alt+up` |
 | `image_paste` | `ctrl+v`, `alt+v` |
 | `model_cycle_forward` | `ctrl+p` |

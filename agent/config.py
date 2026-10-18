@@ -247,11 +247,6 @@ class Settings:
             require_keybindings_outside_workspace(result.config_dir, result.sandbox.workspace)
         return result
 
-    # Backward-compatible alias used by older call sites / docs.
-    @classmethod
-    def from_env(cls) -> "Settings":
-        return cls.load()
-
 
 def resolve_config_path(
     path: str | Path | None = None,

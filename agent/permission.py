@@ -60,20 +60,10 @@ def permission_mode_from_interrupt_on(interrupt_on: dict[str, Any] | None) -> Pe
 
 
 def parse_permission_mode(value: str) -> PermissionMode | None:
-    key = value.strip().lower().replace("_", "-")
-    aliases = {
-        "ask": PermissionMode.ASK,
-        "confirm": PermissionMode.ASK,
-        "approve": PermissionMode.ASK,
-        "all-approve": PermissionMode.ASK,
-        "allapprove": PermissionMode.ASK,
-        "allow": PermissionMode.ALLOW,
-        "bypass": PermissionMode.ALLOW,
-        "yolo": PermissionMode.ALLOW,
-        "auto": PermissionMode.ALLOW,
-        "all-allow": PermissionMode.ALLOW,
-    }
-    return aliases.get(key)
+    try:
+        return PermissionMode(value.strip().lower())
+    except ValueError:
+        return None
 
 
 def permission_mode_label(mode: PermissionMode) -> str:

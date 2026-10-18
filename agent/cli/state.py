@@ -57,18 +57,21 @@ def touch(block: MessageBlock | ToolBlock) -> MessageBlock | ToolBlock:
 @dataclass
 class CliState:
     blocks: list[Block] = field(default_factory=list)
-    todos: list[dict[str, str]] = field(default_factory=list)
     running: bool = False
     compacting: bool = False
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
+    messages_expanded: bool = False
     # Held by reference, not index: app-side filtering of `blocks` would
     # otherwise silently redirect stream deltas into an unrelated block.
     active_block: MessageBlock | None = None
     pending_user_ids: dict[str, str] = field(default_factory=dict)
     attachments: list[ImageAttachmentRef] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    # Separate a never-started conversation from missing model usage.
+    # Clearing the visible transcript must not reset this session property.
+    context_pristine: bool = True
 
     def add_user(
         self,
@@ -92,13 +95,13 @@ class CliState:
 
     def clear(self) -> None:
         self.blocks.clear()
-        self.todos.clear()
         self.active_block = None
         self.pending_user_ids.clear()
         self.usage.clear()
 
     def load_transcript(self, blocks: list[TranscriptBlock]) -> None:
         self.clear()
+        self.context_pristine = not bool(blocks)
         for item in blocks:
             if item.kind == "user":
                 self.blocks.append(MessageBlock(
@@ -124,6 +127,7 @@ class CliState:
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
         if event.type == "run_started":
+            self.context_pristine = False
             self.running = True
             self.status = "Working…  Esc to cancel"
             self.active_block = None
@@ -133,8 +137,6 @@ class CliState:
             self.compacting = False
         elif event.type == "assistant_started":
             self.active_block = None
-        elif event.type == "todos_updated" and isinstance(event.result, list):
-            self.todos = [dict(item) for item in event.result if isinstance(item, dict)]
         elif event.type == "usage" and isinstance(event.result, dict):
             usage = {
                 key: int(value)
@@ -195,7 +197,7 @@ class CliState:
                 tool.artifact = artifact
             if event.name == "execute" and artifact is not None:
                 if artifact.get("truncated") and not had_tail_snapshot and event.content:
-                    # Legacy/no-stream fallback: the final result has the tail.
+                    # Without streamed output, the final result contains the tail.
                     tool.output = event.content
                 elif not tool.output:
                     tool.output = event.content
@@ -208,15 +210,12 @@ class CliState:
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
             mode = ""
-            message_id = ""
             if isinstance(event.result, dict):
                 mode = str(event.result.get("mode") or "")
-                message_id = str(event.result.get("id") or "")
             if mode == "steer" and event.content:
-                self.add_user(event.content, pending=True, message_id=message_id)
                 self.status = "Steering queued"
             elif mode == "followUp":
-                self.status = f"Follow-up queued ({event.content[:40]})"
+                self.status = "Follow-up queued"
         elif event.type == "steering_applied":
             message_id = ""
             if isinstance(event.result, dict):
@@ -227,6 +226,8 @@ class CliState:
                     if isinstance(block, MessageBlock) and block.id == block_id:
                         touch(block).pending = False
                         break
+            elif event.content:
+                self.add_user(event.content, message_id=message_id)
         elif event.type == "run_cancelling":
             self.status = "Cancelling…"
         elif event.type == "interaction_requested":

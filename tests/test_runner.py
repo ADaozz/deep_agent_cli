@@ -5,7 +5,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import interrupt
 
 from agent.factory import create_agent
 from agent.config import SandboxConfig, Settings
@@ -23,7 +22,8 @@ from agent.runner import (
 from tests.conftest import graph_tool_names, scripted_model
 
 
-def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
+def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == []
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
@@ -33,10 +33,10 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done) -> None:
     assert "request_human_input" in names
     assert "lookup_docs" not in names
     assert "send_email" not in names
-    assert "write_todos" in names
+    assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert len(names) == 10
+    assert len(names) == 9
 
 
 def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> None:
@@ -184,33 +184,6 @@ def test_human_input_rejects_wrong_interrupt_entry() -> None:
     resumed = runner.submit_human_input({"text": "方案 A"})
     assert resumed.status == "completed"
     assert resumed.output == "不应继续。"
-
-
-def test_removed_handoff_session_has_clear_resume_error() -> None:
-    def handoff_to_human(reason: str, question: str) -> str:
-        return str(interrupt({"type": "human_input", "reason": reason, "question": question}))
-
-    saver = InMemorySaver()
-    old_prepared = create_agent(
-        model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "old-handoff", "name": "handoff_to_human",
-            "args": {"reason": "缺信息", "question": "选哪个？"},
-        }])]),
-        backend=StateBackend(), skills=[], checkpointer=saver,
-        extra_tools=[StructuredTool.from_function(
-            func=handoff_to_human, name="handoff_to_human", description="Old human input tool",
-        )],
-    )
-    old_runner = AgentRunner(prepared=old_prepared, thread_id="old-human")
-    assert old_runner.invoke("问用户").status == "waiting_human"
-    old_runner.close()
-
-    current = AgentRunner(
-        model=scripted_model([AIMessage(content="done")]), backend=StateBackend(),
-        checkpointer=saver, thread_id="old-human",
-    )
-    with pytest.raises(RuntimeError, match="removed handoff_to_human"):
-        current.submit_human_input({"text": "A"})
 
 
 def test_execute_tool_event_uses_artifact_status() -> None:
@@ -374,7 +347,7 @@ def test_request_human_input_recovers_from_stringified_fields() -> None:
                     "question": "demo 用哪种 SDK 形态？",
                     "fields": json.dumps([{
                         "id": "sdk_choice", "type": "single_select", "label": "SDK 形态",
-                        "options": [{"id": "deepagents", "label": "官方 deepagents 包"}],
+                        "options": [{"value": "deepagents", "label": "官方 deepagents 包"}],
                     }], ensure_ascii=False),
                     "impact": json.dumps(["SDK 选择决定依赖清单"], ensure_ascii=False),
                 },
@@ -737,3 +710,70 @@ def test_human_input_all_optional_can_be_omitted_or_empty(values):
         assert runner.submit_human_input(values).status == "completed"
     finally:
         runner.close()
+
+
+def test_runner_cancels_running_execute_tool(tmp_path) -> None:
+    """C08: cancelling a long execute still kills it and ends the run promptly."""
+    import threading
+    import time
+
+    marker = tmp_path / "started"
+    backend = UnsandboxedShellBackend(SandboxConfig(workspace=tmp_path, allow_unsandboxed=True))
+    prepared = create_agent(model=scripted_model([
+        AIMessage(content="", tool_calls=[{"id": "long-exec", "name": "execute",
+                                           "args": {"command": f"touch {marker}; sleep 60"}}]),
+        AIMessage(content="unused"),
+    ]), backend=backend, skills=[])
+    runner = AgentRunner(prepared=prepared, thread_id="exec-cancel")
+    try:
+        assert runner.invoke("run").status == "waiting_confirmation"
+        results = []
+        worker = threading.Thread(target=lambda: results.append(runner.approve_tool("long-exec")))
+        worker.start()
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        started = time.monotonic()
+        runner.request_cancel()
+        worker.join(5)
+        assert not worker.is_alive() and time.monotonic() - started < 5
+        assert results[0].status == "cancelled"
+    finally:
+        runner.close()
+
+
+def test_model_stream_cancelled_without_cancel_request_is_a_failure() -> None:
+    from agent.llm_stream import ModelStreamCancelled
+
+    class StoppedModel(type(scripted_model([]))):
+        def _generate(self, *args, **kwargs):
+            raise ModelStreamCancelled("stopped by someone else")
+
+    runner = AgentRunner(model=StoppedModel(messages=iter([])), backend=StateBackend(), thread_id="not-cancel")
+    try:
+        events = []
+        result = runner.invoke("hello", on_event=events.append)
+        assert result.status == "failed"
+        assert "stopped unexpectedly" in result.error
+        assert [event.type for event in events if event.type.startswith("run_")][-1] == "run_failed"
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+def test_http_errors_stay_failures_and_keep_sdk_retries(api) -> None:
+    from agent.config import ModelProfile
+    from tests.model_stream_server import ScriptedSSEServer
+
+    with ScriptedSSEServer(api, []) as server:
+        settings = Settings(llm_profiles=(ModelProfile("local/e", "e", base_url=server.base_url, api=api),),
+                            llm_default="local/e")
+        runner = AgentRunner(settings=settings, backend=StateBackend(), thread_id="http-error")
+        try:
+            result = runner.invoke("hello")
+        finally:
+            runner.close()
+    assert result.status == "failed"
+    # max_retries=2: the original request plus two retries, as before the bridge.
+    assert len(server.errors) == 3

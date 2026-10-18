@@ -6,7 +6,8 @@
 文件路径或 socket。
 
 宿主 -> Worker: {"op": "run", "id": N, "command": str} | {"op": "kill", "id": N}
-Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64}
+                | {"op": "run_argv", "id": N, "argv": list[str], "cwd": str, ...}
+Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64, "stream"?: str}
                 | {"op": "exit", "id": N, "code": int}
                 | {"op": "spawn_error", "id": N, "message": str}
 
@@ -18,6 +19,7 @@ import json
 import os
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -52,20 +54,65 @@ def _kill_group(pid):
         pass
 
 
-def _run(request_id, command):
+def _open_cwd(path, mount_identity):
+    """Retain grep's no-symlink path checks inside the existing mount namespace."""
+    if not isinstance(path, str) or not path.startswith("/") or ".." in path.split("/"):
+        raise ValueError("invalid argv working directory")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    current = ""
     try:
+        for part in filter(None, path.split("/")):
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            current += "/" + part
+            if mount_identity and current == mount_identity[0]:
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != tuple(mount_identity[1:]):
+                    raise ValueError("search mount changed; retry after restoring the workspace")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None):
+    descriptors = []
+    structured = argv is not None
+    try:
+        if structured:
+            if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
+                raise ValueError("argv must be a non-empty list of strings")
+            directory_fd = _open_cwd(cwd, mount_identity)
+            descriptors.append(directory_fd)
+            cwd = f"/proc/self/fd/{directory_fd}"
+            if file is not None:
+                if not file or "/" in file or file in (".", "..") or argv[-1] != file:
+                    raise ValueError("invalid search file")
+                fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+                descriptors.append(fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise ValueError("search file is not a regular file")
+                argv = [*argv[:-1], f"/proc/self/fd/{fd}"]
         process = subprocess.Popen(
-            ["/bin/sh", "-lc", command],
-            cwd=WORKDIR,
+            argv if structured else ["/bin/sh", "-lc", command],
+            shell=False,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
             close_fds=True,
+            pass_fds=tuple(descriptors),
         )
     except Exception as exc:  # noqa: BLE001
-        _send({"op": "spawn_error", "id": request_id, "message": f"{type(exc).__name__}: {exc}"})
+        # OSError embeds paths; only return its path-free diagnostic.
+        detail = exc.strerror if structured and isinstance(exc, OSError) else str(exc)
+        _send({"op": "spawn_error", "id": request_id, "message": f"{type(exc).__name__}: {detail}"})
         return
+    finally:
+        for fd in descriptors:
+            os.close(fd)
     with _running_lock:
         _running[request_id] = process
         if request_id in _killed_before_start:
@@ -73,8 +120,8 @@ def _run(request_id, command):
             _kill_group(process.pid)
 
     selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    selector.register(process.stderr, selectors.EVENT_READ)
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     # 后台子进程可能持续写管道；shell 退出后只排空一次固定窗口。
     drain_deadline = None
     try:
@@ -92,7 +139,10 @@ def _run(request_id, command):
                 except Exception:  # noqa: BLE001
                     chunk = b""
                 if chunk:
-                    _send({"op": "out", "id": request_id, "data": base64.b64encode(chunk).decode("ascii")})
+                    message = {"op": "out", "id": request_id, "data": base64.b64encode(chunk).decode("ascii")}
+                    if structured:
+                        message["stream"] = key.data
+                    _send(message)
                 else:
                     selector.unregister(key.fileobj)
         code = process.wait()
@@ -163,6 +213,12 @@ def main():
             if op == "run":
                 threading.Thread(
                     target=_run, args=(request_id, str(message["command"])), daemon=True,
+                ).start()
+            elif op == "run_argv":
+                threading.Thread(
+                    target=_run, kwargs={"request_id": request_id, "argv": message["argv"],
+                                         "cwd": message["cwd"], "mount_identity": message.get("mount_identity"),
+                                         "file": message.get("file")}, daemon=True,
                 ).start()
             elif op == "kill":
                 _kill(request_id)

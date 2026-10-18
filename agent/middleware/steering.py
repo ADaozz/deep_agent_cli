@@ -1,18 +1,24 @@
 """Inject steering before the next model or proposed tool call."""
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, NotRequired
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse, hook_config
+from langchain.agents.middleware.types import AgentState, ExtendedModelResponse, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from agent.control import RunController
 
 
+class SteeringState(AgentState):
+    steering_replan: NotRequired[bool]
+
+
 class SteeringMiddleware(AgentMiddleware):
     """Apply steering before the next model call or before proposed tools start."""
+
+    state_schema = SteeringState
 
     def __init__(self, controller: RunController) -> None:
         super().__init__()
@@ -42,8 +48,16 @@ class SteeringMiddleware(AgentMiddleware):
         ]
         return ExtendedModelResponse(
             model_response=ModelResponse(result=messages, structured_response=response.structured_response),
-            command=Command(update={"messages": [HumanMessage(content=text)], "jump_to": "model"}),
+            command=Command(update={"messages": [HumanMessage(content=text)], "steering_replan": True}),
         )
+
+    @hook_config(can_jump_to=["model"])
+    def after_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        # jump_to is ephemeral: setting it in wrap_model_call loses it while
+        # other after-model hooks run. Route from our own hook instead.
+        if state.get("steering_replan"):
+            return {"steering_replan": False, "jump_to": "model"}
+        return None
 
     @hook_config(can_jump_to=["model"])
     def after_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:  # noqa: ANN401

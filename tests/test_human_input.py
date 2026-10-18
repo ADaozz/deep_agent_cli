@@ -74,6 +74,7 @@ def test_tool_schema_describes_field_shape() -> None:
     field_spec = schema["$defs"]["FieldSpec"]["properties"]
     assert {"id", "type", "label", "required", "options"} <= set(field_spec)
     assert field_spec["type"]["enum"] == list(FIELD_TYPES)
+    assert field_spec["options"]["maxItems"] == 3
     assert schema["$defs"]["FieldOption"]["properties"]["value"]["type"] == "string"
     assert schema["$defs"]["Recommendation"]["properties"]["value"]["type"] == "string"
 
@@ -84,7 +85,7 @@ def test_stringified_fields_are_decoded() -> None:
         "question": "demo 用哪种 SDK 形态？",
         "fields": json.dumps([{
             "id": "sdk_choice", "type": "single_select", "label": "SDK 形态",
-            "options": [{"id": "deepagents", "label": "官方 deepagents 包"}],
+            "options": [{"value": "deepagents", "label": "官方 deepagents 包"}],
         }], ensure_ascii=False),
         "recommendation": json.dumps({"value": "deepagents", "reason": "内置规划与子代理"}, ensure_ascii=False),
         "impact": json.dumps(["SDK 选择决定依赖清单"], ensure_ascii=False),
@@ -93,6 +94,37 @@ def test_stringified_fields_are_decoded() -> None:
     assert args.fields[0].options[0].value == "deepagents"
     assert args.recommendation == Recommendation(value="deepagents", reason="内置规划与子代理")
     assert args.impact == ["SDK 选择决定依赖清单"]
+
+
+@pytest.mark.parametrize("field_type", ["single_select", "multi_select"])
+def test_choice_allows_three_options_plus_automatic_other(field_type) -> None:
+    args = HumanInputArgs.model_validate({
+        "reason": "r", "question": "q", "fields": [{
+            "id": "choice", "type": field_type,
+            "options": [{"value": str(index), "label": f"Choice {index}"} for index in range(3)],
+        }],
+    })
+    payload = normalize_interaction_request(
+        reason=args.reason, question=args.question, fields=[field.model_dump() for field in args.fields],
+    )
+    options = payload["fields"][0]["options"]
+    assert [option["value"] for option in options[:3]] == ["0", "1", "2"]
+    assert len(options) == 4
+    assert options[-1]["allowsCustomText"] is True
+
+
+@pytest.mark.parametrize("field_type", ["single_select", "multi_select"])
+def test_choice_rejects_more_than_three_model_options(field_type) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        HumanInputArgs.model_validate({
+            "reason": "r", "question": "q", "fields": [{
+                "id": "choice", "type": field_type,
+                "options": [{"value": str(index), "label": f"Choice {index}"} for index in range(4)],
+            }],
+        })
+    error = excinfo.value.errors()[0]
+    assert error["loc"] == ("fields", 0, "options")
+    assert error["type"] == "too_long"
 
 
 def test_unknown_enum_values_degrade_instead_of_failing() -> None:
@@ -111,3 +143,12 @@ def test_unparsable_fields_still_raise_validation_error() -> None:
     with pytest.raises(ValidationError) as excinfo:
         HumanInputArgs.model_validate({"reason": "r", "question": "q", "fields": "五个字段，见上文"})
     assert excinfo.value.errors()[0]["type"] == "list_type"
+
+
+def test_option_id_is_not_accepted_as_value() -> None:
+    with pytest.raises(ValidationError):
+        HumanInputArgs.model_validate({
+            "reason": "r", "question": "q",
+            "fields": [{"id": "choice", "type": "single_select",
+                        "options": [{"id": "old-option", "label": "Old option"}]}],
+        })

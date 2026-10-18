@@ -59,6 +59,22 @@ def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
         raise
 
 
+def _cancel_outcome(result: RunResult) -> RunResult:
+    """Terminal result of a run whose cancel was accepted.
+
+    The Runner's own outcome decides: work that completed (or failed) before
+    the cancel took effect keeps that status, and a cancel whose model request
+    was not confirmed closed is a failure rather than a clean cancellation.
+    Only a worker that stopped waiting for an interaction has no Runner
+    outcome of its own; nothing ran after the cancel there.
+    """
+    if result.status in {"completed", "failed"}:
+        return result
+    if result.status == "cancelled" and result.error:
+        return RunResult(status="failed", error=result.error)
+    return RunResult(status="cancelled")
+
+
 class RunManager:
     def __init__(self, config: ServerConfig, factory: Callable = runner_factory) -> None:
         self.config = config
@@ -209,17 +225,25 @@ class RunManager:
             return self.run(run_id)
 
     def cancel(self, run_id: str) -> dict[str, Any]:
+        """Accept a cancel request; the worker publishes the terminal state."""
         with self.lock:
             run = self.run(run_id)
             active = self.active.get(run_id)
             if active is None or run["status"] in TERMINAL:
                 raise ServiceError(409, "Run has already ended")
-            active.cancelled.set()
-            if active.runner is not None:
-                active.runner.request_cancel()
-            active.commands.put(("cancel", None))
-            self.store.update(run_id, "cancelling")
-            return self.run(run_id)
+            first = not active.cancelled.is_set()
+            runner = active.runner
+            if first:
+                active.cancelled.set()
+                active.commands.put(("cancel", None))
+                self.store.update(run_id, "cancelling")
+            snapshot = self.run(run_id)
+        # Signalling the Runner touches tools, sandboxes and SQLite, so it
+        # stays outside the manager lock. A worker that has not published its
+        # runner yet sees ``cancelled`` (or replays it at run_started).
+        if first and runner is not None:
+            runner.request_cancel()
+        return snapshot
 
     @staticmethod
     def _interruption(runner: Any) -> RunResult:
@@ -287,7 +311,7 @@ class RunManager:
                         # Bad answers must not lose a pending question or release the project.
                         self.store.emit(run_id, "interaction_rejected", {"error": "Invalid interaction response"})
                         result = self._interruption(runner)
-                final = RunResult(status="cancelled") if active.cancelled.is_set() else result
+                final = _cancel_outcome(result) if active.cancelled.is_set() else result
         except Exception:
             # Exceptions may embed endpoint credentials. Keep public errors generic.
             LOG.error("Agent worker failed (%s)", run_id)
@@ -318,9 +342,11 @@ class RunManager:
                 return
             self.closing = True
             active_runs = list(self.active.items())
-            for run_id, active in active_runs:
-                if self.run(run_id)["status"] not in TERMINAL:
-                    self.cancel(run_id)
+        for run_id, _active in active_runs:
+            try:
+                self.cancel(run_id)
+            except ServiceError:
+                pass
         deadline = time.monotonic() + 35
         for _, active in active_runs:
             if active.thread is not None:

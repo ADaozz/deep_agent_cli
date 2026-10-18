@@ -29,6 +29,17 @@ jobs:
           bash .github/scripts/enable-ci-bwrap.sh
       - name: Install package and test tools
         run: python -m pip install -e ".[dev,server]"
+      - name: Verify rg from the current Python environment
+        run: |
+          python - <<'PYTHON'
+          import subprocess
+          import sysconfig
+          from pathlib import Path
+          from agent.tools.grep import resolve_rg
+          rg = Path(sysconfig.get_path("scripts")) / "rg"
+          assert resolve_rg() == str(rg)
+          subprocess.run([str(rg), "--version"], check=True)
+          PYTHON
       - name: Require actual sandbox support
         run: python examples/sandbox_probe.py --require-sandbox --report sandbox-report.json
       - name: Run automatic regression including local HTTP integration
@@ -45,6 +56,7 @@ jobs:
           /tmp/deep-agent-wheel-test/bin/pip install dist/*.whl
           /tmp/deep-agent-wheel-test/bin/deep-agent --help
           /tmp/deep-agent-wheel-test/bin/deep-agent --version
+          /tmp/deep-agent-wheel-test/bin/rg --version
           mkdir -p /tmp/deep-agent-wheel-home /tmp/deep-agent-wheel-work
           cd /tmp/deep-agent-wheel-work
           HOME=/tmp/deep-agent-wheel-home /tmp/deep-agent-wheel-test/bin/deep-agent

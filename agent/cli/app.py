@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from functools import partial
 import logging
 import os
@@ -62,6 +63,7 @@ from agent.cli.rendering import (
     TranscriptDocument,
     TranscriptRenderer,
     render_interaction,
+    render_queued_messages,
     render_review,
 )
 from agent.cli.session_controller import SessionController
@@ -84,6 +86,29 @@ INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
 CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 STATUS_NOTICE_SECONDS = 1.0
 
+_RUN_EPOCH: ContextVar[int | None] = ContextVar("deep_agent_tui_run_epoch", default=None)
+
+
+def _call_in_run_epoch(epoch: int, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run a Runner operation in a context tagged with its run epoch.
+
+    LangGraph copies the context into node and tool threads, so every event
+    the operation emits carries the epoch back to the UI loop.
+    """
+    def call() -> Any:
+        _RUN_EPOCH.set(epoch)
+        return func(*args, **kwargs)
+    return copy_context().run(call)
+
+
+def format_workspace_path(path: Path) -> str:
+    """Abbreviate the current user's home directory for display only."""
+    try:
+        relative = path.relative_to(Path.home())
+    except ValueError:
+        return str(path)
+    return "~/" if relative == Path(".") else f"~/{relative}"
+
 
 def format_context_window(window: int) -> str:
     """1000000 -> "1.0m", 200000 -> "200k"."""
@@ -94,12 +119,14 @@ def format_context_window(window: int) -> str:
     return str(window)
 
 
-def format_context_usage(usage: dict[str, int], window: int) -> str:
+def format_context_usage(usage: dict[str, int], window: int, *, empty_session: bool = False) -> str:
     """Right-hand footer label, empty when the profile declares no window."""
     if window <= 0:
         return ""
     label = f"{format_context_window(window)} Context"
     used = usage.get("input_tokens")
+    if empty_session and not usage:
+        used = 0
     if type(used) is not int or used < 0:
         return f"{label} · Unknown"
     percent = used / window * 100
@@ -326,15 +353,19 @@ class _TranscriptWindow(Window):
     outright and skips the cursor-chasing arithmetic entirely.
     """
 
-    def __init__(self, *args: Any, viewport: Any = None, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, viewport: Any = None, scroll_offset: Any = None, **kwargs: Any) -> None:
         self._viewport = viewport
+        self._scroll_offset = scroll_offset
         super().__init__(*args, **kwargs)
 
     def _scroll(self, ui_content: Any, width: int, height: int) -> None:
         self.horizontal_scroll = 0
         self.vertical_scroll_2 = 0
         maximum = max(0, ui_content.line_count - height)
-        self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
+        if self._scroll_offset is not None:
+            self.vertical_scroll = self._scroll_offset(maximum)
+        else:
+            self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
 
 class CliApplication:
     """pi-inspired terminal presentation over the existing synchronous runner."""
@@ -354,6 +385,7 @@ class CliApplication:
             require_keybindings_outside_workspace(config_dir, workspace)
         _register_terminal_sequences()
         self.state = CliState()
+        self.state.context_pristine = not runner.thread_has_content()
         self.commands = command_table()
         self.command_by_name = {item.name: item for item in self.commands}
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
@@ -366,6 +398,10 @@ class CliApplication:
         self._io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deep-agent-io")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._run_task: asyncio.Task[None] | None = None
+        # Each dispatched run gets an epoch; its Runner events carry it so a
+        # late event of an earlier run cannot change the current run's UI.
+        self._run_epoch = 0
+        self._cancel_sent = False
         self._compacting = False
         self._last_ctrl_c: float | None = None
         self._status_notice_handle: asyncio.TimerHandle | None = None
@@ -375,6 +411,8 @@ class CliApplication:
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
+        self._queue_scroll = 0
+        self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
         self._selection_start: tuple[int, int] | None = None
         self._selection_end: tuple[int, int] | None = None
         self._selection_dragging = False
@@ -427,6 +465,14 @@ class CliApplication:
         self.status_control = _ScrollableTextControl(
             text=self._status_text, focusable=False, on_scroll=self.scroll_transcript,
             on_select_outside=self._select_below_transcript,
+        )
+        self.queue_control = _ScrollableTextControl(
+            text=self._queue_text, focusable=False, on_scroll=self._scroll_queue,
+        )
+        self.queue_window = _TranscriptWindow(
+            self.queue_control, scroll_offset=self._queue_offset,
+            height=self._queue_height, wrap_lines=False, always_hide_cursor=True,
+            dont_extend_height=True, style="class:status",
         )
         self.back_to_bottom_control = _BackToBottomControl(
             text=lambda: FormattedText([("class:back-to-bottom", "↓ Back to bottom · esc")])
@@ -537,6 +583,7 @@ class CliApplication:
                 ),
                 filter=Condition(self._status_visible),
             ),
+            ConditionalContainer(self.queue_window, filter=Condition(self._queue_expanded)),
             ConditionalContainer(
                 self.interaction_bottom_divider_window,
                 filter=interaction_visible | Condition(lambda: self.state.status == "Waiting for input"),
@@ -799,7 +846,7 @@ class CliApplication:
             "Keyboard\n"
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
-            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · "
+            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · Ctrl+B messages · "
             "Mouse drag selects and copies across history · "
             "Ctrl+V/Alt+V paste image/text · "
             "Ctrl+C clear/exit · Ctrl+D exit\n\n"
@@ -1224,7 +1271,6 @@ class CliApplication:
         self._clear_skill_draft()
         self.clear_transcript_selection()
         self.state.load_transcript(snapshot.transcript)
-        self.state.todos = list(snapshot.todos)
         self.interaction = None
         self._reviewing = False
         self.state.add_system(
@@ -1509,11 +1555,40 @@ class CliApplication:
             or self.runner.control.pending_follow_up_count()
         )
 
+    def _queue_expanded(self) -> bool:
+        return self.state.messages_expanded and bool(self.runner.control.pending_message_texts())
+
+    def _queue_text(self) -> FormattedText:
+        key = (tuple(self.runner.control.pending_message_texts()), self._width())
+        if self._queue_preview_cache is None or self._queue_preview_cache[0] != key:
+            text = render_queued_messages(list(key[0]), key[1]) if key[0] else ""
+            self._queue_preview_cache = (key, to_formatted_text(ANSI(text)), text.count("\n") + 1)
+            self._queue_scroll = 0
+        return self._queue_preview_cache[1]
+
+    def _queue_height(self) -> Dimension:
+        self._queue_text()
+        rows = self.application.output.get_size().rows
+        height = min(self._queue_preview_cache[2], max(1, rows // 3))
+        return Dimension.exact(height)
+
+    def _queue_offset(self, maximum: int) -> int:
+        self._queue_scroll = max(0, min(self._queue_scroll, maximum))
+        return self._queue_scroll
+
+    def _scroll_queue(self, delta: int) -> None:
+        self._queue_text()
+        maximum = max(0, self._queue_preview_cache[2] - self._queue_height().preferred)
+        self._queue_offset(maximum)
+        self._queue_scroll = max(0, min(maximum, self._queue_scroll + delta))
+        self.application.invalidate()
+
     def _status_text(self) -> FormattedText:
         if not self._status_visible():
             self._working_messages.reset()
             return FormattedText([])
-        pending = self.runner.control.pending_steering_count() + self.runner.control.pending_follow_up_count()
+        queued = self.runner.control.pending_message_texts()
+        pending = len(queued)
         active = self.state.running and self.interaction is None and not self.state.status.startswith("Cancelling")
         now = monotonic()
         message = self._working_messages.current(active, now)
@@ -1523,8 +1598,16 @@ class CliApplication:
         if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
         if pending:
-            label = f"{label} · queued {pending}" if label else f"queued {pending}"
-        status = _truncate_cells(f" {spinner}{label}", width)
+            preview = " | ".join(" ".join(text.split()) for text in queued)
+            queue_label = f"queued {pending} · Ctrl+B collapse" if self.state.messages_expanded else f"queued {pending}: {preview}"
+            label = f"{label} · {queue_label}" if label else queue_label
+        raw_status = f" {spinner}{label}"
+        if pending and not self.state.messages_expanded and get_cwidth(raw_status) > width and width >= 20:
+            hint = " · Ctrl+B expand" if width >= 32 else " · Ctrl+B"
+            status = _truncate_cells(raw_status, max(1, width - get_cwidth(hint))) + hint
+            status = _truncate_cells(status, width)
+        else:
+            status = _truncate_cells(raw_status, width)
         fragments = [("class:status", status)]
         remaining = width - get_cwidth(status)
         if message is not None and remaining > 3:
@@ -1548,7 +1631,10 @@ class CliApplication:
         elif pending_effort is not None:
             model_label += f" → {pending_effort} (pending)"
         resume_id = self.runner.thread_id[:8]
-        context = format_context_usage(self.state.usage, self.runner.context_window())
+        context = format_context_usage(
+            self.state.usage, self.runner.context_window(),
+            empty_session=self.state.context_pristine and not self.state.running,
+        )
         # Row 1: workspace · model · resume on the left, git on the right.
         # Row 2: sandbox/permission on the left, context on the right.
         # The left side always truncates before the right side.
@@ -1567,7 +1653,7 @@ class CliApplication:
             model_width = max(1, available - get_cwidth(resume_id) - 6)
             model_fit = _truncate_cells(model_label, model_width)
             workspace_width = max(1, available - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
-            workspace_fit = _truncate_cells(f" {self._workspace()}", workspace_width)
+            workspace_fit = _truncate_cells(f" {format_workspace_path(self._workspace())}", workspace_width)
             left_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
             first_padding = " " * max(1, width - left_width - get_cwidth(git_fit))
             if workspace_fit.startswith(" "):
@@ -1680,11 +1766,11 @@ class CliApplication:
 
         @kb.add("pageup")
         def page_up(event) -> None:  # type: ignore[no-untyped-def]
-            self.scroll_transcript(-10)
+            self._scroll_queue(-10) if self._queue_expanded() else self.scroll_transcript(-10)
 
         @kb.add("pagedown")
         def page_down(event) -> None:  # type: ignore[no-untyped-def]
-            self.scroll_transcript(10)
+            self._scroll_queue(10) if self._queue_expanded() else self.scroll_transcript(10)
 
         @kb.add("c-home")
         def scroll_top(event) -> None:  # type: ignore[no-untyped-def]
@@ -1761,6 +1847,11 @@ class CliApplication:
                 self.set_status("Wait for compaction to finish")
             elif self.state.running:
                 restored = self._restore_queued_to_editor(event.current_buffer)
+                if self._cancel_sent:
+                    self.set_status("Cancelling… waiting for the run to stop", transient=False)
+                    self.application.invalidate()
+                    return
+                self._cancel_sent = True
                 self.runner.request_cancel()
                 if restored:
                     self.set_status("Cancelling… · queued messages restored", transient=False)
@@ -1808,6 +1899,13 @@ class CliApplication:
         def thinking_toggle(event) -> None:  # type: ignore[no-untyped-def]
             self.state.thinking_collapsed = not self.state.thinking_collapsed
             self.set_status(f"Thinking: {'collapsed' if self.state.thinking_collapsed else 'expanded'}")
+
+        @bind("messages_toggle")
+        def messages_toggle(event) -> None:  # type: ignore[no-untyped-def]
+            self.state.messages_expanded = not self.state.messages_expanded
+            self._queue_scroll = 0
+            self.clear_transcript_selection()
+            self.application.invalidate()
 
         @bind("dequeue")
         def dequeue(event) -> None:  # type: ignore[no-untyped-def]
@@ -1888,7 +1986,7 @@ class CliApplication:
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
             return
-        if self.state.running:
+        if self.state.running or self.runner.control.pending_message_texts():
             if self.state.attachments:
                 self.set_status("Wait for the active run before sending images")
                 return
@@ -1899,6 +1997,8 @@ class CliApplication:
             else:
                 self.runner.steer(text)
                 self.set_status("Steering queued")
+            if not self.state.running and (self._run_task is None or self._run_task.done()):
+                self._start_queued_run()
             self.application.invalidate()
             return
         self._reset_submitted_buffer(text)
@@ -1936,31 +2036,55 @@ class CliApplication:
         self.state.running = True
         self._working_messages.reset()
         self.set_status("Working…  Esc to cancel", transient=False)
+        self._run_epoch += 1
+        epoch = self._run_epoch
+        self._cancel_sent = False
+        # Esc may arrive before the worker reaches begin_run; the reservation
+        # keeps that cancel instead of letting begin_run clear it.
+        reservation = self.runner.reserve_run()
 
         async def work() -> None:
-            if resume_call is None:
-                try:
-                    result = await self._run_blocking(
-                        self.runner.invoke_with_attachment_refs,
-                        text,
-                        image_refs=image_refs,
-                        on_event=self._on_event_thread,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.state.attachments[:] = image_refs
-                    self._apply_event(RunEvent(type="run_failed", content=str(exc)))
-                    return
-                if result.status == "failed" and image_refs:
-                    self.state.attachments[:] = image_refs
-            else:
-                try:
-                    result = await self._run_blocking(resume_call)
-                except Exception as exc:  # noqa: BLE001
-                    self._apply_event(RunEvent(type="run_failed", content=str(exc)))
-                    return
-            self._handle_result(result)
+            try:
+                if resume_call is None:
+                    try:
+                        result = await self._run_blocking(
+                            _call_in_run_epoch, epoch,
+                            self.runner.invoke_with_attachment_refs,
+                            text,
+                            image_refs=image_refs,
+                            on_event=self._on_event_thread,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.state.attachments[:] = image_refs
+                        self._apply_event(RunEvent(type="run_failed", content=str(exc)))
+                        return
+                    if result.status == "failed" and image_refs:
+                        self.state.attachments[:] = image_refs
+                else:
+                    try:
+                        result = await self._run_blocking(_call_in_run_epoch, epoch, resume_call)
+                    except Exception as exc:  # noqa: BLE001
+                        self._apply_event(RunEvent(type="run_failed", content=str(exc)))
+                        return
+                self._handle_result(result)
+            finally:
+                self.runner.release_run_reservation(reservation)
+                if epoch == self._run_epoch:
+                    self._cancel_sent = False
 
         self._run_task = asyncio.create_task(work())
+
+    def _start_queued_run(self) -> None:
+        if self.interaction is not None or self.runner.current_interrupt() is not None:
+            return
+        text = self.runner.control.pop_steering()
+        if text is None:
+            text = self.runner.control.pop_follow_up()
+        if text is not None:
+            # The applied event records the user message in the transcript.
+            self._start_run("", resume_call=partial(
+                self.runner.invoke, text, on_event=self._on_event_thread,
+            ))
 
     async def image_command(self, arg: str) -> None:
         value = arg.strip()
@@ -2082,10 +2206,17 @@ class CliApplication:
                     temp.unlink(missing_ok=True)
 
     def _on_event_thread(self, event: RunEvent) -> None:
+        epoch = _RUN_EPOCH.get()
         if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._apply_event, event)
+            self._loop.call_soon_threadsafe(self._apply_run_event, event, epoch)
         else:
-            self._apply_event(event)
+            self._apply_run_event(event, epoch)
+
+    def _apply_run_event(self, event: RunEvent, epoch: int | None) -> None:
+        # Events without an epoch come from the UI thread (steering, control).
+        if epoch is not None and epoch != self._run_epoch:
+            return
+        self._apply_event(event)
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
         previous_status = self.state.status
@@ -2120,6 +2251,13 @@ class CliApplication:
         self.application.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
+        if result.status == "cancelled":
+            self.state.running = False
+            if result.error:
+                self.state.add_system(result.error, error=True)
+                self.set_status("Cancel cleanup not confirmed", transient=False)
+            elif self.state.status != "Cancelled":
+                self.set_status("Cancelled", transient=False)
         if result.status == "paused":
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")
@@ -2132,6 +2270,10 @@ class CliApplication:
             self.interaction = self._deferred_config_interaction
             self._deferred_config_interaction = None
             self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
+        elif result.status == "completed":
+            # Input can arrive after the worker's final queue check, while
+            # the UI still considers that worker to be running.
+            self._start_queued_run()
         self.application.invalidate()
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:

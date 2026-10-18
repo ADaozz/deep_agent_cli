@@ -136,7 +136,7 @@ def _operand(args: dict[str, Any]) -> str:
 
 
 def _mutation_path(name: str, args: dict[str, Any]) -> str:
-    path = args.get("file_path") or args.get("path")
+    path = args.get("file_path")
     if not path:
         return "file"
     label = str(PurePosixPath(str(path)))
@@ -251,7 +251,7 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
             [],
             content.splitlines(),
             fromfile="/dev/null",
-            tofile=_diff_name("b", str(args.get("file_path") or args.get("path") or "file")),
+            tofile=_diff_name("b", str(args.get("file_path") or "file")),
             lineterm="",
         ))
         if not raw:
@@ -264,12 +264,11 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
             full_diff=raw,
         )
     if name == "edit_file":
-        # Presence checks, not truthiness: an explicit "" is a legal edit side.
-        old = args["old_string"] if "old_string" in args else args.get("old_text")
-        new = args["new_string"] if "new_string" in args else args.get("new_text")
+        old = args.get("old_string")
+        new = args.get("new_string")
         if not isinstance(old, str) or not isinstance(new, str):
             return None
-        path = str(args.get("file_path") or args.get("path") or "file")
+        path = str(args.get("file_path") or "file")
         raw = "\n".join(unified_diff(
             old.splitlines(),
             new.splitlines(),
@@ -352,7 +351,7 @@ def build_review_mutation(name: str, args: dict[str, Any]) -> FileMutationPrevie
 
 
 def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
-    verb = {"create": "Create", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
+    verb = {"create": "Created", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
     detail = ""
     if mutation.operation == "modify" and mutation.diff:
         detail = f"(+{mutation.diff.added or 0} -{mutation.diff.deleted or 0})"
@@ -427,7 +426,7 @@ def build_read_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_grep_preview(block: ToolBlock) -> ToolPreview:
-    pattern = block.arguments.get("pattern") or block.arguments.get("query")
+    pattern = block.arguments.get("pattern")
     label = json.dumps(str(pattern), ensure_ascii=False) if pattern else ""
     return ToolPreview(
         kind="grep", verb="grep", target=_operand(block.arguments),
@@ -437,7 +436,7 @@ def build_grep_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_glob_preview(block: ToolBlock) -> ToolPreview:
-    pattern = block.arguments.get("pattern") or block.arguments.get("query")
+    pattern = block.arguments.get("pattern")
     label = json.dumps(str(pattern), ensure_ascii=False) if pattern else ""
     return ToolPreview(
         kind="glob", verb="glob", target=_operand(block.arguments),
@@ -447,7 +446,7 @@ def build_glob_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_ls_preview(block: ToolBlock) -> ToolPreview:
-    path = block.arguments.get("path") or block.arguments.get("file_path")
+    path = block.arguments.get("path")
     return ToolPreview(
         kind="ls", verb="ls", target=_operand(block.arguments),
         summary=f"List {PurePosixPath(str(path))}" if path else "List",
@@ -560,17 +559,6 @@ def _format_seconds(value: Any) -> str:
     return f"{text}s" if text else ""
 
 
-def _legacy_search_stats(output: str) -> str:
-    """Fallback for old sessions / third-party tools without an artifact."""
-    if not output.startswith("Web search results for:"):
-        return ""
-    count_line = next((
-        line for line in output.splitlines()
-        if line.endswith(" results") and line.split(" ", 1)[0].isdigit()
-    ), "")
-    return count_line
-
-
 def build_web_search_preview(block: ToolBlock) -> ToolPreview:
     query = str(block.arguments.get("query") or "…").replace("\n", " ")
     detail = ""
@@ -585,8 +573,6 @@ def build_web_search_preview(block: ToolBlock) -> ToolPreview:
             if seconds:
                 stats.append(seconds)
             detail = " · ".join(stats)
-        else:
-            detail = _legacy_search_stats(block.output)
     return ToolPreview(
         kind="web_search", verb="web_search", target=f'"{query[:80]}"',
         detail=detail, group="web", action="expand",

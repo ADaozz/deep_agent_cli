@@ -278,7 +278,7 @@ def test_sent_skill_stays_a_colored_block_with_markdown_instructions(pending):
     label = draft.display("playwright-cli", "/skills/playwright-cli/SKILL.md")
     payload = draft.expand(label + " **检查登录**\n\n- 记录截图\n- 验证按钮")
     block = MessageBlock(kind="user", content=payload, pending=pending)
-    rendered = _capture(_message(block, True)[0], 100)
+    rendered = _capture(_message(block, True, messages_expanded=True)[0], 100)
     plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
     assert "[Skill: playwright-cli]" in plain
     assert "使用技能" not in plain and "/skills/" not in plain
@@ -300,6 +300,8 @@ def test_restored_skill_message_and_steering_keep_block_display():
     assert message.content == payload
     state = CliState()
     state.apply(RunEvent(type="steering_queued", content=payload, result={"mode": "steer", "id": "skill-steer"}))
+    assert not state.blocks
+    state.apply(RunEvent(type="steering_applied", content=payload, result={"id": "skill-steer"}))
     assert "[Skill: alpha]" in render_transcript(state, 100)
     state.apply(RunEvent(type="steering_applied", content=payload, result={"id": "skill-steer"}))
     assert "[Skill: alpha]" in render_transcript(state, 100)

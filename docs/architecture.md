@@ -1,120 +1,293 @@
-# 架构
+# Harness 架构
+
+`deep_agent_cli` 使用 Deep Agents 和 LangGraph 执行 Agent 图。Harness 负责将模型、工具、工作区、人工干预、沙箱、会话和前端组织成可控制、可恢复的运行系统，不另行实现推理循环。
+
+本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)、[HTTP 服务](server.md)；Python 接入见 [library.md](library.md)。
+
+## 职责与设计约束
+
+Harness 的职责包括图装配、运行控制、工具审批、命令隔离、状态持久化和前端事件转换。其中有几个需要始终分开的概念：
+
+- 模型提出工具调用，Harness 按既定策略决定是否执行，以及在哪里执行。
+- 权限模式决定调用前是否审批；沙箱决定执行进程能访问的资源。提示词、`AGENTS.md` 和工具描述不承担操作系统安全边界。
+- 不同模型工具可以共享执行资源。`grep` 与 `execute` 共用沙箱，但各自保留参数、输出与审批语义。
+- 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
+- 同一会话的模型、权限切换复用沙箱；新建、切换和关闭会话清理原会话的沙箱。
+
+当前没有启用子 Agent 或 MCP 客户端，也没有容器编排、CPU、内存、磁盘或进程数的硬配额。这些不属于现有 Harness 的能力承诺。
 
 ## 分层
 
-```text
-agent/cli/             终端界面：输入、渲染、按键、审批与提问面板
-   │  RunEvent（不含终端格式）
-   ▼
-agent/runner.py        AgentRunner：一次运行的生命周期、中断与恢复、模型/权限切换
-agent/session_runtime.py  会话租约、新会话延迟持久化、会话切换
-   │
-   ▼
-agent/factory.py       AgentSpec → create_deep_agent()，装配工具与中间件
-   ├── agent/llm.py        模型客户端（Chat Completions / Responses）
-   ├── agent/tools/        execute、request_human_input、web_search
-   ├── agent/middleware/   暂停、steering、取消、恢复说明、附件等
-   ├── agent/sandbox.py    Bubblewrap / 宿主执行 backend 与路径路由
-   ├── agent/sandbox_pool.py      按网络模式懒启动、复用的持久沙箱
-   └── agent/sandbox_worker.py    沙箱内的常驻命令 Worker（仅标准库）
-   │
-   ▼
-agent/session.py       SQLite：LangGraph checkpoint + session_catalog
-agent/session_lock.py  每个会话一个 flock 锁
+```mermaid
+flowchart TB
+    CLI["TUI / CLI · agent/cli"] --> RUN["AgentRunner"]
+    HTTP["HTTP / SSE · agent/server/app.py"] --> SERVICE["RunManager / ServiceStore"]
+    SERVICE --> RUN
+    RUN <--> CONTROL["RunController · 取消 / 暂停 / 消息队列"]
+    RUN <--> SESSION["SessionRuntime / SessionStore / 会话租约"]
+    SESSION --> DB["SQLite checkpoint / catalog / 附件"]
+    RUN --> FACTORY["factory.build_agent"]
+    FACTORY --> GRAPH["Deep Agents / LangGraph"]
+    GRAPH --> MODEL["LLM 协议适配"]
+    GRAPH --> TOOLS["工具与 Middleware"]
+    TOOLS --> FILES["WorkspaceCompositeBackend · 文件路径路由"]
+    TOOLS --> EXEC["BubblewrapBackend / SandboxPool"]
+    EXEC --> WORKER["持久 Worker · Shell / argv 子进程"]
 ```
 
-`agent/cli/` 只依赖 `AgentRunner` 的公开方法和 `RunEvent`。Runtime 不依赖终端，可以接到其他前端，见 [library.md](library.md)。
+文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。本地 `grep` 独立注册，在沙箱模式且有 rg 时共享命令执行的 SandboxPool。
+
+| 层 | 实现 | 职责 |
+|---|---|---|
+| 交互入口 | `agent/cli/`、`agent/server/app.py` | 输入、渲染、审批/提问界面、HTTP 鉴权与 SSE |
+| 服务调度 | `agent/server/runtime.py`、`store.py` | 后台任务、项目并发限制、交互与事件持久化 |
+| 运行控制 | `agent/runner.py`、`control.py` | Run 生命周期、中断恢复、取消、steering、统一事件 |
+| 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
+| 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
+| 工具 | `agent/tools/`、上游文件工具 | Schema、参数校验、结果与 artifact |
+| 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 虚拟路径、命名空间、持久进程、超时与清理 |
+| 会话状态 | `agent/session.py`、`session_runtime.py`、`session_lock.py` | Checkpoint、元数据、附件、独占租约与恢复 |
+
+核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，TUI 和 HTTP 各自转换和展示。
+
+### 状态文案设计规范
+
+工具卡片和聚合摘要的状态标题统一遵循：**运行中使用进行式（`-ing`），成功完成后使用过去式；等待、失败、取消及完成未确认时不使用成功文案。** 新增或调整状态展示时沿用此口径。
+
+| 操作 | 运行中 | 成功完成后 |
+|---|---|---|
+| 命令执行 | `Running <命令>` | `Ran <命令>` |
+| 编辑文件 | `Editing <路径>` | `Edited <路径>` |
+| 写入文件 | `Writing <路径>` | 根据结果显示 `Created <路径>` 或 `Wrote <路径>` |
+| 删除文件 | `Deleting <路径>` | `Deleted <路径>` |
+| 探索分组 | `Exploring N items` | `Explored N items`（单项用 `item`） |
+
+- **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。
+- **等待与异常单独表达**：等待执行使用中性动作名和 `waiting for input`；完成未确认使用 `interrupted (completion unconfirmed)`。命令失败、超时、取消、启动失败分别显示 `Failed`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
+- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续新建合并为 `Created N files`。
+- **区分动作标签与状态标题**：工具名、审批动作和探索明细中的 `Read`、`Search`、`List` 等动作标签不承担完成状态；成功与否由状态标题、标记及异常提示表达。
+- **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
 
 ## 构图
 
-`factory.build_agent()` 是唯一的装配入口，调用 Deep Agents 的 `create_deep_agent()`，不修改上游代码。
+`factory.build_agent()` 是统一的图装配入口，调用上游 `create_deep_agent()`；`create_agent()` 是便捷入口。`AgentSpec` 描述 instructions、扩展工具、Skills、Backend、沙箱配置和搜索密钥；`PreparedAgent` 保存图、模型、工具注册信息、审批规则、checkpointer、控制器和 SandboxPool 等装配结果。
 
-传入的工具：
+### 工具注册
 
-- `request_human_input`（始终注册）
-- `execute`（backend 支持命令执行时注册；`allow` 模式下使用默认开网的版本）
-- `web_search`（有 Tavily 密钥时注册）
-- 调用方通过 `extra_tools` 传入的工具
+| 工具 | 来源与条件 | 默认 `ask` 下的交互 |
+|---|---|---|
+| `ls`、`read_file`、`glob` | Deep Agents 文件系统中间件 | 免审批 |
+| `write_file`、`edit_file`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
+| `grep` | 本地工作区注册自定义正则工具；其他 Backend 保留原生接口 | 免审批 |
+| `execute` | Backend 支持命令执行时注册 | 每次审批 |
+| `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
+| `request_human_input` | 始终注册 | 独立的人工输入中断 |
+| `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
+| `extra_tools` | 调用方显式注入 | 有副作用的工具需显式加入审批规则 |
 
-文件工具（`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete`）由 Deep Agents 的 `FilesystemMiddleware` 提供，本项目用 `WorkspaceFilesystemMiddleware` 替换它，以便在组合 backend 下仍然暴露 `execute`。`write_todos` 由 LangChain 的 `TodoListMiddleware` 提供。
+`web_search` 是可用的内置工具，有密钥时正常提供，未配置时不注册。其 Tavily 请求在宿主进程中发送，不受 Shell 的网络命名空间约束。
 
-Deep Agents 默认的 general-purpose 子 Agent 被禁用（通过 harness profile），因此没有 `task` 工具。
+文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。默认本地工具集从上游文件工具列表排除 `grep`，再独立注册自定义实现，确保只暴露一个 `grep`；不会把远程或虚拟 Backend 的路径解释为宿主路径。
 
-附加到 Deep Agents 默认中间件栈的中间件（按传入顺序）：
+Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工具。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
-| 中间件 | 作用 |
+### Middleware
+
+传给 Deep Agents 的项目中间件按以下顺序排列；上游仍负责自身默认中间件与图执行机制。
+
+| 中间件 | 控制位置与作用 |
 |---|---|
-| `RuntimeConfigGateMiddleware` | 有排队的模型 / 权限切换时，在模型调用前中断，切换后继续 |
-| `PauseGateMiddleware` | `/pause` 请求后在模型调用前中断 |
-| `RecoveryContextMiddleware` | 恢复异常结束的会话后，为第一次模型请求附加状态说明（不写入 checkpoint） |
-| `SteeringMiddleware` | 注入 steering；模型返回时若有 steering，丢弃尚未开始的工具调用并重新推理 |
-| `ToolCancelMiddleware` | 把取消信号传递给正在运行的工具 |
-| `ToolArgHintMiddleware` | 工具参数校验失败时返回可操作的提示 |
-| `WriteOperationMiddleware` | 在 `write_file` 结果中标记是新建还是覆盖 |
-| `AttachmentMaterializationMiddleware` | 请求模型时把图片引用替换为实际内容 |
-| `TodoListMiddleware` | `write_todos` |
-| `WorkspaceFilesystemMiddleware` | 文件工具 |
-| `SummarizationToolMiddleware` | `/compact` 使用的 `compact_conversation` |
+| `RuntimeConfigGateMiddleware` | 下一次模型调用前处理待生效的模型/权限切换 |
+| `PauseGateMiddleware` | 下一次模型调用前响应暂停 |
+| `RecoveryContextMiddleware` | 异常恢复后的首次模型请求附加说明，不写入 checkpoint |
+| `UsageIdentityMiddleware` | 模型响应进入 checkpoint 前标记来源 |
+| `SteeringMiddleware` | 注入运行中指令，必要时撤销尚未执行的工具提议并重新推理 |
+| `ToolCancelMiddleware` | 为工具传递可取消上下文 |
+| `ToolArgHintMiddleware` | 为工具参数校验错误提供提示 |
+| `WriteOperationMiddleware` | 标记 `write_file` 是新建还是覆盖 |
+| `AttachmentMaterializationMiddleware` | 仅请求模型时将图片引用展开为内容 |
+| `WorkspaceFilesystemMiddleware` | 文件工具及组合 Backend 能力适配 |
+| `SummarizationToolMiddleware` | 提供手动压缩工具 |
 
-审批由 Deep Agents 的 `interrupt_on` 实现；`ask` 模式的规则见 `agent/permission.py`。
+工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。
+
+## 运行与中断
+
+```mermaid
+sequenceDiagram
+    participant U as TUI / HTTP
+    participant R as AgentRunner
+    participant G as LangGraph
+    participant T as Tool
+    participant S as Checkpoint / Session
+    U->>R: invoke(task)
+    R->>S: 校验会话租约，标记 pending
+    R->>G: graph.stream(durability=sync)
+    G->>G: 模型生成回答或工具调用
+    opt 工具需要审批
+        G-->>R: interrupt
+        R-->>U: waiting_confirmation
+        U->>R: 批量 approve / reject
+        R->>G: Command(resume=decisions)
+    end
+    opt 执行工具
+        G->>T: 调用允许执行的工具
+        T-->>G: ToolMessage / artifact
+    end
+    G-->>R: 状态更新、最终回答或中断
+    R-->>U: RunEvent / RunResult
+    R->>S: 记录结束原因或待恢复状态
+```
+
+`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。它把模型与工具消息转成 `RunEvent`，负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。
+
+`RunResult` 的状态包括 `completed`、`failed`、`cancelled`、`waiting_confirmation`、`waiting_human`、`paused` 和 `runtime_config_boundary`。几类中断含义不同：审批是执行前授权；人工输入是 Agent 提问；暂停是用户请求；配置边界用于安全切换模型或权限。它们借助 checkpoint 恢复，但不能互相替代。
+
+### 运行中控制
+
+- `steer(text)` 在模型安全边界介入；模型刚生成但尚未执行的工具提议可以被丢弃，随后重新推理。
+- `follow_up(text)` 排在当前任务后执行，不抢占活动工具。
+- 暂停和排队的模型/权限修改在下一次模型调用前处理；切到 `allow` 不会自动同意已经等待中的审批。
+- 用户追加的消息不被当作工具审批的同意。
+
+`RunController` 按运行代际隔离取消信号，也处理已经调度但尚未 `begin_run` 的取消。取消会关闭模型流、请求图停止，并通知活动工具。`execute` 和 `grep` 最终终止本条命令的进程组，正常情况下保留持久沙箱。
+
+最终回答已经 checkpoint 后到达的取消，不把完成结果改写为取消。文件写入、外部请求等已经发生的副作用不会回滚；失败后需要核对 checkpoint 与实际工作区状态。
+
+## 权限与执行模式
+
+| 概念 | 决定什么 | 实现位置 |
+|---|---|---|
+| `ask` / `allow` | 工具调用前是否审批 | `agent/permission.py`、Deep Agents HITL |
+| `SANDBOXED` / `UNSANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
+| `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
+
+`ask` 默认审批文件修改、每次 `execute` 和每次 `web_search`。只读文件搜索免审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
+
+`UNSANDBOXED` 需显式授权回退，只允许 `ask`，命令以宿主当前用户权限执行。`CUSTOM` 由调用方注入的 Backend 决定资源边界。HTTP 服务固定 `ask`，强制沙箱，不支持宿主回退。
 
 ## Backend 与路径
 
-`WorkspaceCompositeBackend` 把 Agent 看到的路径路由到不同 backend：
+`WorkspaceCompositeBackend` 将模型看到的虚拟路径路由到授权根：
 
-- `/workspace/` → `BubblewrapBackend`（或 `UnsandboxedShellBackend`）。文件操作由其 `FilesystemBackend` 父类在宿主进程中完成（`virtual_mode`，根目录为工作区）；`execute` 交给 `SandboxPool`：按 `network` 取（或懒启动）对应的持久沙箱，由沙箱内的 Worker 为每条命令启动新的 shell。Pool 随 backend 在模型、权限切换的重建之间复用（切换不影响沙箱），由 `AgentRunner` 在会话切换和关闭时销毁。
-- `/skills/` → 只读的 `FilesystemBackend`，根目录为 `~/.deep-agent/skills/`。
-- 其他路径 → 一律返回权限错误。
+- `/workspace` → 工作区的 `BubblewrapBackend` 或 `UnsandboxedShellBackend`。普通文件操作由其 `FilesystemBackend` 能力在宿主执行；命令经执行 Backend 启动。
+- `/skills` → 只读 Skills Backend，目录存在时使用 `~/.deep-agent/skills/`。
+- 其他虚拟路径 → 拒绝访问。
 
-`artifacts_root` 设为 `/workspace/.deepagents`，Deep Agents 的压缩历史等产物写在这里。
+`artifacts_root` 为 `/workspace/.deepagents`，用于压缩历史等上游产物。文件工具的访问边界来自 Backend 路径约束，不能描述为所有读写都在 Bubblewrap 内。`.git/`、`.env` 等文件若在授权工作区内，也在 Agent 可访问范围内。
+
+### 双持久沙箱
+
+一个会话按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。`SandboxPool` 负责懒启动、复用、失效替换与会话清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。
+
+每次 `execute` 启动新的 `/bin/sh -lc`，Shell 变量和 `cd` 不跨调用保留；实例内 `/tmp`、`/home` 文件以及仍存活的后台进程可以保留。两个实例的进程、临时目录独立，通过 `/workspace` 等共享授权挂载交换文件。切换回 `ask` 不会停止此前有网实例中的后台进程。
+
+模型或权限切换复用当前 Pool。新建、切换、关闭会话会清理原 Pool，不能把旧会话的后台状态带入新会话。Worker 丢失时当前调用明确失败、不自动重放，下一次调用可以创建替代实例。
+
+### 隔离边界
+
+默认 `/workspace` 可写，系统运行时目录和 Skills 只读；沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
+
+无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网；共享工作区中的 Unix socket、FIFO 或普通文件可能成为通信通道。当前也没有资源硬配额。部署边界以 [sandbox.md](sandbox.md#网络) 为准，不能靠提示词补足。
+
+## grep 搜索
+
+本地 `grep` 是独立的只读工具，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。工具没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
+
+```text
+参数与 Glob 校验
+  → WorkspaceCompositeBackend.regex_search_location() 路由虚拟路径
+  → 宿主以 O_NOFOLLOW 和文件描述符校验挂载根、目标与文件限制
+  ├─ SANDBOXED 且有 rg
+  │    → SandboxPool → start_argv → 原 Worker → 单个 rg
+  └─ UNSANDBOXED 或无 rg
+       → 独立宿主 Python Worker → 目录描述符遍历与 re 匹配
+  → 流式解析、计数、去重、截断 → 工具结果
+```
+
+`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
+
+沙箱启动时将 rg 只读挂载到 `/run/deep-agent/rg`。工厂按权限选择 Pool：`ask` 使用无网实例，`allow` 使用有网实例；与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
+
+`start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
+
+**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消、超时或截断只清理本条 rg；Worker 失效则沿用 Pool 的丢失与替换机制。搜索总预算 10 秒，包含 Pool 等待和冷启动。
+
+Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历限制文件访问，不具备 Bubblewrap 隔离。Python `re` 与 Rust Regex、ignore 解析的差异见 [search.md](search.md)；不通过静默字面量匹配掩盖。
 
 ## 模型适配
 
-模型接入的验收边界：用户配置只声明 API 协议、端点地址/凭据、模型 ID 和模型能力（输入模态、上下文窗口、可选推理强度）。Thinking、工具调用、图片、usage 和请求参数的格式转换由模型适配层完成，Agent 核心只消费统一的 LangChain 消息和既有运行事件。
+`llm.build_chat_model()` 按配置的 `api` 选择协议，而非按模型厂商分支：
 
-新增符合 Responses 或 Chat Completions 协议的模型，原则上只增加配置，不修改 Agent、会话、沙箱、审批和工具执行代码。新发现的非标准端点字段应局限在适配层做可选字段兼容，不向用户增加厂商开关，也不在核心代码加入按模型名/厂商分支。
+- `responses` → `ResponsesChatOpenAI`。将已知非标准 `response.reasoning_text.*` 事件规范化为 LangChain 支持的 `response.reasoning_summary_text.*`，标准事件继续由上游解析。
+- `chat_completions` → `ChatCompletionsChatOpenAI`。兼容 `reasoning_content` / `reasoning`，统一保存思考正文，并保留来源字段名用于历史回传。
 
-`llm.build_chat_model()` 按 `api` 构造客户端：
+两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试、请求序列化和附件解析。Responses 继续复用 LangChain 的完整解析循环、工具调用拼接与异常映射；SDK 的结构化 parse 与 create 路径共用 usage 规范化。模型客户端统一使用协议类名，不保留旧厂商别名。
 
-- `responses` → `ResponsesChatOpenAI`：使用 Responses API，在转换前把 `response.reasoning_text.*` 事件改名为 LangChain 1.6 能识别的 `response.reasoning_summary_text.*`。
-- `chat_completions` → `ChatCompletionsChatOpenAI`：使用 Chat Completions，读取 `reasoning_content` 或 `reasoning` 字符串，正文统一保存，下一轮请求按实际收到的字段名回传。
+图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/stream.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
 
-两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试和请求前附件解析。附件解析只生成请求消息，checkpoint 保存引用。Responses 在 SDK stream 入口包装已知非标准事件，继续复用 LangChain 的完整解析循环、工具调用拼接和异常映射；标准事件保持原样。所有端点统一采用 SDK 标准请求序列化，不按主机、端口或厂商嵌套 extra_body。结构化输出的 SDK parse 路径与 create 共用响应 Usage 规范化。Chat Completions 的思考正文统一保存为 reasoning_content，并在消息元数据中保留来源字段名，历史回传时按原字段发送。
+`UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以 API 返回的 `input_tokens` 展示占用，缺失时显示 Unknown，不将估算数当成实际用量；取消、切换和压缩时清除旧值，恢复只读取当前来源的有效 usage。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
 
-`QwenChatOpenAI`、`TokenPlanChatOpenAI`、`ReasoningChatOpenAI` 及旧事件规范化函数暂时保留为弃用的 Python 别名。内部不使用厂商类名选择协议。
-
-`UsageIdentityMiddleware` 在模型结果进入 checkpoint 前标记模型来源，不改变工具或图的执行决定。流式回调将 usage-only chunk 转为既有 usage 事件；TUI 仅读取 API 的 input_tokens。缺失、取消、切换和压缩时清除旧值，恢复只读取当前来源对应的有效 usage。自动压缩仍使用 Deep Agents 原有机制。
-
-配置了 `context_window` 时，写入模型 profile 的 `max_input_tokens`，Deep Agents 据此计算压缩阈值。
-
-思考内容在 `agent/stream.py` 中拆分：除 `reasoning_content` 等字段外，也处理正文中的 `<think>…</think>` 标签。
+新增兼容 Responses / Chat Completions 的模型应优先只改配置。非标准端点兼容局限在适配层，Runner、工具、会话与沙箱继续消费统一消息和事件。
 
 ## 上下文压缩
 
-自动压缩使用 Deep Agents 默认加入的 `SummarizationMiddleware`：
+自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时约在窗口 85% 触发，保留最近约 10% 上下文；没有该 profile 信息时，约 170,000 tokens 触发，保留最近 6 条消息。具体阈值取决于上游版本。
 
-- 配置了 `context_window`：约 85% 时触发，保留最近约 10% 的上下文。
-- 未配置且模型 profile 也没有 `max_input_tokens`：约 170,000 tokens 触发，保留最近 6 条消息。
-- 被摘要掉的消息以 Markdown 写入 `/workspace/.deepagents/conversation_history/<id>.md`（即工作区下的 `.deepagents/`），Agent 之后仍可读取。
-
-`/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation` 工具，要求 usage 达到自动阈值的一半。
-
-具体阈值由 Deep Agents 决定，升级依赖后可能变化。
+`/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `/workspace/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
 ## 会话存储
 
-每个工作区一个 SQLite 文件（WAL 模式，权限 `0600`），包含：
+默认每个工作区对应 `~/.deep-agent/sessions/` 中的一份 SQLite 数据库；作为库使用且未传入持久 checkpointer 时，工厂使用 `InMemorySaver`。持久会话包含：
 
-- LangGraph `SqliteSaver` 的 checkpoint：消息、中断、图状态（含 `todos`）。序列化器禁用 pickle 回退。
-- `session_catalog` 表：标题、时间、模型、推理强度、权限模式、待生效的切换、上一轮的结束原因（`pending` / `stop` / `error` / `aborted` / `deferred`）。旧表结构在打开时迁移。
+- LangGraph `SqliteSaver` checkpoint：消息、图状态、中断；禁用 pickle fallback。
+- `session_catalog`：标题、时间、模型、推理强度、权限、待切换配置和上轮结束原因。数据库使用 WAL、权限 `0600`，仅接受当前表结构，不自动迁移旧数据库。
+- `<db>.locks/`：每 thread 一个 `flock` 独占租约，退出时由内核释放；锁文件保留，描述符 close-on-exec。
+- `<db>.attachments/`：按内容哈希保存的图片附件。
 
-数据库旁边：
+`SessionRuntime` 负责租约、新会话延迟持久化、会话切换和恢复计划。切换先读取和准备目标，再提交绑定；读取失败保留原会话。尚在写 checkpoint 的运行不能提前失去租约。
 
-- `<db>.locks/`：每个会话一个锁文件，`flock` 独占；进程退出时由内核释放，锁文件不删除；文件描述符设置 close-on-exec，子进程不继承。
-- `<db>.attachments/`：按内容哈希存储的图片。
+上一轮 `pending` 且已有 checkpoint，或以 `aborted` / `error` 结束时，下一次用户输入会附加一次性恢复说明。明确的审批、人工输入、暂停中断按各自 checkpoint 恢复，不重新生成或自动重放未知结果的工具。持久化图状态不等于恢复沙箱进程；会话重新打开时按需启动新沙箱。
 
-恢复时按上一轮的结束原因决定行为：`pending`（且已有 checkpoint）、`aborted`、`error` 会在下一次用户输入时附加恢复说明；明确的审批或暂停中断按 checkpoint 恢复，不重新执行工具。会话切换在全部读取完成后才提交，中途失败回滚到原会话。
+## TUI 与 HTTP 服务
+
+TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展示、审批、提问及选择器。HTTP 由 FastAPI 提供，`RunManager` 管理后台 worker、任务状态、人工交互与取消，`ServiceStore` 将 Run 和 SSE 事件持久化到服务自己的 SQLite。
+
+两者共享执行语义，但 HTTP 当前只是能力子集：固定 `ask`、强制沙箱，接受文字任务，不暴露 TUI 的模型/权限切换、图片上传、Skills 选择器、主动暂停、手动压缩或运行中 steering。服务每个项目最多一个未结束 Run，并受 `max_runs` 总量限制；等待审批或人工输入仍占用名额。完整接口以 [server.md](server.md) 为准。
+
+服务审批携带 `interrupt_id`，防止向过期快照提交决定；批量决定必须覆盖待审批工具集合。`interaction_submitted` 先写事件存储再通知 worker，最终状态与 `run_finished` 在同一事务提交，供 SSE 续接。取消接口返回 `202` 只表示受理，最终 Run 状态才表示实际结果；断开 SSE 不取消任务。
+
+服务 Bearer token 不区分最终用户。多用户产品需由上层业务后端校验用户、项目及 session/run 归属，不能把服务凭据直接当作浏览器用户权限。
+
+## 观察与验证
+
+诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `/workspace/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。
+
+| 行为契约 | 相关测试 |
+|---|---|
+| 工具注册、审批、拒绝与权限切换 | `test_runner.py`、`test_permission.py`、`test_web_search.py` |
+| 正则、Glob、结果限制、回退、路径边界和搜索取消 | `test_grep.py` |
+| 双沙箱复用、argv/Shell、网络模式、超时及 Worker 失效 | `test_sandbox.py`、`test_persistent_sandbox.py` |
+| 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
+| 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
+| HTTP 交互、取消、SSE 与终态一致性 | `test_server.py`、`test_server_terminal.py` |
+| 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
+
+运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟 HTTP、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
+
+## 扩展边界
+
+新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。未来接入 MCP 时，还需明确远程请求实际发生的位置与授权上下文，不能声称它自动受到 Bubblewrap 保护。
+
+增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。前端以既有 RunResult、RunEvent 和 HTTP 交互 Schema 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
 
 ## 依赖
 
-主要依赖及版本范围见 [`pyproject.toml`](../pyproject.toml)。其中 `deepagents` 固定在 `>=0.7.17,<0.8.0`，`langchain-openai` 固定在 `>=1.6.2,<1.7.0`，因为模型适配和压缩逻辑依赖这两个包的内部接口。
+主要依赖范围见 [pyproject.toml](../pyproject.toml)。`deepagents>=0.7.17,<0.8.0`、`langchain-openai>=1.6.2,<1.7.0` 的部分内部接口用于协议适配、文件系统能力和压缩；升级需针对这些契约回归验证，不以修改上游源码或建立平行执行引擎替代。
+
+## 源码入口
+
+- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
+- 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
+- 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。
+- HTTP 服务：[app.py](../agent/server/app.py)、[runtime.py](../agent/server/runtime.py)、[store.py](../agent/server/store.py)。

@@ -31,6 +31,7 @@ _EXPECTATIONS = {
     "enum": "取值不在允许的枚举内，见下方 schema",
     "string_pattern_mismatch": "字符串格式不符合要求，见下方 schema",
     "too_short": "长度不足，见下方 schema",
+    "too_long": "长度超过上限，按下方 schema 的 maxItems 或 maxLength 精简后重新调用",
     "model_attributes_type": "结构不符合该参数的 schema，见下方 schema",
     "model_type": "必须是 JSON 对象，见下方 schema",
 }

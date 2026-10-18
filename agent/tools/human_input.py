@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import interrupt
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent.tools.human_interaction import (
     FIELD_TYPES,
@@ -30,9 +30,7 @@ class FieldOption(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     value: str = Field(
-        default="",
         description="选项值，用户选中后按这个值回传",
-        validation_alias=AliasChoices("value", "id"),
     )
     label: str = Field(default="", description="展示给用户的选项文案")
     description: str = Field(default="", description="选项补充说明，可留空")
@@ -50,7 +48,8 @@ class FieldSpec(BaseModel):
     placeholder: str = Field(default="", description="输入框占位提示，可留空")
     options: list[FieldOption] = Field(
         default_factory=list,
-        description="single_select / multi_select 的候选项，其他类型留空数组",
+        max_length=3,
+        description="single_select / multi_select 的候选项，最多 3 个；Other 由系统另行添加，不要自行提供。其他类型留空数组",
     )
 
     @field_validator("type", mode="before")
@@ -164,8 +163,9 @@ def _request_description() -> str:
         "只声明交互语义，不要指定前端组件。"
         "fields / recommendation / impact 必须传原生 JSON 结构，不要序列化成字符串。"
         "有可选项时必须用 single_select 或 multi_select，选项写进该字段的 options，"
+        "每题最多提供 3 个候选项，优先保留最相关的选择。"
         "不要把选项写成 question 里的 Markdown 列表。"
-        "选择题会自动附加 Other: 自定义输入选项，无需自行提供。"
+        "选择题会自动附加 Other: 自定义输入选项，不计入这 3 个候选项，无需自行提供。"
         "question 只保留简短题干。"
         "recommendation 与 impact 可选。这不是工具权限确认。"
     )

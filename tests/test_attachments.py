@@ -15,7 +15,7 @@ from agent.attachments import (
     image_attachment_from_bytes,
 )
 from agent.config import ModelProfile, Settings
-from agent.llm import chat_openai
+from agent.llm import build_chat_model
 from agent.runner import AgentRunner
 from agent.session import SessionStore, messages_to_transcript
 from tests.conftest import scripted_model
@@ -51,10 +51,9 @@ def test_qwen_materializes_ref_only_for_request(tmp_path: Path) -> None:
         content="describe",
         additional_kwargs={ATTACHMENT_META_KEY: [ref.to_dict()]},
     )
-    llm = chat_openai(
-        model="qwen3.5-plus",
-        api_key="test",
-        base_url="http://localhost:8000/v1",
+    llm = build_chat_model(
+        ModelProfile("test", "qwen3.5-plus", api_key="test",
+                     base_url="http://localhost:8000/v1", api="responses"),
         attachment_store=store,
     )
     payload = llm._get_request_payload([message])

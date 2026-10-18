@@ -78,7 +78,9 @@
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件。它们只接受 `/workspace/...` 和 `/skills/...` 路径：前者映射到工作区，后者只读；其他路径返回权限错误。单个文件读写上限 10 MB。
+`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件。它们只接受 `/workspace/...` 和 `/skills/...` 路径：前者映射到工作区，后者只读；其他路径返回权限错误。单个文件读写上限 10 MiB。
+
+`grep` 是免审批探索工具，不调用 `execute`。SANDBOXED 且有 rg 时，在现有 SandboxPool 中以 argv 运行 rg：`ask` 复用无网实例，`allow` 复用有网实例，不创建专用 grep 沙箱。rg 在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。UNSANDBOXED 或缺少 rg 时使用可终止的宿主 Python 正则回退。参数、Glob 与结果限制见 [search.md](search.md)，进程路径见 [architecture.md](architecture.md#grep-搜索)。execute 的 `network` 参数、审批和网络规则不受 grep 选择影响。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 
@@ -112,7 +114,7 @@
 
 ## Playwright 与有头 X11
 
-浏览器应使用当前 CLI 的依赖版本安装，在宿主机手动运行 `playwright-cli install-browser --help`，再运行 `playwright-cli install-browser chromium`；不要用可能解析到不同版本的 `npx playwright install chromium`。默认 `playwright-cli open` 使用系统 Chrome；`--browser=chromium` 使用与该 CLI 匹配的缓存 Chromium。本轮核对 CLI 0.1.22 的帮助及 `install-browser chromium --dry-run`，实际下载仍需用户准备，不锁定项目版本。
+浏览器应使用当前 CLI 的依赖版本安装，在宿主机手动运行 `playwright-cli install-browser --help`，再运行 `playwright-cli install-browser chromium`；不要用可能解析到不同版本的 `npx playwright install chromium`。默认 `playwright-cli open` 使用系统 Chrome；`--browser=chromium` 使用与该 CLI 匹配的缓存 Chromium。实际下载由用户准备，项目不锁定 Playwright CLI 版本。
 
 Node 可以来自 `/usr/bin/node`，CLI 则可以在自定义 npm prefix 下。系统 Node 在默认 `/usr` 挂载中；额外 prefix 需要挂载其可执行文件及 npm 包整体（包含 `lib/node_modules`），再调整 PATH。精简示例：
 
@@ -143,17 +145,7 @@ Xvfb :2 -screen 0 1600x900x24 -extension MIT-SHM
 # 宿主启动 CLI 前：export DISPLAY=:2
 ```
 
-无需增加 Chrome 启动参数。不要为了适配浏览器删除 IPC 隔离，也不要擅自修改宿主安全策略。以下是用户提供的真实机器帧缓冲截图验收结果，**不是当前环境的复测结果**：
-
-| X Server | Browser | 成功渲染 |
-|---|---|---|
-| MIT-SHM 开启 | 系统 Chrome | 0/10 |
-| MIT-SHM 开启 | 测试 Chromium | 8/10 |
-| MIT-SHM 关闭 | 系统 Chrome | 10/10 |
-| MIT-SHM 关闭 | 测试 Chromium | 10/10 |
-| MIT-SHM 关闭，真实 TUI | 系统 Chrome | 1/1 |
-
-有头验收必须有实际窗口 / 帧缓冲截图；DOM、title、IsViewable 或窗口存在只作辅助证据。当前环境缺少 Xvfb 时应标为 BLOCKED，不能把启动失败视为成功。CLI 可能生成 `.playwright-cli/`，建议用户自己加入项目 `.gitignore`；程序不自动修改它。
+无需增加 Chrome 启动参数。不要为了适配浏览器删除 IPC 隔离，也不要擅自修改宿主安全策略。专用 Xvfb 上关闭 MIT-SHM 后，系统 Chrome 与测试 Chromium 才能稳定渲染；开启 MIT-SHM 时系统 Chrome 通常无法出画面。CLI 可能生成 `.playwright-cli/`，建议自行加入项目 `.gitignore`；程序不自动修改它。
 
 ## 排查：Ubuntu / WSL2
 

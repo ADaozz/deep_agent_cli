@@ -320,7 +320,8 @@ def test_default_skills_ignore_project_directory(tmp_path: Path, monkeypatch: py
     assert _default_skill_sources(backend) == ["/skills/"]
 
 
-def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
+def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     config = replace(config_for(tmp_path), bwrap_path="/bin/true")
     selected = select_backend(config, check=False)
     assert isinstance(selected.backend, SandboxBackendProtocol)
@@ -341,10 +342,9 @@ def test_sandbox_backend_adds_execute(tmp_path: Path) -> None:
         "edit_file",
         "delete",
         "execute",
-        "write_todos",
         "compact_conversation",
     }
-    assert len(names) == 11
+    assert len(names) == 10
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 
@@ -454,6 +454,34 @@ def test_extra_mount_cannot_replace_worker(tmp_path: Path) -> None:
     config = replace(config_for(tmp_path), extra_read_only_mounts=(BindMount(tmp_path, "/run/deep-agent"),))
     with pytest.raises(ValueError, match="sandbox worker"):
         select_backend(config, check=False)
+
+
+def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
+    from agent.tools import grep
+    from agent.sandbox import SEARCH_BINARY_PATH
+
+    binary = tmp_path / "bin" / "rg"
+    binary.parent.mkdir()
+    binary.write_text("binary")
+    binary.chmod(0o755)
+    link = tmp_path / "rg-link"
+    link.symlink_to(binary)
+    monkeypatch.setattr(grep, "resolve_rg", lambda: str(link))
+    backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
+    for network in (False, True):
+        args = backend.worker_args(network)
+        index = args.index(SEARCH_BINARY_PATH)
+        assert args[index - 2:index + 1] == ["--ro-bind", str(binary), SEARCH_BINARY_PATH]
+        assert ("--unshare-net" in args) is not network
+
+
+def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch):
+    from agent.tools import grep
+    from agent.sandbox import SEARCH_BINARY_PATH
+
+    monkeypatch.setattr(grep, "resolve_rg", lambda: None)
+    backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
+    assert SEARCH_BINARY_PATH not in backend.worker_args()
 
 
 def test_sandbox_start_failure_is_reported_not_run_on_host(tmp_path: Path) -> None:
