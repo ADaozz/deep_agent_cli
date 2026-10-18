@@ -58,6 +58,11 @@ def program(text):
 
 def service(base):
     import uvicorn
+    import agent.sandbox
+    skills = base / 'skills'
+    (skills / 'review').mkdir(parents=True, exist_ok=True)
+    (skills / 'review' / 'SKILL.md').write_text('---\nname: review\ndescription: Review project code\n---\nReview carefully.\n')
+    agent.sandbox.default_skills_dir = lambda: skills
     from agent.server.app import create_app
     from agent.server.config import ServerConfig
     from agent.runner import AgentRunner

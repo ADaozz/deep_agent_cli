@@ -1,3 +1,4 @@
+import type { Capabilities, PermissionSelection } from './types'
 import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing } from './types'
 
 export interface ApiConfig {
@@ -97,6 +98,9 @@ export async function getHealth(baseUrl: string): Promise<boolean> {
 }
 
 export const api = {
+  capabilities: (config: ApiConfig, projectId: string) => request<Capabilities>(config, `/v1/projects/${encodeURIComponent(projectId)}/capabilities`),
+  permission: (config: ApiConfig, sessionId: string) => request<PermissionSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/permission`),
+  selectPermission: (config: ApiConfig, sessionId: string, mode: 'ask' | 'allow', confirmation = '') => request<PermissionSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/permission`, { method: 'POST', body: { mode, confirmation } }),
   workspaces: (config: ApiConfig) => request<{ workspaces: Workspace[] }>(config, '/v1/workspaces'),
   selectWorkspace: (config: ApiConfig, path: string) => request<Workspace>(config, '/v1/workspaces', { method: 'POST', body: { path } }),
   directories: (config: ApiConfig, path?: string) => request<DirectoryListing>(config, '/v1/workspace-directories', { method: 'POST', body: path ? { path } : {} }),

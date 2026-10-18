@@ -8,6 +8,7 @@ import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
+import { useDraft, readDraft, draftPrompt, clearSentDraft } from '../store/drafts'
 import { app, openSession, sendFromHome, sessionRows, runBannerAction } from '../store/app'
 import { longAge } from '../lib/timeline'
 import { refreshGit, workspaceGit } from '../store/git'
@@ -19,13 +20,13 @@ import { api } from '../api/client'
 import { recentWorkspacePaths, rememberWorkspace } from '../store/workspaces'
 import { projectLabel, apiConfig } from '../store/settings'
 
-const text = ref('')
+const draftKey = computed(() => 'home:' + (selectedWorkspace.value?.path || ''))
+const { text, paths, skills } = useDraft(draftKey)
 const draftOpen = ref(false)
 const branchOpen = ref(false)
 const pathOpen = ref(false)
 const branchBusy = ref(false)
 const branchError = ref('')
-const flashText = ref('')
 
 const recent = computed(() => sessionRows.value.slice(0, 4))
 
@@ -33,13 +34,6 @@ const selectedWorkspace = computed(() => app.projects.find(project => project.id
 const workspaceHistory = computed(() => recentWorkspacePaths.map(path => app.projects.find(project => project.path === path)).filter((project): project is Workspace => !!project).slice(0, 4))
 const git = computed(() => workspaceGit[selectedWorkspace.value?.id || ''])
 const workspaceBusy = computed(() => branchBusy.value || app.busy.submit || sessionRows.value.some(row => row.projectId === selectedWorkspace.value?.id && row.status && !isTerminal(row.status)))
-
-function flash(message: string): void {
-  flashText.value = message
-  window.setTimeout(() => {
-    if (flashText.value === message) flashText.value = ''
-  }, 4000)
-}
 
 function pickProject(projectId: string): void {
   const workspace = app.projects.find(project => project.id === projectId)
@@ -65,9 +59,13 @@ async function switchBranch(branch: string): Promise<void> {
   finally { branchBusy.value = false }
 }
 
-async function submit(value: string): Promise<void> {
-  const ok = await sendFromHome(value)
-  if (ok) text.value = ''
+async function submit(): Promise<void> {
+  const key = draftKey.value
+  const snapshot = JSON.stringify(readDraft(key))
+  const ok = await sendFromHome(draftPrompt(readDraft(key)))
+  if (ok) {
+    clearSentDraft(key, snapshot)
+  }
 }
 
 function refreshProjects(): void {
@@ -115,6 +113,9 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 
       <PromptComposer
         v-model="text"
+        v-model:paths="paths"
+        v-model:skills="skills"
+        :draft-key="draftKey"
         placeholder="让 Deep Agent 构建、修 bug、探索"
         :running="false"
         :busy="app.busy.submit"
@@ -126,21 +127,12 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
         <button
           class="pill-btn"
           type="button"
-          @click="flash('扩展市场属于 Cursor；deep-agent 没有插件注册表。')"
-        >
-          浏览扩展市场
-          <Icon name="arrowUpRight" :size="12" />
-        </button>
-        <button
-          class="pill-btn"
-          type="button"
           @click="text = '请审查当前项目的安全风险，给出有代码位置依据的发现和修复建议。'"
         >
           运行安全审计
         </button>
       </div>
 
-      <p v-if="flashText" class="home-flash">{{ flashText }}</p>
 
       <div class="recent">
         <button

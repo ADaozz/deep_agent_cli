@@ -97,3 +97,58 @@ def test_failed_switch_keeps_actual_model_and_redacts_provider_error(model_confi
         assert response.status_code == 503
         assert 'never-return-this-key' not in response.text
         assert client.get(f'/v1/sessions/{sid}/model', headers=AUTH).json()['model_id'] == 'OrgA/one'
+
+
+def test_native_skill_catalog_and_permission_persistence(model_config, monkeypatch, tmp_path):
+    from agent.server.runtime import _runner_from_settings
+    from agent.permission import PermissionMode
+    skills = tmp_path / 'skills'
+    (skills / 'review').mkdir(parents=True)
+    (skills / 'review' / 'SKILL.md').write_text('---\nname: review\ndescription: Review project code\n---\nRead the code carefully.\n')
+    monkeypatch.setattr('agent.sandbox.default_skills_dir', lambda: skills)
+    with TestClient(create_app(model_config)) as client:
+        assert client.get('/v1/projects/app/capabilities').status_code == 401
+        response = client.get('/v1/projects/app/capabilities', headers=AUTH)
+        assert response.status_code == 200, response.text
+        catalog = response.json()
+        assert catalog['allow_available'] is True
+        skill = catalog['skills'][0]
+        assert skill['name'] == 'review'
+        assert skill['path'] == '/skills/review/SKILL.md'
+        assert skill['instruction'] == '使用技能 review，先读取 /skills/review/SKILL.md 并遵循其说明。'
+        assert 'never-return-this-key' not in response.text
+        sid = client.post('/v1/sessions', headers=AUTH, json={'project_id': 'app'}).json()['id']
+        endpoint = f'/v1/sessions/{sid}/permission'
+        assert client.get(endpoint, headers=AUTH).json() == {'mode': 'ask'}
+        assert client.post(endpoint, headers=AUTH, json={'mode': 'allow'}).status_code == 422
+        assert client.post(endpoint, headers=AUTH, json={'mode': 'allow', 'confirmation': 'ALLOW'}).json() == {'mode': 'allow'}
+    with TestClient(create_app(model_config)) as client:
+        assert client.get(endpoint, headers=AUTH).json() == {'mode': 'allow'}
+        # The production factory must restore ALLOW rather than reset to ASK.
+        runner = _runner_from_settings(model_config.settings_for('app'), sid)
+        try:
+            assert runner.permission_mode() is PermissionMode.ALLOW
+        finally:
+            runner.close()
+            runner.session_store.close()
+        # /model must also preserve the selected permission.
+        assert client.post(f'/v1/sessions/{sid}/model', headers=AUTH, json={'model_id': 'OrgA/two', 'reasoning_effort': 'default'}).status_code == 200
+        assert client.get(endpoint, headers=AUTH).json() == {'mode': 'allow'}
+        assert client.post(endpoint, headers=AUTH, json={'mode': 'ask'}).json() == {'mode': 'ask'}
+        monkeypatch.setattr('agent.server.runtime.allow_mode_available', lambda _: False)
+        assert client.post(endpoint, headers=AUTH, json={'mode': 'allow', 'confirmation': 'ALLOW'}).status_code == 422
+        assert client.get(endpoint, headers=AUTH).json() == {'mode': 'ask'}
+
+
+def test_permission_busy_validation_and_unknown_session(model_config):
+    from agent.server.runtime import ActiveRun
+    with TestClient(create_app(model_config)) as client:
+        sid = client.post('/v1/sessions', headers=AUTH, json={'project_id': 'app'}).json()['id']
+        endpoint = f'/v1/sessions/{sid}/permission'
+        assert client.post(endpoint, headers=AUTH, json={'mode': 'invalid'}).status_code == 422
+        assert client.get('/v1/sessions/missing/permission', headers=AUTH).status_code == 404
+        client.app.state.manager.active['reserved'] = ActiveRun('app')
+        try:
+            assert client.post(endpoint, headers=AUTH, json={'mode': 'ask'}).status_code == 409
+        finally:
+            client.app.state.manager.active.pop('reserved')

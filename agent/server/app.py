@@ -73,6 +73,11 @@ class BranchSelection(Body):
     branch: str = Field(min_length=1, max_length=512)
 
 
+class PermissionSelection(Body):
+    mode: Literal["ask", "allow"]
+    confirmation: str = Field(default="", max_length=16)
+
+
 class ModelSelection(Body):
     model_id: str = Field(min_length=1, max_length=512)
     reasoning_effort: str = Field(min_length=1, max_length=64)
@@ -140,6 +145,18 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     def project_git(project_id: str, service: RunManager = Depends(manager)):
         service.require_project(project_id)
         return workspace_git(config.projects[project_id])
+
+    @api.get("/projects/{project_id}/capabilities")
+    def capabilities(project_id: str, service: RunManager = Depends(manager)):
+        return service.capabilities(project_id)
+
+    @api.get("/sessions/{session_id}/permission")
+    def permission(session_id: str, service: RunManager = Depends(manager)):
+        return service.session_permission(session_id)
+
+    @api.post("/sessions/{session_id}/permission")
+    def change_permission(session_id: str, body: PermissionSelection, service: RunManager = Depends(manager)):
+        return service.change_session_permission(session_id, body.mode, body.confirmation)
 
     @api.get("/projects/{project_id}/models")
     def models(project_id: str, service: RunManager = Depends(manager)):

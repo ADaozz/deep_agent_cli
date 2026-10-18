@@ -1931,3 +1931,11 @@ a {
 
 .workspace-history-label { display: flex; flex-direction: column; min-width: 0; }
 .workspace-history-label small { display: block; color: var(--t3); font-size: 11px; }
+
+.attachment-blocks { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px 0; }
+.attachment-block { display: flex; align-items: center; gap: 8px; max-width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raised); font-size: 12px; }
+.attachment-block span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-block .ico { flex-shrink: 0; }
+.attachment-path-input { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 10px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+
+.composer.is-pill.has-paths { border-radius: var(--radius-card); }

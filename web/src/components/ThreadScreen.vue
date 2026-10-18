@@ -8,6 +8,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
+import { useDraft, readDraft, draftPrompt, clearSentDraft } from '../store/drafts'
 import SidePanel from './SidePanel.vue'
 import WorkLog from './WorkLog.vue'
 import {
@@ -33,7 +34,8 @@ import type { RunStatus } from '../api/types'
 defineProps<{ panelOpen: boolean }>()
 const emit = defineEmits<{ 'toggle-panel': [] }>()
 
-const text = ref('')
+const draftKey = computed(() => 'thread:' + app.sessionId)
+const { text, paths, skills } = useDraft(draftKey)
 const menu = ref(false)
 const body = ref<HTMLElement | null>(null)
 const copied = ref(false)
@@ -103,10 +105,12 @@ watch(
   () => { void refreshGit(currentRecord.value?.session.project_id || ''); scrollToBottom() },
 )
 
-async function send(value: string): Promise<void> {
-  const ok = await submitText(value)
+async function send(): Promise<void> {
+  const key = draftKey.value
+  const snapshot = JSON.stringify(readDraft(key))
+  const ok = await submitText(draftPrompt(readDraft(key)))
   if (ok) {
-    text.value = ''
+    clearSentDraft(key, snapshot)
     scrollToBottom()
   }
 }
@@ -213,7 +217,7 @@ async function copySession(): Promise<void> {
             </button>
           </div>
 
-          <div v-if="app.banner" class="banner" :class="bannerKind">
+          <div v-if="app.banner" class="banner" :class="bannerKind" role="alert">
             <Icon name="alert" :size="13" />
             <span class="grow">{{ app.banner.text }}<small v-if="app.banner.hint" class="banner-hint">{{ app.banner.hint }}</small></span>
             <button
@@ -246,6 +250,9 @@ async function copySession(): Promise<void> {
 
           <PromptComposer
             v-model="text"
+            v-model:paths="paths"
+            v-model:skills="skills"
+            :draft-key="draftKey"
             variant="pill"
             placeholder="追加跟进"
             :running="active"

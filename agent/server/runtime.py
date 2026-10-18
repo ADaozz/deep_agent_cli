@@ -12,10 +12,10 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from agent.config import Settings
-from agent.permission import PermissionMode
+from agent.permission import PermissionMode, allow_mode_available, PERMISSION_ALLOW_WARNING
 from agent.runner import AgentRunner, RunResult
 from agent.tools.human_interaction import validate_human_input_values
-from agent.sandbox import select_backend
+from agent.sandbox import select_backend, sandbox_pool_of
 from agent.session import SessionStore
 from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
@@ -52,7 +52,6 @@ def _runner_from_settings(settings: Settings, session_id: str) -> AgentRunner:
             settings=settings, sandbox_config=settings.sandbox, session_store=store,
             thread_id=session_id, workspace=settings.sandbox.workspace,
         )
-        runner.set_permission_mode(PermissionMode.ASK)
         return runner
     except BaseException:
         store.close()
@@ -244,6 +243,84 @@ class RunManager:
                 raise ServiceError(409, "Session is already open in another process") from None
             except Exception:
                 raise ServiceError(503, "Unable to apply model configuration") from None
+            finally:
+                if runner is not None:
+                    try:
+                        runner.close()
+                    finally:
+                        if runner.session_store is not None:
+                            runner.session_store.close()
+
+    def capabilities(self, project_id: str) -> dict[str, Any]:
+        # Use the same backend sources and native loader as CLI /skill.
+        from types import SimpleNamespace
+        from agent.cli.skills import load_skill_catalog, SkillDraft
+        from agent.factory import _default_skill_sources
+        with self.lock:
+            settings = self._model_settings(project_id)
+            selected = select_backend(settings.sandbox)
+            try:
+                catalog = load_skill_catalog(SimpleNamespace(
+                    backend=selected.backend, skill_sources=_default_skill_sources(selected.backend) or [],
+                ))
+                skills = []
+                for item in sorted(catalog.get("skills_metadata", []), key=lambda item: item["name"]):
+                    draft = SkillDraft()
+                    marker = draft.display(item["name"], item["path"])
+                    skills.append({"name": item["name"], "path": item["path"],
+                                   "description": item["description"], "instruction": draft.expand(marker)})
+                return {"skills": skills, "warnings": [str(e) for e in catalog.get("skills_load_errors", [])],
+                        "allow_available": allow_mode_available(selected.mode), "allow_warning": PERMISSION_ALLOW_WARNING}
+            finally:
+                pool = sandbox_pool_of(selected.backend)
+                if pool is not None:
+                    pool.shutdown()
+
+    def session_permission(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            session = self.session(session_id)
+            settings = self._model_settings(session["project_id"])
+            mode = "ask"
+            if settings.state_path.exists():
+                store = SessionStore(settings.state_path)
+                try:
+                    saved = store.get(session_id)
+                    if saved is not None:
+                        mode = saved.permission_mode or "ask"
+                finally:
+                    store.close()
+            return {"mode": mode}
+
+    def change_session_permission(self, session_id: str, mode: str, confirmation: str) -> dict[str, Any]:
+        with self.lock:
+            session = self.session(session_id)
+            if self.closing:
+                raise ServiceError(503, "Service is shutting down")
+            if any(active.project_id == session["project_id"] for active in self.active.values()):
+                raise ServiceError(409, "Finish the current run or interaction before switching permission")
+            if mode == "allow" and confirmation != "ALLOW":
+                raise ServiceError(422, "Type ALLOW to confirm")
+            settings = self._model_settings(session["project_id"])
+            runner = None
+            try:
+                runner = (_runner_from_settings(settings, session_id) if self.factory is runner_factory
+                          else self.factory(self.config, session["project_id"], session_id))
+                if runner.current_interrupt() is not None:
+                    raise ServiceError(409, "Resolve the session interruption before switching permission")
+                if mode == "allow" and not allow_mode_available(runner.prepared.execution_mode):
+                    raise ServiceError(422, "ALLOW requires SANDBOXED execution")
+                events = []
+                runner.request_permission_change(PermissionMode(mode))
+                runner._apply_pending_runtime_config(events.append)
+                if any(event.type == "runtime_config_failed" for event in events):
+                    raise ServiceError(503, "Unable to apply permission configuration")
+                return {"mode": runner.permission_mode().value}
+            except ServiceError:
+                raise
+            except SessionLockBusyError:
+                raise ServiceError(409, "Session is already open in another process") from None
+            except Exception:
+                raise ServiceError(503, "Unable to apply permission configuration") from None
             finally:
                 if runner is not None:
                     try:

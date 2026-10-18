@@ -1,3 +1,4 @@
+import { clearDrafts } from './drafts'
 import type { Run } from '../api/types'
 import type { RunRecord, SessionRecord } from '../lib/runView'
 import { emptyView } from '../lib/runView'
@@ -71,6 +72,7 @@ export function saveRecords(records: RecordMap, immediate = false): void {
 }
 
 export function clearRecords(): void {
+  clearDrafts()
   try {
     localStorage.removeItem(STORAGE_KEY)
     localStorage.removeItem(LAST_SESSION_KEY)

@@ -31,7 +31,7 @@ export DEEP_AGENT_SERVICE_TOKEN='<设置一个随机服务令牌>'
 deep-agent serve --config ~/.deep-agent/service.yaml --host 127.0.0.1 --port 8080
 ```
 
-服务启动时检查模型配置和各项目沙箱。`sandbox.allow_unsandboxed` 在服务模式下强制关闭，权限固定使用 `ask`。
+服务启动时检查模型配置和各项目沙箱。`sandbox.allow_unsandboxed` 在服务模式下强制关闭，新会话权限默认 `ask`，可通过扩展权限接口切换并保存。
 
 配置在启动时加载，修改模型或项目配置后需要重启服务。
 
@@ -60,9 +60,10 @@ HTTP 服务复用 CLI 的 `AgentRunner`、模型调用、工具、审批、人�
 | 会话任务列表、项目活动任务 | 支持 | 只读任务摘要分页和活动任务查询，见 [Web 集成新增的只读查询](#web-集成新增的只读查询) |
 | 会话标题、搜索、删除、消息列表 | 未提供 | 会话接口只有 ID、项目和创建时间；调用方保存展示记录 |
 | 模型/思考强度切换 | 已提供 | 从配置目录选择组织、模型、强度，空闲会话可切换并持久化 |
-| 权限模式切换 | 未提供 | 权限固定为 `ask` |
+| 权限模式切换 | 扩展 GET/POST session permission 接口 | 复用原生 ask/allow；ALLOW 仅沙箱模式并需精确确认 |
 | 主动暂停、手动压缩、运行中追加/插入消息 | 未提供 | 不显示相应 HTTP 操作按钮 |
-| 图片/附件上传、文件下载、剪贴板、技能选择器 | 未提供 | 创建任务仅接受文字，不把 CLI 的附件或选择器当作已有 HTTP 接口 |
+| Skill 选择器 | 扩展 capabilities 接口 | 复用 CLI 原生技能源和指令展开，作为任务文字发送 |
+| 图片/附件上传、文件下载、剪贴板 | 不传输文件内容 | Web 路径块只将路径字符串加入任务 text |
 
 向 `text` 发送 `/model`、`/compact` 等文字不会触发 CLI 斜杠命令分发。前端不能用这种方式模拟尚未暴露的操作。
 
@@ -857,3 +858,14 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 - `POST /v1/projects/{project_id}/git/branch` 接受 `{branch:string}`，只选择该工作区已存在的本地分支，执行原生 `git switch -- branch`，不 force、不丢弃修改。活动任务或 Git 拒绝切换时返回 409，成功后返回更新的 Git 元数据；GET Git 响应新增 `branches`。
 
 以上均要求原服务认证，并由现有同源网关一对一映射。最近四个 workspace 路径与排序保存在浏览器 `deepagent.workspace-history.v1`，服务侧目录索引用于重启后继续访问会话；两者不创建另一套任务执行逻辑。
+
+
+## Web 能力扩展接口
+
+这些接口仅适配现有 TUI/Runner 能力，不修改 TUI 或核心执行路径；均要求服务鉴权，网关只转发白名单路由。
+
+- `GET /v1/projects/{project_id}/capabilities`：返回原生 Skill 目录（name/path/description/instruction）、加载警告，以及 `allow_available` 和 CLI 的 `allow_warning`。技能源与 CLI `/skill` 一致。
+- `GET /v1/sessions/{session_id}/permission`：返回原生会话保存的 `{ "mode": "ask" | "allow" }`，新会话默认 ask。
+- `POST /v1/sessions/{session_id}/permission`：请求 `{ "mode": "ask" }` 或 `{ "mode": "allow", "confirmation": "ALLOW" }`，通过 Runner 的权限请求/配置应用路径持久化；返回实际生效的 mode。ALLOW 只在 SANDBOXED 可用；缺少精确确认或不可用返回 422，workspace 忙或会话有待处理交互返回 409。接口不会自动批准已经挂起的审批。
+
+浏览器中的草稿与路径块无需新增上传接口。任务仍只提交 `{ "text": "正文\n文件路径\n图片路径" }`；Skill 使用目录返回的原生 instruction 合入文本。

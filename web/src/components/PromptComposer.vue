@@ -4,19 +4,25 @@
  *   card (home)  → rounded 12 card, 640×120, textarea above the control bar
  *   pill (thread) → 44px pill with the textarea inline between + and the buttons
  *
- * Left: circular "+" (upload file / upload image) and the model label. Right: mic and
- * the round black send / stop button. Model selection uses the service catalog
- * and session settings; attachments are configured on the service.
+ * Left: circular "+" (upload file / upload image) and the model label. Right: the round black send / stop button. Model selection uses the service catalog
+ * and session settings; attachments are plain path references.
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import AttachmentPathDialog from './AttachmentPathDialog.vue'
+import type { PathReference } from '../store/drafts'
 import Popover from './Popover.vue'
 import { models } from '../store/models'
+import CapabilityPicker from './CapabilityPicker.vue'
+import type { SkillReference } from '../api/types'
 import ModelPicker from './ModelPicker.vue'
 import { app, currentRecord } from '../store/app'
 
 const props = defineProps<{
   modelValue: string
+  paths: PathReference[]
+  skills: SkillReference[]
+  draftKey: string
   placeholder: string
   /** A run is active: the round button becomes Stop. */
   running: boolean
@@ -29,16 +35,25 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [string]
+  'update:paths': [PathReference[]]
+  'update:skills': [SkillReference[]]
   submit: [string]
   stop: []
 }>()
 
 const area = ref<HTMLTextAreaElement | null>(null)
 const plusOpen = ref(false)
+const pathKind = ref<'file' | 'image' | null>(null)
+watch(() => props.draftKey, () => { pathKind.value = null; plusOpen.value = false })
+function pickPath(kind: 'file' | 'image'): void { plusOpen.value = false; pathKind.value = kind }
+function addPaths(paths: PathReference[]): void {
+  emit('update:paths', [...props.paths, ...paths.filter(p => !props.paths.some(existing => existing.path === p.path))])
+  pathKind.value = null
+}
 const modelProject = computed(() => app.view === 'thread' ? currentRecord.value?.session.project_id || '' : app.draftProjectId || app.projects[0]?.id || '')
 const modelSession = computed(() => app.view === 'thread' ? app.sessionId : '')
 
-const canSend = computed(() => !props.disabled && !props.running && !props.busy && !models.changing[modelSession.value] && props.modelValue.trim().length > 0)
+const canSend = computed(() => !props.disabled && !props.running && !props.busy && !models.changing[modelSession.value] && (props.modelValue.trim().length > 0 || props.paths.length > 0 || props.skills.length > 0))
 const pill = computed(() => props.variant === 'pill')
 
 function resize(): void {
@@ -77,7 +92,18 @@ function onRound(): void {
 </script>
 
 <template>
-  <div class="composer" :class="{ 'is-pill': pill }">
+  <div class="composer" :class="{ 'is-pill': pill, 'has-paths': paths.length || skills.length }">
+    <AttachmentPathDialog v-if="pathKind" :kind="pathKind" @close="pathKind = null" @selected="addPaths" />
+    <div v-if="paths.length || skills.length" class="attachment-blocks" aria-label="附件路径">
+      <div v-for="skill in skills" :key="skill.path" class="attachment-block" :title="skill.description">
+        <span>Skill: {{ skill.name }}</span><button class="ico" type="button" :aria-label="'移除 Skill ' + skill.name" @click="emit('update:skills', skills.filter(s => s.path !== skill.path))"><Icon name="close" :size="12" /></button>
+      </div>
+      <div v-for="item in paths" :key="item.path" class="attachment-block" :title="item.path">
+        <Icon :name="item.kind === 'image' ? 'image' : 'file'" :size="16" />
+        <span>{{ item.path }}</span>
+        <button class="ico" type="button" :aria-label="'移除 ' + item.path" @click="emit('update:paths', paths.filter(p => p.path !== item.path))"><Icon name="close" :size="12" /></button>
+      </div>
+    </div>
     <template v-if="!pill">
       <textarea
         ref="area"
@@ -96,24 +122,21 @@ function onRound(): void {
             <Icon name="plus" :size="12" />
           </button>
           <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
-            <button class="pop-item" type="button" @click="plusOpen = false">
+            <button class="pop-item" type="button" @click="pickPath('file')">
               <Icon name="file" :size="13" />
               <span class="grow">上传文件</span>
             </button>
-            <button class="pop-item" type="button" @click="plusOpen = false">
+            <button class="pop-item" type="button" @click="pickPath('image')">
               <Icon name="image" :size="13" />
               <span class="grow">上传图片</span>
             </button>
           </Popover>
         </span>
 
+        <CapabilityPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" @skill="skill => emit('update:skills', skills.some(s => s.path === skill.path) ? skills : [...skills, skill])" />
         <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
 
         <span class="spacer" />
-
-        <button class="round" type="button" title="本控制台不支持语音输入">
-          <Icon name="mic" :size="15" />
-        </button>
         <button
           class="round round-send"
           type="button"
@@ -133,11 +156,11 @@ function onRound(): void {
           <Icon name="plus" :size="12" />
         </button>
         <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
-          <button class="pop-item" type="button" @click="plusOpen = false">
+          <button class="pop-item" type="button" @click="pickPath('file')">
             <Icon name="file" :size="13" />
             <span class="grow">上传文件</span>
           </button>
-          <button class="pop-item" type="button" @click="plusOpen = false">
+          <button class="pop-item" type="button" @click="pickPath('image')">
             <Icon name="image" :size="13" />
             <span class="grow">上传图片</span>
           </button>
@@ -156,10 +179,8 @@ function onRound(): void {
       />
 
       <div class="right">
+        <CapabilityPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" @skill="skill => emit('update:skills', skills.some(s => s.path === skill.path) ? skills : [...skills, skill])" />
         <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
-        <button class="round" type="button" title="本控制台不支持语音输入">
-          <Icon name="mic" :size="15" />
-        </button>
         <button
           class="round round-send"
           type="button"

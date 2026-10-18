@@ -184,3 +184,7 @@ export interface DirectoryListing {
   directories: { name: string; path: string }[]
   truncated: boolean
 }
+
+export interface SkillReference { name: string; path: string; instruction: string; description: string }
+export interface Capabilities { skills: SkillReference[]; warnings: string[]; allow_available: boolean; allow_warning: string }
+export interface PermissionSelection { mode: 'ask' | 'allow' }
