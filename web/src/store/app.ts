@@ -254,7 +254,9 @@ function explain(
         return {
           kind: 'warn',
           text: `${context}冲突（409）：${detail || '状态已变化'}`,
-          hint: '每个项目只允许一个未结束的运行，且交互会过期。已保留你输入的文本。',
+          hint: detail.includes('另一个 Deep Agent')
+            ? '请先结束另一端再提交。已保留你输入的文本。'
+            : '每个项目只允许一个未结束的运行，且交互会过期。已保留你输入的文本。',
           actions: [{ key: 'refresh', label: '同步' }, { key: 'dismiss', label: '关闭' }],
         }
       case 422:

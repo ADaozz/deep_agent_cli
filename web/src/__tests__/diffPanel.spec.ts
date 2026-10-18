@@ -41,6 +41,7 @@ describe('workspace diff panel', () => {
     const panel = mount(SidePanel, { props: { git, projectId: 'app', title: 'app', subtitle: '' } })
     expect(panel.text()).toContain('agent/server/gitinfo.py')
     expect(panel.text()).toContain('notes/new.txt')
+    expect(panel.text()).not.toContain('变更文件')
     await panel.get('button[title="agent/server/gitinfo.py"]').trigger('click')
     await flushPromises()
     expect(request).toHaveBeenCalledWith({ baseUrl: '/api/agent' }, 'app', 'agent/server/gitinfo.py', 'all', false)
