@@ -1,12 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
-import type { WorkspaceGit } from '../api/types'
+import { api, ApiError } from '../api/client'
+import type { GitDiffLine, GitDiffScope, GitFileDiff, GitFileEntry, WorkspaceGit } from '../api/types'
 import { shortPath } from '../lib/timeline'
+import { refreshGit } from '../store/git'
+import { apiConfig } from '../store/settings'
 
 const props = defineProps<{
   git?: WorkspaceGit
+  projectId?: string
   title: string
   subtitle: string
 }>()
@@ -15,9 +19,17 @@ const emit = defineEmits<{ close: [] }>()
 
 const tab = ref<'changes' | 'desktop' | 'terminal' | 'files'>('changes')
 const sub = ref<'diff' | 'review' | 'commits'>('diff')
+const scope = ref<GitDiffScope>('all')
 const maximized = ref(false)
 const menu = ref(false)
 const copied = ref(false)
+const refreshing = ref(false)
+const open = ref<string[]>([])
+const collapsed = reactive<Record<string, boolean>>({})
+const loading = reactive<Record<string, boolean>>({})
+const sawFull = reactive<Record<string, boolean>>({})
+const diffs = reactive<Record<string, GitFileDiff>>({})
+const generation = new Map<string, number>()
 
 const TABS: { key: typeof tab.value; label: string }[] = [
   { key: 'changes', label: '变更' },
@@ -32,18 +44,156 @@ const SUBS: { key: typeof sub.value; label: string }[] = [
   { key: 'commits', label: '提交' },
 ]
 
-const files = computed(() => props.git?.available ? props.git.files || [] : [])
+const SCOPES: { key: GitDiffScope; label: string }[] = [
+  { key: 'all', label: '整体差异' },
+  { key: 'staged', label: '已暂存' },
+  { key: 'unstaged', label: '未暂存' },
+]
+
+const STATUS: Record<string, string> = {
+  untracked: '未跟踪',
+  deleted: '删除',
+  added: '新增',
+  renamed: '重命名',
+  copied: '复制',
+  modified: '修改',
+}
+
+const files = computed(() => (props.git?.available ? props.git.files || [] : []))
+
+function isUntracked(file: GitFileEntry): boolean {
+  return file.untracked === true || file.status === 'untracked'
+}
+
+const tracked = computed(() => files.value.filter((file) => {
+  if (isUntracked(file)) return false
+  if (scope.value === 'staged') return file.staged === true
+  if (scope.value === 'unstaged') return file.unstaged === true
+  return true
+}))
+
+const untrackedFiles = computed(() => (scope.value === 'staged' ? [] : files.value.filter(isUntracked)))
+const groups = computed(() => [
+  { label: '变更文件', files: tracked.value },
+  { label: '未跟踪', files: untrackedFiles.value },
+].filter((group) => group.files.length))
+const shown = computed(() => groups.value.flatMap((group) => group.files))
 
 const emptyText = computed(() => {
   const labels = { desktop: '桌面', terminal: '终端', files: '文件' } as const
   if (tab.value !== 'changes') return `${labels[tab.value]}视图不由本控制台提供`
-  return props.git?.available ? '工作区没有 Git 变更' : '工作区没有可用的 Git 仓库'
+  if (!props.git?.available) return '工作区没有可用的 Git 仓库'
+  if (sub.value !== 'diff') return '工作区没有 Git 变更'
+  if (scope.value === 'staged') return '没有已暂存的变更'
+  if (scope.value === 'unstaged') return '没有未暂存的变更'
+  return '工作区没有 Git 变更'
+})
+
+function diffKey(path: string, full = false): string {
+  return `${scope.value}:${full ? '1' : '0'}:${path}`
+}
+
+function currentDiff(path: string): GitFileDiff | undefined {
+  return diffs[diffKey(path, true)] ?? diffs[diffKey(path, false)]
+}
+
+function isOpen(path: string): boolean {
+  return open.value.includes(path)
+}
+
+function countLabel(file: GitFileEntry): string {
+  if (file.binary) return '二进制'
+  if (file.untracked || file.added == null || file.removed == null) return '暂无行数统计'
+  if (scope.value !== 'all') return ''
+  return `+${file.added} / -${file.removed}`
+}
+
+function lineNo(line: GitDiffLine): string {
+  if (line.kind === 'meta') return ''
+  const value = line.kind === 'delete' ? line.old_no : line.new_no
+  return value == null ? '' : String(value)
+}
+
+function mark(kind: GitDiffLine['kind']): string {
+  if (kind === 'add') return '+'
+  if (kind === 'delete') return '-'
+  return ' '
+}
+
+function hunkId(path: string, index: number): string {
+  return `${scope.value}:${path}:${index}`
+}
+
+async function load(path: string, full: boolean): Promise<void> {
+  const key = diffKey(path, full)
+  const mine = (generation.get(key) ?? 0) + 1
+  generation.set(key, mine)
+  loading[path] = true
+  try {
+    if (!props.projectId) throw new ApiError(422, '无法读取该文件的差异')
+    const result = await api.projectGitDiff(apiConfig(), props.projectId, path, scope.value, full)
+    if (generation.get(key) !== mine) return
+    diffs[key] = result.available ? result : { available: false, error: '无法读取该文件的差异' }
+    if (full) sawFull[`${scope.value}:${path}`] = true
+  } catch (error) {
+    if (generation.get(key) !== mine) return
+    const detail = error instanceof ApiError && typeof error.detail === 'string' ? error.detail : '无法读取该文件的差异'
+    diffs[key] = { available: false, error: detail }
+  } finally {
+    if (generation.get(key) === mine) loading[path] = false
+  }
+}
+
+function toggleFile(path: string): void {
+  if (isOpen(path)) {
+    open.value = open.value.filter((item) => item !== path)
+    return
+  }
+  open.value = [...open.value, path]
+  if (!currentDiff(path)) void load(path, false)
+}
+
+function toggleHunk(path: string, index: number): void {
+  const key = hunkId(path, index)
+  collapsed[key] = !collapsed[key]
+}
+
+async function refreshWorkspace(): Promise<void> {
+  if (!props.projectId || refreshing.value) return
+  refreshing.value = true
+  for (const key of Object.keys(diffs)) delete diffs[key]
+  for (const key of Object.keys(sawFull)) delete sawFull[key]
+  generation.clear()
+  try {
+    await refreshGit(props.projectId)
+  } finally {
+    refreshing.value = false
+  }
+  const alive = new Set(shown.value.map((file) => file.path))
+  open.value = open.value.filter((path) => alive.has(path))
+  for (const path of open.value) void load(path, false)
+}
+
+watch(scope, () => {
+  for (const path of open.value) {
+    if (!currentDiff(path)) void load(path, false)
+  }
+})
+
+watch(() => props.projectId, () => {
+  open.value = []
+  scope.value = 'all'
+  generation.clear()
+  for (const key of Object.keys(diffs)) delete diffs[key]
+  for (const key of Object.keys(collapsed)) delete collapsed[key]
+  for (const key of Object.keys(loading)) delete loading[key]
+  for (const key of Object.keys(sawFull)) delete sawFull[key]
 })
 
 async function copyPaths(): Promise<void> {
-  if (!files.value.length) return
+  if (!shown.value.length) return
   try {
-    await navigator.clipboard.writeText(files.value.map((file) => file.path).join('\n'))
+    await navigator.clipboard.writeText(shown.value.map((file) => file.path).join('\n'))
     copied.value = true
     setTimeout(() => {
       copied.value = false
@@ -80,7 +230,7 @@ async function copyPaths(): Promise<void> {
             <Icon name="dots" :size="14" :stroke-width="2" />
           </button>
           <Popover v-if="menu" align="down" end @close="menu = false">
-            <button class="pop-item" type="button" :disabled="!files.length" @click="copyPaths(); menu = false">
+            <button class="pop-item" type="button" :disabled="!shown.length" @click="copyPaths(); menu = false">
               <Icon name="copy" :size="13" />
               <span class="grow">{{ copied ? '已复制' : '复制变更路径' }}</span>
             </button>
@@ -111,19 +261,102 @@ async function copyPaths(): Promise<void> {
         </button>
       </div>
 
-      <template v-if="tab === 'changes' && sub === 'diff' && files.length">
-        <div class="panel-group">
-          <details v-for="file in files" :key="file.path">
-            <summary class="file-row">
-              <Icon name="file" :size="13" />
-              <span class="file-name" :title="file.path">{{ shortPath(file.path, 60) }}</span>
-              <span class="hint">{{ file.status === 'untracked' ? '未跟踪' : file.status === 'deleted' ? '删除' : file.status === 'added' ? '新增' : '修改' }}</span>
-            </summary><pre class="log-out">{{ file.binary ? '二进制文件' : file.added != null ? `+${file.added} / -${file.removed}` : '暂无行数统计' }}</pre>
-          </details>
+      <template v-if="tab === 'changes' && sub === 'diff' && git?.available">
+        <div class="diff-toolbar">
+          <div class="diff-scopes" role="tablist" aria-label="差异范围">
+            <button
+              v-for="item in SCOPES"
+              :key="item.key"
+              class="tab"
+              :class="{ 'is-active': scope === item.key }"
+              type="button"
+              role="tab"
+              :aria-selected="scope === item.key"
+              @click="scope = item.key"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+          <button class="ico" type="button" title="刷新工作区" :disabled="refreshing" @click="refreshWorkspace">
+            <Icon name="refresh" :size="13" />
+          </button>
         </div>
-        <p class="panel-empty">
-          来自 {{ title }} 工作区的 Git 状态，与 HEAD 比较，包含暂存和未暂存改动。
-        </p>
+
+        <template v-if="shown.length">
+          <div v-for="group in groups" :key="group.label" class="panel-group">
+            <p class="panel-label">{{ group.label }}</p>
+            <article v-for="file in group.files" :key="file.path">
+              <button
+                class="file-row"
+                type="button"
+                :aria-expanded="isOpen(file.path)"
+                :title="file.old_path ? `${file.old_path} → ${file.path}` : file.path"
+                @click="toggleFile(file.path)"
+              >
+                <Icon :name="isOpen(file.path) ? 'chevronDown' : 'chevronRight'" :size="13" />
+                <span class="file-name">{{ shortPath(file.path, 60) }}</span>
+                <span class="hint">{{ STATUS[file.status] || '修改' }}</span>
+                <span class="diff-count">{{ countLabel(file) }}</span>
+              </button>
+              <div v-if="isOpen(file.path)" class="diff-view">
+                <p v-if="loading[file.path] && !currentDiff(file.path)" class="diff-note">正在读取差异…</p>
+                <template v-else-if="currentDiff(file.path)?.available">
+                  <p v-if="currentDiff(file.path)?.binary" class="diff-note">二进制文件，不显示内容</p>
+                  <p v-else-if="currentDiff(file.path)?.symlink" class="diff-note">
+                    符号链接<span v-if="currentDiff(file.path)?.target"> → {{ currentDiff(file.path)?.target }}</span>，不跟随目标内容
+                  </p>
+                  <template v-else>
+                    <p v-if="currentDiff(file.path)?.old_path" class="diff-note">
+                      {{ currentDiff(file.path)?.old_path }} → {{ currentDiff(file.path)?.path }}
+                    </p>
+                    <p v-if="!currentDiff(file.path)?.hunks?.length" class="diff-note">此范围没有文本差异</p>
+                    <section
+                      v-for="(hunk, index) in currentDiff(file.path)?.hunks || []"
+                      :key="`${file.path}:${index}`"
+                      class="hunk"
+                    >
+                      <button
+                        class="hunk-toggle"
+                        type="button"
+                        :aria-expanded="!collapsed[hunkId(file.path, index)]"
+                        @click="toggleHunk(file.path, index)"
+                      >
+                        <span>{{ collapsed[hunkId(file.path, index)] ? '展开' : '折叠' }}</span>
+                        <span class="hunk-header">{{ hunk.header }}</span>
+                      </button>
+                      <div v-show="!collapsed[hunkId(file.path, index)]" class="hunk-lines">
+                        <div
+                          v-for="(line, lineIndex) in hunk.lines"
+                          :key="lineIndex"
+                          class="diff-line"
+                          :class="'is-' + line.kind"
+                        >
+                          <span class="diff-no">{{ lineNo(line) }}</span>
+                          <span class="diff-mark">{{ mark(line.kind) }}</span>
+                          <span class="diff-code">{{ line.text }}</span>
+                        </div>
+                      </div>
+                    </section>
+                    <button
+                      v-if="currentDiff(file.path)?.truncated && !sawFull[`${scope}:${file.path}`]"
+                      class="btn diff-full"
+                      type="button"
+                      @click="load(file.path, true)"
+                    >
+                      查看完整变更
+                    </button>
+                    <p v-else-if="currentDiff(file.path)?.truncated" class="diff-note">差异过长，已截断</p>
+                  </template>
+                </template>
+                <p v-else class="diff-note">{{ currentDiff(file.path)?.error || '无法读取该文件的差异' }}</p>
+              </div>
+            </article>
+          </div>
+          <p class="panel-empty">
+            来自 {{ title }} 工作区。整体差异比较工作区与 {{ git.head ? 'HEAD' : '空树' }}，已暂存比较索引，未暂存比较工作区与索引。未跟踪文件单独列出。
+          </p>
+        </template>
+        <p v-else class="panel-empty">{{ emptyText }}</p>
       </template>
 
       <p v-else class="panel-empty">{{ emptyText }}</p>

@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.server.config import ServerConfig
-from agent.server.gitinfo import workspace_git
+from agent.server.gitinfo import GitRequestError, file_diff, workspace_git
 from agent.server.workspaces import directories
 from agent.server.runtime import RunManager, ServiceError, runner_factory
 from agent.server.store import TERMINAL
@@ -143,6 +143,20 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @api.post("/projects/{project_id}/git/branch")
     def switch_branch(project_id: str, body: BranchSelection, service: RunManager = Depends(manager)):
         return service.switch_branch(project_id, body.branch)
+
+    @api.get("/projects/{project_id}/git/diff")
+    def project_git_diff(
+        project_id: str,
+        path: str = Query(min_length=1, max_length=4096),
+        scope: Literal["all", "staged", "unstaged"] = "all",
+        full: bool = False,
+        service: RunManager = Depends(manager),
+    ):
+        service.require_project(project_id)
+        try:
+            return file_diff(config.projects[project_id], path, scope, full=full)
+        except GitRequestError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
 
     @api.get("/projects/{project_id}/git")
     def project_git(project_id: str, service: RunManager = Depends(manager)):

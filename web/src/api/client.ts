@@ -1,5 +1,5 @@
 import type { Capabilities, PermissionSelection } from './types'
-import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing } from './types'
+import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing, GitFileDiff, GitDiffScope } from './types'
 
 export interface ApiConfig {
   baseUrl: string
@@ -107,6 +107,8 @@ export const api = {
   switchBranch: (config: ApiConfig, projectId: string, branch: string) => request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/branch`, { method: 'POST', body: { branch } }),
   projectGit: (config: ApiConfig, projectId: string) =>
     request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git`),
+  projectGitDiff: (config: ApiConfig, projectId: string, path: string, scope: GitDiffScope, full = false) =>
+    request<GitFileDiff>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/diff?path=${encodeURIComponent(path)}&scope=${scope}&full=${full ? '1' : '0'}`),
   models: (config: ApiConfig, projectId: string) =>
     request<ModelCatalog>(config, `/v1/projects/${encodeURIComponent(projectId)}/models`),
   sessionModel: (config: ApiConfig, sessionId: string) =>

@@ -182,3 +182,18 @@ def test_gateway_model_catalog_and_session_selection_routes():
         assert [request.url.path for request in seen] == ['/v1/projects/app/models', '/v1/sessions/s/model', '/v1/sessions/s/model']
         assert all(request.headers['Authorization'] == 'Bearer ' + TOKEN for request in seen)
         assert b'OrgB/three' in seen[-1].content
+
+
+def test_gateway_forwards_file_diff_and_rejects_unknown_query():
+    seen = []
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={'available': True, 'hunks': []})
+    with TestClient(create_app(GatewayConfig(token=TOKEN), transport=httpx.MockTransport(upstream)), base_url=ORIGIN) as client:
+        response = client.get('/api/agent/projects/app/git/diff', params={'path': 'a b.txt', 'scope': 'staged', 'full': '1'})
+        assert response.status_code == 200
+        assert seen[0].url.path == '/v1/projects/app/git/diff'
+        assert seen[0].url.params['path'] == 'a b.txt'
+        assert seen[0].url.params['scope'] == 'staged'
+        assert seen[0].url.params['full'] == '1'
+        assert client.get('/api/agent/projects/app/git/diff', params={'path': 'a', 'extra': '1'}).status_code == 422
