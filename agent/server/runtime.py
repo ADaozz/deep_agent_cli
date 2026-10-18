@@ -252,6 +252,17 @@ class RunManager:
                         if runner.session_store is not None:
                             runner.session_store.close()
 
+    def validate_file_paths(self, session_id: str, paths: list[str]) -> None:
+        from agent.server.file_references import RULES, is_image_path
+        if not any(is_image_path(path) for path in paths):
+            return
+        with self.lock:
+            session = self.session(session_id)
+            settings = self._model_settings(session["project_id"])
+            selection = self.session_model(session_id)
+            if not settings.get_profile(selection["model_id"]).supports_input("image"):
+                raise ServiceError(422, RULES["image_model_required_message"])
+
     def capabilities(self, project_id: str) -> dict[str, Any]:
         # Use the same backend sources and native loader as CLI /skill.
         from types import SimpleNamespace

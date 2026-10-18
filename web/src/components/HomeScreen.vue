@@ -62,7 +62,7 @@ async function switchBranch(branch: string): Promise<void> {
 async function submit(): Promise<void> {
   const key = draftKey.value
   const snapshot = JSON.stringify(readDraft(key))
-  const ok = await sendFromHome(draftPrompt(readDraft(key)))
+  const ok = await sendFromHome(draftPrompt(readDraft(key), false), readDraft(key).paths.map(item => item.path))
   if (ok) {
     clearSentDraft(key, snapshot)
   }

@@ -1940,4 +1940,5 @@ a {
 
 .composer.is-pill.has-paths { border-radius: var(--radius-card); }
 
-.pop-item[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+
+.file-reference-notice { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 16px; max-width: calc(100vw - 32px); padding: 12px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raised); color: var(--text); box-shadow: 0 4px 20px #0002; }

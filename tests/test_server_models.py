@@ -173,3 +173,51 @@ def test_new_web_session_uses_configured_default_not_first_catalog_entry(model_c
         finally:
             runner.close()
             runner.session_store.close()
+
+
+@pytest.mark.parametrize('path', ['/tmp/a.PNG', './b.JpEg', 'relative/photo.jpg', '/tmp/有 空格.webp', '/tmp/animation.GIF'])
+def test_file_paths_reject_images_for_text_only_models_before_admission(model_config, path):
+    with TestClient(create_app(model_config)) as client:
+        sid = client.post('/v1/sessions', json={'project_id':'app'}, headers=AUTH).json()['id']
+        assert client.post(f'/v1/sessions/{sid}/model', headers=AUTH, json={'model_id':'OrgA/two','reasoning_effort':'default'}).status_code == 200
+        response = client.post(f'/v1/sessions/{sid}/runs', headers=AUTH, json={'text':'read file', 'file_paths':[path]})
+        assert response.status_code == 422
+        assert response.json()['detail'] == '请切换到支持图片理解的模型'
+        assert client.get(f'/v1/sessions/{sid}/runs', headers=AUTH).json()['runs'] == []
+        assert not client.app.state.manager.active
+
+
+@pytest.mark.parametrize('image_supported,path', [(False, '/tmp/普通文件.PDF'), (False, './document.txt'), (True, '/tmp/image.JPEG')])
+def test_file_paths_are_plain_prompt_strings_after_validation(model_config, monkeypatch, image_supported, path):
+    from agent.runner import AgentRunner
+    original = AgentRunner.invoke
+    prompts = []
+    def invoke(self, text, **kwargs):
+        prompts.append(text)
+        return original(self, text, **kwargs)
+    monkeypatch.setattr(AgentRunner, 'invoke', invoke)
+    with TestClient(create_app(model_config)) as client:
+        sid = client.post('/v1/sessions', json={'project_id':'app'}, headers=AUTH).json()['id']
+        if not image_supported:
+            assert client.post(f'/v1/sessions/{sid}/model', headers=AUTH, json={'model_id':'OrgA/two','reasoning_effort':'default'}).status_code == 200
+        response = client.post(f'/v1/sessions/{sid}/runs', headers=AUTH, json={'text':'', 'file_paths':[path]})
+        assert response.status_code == 202, response.text
+        rid = response.json()['id']
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            run = client.get(f'/v1/runs/{rid}', headers=AUTH).json()
+            if run['status'] in {'completed', 'failed'}:
+                break
+            time.sleep(.01)
+        assert run['status'] == 'completed', run
+        assert prompts == [path]
+
+
+@pytest.mark.parametrize('body', [
+    {'text':'x','file_paths':['']}, {'text':'x','file_paths':['  ']},
+    {'text':'x','file_paths':['./bad\nname.png']}, {'resume':True,'file_paths':['./a.png']},
+])
+def test_file_path_body_validation(model_config, body):
+    with TestClient(create_app(model_config)) as client:
+        sid = client.post('/v1/sessions', json={'project_id':'app'}, headers=AUTH).json()['id']
+        assert client.post(f'/v1/sessions/{sid}/runs', headers=AUTH, json=body).status_code == 422

@@ -1,3 +1,4 @@
+import { imageModelRequiredMessage, notifyFileReference } from './fileReferences'
 import { clearDrafts } from './drafts'
 import { readThreadLocation, writeThreadLocation } from './threadLocation'
 import { applyDraftPermission } from './capabilities'
@@ -294,6 +295,10 @@ function explain(
 }
 
 function showError(error: unknown, context: string): void {
+  if (error instanceof ApiError && error.status === 422 && error.detail === imageModelRequiredMessage) {
+    notifyFileReference(imageModelRequiredMessage)
+    return
+  }
   const info = explain(error, context)
   setBanner(info.kind, info.text, info.hint, info.actions)
 }
@@ -398,9 +403,9 @@ export function setDraftProject(projectId: string): void {
  * first run in it. The session is only shown as "active" once the run exists,
  * so a rejected submit keeps the user on the home screen with their text.
  */
-export async function sendFromHome(text: string): Promise<boolean> {
+export async function sendFromHome(text: string, filePaths: string[] = []): Promise<boolean> {
   const value = text.trim()
-  if (!value) return false
+  if (!value && !filePaths.length) return false
   const projectId = app.draftProjectId || app.projects[0]?.id || ''
   if (!projectId) {
     setBanner(
@@ -423,8 +428,8 @@ export async function sendFromHome(text: string): Promise<boolean> {
     selectSession(session.id)
     await applyDraftModel(projectId, session.id)
     await applyDraftPermission(projectId, session.id)
-    const run = await api.createRun(apiConfig(), session.id, { text: value })
-    const runRecord = makeRunRecord(run, value, false)
+    const run = await api.createRun(apiConfig(), session.id, { text: value, ...(filePaths.length ? { file_paths: filePaths } : {}) })
+    const runRecord = makeRunRecord(run, [value, ...filePaths].filter(Boolean).join('\n'), false)
     attachRun(app.records[session.id], runRecord)
     streamRun(runRecord)
     app.view = 'thread'
@@ -546,17 +551,17 @@ async function discoverActiveRuns(): Promise<void> {
 
 // ---------------------------------------------------------------- run actions
 
-export async function submitText(text: string): Promise<boolean> {
+export async function submitText(text: string, filePaths: string[] = []): Promise<boolean> {
   const record = currentRecord.value
   if (!record || models.changing[record.session.id]) return false
   const value = text.trim()
-  if (!value) return false
+  if (!value && !filePaths.length) return false
   if (app.busy.submit) return false
   app.busy.submit = true
   clearBanner()
   try {
-    const run = await api.createRun(apiConfig(), record.session.id, { text: value })
-    const runRecord = makeRunRecord(run, value, false)
+    const run = await api.createRun(apiConfig(), record.session.id, { text: value, ...(filePaths.length ? { file_paths: filePaths } : {}) })
+    const runRecord = makeRunRecord(run, [value, ...filePaths].filter(Boolean).join('\n'), false)
     attachRun(record, runRecord)
     streamRun(runRecord)
     return true

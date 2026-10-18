@@ -1,0 +1,4 @@
+{
+  "image_extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+  "image_model_required_message": "请切换到支持图片理解的模型"
+}

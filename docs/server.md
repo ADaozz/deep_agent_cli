@@ -261,8 +261,9 @@ POST /v1/sessions/{session_id}/runs
 
 | 字段 | 类型与默认值 | 约束 |
 | --- | --- | --- |
-| `text` | string 或 null；默认 null | 提交新输入时必填，长度 1–100000 个字符，不能全部为空白 |
-| `resume` | boolean；默认 false | true 时不能同时提供非 null 的 text；用于恢复 checkpoint 中已有中断 |
+| `text` | string 或 null；默认 null | 无 file_paths 时必填，长度 1–100000；有路径时可为空或省略 |
+| `file_paths` | string[]；默认 [] | 最多 100 个单行路径；后缀与模型能力校验见 Web 扩展接口 |
+| `resume` | boolean；默认 false | true 时不能同时提供非 null 的 text 或非空 file_paths；用于恢复 checkpoint 中已有中断 |
 
 不要传 `model`、`workspace`、`permission`、`attachments` 等额外字段。`{}`、`{"text":" "}`、`{"text":"你好","resume":true}` 返回 `422`。`{"text":null,"resume":true}` 与只传 resume 等效。
 
@@ -868,4 +869,6 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 - `GET /v1/sessions/{session_id}/permission`：返回原生会话保存的 `{ "mode": "ask" | "allow" }`，新会话默认 ask。
 - `POST /v1/sessions/{session_id}/permission`：请求 `{ "mode": "ask" }` 或 `{ "mode": "allow", "confirmation": "ALLOW" }`，通过 Runner 的权限请求/配置应用路径持久化；返回实际生效的 mode。ALLOW 只在 SANDBOXED 可用；缺少精确确认或不可用返回 422，workspace 忙或会话有待处理交互返回 409。接口不会自动批准已经挂起的审批。
 
-浏览器中的草稿与路径块无需新增上传接口。任务仍只提交 `{ "text": "正文\n文件路径\n图片路径" }`；Skill 使用目录返回的原生 instruction 合入文本。
+浏览器中的草稿与路径块无需新增上传接口。任务提交 `{ "text": "正文", "file_paths": ["./文件.txt", "./图片.PNG"] }`；`file_paths` 可省略，最多 100 个非空单行路径，每项最多 4096 字符。仅路径消息可传空 text 或省略 text；resume 不允许同时提供路径。Skill 使用目录返回的原生 instruction 合入 text。
+
+后端按共享后缀规则识别图片，并在任务接纳前检查会话实际模型的 `supports_input("image")`；不支持返回 `422 {"detail":"请切换到支持图片理解的模型"}`，不创建 Run。普通文件路径不受图片能力限制。模型校验与任务接纳处于同一把锁中，避免校验期间模型被切换。通过后将路径逐行拼入文本，最终提示词最多 100000 字符；不下载或读取文件内容。

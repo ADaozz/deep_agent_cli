@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import json
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -29,15 +29,18 @@ class CreateSession(Body):
 
 
 class CreateRun(Body):
-    text: str | None = Field(default=None, min_length=1, max_length=100_000)
+    text: str | None = Field(default=None, max_length=100_000)
     resume: bool = False
+    file_paths: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def check_input(self) -> CreateRun:
-        if self.resume == (self.text is not None):
-            raise ValueError("Provide either nonempty text or resume=true")
-        if self.text is not None and not self.text.strip():
+        if self.resume == (self.text is not None or bool(self.file_paths)):
+            raise ValueError("Provide text or file paths, or resume=true")
+        if self.text is not None and not self.text.strip() and not self.file_paths:
             raise ValueError("text must not be blank")
+        if any(not path.strip() or any(char in path for char in ('\n', '\r', '\x00')) for path in self.file_paths):
+            raise ValueError("File paths must be nonempty single-line strings")
         return self
 
 
@@ -198,7 +201,16 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
 
     @api.post("/sessions/{session_id}/runs", status_code=202)
     def submit(session_id: str, body: CreateRun, service: RunManager = Depends(manager)):
-        return service.submit(session_id, body.text, body.resume)
+        # Keep model validation and run admission atomic against model switches.
+        with service.lock:
+            service.validate_file_paths(session_id, body.file_paths)
+            text = body.text
+            if body.file_paths:
+                parts = [text.strip()] if text and text.strip() else []
+                text = "\n".join([*parts, *(path.strip() for path in body.file_paths)])
+                if len(text) > 100_000:
+                    raise ServiceError(422, "Prompt with file paths exceeds 100000 characters")
+            return service.submit(session_id, text, body.resume)
 
     @api.get("/runs/{run_id}")
     def run(run_id: str, service: RunManager = Depends(manager)):

@@ -36,8 +36,8 @@ export function useDraft(key: Ref<string>) {
 }
 
 /** Paths are plain prompt text; never read or upload file contents. */
-export function draftPrompt(draft: Draft): string {
-  return [draft.text.trim(), ...draft.paths.map(p => p.path), ...(draft.skills || []).map(s => s.instruction)].filter(Boolean).join('\n')
+export function draftPrompt(draft: Draft, includePaths = true): string {
+  return [draft.text.trim(), ...(includePaths ? draft.paths.map(p => p.path) : []), ...(draft.skills || []).map(s => s.instruction)].filter(Boolean).join('\n')
 }
 
 export function clearSentDraft(key: string, snapshot: string): void {

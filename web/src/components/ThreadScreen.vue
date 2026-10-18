@@ -108,7 +108,7 @@ watch(
 async function send(): Promise<void> {
   const key = draftKey.value
   const snapshot = JSON.stringify(readDraft(key))
-  const ok = await submitText(draftPrompt(readDraft(key)))
+  const ok = await submitText(draftPrompt(readDraft(key), false), readDraft(key).paths.map(item => item.path))
   if (ok) {
     clearSentDraft(key, snapshot)
     scrollToBottom()

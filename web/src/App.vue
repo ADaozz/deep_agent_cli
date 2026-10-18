@@ -7,6 +7,7 @@
  */
 import { onMounted, onUnmounted, ref } from 'vue'
 import AgentSidebar from './components/AgentSidebar.vue'
+import FileReferenceNotice from './components/FileReferenceNotice.vue'
 import HomeScreen from './components/HomeScreen.vue'
 import Icon from './components/Icon.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
@@ -37,6 +38,7 @@ function clearLocalData(): void {
 
 <template>
   <div class="app">
+    <FileReferenceNotice />
     <button
       v-if="!sidebarOpen"
       class="sidebar-reveal"

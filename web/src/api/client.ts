@@ -134,7 +134,7 @@ export const api = {
   getRun: (config: ApiConfig, runId: string) =>
     request<Run>(config, `/v1/runs/${encodeURIComponent(runId)}`),
 
-  createRun: (config: ApiConfig, sessionId: string, body: { text: string } | { resume: true }) =>
+  createRun: (config: ApiConfig, sessionId: string, body: { text: string; file_paths?: string[] } | { resume: true }) =>
     request<Run>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/runs`, {
       method: 'POST',
       body,

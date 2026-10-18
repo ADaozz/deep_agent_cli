@@ -168,15 +168,15 @@ test('model picker follows organization → model → effort and persists actual
 })
 
 
-test('plus menu contains files, images and Skills and home Git metadata is hidden for non-repositories', async ({ page }) => {
+test('plus menu contains files and Skills and home Git metadata is hidden for non-repositories', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', {name:'添加上下文',exact:true}).click()
-  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','上传图片','Skills'])
+  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','Skills'])
   await page.keyboard.press('Escape')
   await send(page,'git-card')
   await answer(page,'任务完成：git-card')
   await page.getByRole('button',{name:'添加上下文',exact:true}).click()
-  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','上传图片','Skills'])
+  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','Skills'])
   await page.keyboard.press('Escape')
   await expect(page.locator('.round-code')).toHaveCount(0)
   await page.getByRole('button',{name:'新对话',exact:true}).click()
@@ -258,14 +258,14 @@ test('drafts and path blocks survive reload, stay isolated by thread, and send o
   await answer(page, '任务完成：draft-thread-A')
   const a = new URLSearchParams(new URL(page.url()).hash.slice(1)).get('thread')
   await page.getByLabel('向 Agent 输入指令').fill('unsent A')
-  const addPath = async (kind: string, value: string) => {
+  const addPath = async (value: string) => {
     await page.getByRole('button', {name:'添加上下文',exact:true}).click()
-    await page.getByRole('button', {name:kind === '图片' ? '上传图片' : '上传文件',exact:true}).click()
-    await page.getByLabel(kind + '路径', {exact:true}).fill(value)
+    await page.getByRole('button', {name:'上传文件',exact:true}).click()
+    await page.getByLabel('文件路径', {exact:true}).fill(value)
     await page.getByRole('button', {name:'添加',exact:true}).click()
   }
-  await addPath('文件', '/tmp/文档 with spaces.txt')
-  await addPath('图片', './图片.png')
+  await addPath('/tmp/文档 with spaces.txt')
+  await addPath('./图片.png')
   await page.reload()
   await expect(page.getByLabel('向 Agent 输入指令')).toHaveValue('unsent A')
   await expect(page.getByLabel('附件路径')).toContainText('/tmp/文档 with spaces.txt')
@@ -281,14 +281,14 @@ test('drafts and path blocks survive reload, stay isolated by thread, and send o
   await page.getByRole('button', {name:'发送',exact:true}).click()
   const request = await requestPromise
   expect(request.headers()['content-type']).toBe('application/json')
-  expect(request.postDataJSON()).toEqual({text:'unsent A\n/tmp/文档 with spaces.txt\n./图片.png'})
+  expect(request.postDataJSON()).toEqual({text:'unsent A',file_paths:['/tmp/文档 with spaces.txt','./图片.png']})
   await answer(page, '任务完成：unsent A')
   await expect(page.getByLabel('附件路径')).toHaveCount(0)
   expect(await page.evaluate(id => localStorage.getItem('deepagent.draft.v1:thread:' + id), a)).toBeNull()
   await page.locator('aside .chat-row').filter({hasText:'draft-thread-B'}).click()
   await expect(page.getByLabel('向 Agent 输入指令')).toHaveValue('unsent B')
   await page.getByLabel('向 Agent 输入指令').fill('')
-  await addPath('文件', './path-only.txt')
+  await addPath('./path-only.txt')
   await page.route('**/sessions/*/runs', async route => {
     if (route.request().method() === 'POST') await route.fulfill({status:503,json:{detail:'test send failed'}})
     else await route.continue()
@@ -372,7 +372,7 @@ test('localStorage keeps only unsent composer drafts and removes legacy non-draf
   await expect(page.getByLabel('向 Agent 输入指令')).toHaveValue('')
 })
 
-test('attachment entries follow the configured image capability of the current model', async ({ page }) => {
+test('one file entry checks extensions locally and shares the server rejection notice', async ({ page, request }) => {
   await page.goto('/')
   const picker = page.getByRole('button', {name:'选择模型',exact:true})
   const choose = async (model: string, effort: string) => {
@@ -381,31 +381,39 @@ test('attachment entries follow the configured image capability of the current m
     await page.getByRole('button', {name:model,exact:true}).click()
     await page.getByRole('button', {name:effort,exact:true}).click()
   }
-  const checkBlocked = async () => {
+  const openFile = async () => {
     await page.getByRole('button', {name:'添加上下文',exact:true}).click()
-    for (const name of ['上传文件','上传图片']) {
-      const entry = page.getByRole('button', {name,exact:true})
-      await expect(entry).toHaveAttribute('aria-disabled','true')
-      // aria-disabled keeps pointer events so a user click can explain the restriction.
-      await entry.click({force:true})
-      await expect(page.getByRole('alert')).toHaveText('请切换到支持图片理解的模型')
-      await expect(page.getByRole('dialog')).toHaveCount(0)
-    }
-    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', {name:'上传图片',exact:true})).toHaveCount(0)
+    await page.getByRole('button', {name:'上传文件',exact:true}).click()
   }
   await choose('model-two','默认')
-  await checkBlocked()
-  await send(page,'text-only model task')
-  await answer(page,'任务完成：text-only model task')
-  await checkBlocked()
+  await openFile()
+  await page.getByLabel('文件路径', {exact:true}).fill('/tmp/图片.PNG')
+  await page.getByRole('button', {name:'添加',exact:true}).click()
+  const notice = page.locator('.file-reference-notice')
+  await expect(notice).toContainText('请切换到支持图片理解的模型')
+  await expect(page.getByRole('dialog', {name:'添加文件路径'})).toBeVisible()
+  await page.getByLabel('文件路径', {exact:true}).fill('./普通文件.PDF')
+  await page.getByRole('button', {name:'添加',exact:true}).click()
+  await expect(notice).toHaveCount(0)
+  await page.getByRole('button', {name:'发送',exact:true}).click()
+  await answer(page,'任务完成：./普通文件.PDF')
+  const session = new URLSearchParams(new URL(page.url()).hash.slice(1)).get('thread')!
+  const rejected = await request.post('/api/agent/sessions/' + session + '/runs', {headers:{Origin:'http://127.0.0.1:5173'},data:{text:'direct caller',file_paths:['./bypass.JpEg']}})
+  expect(rejected.status()).toBe(422)
+  expect((await rejected.json()).detail).toBe('请切换到支持图片理解的模型')
+  // A model changed by another client must still be checked by the backend.
   await choose('model-one','low')
-  await page.getByRole('button', {name:'添加上下文',exact:true}).click()
-  const imageEntry = page.getByRole('button', {name:'上传图片',exact:true})
-  await expect(imageEntry).toHaveAttribute('aria-disabled','false')
-  await imageEntry.click()
-  await expect(page.getByRole('dialog', {name:'添加图片路径'})).toBeVisible()
-  await page.getByRole('button', {name:'关闭附件路径',exact:true}).click()
-  await page.reload()
-  await page.getByRole('button', {name:'添加上下文',exact:true}).click()
-  await expect(page.getByRole('button', {name:'上传图片',exact:true})).toHaveAttribute('aria-disabled','false')
+  await openFile()
+  await page.getByLabel('文件路径', {exact:true}).fill('./image.webp')
+  await page.getByRole('button', {name:'添加',exact:true}).click()
+  expect((await request.post('/api/agent/sessions/' + session + '/model', {headers:{Origin:'http://127.0.0.1:5173'},data:{model_id:'OrgA/model-two',reasoning_effort:'default'}})).status()).toBe(200)
+  await page.getByRole('button', {name:'发送',exact:true}).click()
+  await expect(notice).toContainText('请切换到支持图片理解的模型')
+  await expect(page.getByLabel('附件路径')).toContainText('./image.webp')
+  expect((await request.post('/api/agent/sessions/' + session + '/model', {headers:{Origin:'http://127.0.0.1:5173'},data:{model_id:'OrgA/model-one',reasoning_effort:'low'}})).status()).toBe(200)
+  await page.getByRole('button', {name:'关闭文件提示',exact:true}).click()
+  await page.getByRole('button', {name:'发送',exact:true}).click()
+  await answer(page,'任务完成：./image.webp')
+  await expect(page.getByLabel('附件路径')).toHaveCount(0)
 })
