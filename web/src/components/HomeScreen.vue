@@ -10,6 +10,7 @@ import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
 import { app, openSession, sendFromHome, sessionRows, runBannerAction } from '../store/app'
 import { collectChanges, longAge } from '../lib/timeline'
+import { models } from '../store/models'
 import { projectLabel, settings } from '../store/settings'
 
 const text = ref('')
@@ -191,7 +192,7 @@ function metaIcon(tone: string): string {
                 :size="12"
                 :style="row.projectId ? { color: 'var(--purple)' } : undefined"
               />
-              <span>{{ settings.modelLabel }}</span>
+              <span v-if="models.sessions[row.id]">{{ models.sessions[row.id].model }}</span>
               <span>{{ row.projectId ? projectLabel(row.projectId) : '无仓库' }}</span>
               <span>{{ longAge(row.updatedAt) }}</span>
             </span>

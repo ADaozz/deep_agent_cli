@@ -59,6 +59,11 @@ class Continue(Body):
     interrupt_id: str
 
 
+class ModelSelection(Body):
+    model_id: str = Field(min_length=1, max_length=512)
+    reasoning_effort: str = Field(min_length=1, max_length=64)
+
+
 class CodeRestore(Body):
     action: Literal["undo", "redo"]
     revision: str = Field(min_length=1, max_length=128)
@@ -102,6 +107,18 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @api.get("/projects")
     def projects():
         return {"projects": [{"id": project_id} for project_id in config.projects]}
+
+    @api.get("/projects/{project_id}/models")
+    def models(project_id: str, service: RunManager = Depends(manager)):
+        return service.models(project_id)
+
+    @api.get("/sessions/{session_id}/model")
+    def session_model(session_id: str, service: RunManager = Depends(manager)):
+        return service.session_model(session_id)
+
+    @api.post("/sessions/{session_id}/model")
+    def change_model(session_id: str, body: ModelSelection, service: RunManager = Depends(manager)):
+        return service.change_session_model(session_id, body.model_id, body.reasoning_effort)
 
     @api.post("/sessions", status_code=201)
     def create_session(body: CreateSession, service: RunManager = Depends(manager)):

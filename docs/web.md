@@ -60,7 +60,7 @@ python -m agent.web_gateway.main --host 127.0.0.1 --port 8765
 - 取消是 `cancelling` 到终态的协作过程，不撤销文件改动；关闭页面也不取消任务。
 - 每个结束轮次的“本轮代码”支持快照列表、回退和撤销回退；保留对话，遇到后续文件变更则报告冲突。范围和限制见 [轮次代码回退](code-restore.md)。
 - 变更侧栏按成功的文件写入/编辑/删除工具事件展示路径及内容片段，不包含完整 Git Diff 或命令引起的全部改动；命令改动可通过轮次快照检查。
-- 模型、权限、Skills、MCP 和项目工作副本由服务配置；模型显示名只改变本机标签。HTTP 不支持上传、语音、桌面、终端交互、PR 或提交操作，对应入口说明能力边界。
+- 模型下拉读取服务配置的组织、模型与可用思考强度，按该顺序选择；收起只显示模型名称。首页选择在首轮提交前应用，会话内选择立即保存，后续运行及重启恢复使用该设置。运行中或等待交互时不能切换。权限、Skills、MCP 和项目工作副本仍由服务配置。HTTP 不支持上传、语音、桌面、终端交互、PR 或提交操作，对应入口说明能力边界。
 
 ## 本机配置
 
@@ -77,7 +77,7 @@ python -m agent.web_gateway.main --host 127.0.0.1 --port 8765
 ## 自动验证
 
 ```bash
-TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server.py tests/test_web_gateway.py tests/test_code_history.py -q
+TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server_models.py tests/test_server.py tests/test_web_gateway.py tests/test_code_history.py -q
 cd web
 npm ci
 npm run typecheck

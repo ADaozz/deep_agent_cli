@@ -59,7 +59,8 @@ HTTP 服务复用 CLI 的 `AgentRunner`、模型调用、工具、审批、人�
 | 服务重启后恢复中断会话 | 支持 | 在原会话创建 `resume=true` 的新任务 |
 | 会话任务列表、项目活动任务 | 支持 | 只读任务摘要分页和活动任务查询，见 [Web 集成新增的只读查询](#web-集成新增的只读查询) |
 | 会话标题、搜索、删除、消息列表 | 未提供 | 会话接口只有 ID、项目和创建时间；调用方保存展示记录 |
-| 模型/思考强度切换、权限模式切换 | 未提供 | 服务启动时读配置，默认模型固定，权限为 `ask` |
+| 模型/思考强度切换 | 已提供 | 从配置目录选择组织、模型、强度，空闲会话可切换并持久化 |
+| 权限模式切换 | 未提供 | 权限固定为 `ask` |
 | 主动暂停、手动压缩、运行中追加/插入消息 | 未提供 | 不显示相应 HTTP 操作按钮 |
 | 图片/附件上传、文件下载、剪贴板、技能选择器 | 未提供 | 创建任务仅接受文字，不把 CLI 的附件或选择器当作已有 HTTP 接口 |
 
@@ -833,3 +834,13 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 ## 轮次代码回退
 
 新增认证 GET `/v1/runs/{run_id}/code-checkpoint` 和 POST `/v1/runs/{run_id}/code-restore`，用于用户显式回退/撤销代码回退；不是Agent模型工具，也不修改原审批和SSE终态事务。元数据/nonce约束、私有存储、冲突及恢复锁详见 [code-restore.md](code-restore.md)。项目恢复被锁定时active-run附加reason=code_restore_recovery。
+
+## 模型选择（Web 扩展）
+
+- `GET /v1/projects/{project_id}/models` 返回 `{models, current}`。`models` 各项只含 `id`、`model`、`source` 和 `reasoning_efforts`，不返回 API key、base URL 或配置路径。无强度配置时返回 `['default']`。
+- `GET /v1/sessions/{session_id}/model` 返回当前 `{model_id, model, source, reasoning_effort}`；未启动的会话使用项目配置的默认模型。
+- `POST /v1/sessions/{session_id}/model` 接受 `{model_id, reasoning_effort}`，返回实际应用后的同一结构。模型必须是完整配置 ID，强度必须匹配配置或为 `default`。未知值返回 422。
+
+切换复用 CLI `/model` 的 `AgentRunner.request_model_change` 和配置应用路径，使用会话租约并保存到同一会话数据库。空闲时可切换；项目有活动任务或会话有未解决的中断时返回 409。应用失败返回不包含提供方凭据的 503，保留实际模型。后续运行、刷新和服务重启从持久化会话恢复所选模型及强度。
+
+网关对应路由为 `/api/agent/projects/{project_id}/models` 和 `/api/agent/sessions/{session_id}/model`，沿用现有认证、Origin 和 JSON 请求约束。

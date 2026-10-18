@@ -29,6 +29,7 @@ const ICONS: Record<string, string[]> = {
   chevronDown: ['M4.6 6.4 8 9.8l3.4-3.4'],
   chevronUp: ['M4.6 9.6 8 6.2l3.4 3.4'],
   chevronRight: ['M6.2 4.2 10 8l-3.8 3.8'],
+  chevronLeft: ['M9.8 4.2 6 8l3.8 3.8'],
   arrowUpRight: ['M5.4 10.6 10.6 5.4', 'M6.4 5.4h4.2v4.2'],
   arrowUp: ['M8 12.8V3.4', 'M4.1 7.3 8 3.4l3.9 3.9'],
   refresh: ['M13 8a5 5 0 1 1-1.6-3.7', 'M13 2.6V5h-2.4'],

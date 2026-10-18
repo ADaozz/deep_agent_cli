@@ -1,4 +1,4 @@
-import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, CodeCheckpoint } from './types'
+import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, CodeCheckpoint, ModelCatalog, ModelSelection } from './types'
 
 export interface ApiConfig {
   baseUrl: string
@@ -97,6 +97,12 @@ export async function getHealth(baseUrl: string): Promise<boolean> {
 }
 
 export const api = {
+  models: (config: ApiConfig, projectId: string) =>
+    request<ModelCatalog>(config, `/v1/projects/${encodeURIComponent(projectId)}/models`),
+  sessionModel: (config: ApiConfig, sessionId: string) =>
+    request<ModelSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/model`),
+  selectModel: (config: ApiConfig, sessionId: string, modelId: string, effort: string) =>
+    request<ModelSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/model`, { method: 'POST', body: { model_id: modelId, reasoning_effort: effort } }),
   sessionRuns: (config: ApiConfig, sessionId: string, cursor?: string) =>
     request<PaginatedRuns>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/runs?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
   activeRun: (config: ApiConfig, projectId: string) =>

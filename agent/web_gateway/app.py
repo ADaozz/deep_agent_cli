@@ -13,6 +13,9 @@ from agent.web_gateway.config import GatewayConfig
 ROUTES = (
     ("GET", "/health", "/health"),
     ("GET", "/projects", "/v1/projects"),
+    ("GET", "/projects/{project_id}/models", "/v1/projects/{project_id}/models"),
+    ("GET", "/sessions/{session_id}/model", "/v1/sessions/{session_id}/model"),
+    ("POST", "/sessions/{session_id}/model", "/v1/sessions/{session_id}/model"),
     ("GET", "/sessions", "/v1/sessions"),
     ("POST", "/sessions", "/v1/sessions"),
     ("GET", "/sessions/{session_id}", "/v1/sessions/{session_id}"),

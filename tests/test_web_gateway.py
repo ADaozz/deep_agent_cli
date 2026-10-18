@@ -167,3 +167,18 @@ def test_static_directory_is_a_build_and_cannot_read_an_existing_parent_secret(t
     with TestClient(create_app(GatewayConfig(token=TOKEN,dist_dir=dist)),base_url=ORIGIN) as client:
         response=client.get('/%2e%2e/private.txt')
         assert response.status_code==404 and 'test-only-private-file' not in response.text
+
+
+def test_gateway_model_catalog_and_session_selection_routes():
+    seen = []
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={'model': 'model-three'})
+    with TestClient(create_app(GatewayConfig(token=TOKEN), transport=httpx.MockTransport(upstream)), base_url=ORIGIN) as client:
+        assert client.get('/api/agent/projects/app/models').status_code == 200
+        assert client.get('/api/agent/sessions/s/model').status_code == 200
+        response = client.post('/api/agent/sessions/s/model', headers={'Origin': ORIGIN}, json={'model_id': 'OrgB/three', 'reasoning_effort': 'high'})
+        assert response.status_code == 200
+        assert [request.url.path for request in seen] == ['/v1/projects/app/models', '/v1/sessions/s/model', '/v1/sessions/s/model']
+        assert all(request.headers['Authorization'] == 'Bearer ' + TOKEN for request in seen)
+        assert b'OrgB/three' in seen[-1].content

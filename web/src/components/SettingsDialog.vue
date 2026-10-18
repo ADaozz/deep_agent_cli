@@ -6,7 +6,6 @@ import { onBeforeUnmount, reactive, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import { ApiError, NetworkError, api, describeDetail, getHealth } from '../api/client'
 import {
-  DEFAULT_MODEL_LABEL,
   applySettings,
   settings,
 } from '../store/settings'
@@ -16,7 +15,6 @@ const emit = defineEmits<{ close: []; saved: []; 'clear-records': [] }>()
 
 const draft = reactive({
   baseUrl: settings.baseUrl,
-  modelLabel: settings.modelLabel,
   labels: { ...settings.projectLabels },
 })
 const testing = ref(false)
@@ -28,7 +26,6 @@ watch(
   (open) => {
     if (!open) return
     draft.baseUrl = settings.baseUrl
-    draft.modelLabel = settings.modelLabel
     draft.labels = { ...settings.projectLabels }
     testResult.ok = false
     testResult.text = ''
@@ -88,7 +85,6 @@ function save(): void {
   applySettings({
     baseUrl: draft.baseUrl,
     projectLabels: labels,
-    modelLabel: draft.modelLabel.trim() || DEFAULT_MODEL_LABEL,
   })
   emit('saved')
   emit('close')
@@ -116,14 +112,6 @@ function clearRecords(): void {
 
       <div class="dialog-body">
         <p class="help">通过本地网关连接 Deep Agent。可测试连接并调整本机显示偏好。</p>
-
-        <div class="field">
-          <label for="model-label">模型显示名</label>
-          <input id="model-label" v-model="draft.modelLabel" type="text" :placeholder="DEFAULT_MODEL_LABEL" />
-          <p class="help">
-            该名称只用于 composer 上的显示。模型本身由服务配置固定；deep-agent 没有模型选择接口。
-          </p>
-        </div>
 
         <div v-if="projects.length" class="field">
           <span>仓库显示名（仅本地）</span>

@@ -5,13 +5,15 @@
  *   pill (thread) → 44px pill with the textarea inline between + and the buttons
  *
  * Left: circular "+" (Files / Skills / MCP) and the model label. Right: mic and
- * the round black send / stop button. The attachment and model menus are visual
- * only: deep-agent serve accepts text and has no model endpoint.
+ * the round black send / stop button. Model selection uses the service catalog
+ * and session settings; attachments are configured on the service.
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
-import { settings } from '../store/settings'
+import { models } from '../store/models'
+import ModelPicker from './ModelPicker.vue'
+import { app, currentRecord } from '../store/app'
 
 const props = defineProps<{
   modelValue: string
@@ -33,9 +35,10 @@ const emit = defineEmits<{
 
 const area = ref<HTMLTextAreaElement | null>(null)
 const plusOpen = ref(false)
-const modelOpen = ref(false)
+const modelProject = computed(() => app.view === 'thread' ? currentRecord.value?.session.project_id || '' : app.draftProjectId || app.projects[0]?.id || '')
+const modelSession = computed(() => app.view === 'thread' ? app.sessionId : '')
 
-const canSend = computed(() => !props.disabled && !props.running && !props.busy && props.modelValue.trim().length > 0)
+const canSend = computed(() => !props.disabled && !props.running && !props.busy && !models.changing[modelSession.value] && props.modelValue.trim().length > 0)
 const pill = computed(() => props.variant === 'pill')
 
 function resize(): void {
@@ -71,12 +74,6 @@ function onRound(): void {
   emit('submit', props.modelValue)
 }
 
-const MODELS = ['由服务配置决定']
-
-function pickModel(): void {
-  // Cosmetic only: deep-agent serve has no model selection endpoint.
-  modelOpen.value = false
-}
 </script>
 
 <template>
@@ -118,22 +115,7 @@ function pickModel(): void {
           </Popover>
         </span>
 
-        <span class="anchor">
-          <button class="model-pick" type="button" @click="modelOpen = !modelOpen">
-            {{ settings.modelLabel }}
-            <Icon name="chevronDown" :size="11" />
-          </button>
-          <Popover v-if="modelOpen" align="up" @close="modelOpen = false">
-            <div class="pop-head">模型</div>
-            <button v-for="model in MODELS" :key="model" class="pop-item" type="button" @click="pickModel">
-              <span class="grow">{{ model }}</span>
-              <Icon v-if="model === settings.modelLabel" name="check" :size="13" />
-              <span v-else-if="model === MODELS[2]" class="hint">新</span>
-            </button>
-            <div class="pop-sep" />
-            <p class="pop-note">模型由服务配置固定；此菜单仅作展示。</p>
-          </Popover>
-        </span>
+        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
 
         <span class="spacer" />
 
@@ -190,21 +172,7 @@ function pickModel(): void {
       />
 
       <div class="right">
-        <span class="anchor">
-          <button class="model-pick" type="button" @click="modelOpen = !modelOpen">
-            {{ settings.modelLabel }}
-            <Icon name="chevronDown" :size="11" />
-          </button>
-          <Popover v-if="modelOpen" align="up" end @close="modelOpen = false">
-            <div class="pop-head">模型</div>
-            <button v-for="model in MODELS" :key="model" class="pop-item" type="button" @click="pickModel">
-              <span class="grow">{{ model }}</span>
-              <Icon v-if="model === settings.modelLabel" name="check" :size="13" />
-            </button>
-            <div class="pop-sep" />
-            <p class="pop-note">模型由服务配置固定；此菜单仅作展示。</p>
-          </Popover>
-        </span>
+        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
         <button class="round" type="button" title="本控制台不支持语音输入">
           <Icon name="mic" :size="15" />
         </button>

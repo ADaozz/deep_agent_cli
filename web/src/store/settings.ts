@@ -3,19 +3,17 @@ import { reactive } from 'vue'
 const STORAGE_KEY = 'deepagent.settings.v1'
 export const DEFAULT_BASE_URL = '/api/agent'
 export const PROXY_BASE_URL = DEFAULT_BASE_URL
-export const DEFAULT_MODEL_LABEL = 'Deep Agent'
 
 export interface Settings {
   baseUrl: string
   projectLabels: Record<string, string>
-  modelLabel: string
 }
 
 function read(): Settings {
-  const fallback = { baseUrl: DEFAULT_BASE_URL, projectLabels: {}, modelLabel: DEFAULT_MODEL_LABEL }
+  const fallback = { baseUrl: DEFAULT_BASE_URL, projectLabels: {} }
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    return { ...fallback, projectLabels: parsed.projectLabels || {}, modelLabel: parsed.modelLabel || DEFAULT_MODEL_LABEL }
+    return { ...fallback, projectLabels: parsed.projectLabels || {} }
   } catch { return fallback }
 }
 

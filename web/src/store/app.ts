@@ -1,4 +1,5 @@
 import { computed, reactive } from 'vue'
+import { applyDraftModel, models } from './models'
 import {
   ApiError,
   NetworkError,
@@ -424,6 +425,7 @@ export async function sendFromHome(text: string): Promise<boolean> {
     }
     saveRecords(app.records, true)
     selectSession(session.id)
+    await applyDraftModel(projectId, session.id)
     const run = await api.createRun(apiConfig(), session.id, { text: value })
     const runRecord = makeRunRecord(run, value, false)
     attachRun(app.records[session.id], runRecord)
@@ -559,7 +561,7 @@ export function projectIsBusy(projectId: string): boolean {
 
 export async function submitText(text: string): Promise<boolean> {
   const record = currentRecord.value
-  if (!record) return false
+  if (!record || models.changing[record.session.id]) return false
   const value = text.trim()
   if (!value) return false
   if (app.busy.submit || app.busy.restore) return false

@@ -18,6 +18,7 @@ from agent.runner import AgentRunner, RunResult
 from agent.tools.human_interaction import validate_human_input_values
 from agent.sandbox import select_backend
 from agent.session import SessionStore
+from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
 from agent.server.store import ServiceStore, TERMINAL
 from agent.server.code_history import CodeHistory, CodeHistoryError
@@ -126,6 +127,95 @@ class RunManager:
             raise ServiceError(404, "Unknown run")
         self.require_project(run["project_id"])
         return run
+
+    def _model_settings(self, project_id: str) -> Settings:
+        self.require_project(project_id)
+        if project_id not in self.settings_by_project:
+            try:
+                self.settings_by_project[project_id] = self.config.settings_for(project_id)
+            except Exception:
+                raise ServiceError(503, "Model configuration is unavailable") from None
+        return self.settings_by_project[project_id]
+
+    @staticmethod
+    def _model_selection(settings: Settings, model_id: str, effort: str) -> dict[str, Any]:
+        try:
+            profile = settings.get_profile(model_id)
+        except KeyError:
+            profile = settings.active_profile
+            effort = "default"
+        if effort != "default" and effort not in profile.reasoning_efforts:
+            effort = "default"
+        return {"model_id": profile.id, "model": profile.model,
+                "source": profile.source or profile.id.split("/", 1)[0], "reasoning_effort": effort}
+
+    def models(self, project_id: str) -> dict[str, Any]:
+        with self.lock:
+            settings = self._model_settings(project_id)
+            return {"models": [{"id": profile.id, "model": profile.model,
+                                "source": profile.source or profile.id.split("/", 1)[0],
+                                "reasoning_efforts": list(profile.reasoning_efforts) or ["default"]}
+                               for profile in settings.list_profiles()],
+                    "current": self._model_selection(settings, settings.llm_default, "default")}
+
+    def session_model(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            session = self.session(session_id)
+            settings = self._model_settings(session["project_id"])
+            model_id, effort = settings.llm_default, "default"
+            if settings.state_path is not None and settings.state_path.exists():
+                store = SessionStore(settings.state_path)
+                try:
+                    saved = store.get(session_id)
+                    if saved is not None:
+                        model_id, effort = saved.model_id or model_id, saved.reasoning_effort
+                finally:
+                    store.close()
+            return self._model_selection(settings, model_id, effort)
+
+    def change_session_model(self, session_id: str, model_id: str, effort: str) -> dict[str, Any]:
+        # No active Runner is touched from a request thread. Reserve the project
+        # under the admission lock while a short-lived idle Runner owns its lease.
+        # Selection and persistence use the same path as CLI /model.
+        with self.lock:
+            session = self.session(session_id)
+            if self.closing:
+                raise ServiceError(503, "Service is shutting down")
+            if any(active.project_id == session["project_id"] for active in self.active.values()):
+                raise ServiceError(409, "Finish the current run or interaction before switching models")
+            settings = self._model_settings(session["project_id"])
+            try:
+                profile = settings.get_profile(model_id)
+                if profile.id != model_id or (effort != "default" and effort not in profile.reasoning_efforts):
+                    raise ValueError
+            except (KeyError, ValueError):
+                raise ServiceError(422, "Unknown model or unsupported reasoning effort") from None
+            runner = None
+            try:
+                runner = (_runner_from_settings(settings, session_id) if self.factory is runner_factory
+                          else self.factory(self.config, session["project_id"], session_id))
+                if runner.current_interrupt() is not None:
+                    raise ServiceError(409, "Resolve the session interruption before switching models")
+                events = []
+                runner.request_model_change(profile.id, reasoning_effort=effort)
+                runner._apply_pending_runtime_config(events.append)
+                if any(event.type == "runtime_config_failed" for event in events):
+                    raise ServiceError(503, "Unable to apply model configuration")
+                current = runner.current_model()
+                return self._model_selection(settings, current.id, runner.reasoning_effort())
+            except ServiceError:
+                raise
+            except SessionLockBusyError:
+                raise ServiceError(409, "Session is already open in another process") from None
+            except Exception:
+                raise ServiceError(503, "Unable to apply model configuration") from None
+            finally:
+                if runner is not None:
+                    try:
+                        runner.close()
+                    finally:
+                        if runner.session_store is not None:
+                            runner.session_store.close()
 
     def session_runs(self, session_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
         self.session(session_id)

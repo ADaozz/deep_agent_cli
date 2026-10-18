@@ -158,3 +158,20 @@ export interface CodeCheckpoint {
     can_undo?: boolean;
     can_redo?: boolean;
 }
+
+export interface ModelSelection {
+  model_id: string
+  model: string
+  source: string
+  reasoning_effort: string
+}
+export interface ModelProfile {
+  id: string
+  model: string
+  source: string
+  reasoning_efforts: string[]
+}
+export interface ModelCatalog {
+  models: ModelProfile[]
+  current: ModelSelection
+}

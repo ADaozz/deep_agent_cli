@@ -1896,3 +1896,8 @@ a {
 @media (max-width: 860px) {
   .side-backdrop { left: 248px; }
 }
+
+.model-selector .popover { max-height: min(380px, 65vh); overflow-y: auto; }
+.model-step { display: flex; gap: 6px; align-items: center; }
+.model-error { color: var(--danger); }
+.model-pick:disabled { opacity: .6; cursor: default; }

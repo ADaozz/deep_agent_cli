@@ -25,6 +25,8 @@ def program(text):
             'undo-read': "cat /workspace/undo.txt; printf '\\n'; if test -f /workspace/undo-delete.txt; then cat /workspace/undo-delete.txt; else printf missing; fi; printf '\\n'; if test -f /workspace/undo-created/binary; then od -An -tu1 /workspace/undo-created/binary; else printf absent; fi",
         }
         return [AIMessage(content='',tool_calls=[{'id':text,'name':'execute','args':{'command':commands[text],'network':False}}]),AIMessage(content=text+' done')]
+    if text=='model-evidence':
+        return [AIMessage(content='model-evidence')]
     if text=='file-changes':
         operations=[
             ('change-create','write_file',{'file_path':'/workspace/changed.ts','content':'const label = "before";\n'}),
@@ -81,6 +83,8 @@ def service(base):
 
         def invoke(self,text,**callbacks):
             self._chat_model.messages=iter(program(text))
+            if text == 'model-evidence':
+                self._chat_model.messages=iter([AIMessage(content=f'model={self.current_model().id}; effort={self.reasoning_effort()}')])
             if text=='pause':
                 original=callbacks['on_event']
                 def event(item):
@@ -91,9 +95,20 @@ def service(base):
 
     def factory(config,project_id,session_id):
         return Runner(model=scripted_model([AIMessage(content='恢复完成')]),
-                      session_store=SessionStore(base/f'{project_id}-checkpoint.sqlite3'),
+                      settings=config.settings_for(project_id),
+                      session_store=SessionStore(config.settings_for(project_id).state_path),
                       sandbox_config=SandboxConfig(workspace=config.projects[project_id]),thread_id=session_id)
 
+    import yaml
+    (base/'model.yaml').write_text(yaml.safe_dump({
+        'llm': {'default': 'OrgA/model-one', 'models': {
+            'OrgA': {'api_key': 'model-test-secret', 'models': {'model-one': {'reasoning_efforts': ['low', 'high']}, 'model-two': {}}},
+            'OrgB': {'api_key': 'model-test-secret-b', 'models': {'model-three': {'reasoning_efforts': ['medium', 'high']}}},
+        }},
+        'paths': {'config_dir': str(base/'agent-config')},
+    }))
+    import agent.runner as runner_module
+    runner_module.build_chat_model = lambda *args, **kwargs: scripted_model([AIMessage(content='恢复完成')])
     config=ServerConfig({p:base/p for p in ('app','worker','third')},base/'model.yaml',base/'state',os.environ['DEEP_AGENT_SERVICE_TOKEN'])
     uvicorn.run(create_app(config,factory=factory),host='127.0.0.1',port=8080,log_level='error',access_log=False)
 
