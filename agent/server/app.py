@@ -14,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.server.config import ServerConfig
+from agent.server.gitinfo import workspace_git
 from agent.server.runtime import RunManager, ServiceError, runner_factory
 from agent.server.store import TERMINAL
 
@@ -64,11 +65,6 @@ class ModelSelection(Body):
     reasoning_effort: str = Field(min_length=1, max_length=64)
 
 
-class CodeRestore(Body):
-    action: Literal["undo", "redo"]
-    revision: str = Field(min_length=1, max_length=128)
-
-
 def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -107,6 +103,11 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @api.get("/projects")
     def projects():
         return {"projects": [{"id": project_id} for project_id in config.projects]}
+
+    @api.get("/projects/{project_id}/git")
+    def project_git(project_id: str, service: RunManager = Depends(manager)):
+        service.require_project(project_id)
+        return workspace_git(config.projects[project_id])
 
     @api.get("/projects/{project_id}/models")
     def models(project_id: str, service: RunManager = Depends(manager)):
@@ -153,14 +154,6 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     @api.get("/runs/{run_id}")
     def run(run_id: str, service: RunManager = Depends(manager)):
         return service.run(run_id)
-
-    @api.get("/runs/{run_id}/code-checkpoint")
-    def code_checkpoint(run_id: str, service: RunManager = Depends(manager)):
-        return service.code_checkpoint(run_id)
-
-    @api.post("/runs/{run_id}/code-restore")
-    def code_restore(run_id: str, body: CodeRestore, service: RunManager = Depends(manager)):
-        return service.restore_code(run_id, body.action, body.revision)
 
     @api.post("/runs/{run_id}/approvals", status_code=202)
     def approvals(run_id: str, body: Approval, service: RunManager = Depends(manager)):

@@ -13,6 +13,7 @@ from agent.web_gateway.config import GatewayConfig
 ROUTES = (
     ("GET", "/health", "/health"),
     ("GET", "/projects", "/v1/projects"),
+    ("GET", "/projects/{project_id}/git", "/v1/projects/{project_id}/git"),
     ("GET", "/projects/{project_id}/models", "/v1/projects/{project_id}/models"),
     ("GET", "/sessions/{session_id}/model", "/v1/sessions/{session_id}/model"),
     ("POST", "/sessions/{session_id}/model", "/v1/sessions/{session_id}/model"),
@@ -23,8 +24,6 @@ ROUTES = (
     ("POST", "/sessions/{session_id}/runs", "/v1/sessions/{session_id}/runs"),
     ("GET", "/projects/{project_id}/active-run", "/v1/projects/{project_id}/active-run"),
     ("GET", "/runs/{run_id}", "/v1/runs/{run_id}"),
-    ("GET", "/runs/{run_id}/code-checkpoint", "/v1/runs/{run_id}/code-checkpoint"),
-    ("POST", "/runs/{run_id}/code-restore", "/v1/runs/{run_id}/code-restore"),
     ("GET", "/runs/{run_id}/events", "/v1/runs/{run_id}/events"),
     *( ("POST", f"/runs/{{run_id}}/{action}", f"/v1/runs/{{run_id}}/{action}")
        for action in ("approvals", "human-input", "continue", "cancel") ),

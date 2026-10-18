@@ -4,7 +4,7 @@
  *   card (home)  → rounded 12 card, 640×120, textarea above the control bar
  *   pill (thread) → 44px pill with the textarea inline between + and the buttons
  *
- * Left: circular "+" (Files / Skills / MCP) and the model label. Right: mic and
+ * Left: circular "+" (upload file / upload image) and the model label. Right: mic and
  * the round black send / stop button. Model selection uses the service catalog
  * and session settings; attachments are configured on the service.
  */
@@ -98,20 +98,12 @@ function onRound(): void {
           <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
             <button class="pop-item" type="button" @click="plusOpen = false">
               <Icon name="file" :size="13" />
-              <span class="grow">文件</span>
+              <span class="grow">上传文件</span>
             </button>
             <button class="pop-item" type="button" @click="plusOpen = false">
-              <Icon name="skill" :size="13" />
-              <span class="grow">技能</span>
+              <Icon name="image" :size="13" />
+              <span class="grow">上传图片</span>
             </button>
-            <button class="pop-item" type="button" @click="plusOpen = false">
-              <Icon name="mcp" :size="13" />
-              <span class="grow">MCP 服务器</span>
-            </button>
-            <div class="pop-sep" />
-            <p class="pop-note">
-              附件、技能与 MCP 服务器在服务端配置；HTTP API 只接受文本。
-            </p>
           </Popover>
         </span>
 
@@ -143,20 +135,12 @@ function onRound(): void {
         <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
           <button class="pop-item" type="button" @click="plusOpen = false">
             <Icon name="file" :size="13" />
-            <span class="grow">文件</span>
+            <span class="grow">上传文件</span>
           </button>
           <button class="pop-item" type="button" @click="plusOpen = false">
-            <Icon name="skill" :size="13" />
-            <span class="grow">技能</span>
+            <Icon name="image" :size="13" />
+            <span class="grow">上传图片</span>
           </button>
-          <button class="pop-item" type="button" @click="plusOpen = false">
-            <Icon name="mcp" :size="13" />
-            <span class="grow">MCP 服务器</span>
-          </button>
-          <div class="pop-sep" />
-          <p class="pop-note">
-            附件、技能与 MCP 服务器在服务端配置；HTTP API 只接受文本。
-          </p>
         </Popover>
       </span>
 

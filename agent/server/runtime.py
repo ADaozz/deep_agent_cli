@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import fcntl
 import logging
-import json
 import os
 from queue import Queue
 from threading import Event, RLock, Thread
@@ -21,7 +20,6 @@ from agent.session import SessionStore
 from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
 from agent.server.store import ServiceStore, TERMINAL
-from agent.server.code_history import CodeHistory, CodeHistoryError
 
 LOG = logging.getLogger(__name__)
 WAITING = frozenset({"waiting_confirmation", "waiting_human", "paused", "runtime_config_boundary"})
@@ -103,10 +101,7 @@ class RunManager:
                     secrets.extend(profile.api_key for profile in settings.llm_profiles)
                     secrets.append(settings.tavily_api_key or "")
             self.store = ServiceStore(config.state_dir / "service.sqlite3", tuple(secrets))
-            self.code_history = CodeHistory(config.state_dir, config.projects)
         except BaseException:
-            if getattr(self, "store", None) is not None:
-                self.store.close()
             self.lease.close()
             raise
 
@@ -227,8 +222,6 @@ class RunManager:
     def active_run(self, project_id: str) -> dict[str, Any]:
         with self.lock:
             self.require_project(project_id)
-            if self.code_history.blocked(project_id):
-                return {"run": None, "blocked": True, "reason": "code_restore_recovery"}
             for run_id, active in self.active.items():
                 if active.project_id == project_id:
                     run = self.run(run_id)
@@ -238,40 +231,11 @@ class RunManager:
                     return {"run": {key: run[key] for key in keys}}
             return {"run": None}
 
-    def code_checkpoint(self, run_id: str) -> dict[str, Any]:
-        with self.lock:
-            run = self.run(run_id)
-            result = self.code_history.describe(run_id)
-            if run["status"] not in TERMINAL and "revision" not in result:
-                result.update(status="recording", reason="本轮代码快照仍在记录")
-            elif run["status"] in TERMINAL and result["status"] == "recording":
-                result.update(status="unavailable", available=False, reason="轮次已结束，但完整代码快照未保存，不能回退")
-            if run["status"] not in TERMINAL or any(a.project_id == run["project_id"] for a in self.active.values()):
-                result.update(can_undo=False, can_redo=False)
-            return json.loads(self.store._json(result))
-
-    def restore_code(self, run_id: str, action: str, revision: str) -> dict[str, Any]:
-        with self.lock:
-            run = self.run(run_id)
-            if self.closing:
-                raise ServiceError(503, "Service is shutting down")
-            if run["status"] not in TERMINAL or any(a.project_id == run["project_id"] for a in self.active.values()):
-                raise ServiceError(409, "项目仍有任务或待审批交互，请先完成或取消任务")
-            try:
-                result = self.code_history.restore(run_id, action, revision)
-            except (CodeHistoryError, OSError) as exc:
-                message = str(exc) if isinstance(exc, CodeHistoryError) else "无法安全访问文件，代码未回退"
-                raise ServiceError(exc.status if isinstance(exc, CodeHistoryError) else 503,
-                                   json.loads(self.store._json(message))) from None
-            return json.loads(self.store._json(result))
-
     def submit(self, session_id: str, text: str | None, resume: bool) -> dict[str, Any]:
         with self.lock:
             session = self.session(session_id)
             if self.closing:
                 raise ServiceError(503, "Service is shutting down")
-            if self.code_history.blocked(session["project_id"]):
-                raise ServiceError(409, "代码恢复未完成，项目已锁定，请人工排查")
             if any(active.project_id == session["project_id"] for active in self.active.values()):
                 raise ServiceError(409, "Project already has an unfinished run")
             if len(self.active) >= self.config.max_runs:
@@ -360,10 +324,6 @@ class RunManager:
             "on_event": on_event,
         }
         try:
-            try:
-                self.code_history.begin(run_id, session["project_id"])
-            except Exception:
-                LOG.error("Code snapshot initialization failed (%s)", run_id)
             if self.factory is runner_factory:
                 runner = _runner_from_settings(self.settings_by_project[session["project_id"]], session["id"])
             else:
@@ -418,10 +378,6 @@ class RunManager:
                     with self.lock:
                         self.store.finish(run_id, "failed", {"status": "failed", "error": "Runner cleanup failed; restart service"})
                     return
-            try:
-                self.code_history.end(run_id)
-            except Exception:
-                LOG.error("Code snapshot finalization failed (%s)", run_id)
             with self.lock:
                 self.store.finish(run_id, final.status, final)
                 self.active.pop(run_id, None)
@@ -445,6 +401,5 @@ class RunManager:
             raise RuntimeError("Agent workers did not drain; service lease retained until process exit")
         if self.active:
             raise RuntimeError("Runner cleanup failed; service lease retained until process exit")
-        self.code_history.close()
         self.store.close()
         self.lease.close()

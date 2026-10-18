@@ -831,10 +831,6 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 `GET /v1/projects/{project_id}/active-run` 返回 `{run:RunSummary|null}`。等待审批/提问、暂停、取消中仍为活跃；终态不作为活跃返回。清理失败时，保留项目占用但不误报终态为活跃，额外返回 `blocked:true`，需要重启服务。SQLite仅增量添加分页索引，原 finish 原子性与提交事件顺序不变。详见 [Web 接口补充](frontend-http-api.md) 和 [启动说明](web.md)。
 
-## 轮次代码回退
-
-新增认证 GET `/v1/runs/{run_id}/code-checkpoint` 和 POST `/v1/runs/{run_id}/code-restore`，用于用户显式回退/撤销代码回退；不是Agent模型工具，也不修改原审批和SSE终态事务。元数据/nonce约束、私有存储、冲突及恢复锁详见 [code-restore.md](code-restore.md)。项目恢复被锁定时active-run附加reason=code_restore_recovery。
-
 ## 模型选择（Web 扩展）
 
 - `GET /v1/projects/{project_id}/models` 返回 `{models, current}`。`models` 各项只含 `id`、`model`、`source` 和 `reasoning_efforts`，不返回 API key、base URL 或配置路径。无强度配置时返回 `['default']`。
@@ -844,3 +840,11 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 切换复用 CLI `/model` 的 `AgentRunner.request_model_change` 和配置应用路径，使用会话租约并保存到同一会话数据库。空闲时可切换；项目有活动任务或会话有未解决的中断时返回 409。应用失败返回不包含提供方凭据的 503，保留实际模型。后续运行、刷新和服务重启从持久化会话恢复所选模型及强度。
 
 网关对应路由为 `/api/agent/projects/{project_id}/models` 和 `/api/agent/sessions/{session_id}/model`，沿用现有认证、Origin 和 JSON 请求约束。
+
+## Workspace Git 信息（只读呈现）
+
+`GET /v1/projects/{project_id}/git`（网关 `/api/agent/projects/{project_id}/git`）读取对应工作区的 Git 元数据，复用 main CLI 的分支/变更数量解析。没有仓库或 Git 不可用时返回 `{available:false}`，前端隐藏 diff、分支与合并信息。
+
+可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的实际 `git diff --numstat`，包括暂存与未暂存修改；未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
+
+查询不 fetch、不 checkout、不提交，也不创建或恢复文件快照。旧的轮次代码快照/回退接口已删除，返回 404。任务执行、审批、取消与清理沿用 main，前端不维护另一套修改/回退机制。

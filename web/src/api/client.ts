@@ -1,4 +1,4 @@
-import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, CodeCheckpoint, ModelCatalog, ModelSelection } from './types'
+import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit } from './types'
 
 export interface ApiConfig {
   baseUrl: string
@@ -97,6 +97,8 @@ export async function getHealth(baseUrl: string): Promise<boolean> {
 }
 
 export const api = {
+  projectGit: (config: ApiConfig, projectId: string) =>
+    request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git`),
   models: (config: ApiConfig, projectId: string) =>
     request<ModelCatalog>(config, `/v1/projects/${encodeURIComponent(projectId)}/models`),
   sessionModel: (config: ApiConfig, sessionId: string) =>
@@ -107,10 +109,6 @@ export const api = {
     request<PaginatedRuns>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/runs?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
   activeRun: (config: ApiConfig, projectId: string) =>
     request<ActiveRunResponse>(config, `/v1/projects/${encodeURIComponent(projectId)}/active-run`),
-  codeCheckpoint: (config: ApiConfig, runId: string) =>
-    request<CodeCheckpoint>(config, `/v1/runs/${encodeURIComponent(runId)}/code-checkpoint`),
-  restoreCode: (config: ApiConfig, runId: string, action: 'undo' | 'redo', revision: string) =>
-    request<CodeCheckpoint>(config, `/v1/runs/${encodeURIComponent(runId)}/code-restore`, { method: 'POST', body: { action, revision } }),
   projects: (config: ApiConfig) => request<{ projects: Project[] }>(config, '/v1/projects'),
 
   createSession: (config: ApiConfig, projectId: string) =>

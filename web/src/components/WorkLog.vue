@@ -6,13 +6,12 @@
  */
 import { computed, ref, watch } from 'vue'
 import Icon from './Icon.vue'
-import CodeRestoreControls from './CodeRestoreControls.vue'
 import InlineInteraction from './InlineInteraction.vue'
 import MarkdownView from './MarkdownView.vue'
 import type { ApprovalDecision } from '../api/types'
 import type { InteractionModel, RunRecord } from '../lib/runView'
 import { buildTimeline, longAge } from '../lib/timeline'
-import { app, projectIsBusy, continueRun, submitApprovals, submitHumanInput } from '../store/app'
+import { continueRun, submitApprovals, submitHumanInput } from '../store/app'
 
 const props = defineProps<{
   record: RunRecord
@@ -157,19 +156,11 @@ async function onContinue(): Promise<void> {
       {{ record.run.result.error }}
     </p>
 
-    <details v-if="terminal" class="round-code">
-      <summary>本轮代码</summary>
-      <CodeRestoreControls :run="record.run" :busy="app.busy.restore" :project-busy="projectIsBusy(record.run.project_id)" @busy="app.busy.restore = $event" />
-    </details>
-
     <div v-if="view.answer" class="answer">
       <MarkdownView :text="view.answer" />
       <div class="msg-foot">
         <button class="ico" type="button" :title="copied ? '已复制' : '复制回答'" @click="copyAnswer">
           <Icon :name="copied ? 'check' : 'copy'" :size="13" />
-        </button>
-        <button class="ico" type="button" title="deep-agent API 不提供分支功能">
-          <Icon name="branch" :size="13" />
         </button>
         <span class="ago">{{ longAge(record.run.created_at) }}</span>
       </div>

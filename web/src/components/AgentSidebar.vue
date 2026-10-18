@@ -138,7 +138,7 @@ function clearLocal(): void {
             @click="openSession(row.id)"
           >
             <span class="chat-lead" :class="{ 'is-repo': !!row.projectId }">
-              <Icon :name="row.projectId ? 'branch' : 'cloud'" :size="13" />
+              <Icon :name="'file'" :size="13" />
             </span>
             <span class="chat-title">{{ row.title }}</span>
             <span class="chat-age">{{ shortAge(row.updatedAt) }}</span>

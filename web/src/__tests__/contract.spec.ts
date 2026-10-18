@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, endpoint, streamEvents } from '../api/client'
 import { applySseMessage, emptyView, type RunRecord } from '../lib/runView'
-import { collectChanges } from '../lib/timeline'
 import { renderMarkdown } from '../lib/markdown'
 import type { Run } from '../api/types'
 
@@ -40,16 +39,6 @@ describe('current gateway contract', () => {
     applySseMessage(r, { id: '5', event: 'run_finished', data: run })
     expect(r.replayComplete).toBe(true)
     expect(r.view.blocks[0].final).toBe('done')
-  })
-  it('lists only successful file changes, including delete, preserving classification and content', () => {
-    const r = record()
-    for (const [id, name, error] of [['a', 'write_file', false], ['b', 'edit_file', true], ['c', 'delete', false], ['d', 'write_file', null]] as const) {
-      applySseMessage(r, { id, event: 'agent_event', data: { type: 'tool_started', tool_call_id: id, name, arguments: { file_path: `/${id}`, content: 'real code' } } })
-      if (error !== null) applySseMessage(r, { id, event: 'agent_event', data: { type: 'tool_completed', tool_call_id: id, name, is_error: error, artifact: { operation: 'create' } } })
-    }
-    const changes = collectChanges([r])
-    expect(changes.map(c => c.path)).toEqual(['/a', '/c'])
-    expect(changes[0]).toMatchObject({ action: '新建', detail: 'real code' })
   })
   it('escapes model HTML and rejects executable markdown URLs', () => {
     const html = renderMarkdown('<img src=x onerror=alert(1)>\n\n[bad](javascript:alert) [ok](https://example.com)\n\n```html\n<script>alert(1)</script>\n```')

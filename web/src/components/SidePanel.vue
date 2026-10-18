@@ -1,17 +1,12 @@
 <script setup lang="ts">
-/**
- * Right panel (toggled from the thread header): Changes / Desktop / Terminal /
- * Files tabs with a Diff / Review / Commits sub-row. Only the changed-file list
- * can be derived from the run events, so no diff is fabricated: the Diff tab
- * lists the paths that a write/edit tool call declared and nothing else.
- */
 import { computed, ref } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
-import { shortPath, type ChangeEntry } from '../lib/timeline'
+import type { WorkspaceGit } from '../api/types'
+import { shortPath } from '../lib/timeline'
 
 const props = defineProps<{
-  changes: ChangeEntry[]
+  git?: WorkspaceGit
   title: string
   subtitle: string
 }>()
@@ -37,12 +32,12 @@ const SUBS: { key: typeof sub.value; label: string }[] = [
   { key: 'commits', label: '提交' },
 ]
 
-const files = computed(() => props.changes)
+const files = computed(() => props.git?.available ? props.git.files || [] : [])
 
 const emptyText = computed(() => {
   const labels = { desktop: '桌面', terminal: '终端', files: '文件' } as const
   if (tab.value !== 'changes') return `${labels[tab.value]}视图不由本控制台提供`
-  return '没有推送的变更'
+  return props.git?.available ? '工作区没有 Git 变更' : '工作区没有可用的 Git 仓库'
 })
 
 async function copyPaths(): Promise<void> {
@@ -90,7 +85,7 @@ async function copyPaths(): Promise<void> {
               <span class="grow">{{ copied ? '已复制' : '复制变更路径' }}</span>
             </button>
             <div class="pop-sep" />
-            <p class="pop-note">deep-agent serve 只返回工具输出——没有 diff、提交或 PR 接口。</p>
+            <p class="pop-note">变更直接读取项目工作区的 Git 状态。</p>
           </Popover>
         </span>
         <button class="ico" type="button" title="最大化" @click="maximized = !maximized">
@@ -122,12 +117,12 @@ async function copyPaths(): Promise<void> {
             <summary class="file-row">
               <Icon name="file" :size="13" />
               <span class="file-name" :title="file.path">{{ shortPath(file.path, 60) }}</span>
-              <span class="hint">{{ file.action }}</span>
-            </summary><pre class="log-out">{{ file.detail }}</pre>
+              <span class="hint">{{ file.status === 'untracked' ? '未跟踪' : file.status === 'deleted' ? '删除' : file.status === 'added' ? '新增' : '修改' }}</span>
+            </summary><pre class="log-out">{{ file.binary ? '二进制文件' : file.added != null ? `+${file.added} / -${file.removed}` : '暂无行数统计' }}</pre>
           </details>
         </div>
         <p class="panel-empty">
-          路径来自本会话的写入/编辑工具调用（{{ subtitle }}）。服务契约不含逐行差异，因此不显示 diff。
+          来自 {{ title }} 工作区的 Git 状态，与 HEAD 比较，包含暂存和未暂存改动。
         </p>
       </template>
 

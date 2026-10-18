@@ -62,7 +62,7 @@ export const app = reactive({
   records: loadRecords() as RecordMap,
   conn: { health: false, authorized: false, error: '', checkedAt: '' },
   banner: null as Banner | null,
-  busy: { submit: false, resume: false, cancel: false, session: false, restore: false },
+  busy: { submit: false, resume: false, cancel: false, session: false },
   stream: { phase: 'idle', runId: '', note: '' } as StreamState,
   settingsOpen: false,
   settingsDirty: 0,
@@ -414,7 +414,7 @@ export async function sendFromHome(text: string): Promise<boolean> {
     )
     return false
   }
-  if (app.busy.submit || app.busy.restore) return false
+  if (app.busy.submit) return false
   app.busy.submit = true
   clearBanner()
   try {
@@ -537,9 +537,6 @@ export async function loadSessionHistory(sessionId: string, more = false): Promi
 async function discoverActiveRuns(): Promise<void> {
   const active = await Promise.all(app.projects.map((project) => api.activeRun(apiConfig(), project.id)))
   for (const result of active) {
-    if (result.blocked && result.reason === 'code_restore_recovery') {
-      setBanner('warn', '项目的代码恢复尚未完成，请检查服务状态后重试。')
-    }
     if (!result.run) continue
     const session = app.sessions.find((session) => session.id === result.run?.session_id)
     if (!session) continue
@@ -553,10 +550,6 @@ async function discoverActiveRuns(): Promise<void> {
   }
 }
 
-export function projectIsBusy(projectId: string): boolean {
-  return Object.values(app.records).some((record) => record.session.project_id === projectId && record.runs.some((run) => !isTerminal(run.run.status)))
-}
-
 // ---------------------------------------------------------------- run actions
 
 export async function submitText(text: string): Promise<boolean> {
@@ -564,7 +557,7 @@ export async function submitText(text: string): Promise<boolean> {
   if (!record || models.changing[record.session.id]) return false
   const value = text.trim()
   if (!value) return false
-  if (app.busy.submit || app.busy.restore) return false
+  if (app.busy.submit) return false
   app.busy.submit = true
   clearBanner()
   try {
@@ -585,7 +578,7 @@ export async function submitText(text: string): Promise<boolean> {
 export async function resumeSession(): Promise<void> {
   const record = currentRecord.value
   if (!record) return
-  if (app.busy.resume || app.busy.restore || currentRunActive.value) return
+  if (app.busy.resume || currentRunActive.value) return
   app.busy.resume = true
   clearBanner()
   try {

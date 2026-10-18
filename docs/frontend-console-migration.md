@@ -1,55 +1,42 @@
-# 新前端适配验收（2026-10-18）
+# 当前 Web 适配验收（2026-10-18）
 
-输入为 `deep-agent-web-20261018.tar.gz`（SHA-256：`957834e1fa12fea71d6ae2c69f6178d5b6f4d0b15b2db6677c4e4318432439a7`），基于 `web_beta` 的 `9afb1a4`（已合并 main）。
+界面采用上传的 `deep-agent-web-20261018.tar.gz`，SHA-256 为 `957834e1fa12fea71d6ae2c69f6178d5b6f4d0b15b2db6677c4e4318432439a7`。前端是 main 的另一种呈现方式；当前 main 基线为 `73605f2`。
 
-## 交付
+## 当前行为
 
-旧 Stitch 组件、样式、状态管理及对应界面测试已删除，采用上传包的 Vue 3 双屏控制台。保留现有 Python 服务与本地网关，通过新客户端适配 `/api/agent`；浏览器不持有服务令牌，不改后端接口。
+- 首页/线程共用输入框；加号菜单只有“上传文件”和“上传图片”两个入口，本次调整菜单呈现。
+- 模型下拉按组织 → 模型名称 → 思考强度选择，收起只显示实际模型名称。会话选择复用 CLI `/model` 的 Runner 配置应用与持久化，运行或等待交互时不可切换。
+- 首页卡片和变更侧栏从对应 workspace 读取 Git 分支、diff 行数与路径状态；无仓库或 Git 不可用时不展示卡片的 Git 信息。
+- diff 与 HEAD 比较，包含暂存和未暂存修改；未跟踪、二进制及无提交仓库不编造行数。“HEAD 已合入”只代表当前提交已包含在默认分支历史中，不代表未提交修改或 PR 状态。
+- 所有每轮文件修改汇总、前后文件快照、回退/撤销回退入口、接口、恢复锁和持久化逻辑均已删除。工具日志继续显示 main 原有的事件数据，不另建文件修改/回退记录。
+- 会话摘要分页、原有 SSE 日志回放、审批、人工输入、取消、暂停继续与服务重启后的显式会话恢复继续可用；缺少本机提问时显示原始提问不可用。
+- 网关注入令牌，浏览器不保存服务凭据。Git 查询只读，不 fetch、checkout 或写 Git 索引/提交。
 
-主要适配：
+## main 一致性核对
 
-- 首页项目选择与首次提交、线程跟进、批量审批、五类人工输入、自定义答案、暂停/继续、协作取消和显式恢复。
-- 服务端分页运行摘要和活动任务发现；新浏览器可以发现待处理任务，清除本机记录后仍能重新加载服务历史。已结束运行完整回放 SSE，避免在终态快照下只读取第一帧；缺少本机提问时提示不可用。
-- 累计文本替换、UTF-8 分块/CRLF SSE 解码、每轮游标、断线重连、状态轮询和过期快照保护。
-- 每轮快照检查、确认回退、撤销回退、409 冲突与服务重启后的回退状态恢复。
-- 只将成功的文件工具事件计入变更，展示写入内容或编辑片段；删除、失败、未结束调用分别处理。
-- 删除浏览器令牌/直连地址配置，移除假订阅和合并状态；模型名称只作显示偏好。
-- 窄屏默认收起导航，侧栏遮罩可关闭，变更面板作为可关闭侧面层显示。
+通过 AST 比较确认 `RunManager.submit`、`respond`、`cancel`、`_interruption`、`_work` 和 `close` 与 `origin/main` 完全一致。Runner、CLI、会话、控制、沙箱等核心文件与 main 无差异。Web 添加的模型接口调用 CLI 已有的模型切换方法，Git 元数据复用 main 的 `agent.cli.gitinfo.parse_status`；执行流程没有另一套实现。
 
-上传包的 `dist` 未提交，生产产物由 `npm run build` 生成。原抓取/截图脚本依赖交付环境外路径，已由仓库的真实服务端到端测试和截图替代。
+## 验证
 
-## 验证结果
-
-| 验证 | 结果 |
+| 检查 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |
-| `npm run lint` | 通过，无告警 |
-| `npm run test` | 3 个文件，8 项通过 |
-| `npm run build` | 通过，生成 Vite 生产资源 |
-| `npm run test:e2e` | 6 项通过（19.6 秒） |
-| `TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server.py tests/test_web_gateway.py tests/test_code_history.py -q --tb=short` | 73 项通过（12.38 秒） |
+| `npm run lint` | 通过 |
+| `npm run test` | 4 个文件，10 项通过 |
+| `npm run build` | 通过 |
+| `npm run test:e2e` | 7 项通过（24.7 秒） |
+| `TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server.py tests/test_server_models.py tests/test_server_gitinfo.py tests/test_web_gateway.py tests/test_gitinfo.py -q --tb=short` | 72 项通过（14.10 秒） |
 
-端到端实际使用本机 Chromium、HTTP 服务、同源网关、AgentRunner、SQLite、Bubblewrap 和临时工作区。模型为受控脚本模型，不访问真实模型或用户项目。测试真实执行批量批准/拒绝、所有人工输入字段、跨浏览器发现与回放、文件修改/删除、二进制文件回退/撤销、后续修改冲突、网关断连、服务崩溃恢复、取消和 390px 窄屏操作。
+浏览器测试使用 Chromium、真实服务、网关、AgentRunner、SQLite 和 Bubblewrap；模型是受控脚本，不访问外部模型。验证了两种输入框的加号菜单、真实 Git 的分支/行数、无 Git 隐藏信息、无轮次回退入口、模型/强度实际执行及重启持久化、审批/人工输入、跨浏览器历史、断连恢复、取消和窄屏。
 
-浏览器流量、本地存储、HTML 和构建产物通过测试控制端审计，未检出网关实际随机令牌。断连场景中有意重启网关所产生的临时代理连接错误属于注入场景，恢复流程通过。
+Git 测试建立真实临时仓库，覆盖暂存加未暂存修改、未跟踪文件、未合并/合并分支、detached HEAD、无提交仓库、无 Git、认证、旧回退接口 404，以及 Git HEAD/索引不被查询改写。
 
-## 界面记录
+## 截图与启动
 
-- [首页（1440×900）](frontend-evidence/console-home-1440.png)
-- [会话线程（1440×900）](frontend-evidence/console-thread-1440.png)
-- [变更侧栏（1440×900）](frontend-evidence/console-changes-1440.png)
-- [窄屏线程（390×844）](frontend-evidence/console-mobile-390.png)
+- [首页 Git 信息](frontend-evidence/console-home-git-1440.png)
+- [线程](frontend-evidence/console-thread-1440.png)
+- [Git 变更侧栏](frontend-evidence/console-changes-1440.png)
+- [模型思考强度菜单](frontend-evidence/console-model-effort-1440.png)
+- [窄屏](frontend-evidence/console-mobile-390.png)
 
-## 当前边界
-
-原始提问依赖浏览器缓存，服务端没有保存其正文；历史摘要和事件日志可从服务恢复。没有 HTTP 模型切换、上传、语音、桌面流、交互终端、PR/提交或完整 Git Diff 接口，相应入口只说明支持范围。回退修改文件但保留对话，具体边界见 [轮次代码回退](code-restore.md)。
-
-启动与配置见 [Web 文档](web.md)，代码结构见 [前端 README](../web/README.md)。之前的 Stitch 报告仅记录旧版实现，不代表当前前端测试结果。
-
-## 模型下拉更新（同日后续）
-
-模型输入控件现已替换原来的本机显示标签。首页及线程共用三级选择：组织 → 模型名称 → 思考强度，收起后只显示当前模型名称。模型目录来自服务的 `llm.models`；没有声明强度时只提供默认选项。组织、模型或强度未选完不修改设置，提供返回上一级操作。
-
-新增模型目录与会话模型读写接口，复用 CLI `/model` 的 Runner 变更/应用路径，实际保存模型 ID 和强度。首页所选配置在首次任务前应用到新会话，线程内切换立即应用；运行/等待交互禁止切换，服务应用失败保留实际模型。删除了连接设置中的模型显示名覆盖。
-
-后续验证：11 项前端测试、78 项服务/网关/代码快照测试，以及 7 项真实服务端到端测试通过；类型检查、lint 和生产构建通过。新增端到端测试验证两次选择后的真实 Runner 模型和强度、刷新/重启持久化、运行中禁用。提供方模型使用脚本替代，不调用外部模型。新增 [思考强度菜单截图](frontend-evidence/console-model-effort-1440.png)。
+启动配置见 [Web 文档](web.md)，接口见 [HTTP 服务文档](server.md)。先前 Stitch 报告仅供历史参考。

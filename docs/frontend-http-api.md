@@ -16,8 +16,8 @@ RunSummary只有 `id,session_id,project_id,status,created_at,updated_at`。任�
 - 原始协议差异：实际 Runner 的 `delta.kind=assistant/reasoning` 是累计文本；前端assistant替换，reasoning不展开。参考 `answer` 增量例子独立兼容。终态 output 权威覆盖，未知kind不猜为回答。
 - Other：当前 Runner 返回自由文本本身，multi_select包含原选项值与自由文本；不会发送 `__other__` marker 代替用户输入。已由真实 Runner 集成测试确认。
 
-只新增读端点和一个索引；没有会话命名/删除、prompt持久化、Diff、模型/权限切换、多模态或文件下载API。部署仍限本地单用户，Unix socket 间接通信及 OUTPUT-PERSIST-01 限制见原服务文档。
+早期 M3 只新增读端点和一个索引；后续模型和 Git 查询见下文。没有会话命名/删除、prompt 持久化、权限切换、多模态或文件下载 API。部署仍限本地单用户，Unix socket 间接通信及 OUTPUT-PERSIST-01 限制见原服务文档。
 
-## 用户追加：按轮次回退代码
+## 当前 Web 适配
 
-GET `/v1/runs/{run_id}/code-checkpoint`、POST `/v1/runs/{run_id}/code-restore`及同源BFF映射已实现。POST只接受action(undo/redo)和当前revision，禁止客户端schema/路径/内容/force；成功200、冲突409。完整契约及限制见 [code-restore.md](code-restore.md)。代码快照状态独立于Run/SSE，操作后GET对账，不自动重试POST。
+模型选择复用 main CLI `/model`，工作区 Git 查询只读取实际仓库状态；契约见 [HTTP 服务文档](server.md)。原轮次代码快照与回退功能已移除，旧接口返回 404。前端仅提供呈现与交互，不改变 main 的任务执行流程。

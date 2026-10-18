@@ -146,19 +146,7 @@ export interface PaginatedRuns {
 export interface ActiveRunResponse {
     run: RunSummary | null;
     blocked?: boolean;
-    reason?: 'code_restore_recovery';
 }
-export interface CodeCheckpoint {
-    run_id: string;
-    available: boolean;
-    status: 'recording' | 'ready' | 'reverted' | 'unavailable';
-    revision?: string;
-    reason?: string;
-    files: { path: string; kind: string; change: 'create' | 'delete' | 'modify' }[];
-    can_undo?: boolean;
-    can_redo?: boolean;
-}
-
 export interface ModelSelection {
   model_id: string
   model: string
@@ -174,4 +162,16 @@ export interface ModelProfile {
 export interface ModelCatalog {
   models: ModelProfile[]
   current: ModelSelection
+}
+
+export interface WorkspaceGit {
+  available: boolean
+  branch?: string
+  changed?: number
+  head?: string | null
+  base_branch?: string | null
+  merged?: boolean | null
+  added?: number | null
+  removed?: number | null
+  files?: { path: string; added: number | null; removed: number | null; status: string; binary: boolean }[]
 }

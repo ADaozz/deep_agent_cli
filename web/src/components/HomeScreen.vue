@@ -4,12 +4,13 @@
  * the "Recent agents" list. Everything is derived from `/v1/projects`,
  * `/v1/sessions` and the locally recorded runs.
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
 import { app, openSession, sendFromHome, sessionRows, runBannerAction } from '../store/app'
-import { collectChanges, longAge } from '../lib/timeline'
+import { longAge } from '../lib/timeline'
+import { refreshGit, workspaceGit } from '../store/git'
 import { models } from '../store/models'
 import { projectLabel, settings } from '../store/settings'
 
@@ -41,30 +42,13 @@ async function submit(value: string): Promise<void> {
   if (ok) text.value = ''
 }
 
-function thumbLabel(tone: string): string {
-  if (tone === 'ok') return '已完成'
-  if (tone === 'run') return '运行中'
-  if (tone === 'wait') return '等待中'
-  if (tone === 'bad') return '失败'
-  return '空闲'
+function refreshProjects(): void {
+  for (const project of app.projects) void refreshGit(project.id)
 }
-
-function thumbClass(tone: string): string {
-  if (tone === 'ok') return 'is-purple'
-  if (tone === 'run') return 'is-green'
-  return ''
-}
-
-function changesOf(row: (typeof recent.value)[number]) {
-  return row.latest ? collectChanges([row.latest]) : []
-}
-
-function metaIcon(tone: string): string {
-  if (tone === 'ok') return 'checkCircle'
-  if (tone === 'wait') return 'circle'
-  if (tone === 'bad') return 'xCircle'
-  return 'branch'
-}
+watch(() => app.projects.map(project => project.id).join(','), refreshProjects, { immediate: true })
+let timer: ReturnType<typeof setInterval> | undefined
+onMounted(() => { timer = setInterval(refreshProjects, 5000) })
+onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
@@ -98,7 +82,7 @@ function metaIcon(tone: string): string {
               type="button"
               @click="pickProject(project.id)"
             >
-              <Icon name="branch" :size="13" />
+              <Icon name="file" :size="13" />
               <span class="grow">{{ projectLabel(project.id) }}</span>
               <Icon v-if="app.draftProjectId === project.id" name="check" :size="13" />
             </button>
@@ -168,14 +152,14 @@ function metaIcon(tone: string): string {
         >
           <span class="thumb">
             <span class="thumb-note">
-              <span v-if="changesOf(row).length">
-                {{ changesOf(row).length }} 个文件
+              <span>{{ row.label }}</span>
+              <span v-if="workspaceGit[row.projectId]?.available" class="git-diff" aria-label="Git diff">
+                <template v-if="workspaceGit[row.projectId].added != null">+{{ workspaceGit[row.projectId].added }} / -{{ workspaceGit[row.projectId].removed }}</template>
+                <template v-else>{{ workspaceGit[row.projectId].changed }} 个变更路径</template>
               </span>
-              <span v-else>{{ row.label }}</span>
             </span>
-            <span class="mini-pill" :class="thumbClass(row.tone)">
-              <Icon name="branch" :size="10" />
-              {{ thumbLabel(row.tone) }}
+            <span v-if="workspaceGit[row.projectId]?.available && workspaceGit[row.projectId].branch" class="mini-pill" aria-label="Git 分支">
+              <Icon name="branch" :size="10" />{{ workspaceGit[row.projectId].branch }}
             </span>
           </span>
 
@@ -187,11 +171,7 @@ function metaIcon(tone: string): string {
               {{ row.title }}
             </span>
             <span class="recent-meta">
-              <Icon
-                :name="row.projectId ? 'branch' : metaIcon(row.tone)"
-                :size="12"
-                :style="row.projectId ? { color: 'var(--purple)' } : undefined"
-              />
+              <span v-if="workspaceGit[row.projectId]?.available && workspaceGit[row.projectId].merged === true" class="git-merged" aria-label="Git 合并状态">HEAD 已合入 {{ workspaceGit[row.projectId].base_branch }}</span>
               <span v-if="models.sessions[row.id]">{{ models.sessions[row.id].model }}</span>
               <span>{{ row.projectId ? projectLabel(row.projectId) : '无仓库' }}</span>
               <span>{{ longAge(row.updatedAt) }}</span>

@@ -13,11 +13,6 @@ async function answer(page: Page, text: string) {
   await expect(page.locator('.answer').last()).toContainText(text)
   await expect(page.getByRole('button', { name: '停止运行', exact: true })).toHaveCount(0)
 }
-async function round(page: Page, text: string) {
-  await send(page, text); await approveSingle(page); await answer(page, text + ' done')
-  return page.locator('.run-block').last().getAttribute('data-run-id')
-}
-
 test('new console: genuine batch approvals, all input types and a completed history reload', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByText('已连接 · 本地工作区')).toBeVisible()
@@ -71,7 +66,7 @@ test('a fresh browser discovers active approval and replays completed logs from 
   } finally { await context.close() }
 })
 
-test('browser never receives the private gateway token, and completed file changes survive replay', async ({ page, request }) => {
+test('browser token stays private and changes panel reflects real workspace Git', async ({ page, request }) => {
   const traffic: Promise<unknown>[] = []
   page.on('request', r => { if (r.url().includes('/api/agent')) traffic.push(r.allHeaders().then(headers => ({ headers, body: r.postData() }))) })
   await page.goto('/'); await send(page, 'file-changes')
@@ -83,47 +78,18 @@ test('browser never receives the private gateway token, and completed file chang
   await answer(page, '文件操作完成')
   await page.getByRole('button', { name: '显示变更面板', exact: true }).click()
   const panel = page.getByRole('complementary', { name: '代码变更' })
-  await expect(panel).toContainText('changed.ts')
-  await expect(panel).toContainText('删除')
+  await expect(panel).toContainText('tracked.txt')
+  await expect(panel).not.toContainText('changed.ts')
   await page.reload()
   await answer(page, '文件操作完成')
   await page.getByRole('button', { name: '显示变更面板', exact: true }).click()
-  await expect(panel).toContainText('changed.ts')
+  await expect(panel).toContainText('tracked.txt')
   await page.screenshot({ path: path.resolve('../docs/frontend-evidence/console-changes-1440.png') })
   const traces = await Promise.all(traffic)
   expect(traces.every(t => !('authorization' in (t as { headers: Record<string, string> }).headers))).toBe(true)
   const storage = await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }))
   const audit = await request.post('http://127.0.0.1:8766/audit', { data: { traffic: traces, html: await page.content(), storage } })
   expect((await audit.json()).matches).toBe(0)
-})
-
-test('per-round undo and redo use actual workspace snapshots and reject later changes', async ({ page, request }) => {
-  test.setTimeout(60000)
-  await page.goto('/')
-  await round(page, 'undo-seed')
-  const one = await round(page, 'undo-one')
-  const two = await round(page, 'undo-two')
-  const block = (id: string | null) => page.locator(`.run-block[data-run-id="${id}"]`)
-  const controls = (id: string | null) => block(id).getByRole('region', { name: '轮次代码回退' })
-  await block(one).locator('.round-code > summary').click()
-  await controls(one).getByRole('button', { name: '回退本轮代码', exact: true }).click()
-  await controls(one).getByRole('button', { name: '确认回退本轮', exact: true }).click()
-  await expect(controls(one).getByRole('alert')).toContainText('409')
-  await block(two).locator('.round-code > summary').click()
-  await controls(two).getByRole('button', { name: '回退本轮代码', exact: true }).click()
-  await controls(two).getByRole('button', { name: '确认回退本轮', exact: true }).click()
-  await expect(controls(two).getByRole('status')).toHaveText('本轮代码已回退')
-  await controls(one).getByRole('button', { name: '回退本轮代码', exact: true }).click()
-  await controls(one).getByRole('button', { name: '确认回退本轮', exact: true }).click()
-  await expect(controls(one).getByRole('status')).toHaveText('本轮代码已回退')
-  expect(await (await request.get('http://127.0.0.1:8766/undo-evidence')).json()).toEqual({ code: 'initial', deleted: 'keep', binary: null })
-  await request.post('http://127.0.0.1:8766/restart/service')
-  await page.reload()
-  await block(one).locator('.round-code > summary').click()
-  await expect(controls(one).getByRole('status')).toHaveText('本轮代码已回退')
-  await controls(one).getByRole('button', { name: '撤销回退', exact: true }).click()
-  await controls(one).getByRole('button', { name: '确认撤销回退', exact: true }).click()
-  expect(await (await request.get('http://127.0.0.1:8766/undo-evidence')).json()).toEqual({ code: 'one', deleted: null, binary: [0, 255, 1] })
 })
 
 test('pause, explicit recovery after service crash, reconnect and cancellation use server states', async ({ page, request }) => {
@@ -199,4 +165,32 @@ test('model picker follows organization → model → effort and persists actual
   await page.getByRole('button', { name: 'OrgA', exact: true }).click()
   await page.getByRole('button', { name: 'model-one', exact: true }).click()
   await page.screenshot({ path: path.resolve('../docs/frontend-evidence/console-model-effort-1440.png') })
+})
+
+
+test('plus menu has only file/image entries and home Git metadata is hidden for non-repositories', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', {name:'添加上下文',exact:true}).click()
+  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','上传图片'])
+  await page.keyboard.press('Escape')
+  await send(page,'git-card')
+  await answer(page,'任务完成：git-card')
+  await page.getByRole('button',{name:'添加上下文',exact:true}).click()
+  await expect(page.locator('.popover .pop-item')).toHaveText(['上传文件','上传图片'])
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.round-code')).toHaveCount(0)
+  await page.getByRole('button',{name:'新对话',exact:true}).click()
+  const cards=page.locator('.recent-row')
+  await expect(cards.first().getByLabel('Git 分支')).toHaveText('feature')
+  await expect(cards.first().getByLabel('Git diff')).toContainText('+2 / -1')
+  await page.screenshot({path:path.resolve('../docs/frontend-evidence/console-home-git-1440.png')})
+  await page.locator('.home-controls .pick').first().click()
+  await page.getByRole('button',{name:'worker',exact:true}).click()
+  await send(page,'no-git-card')
+  await answer(page,'任务完成：no-git-card')
+  await page.getByRole('button',{name:'新对话',exact:true}).click()
+  await expect(cards.first()).toContainText('no-git-card')
+  await expect(cards.first().getByLabel('Git 分支')).toHaveCount(0)
+  await expect(cards.first().getByLabel('Git diff')).toHaveCount(0)
+  await expect(cards.first().getByLabel('Git 合并状态')).toHaveCount(0)
 })

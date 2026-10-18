@@ -25,8 +25,9 @@ import {
   runBannerAction,
   submitText,
 } from '../store/app'
+import { refreshGit, workspaceGit } from '../store/git'
 import { projectLabel } from '../store/settings'
-import { collectChanges, STATUS_UI } from '../lib/timeline'
+import { STATUS_UI } from '../lib/timeline'
 import type { RunStatus } from '../api/types'
 
 defineProps<{ panelOpen: boolean }>()
@@ -40,7 +41,6 @@ const copied = ref(false)
 const sessionId = computed(() => app.sessionId)
 const runs = computed(() => currentRuns.value)
 const lastIndex = computed(() => runs.value.length - 1)
-const changes = computed(() => collectChanges(runs.value))
 
 const title = computed(() => currentRow.value?.title || '会话')
 const repo = computed(() =>
@@ -76,7 +76,9 @@ const elapsed = computed(() => {
 onMounted(() => {
   timer = setInterval(() => {
     now.value = Date.now()
+    if (Math.floor(now.value / 1000) % 5 === 0) void refreshGit(currentRecord.value?.session.project_id || '')
   }, 1000)
+  void refreshGit(currentRecord.value?.session.project_id || '')
   scrollToBottom(false)
 })
 
@@ -98,7 +100,7 @@ watch(
     latestRecord.value?.view.blocks.length ?? 0,
     latestRecord.value?.view.finalized ?? false,
   ],
-  () => scrollToBottom(),
+  () => { void refreshGit(currentRecord.value?.session.project_id || ''); scrollToBottom() },
 )
 
 async function send(value: string): Promise<void> {
@@ -248,7 +250,7 @@ async function copySession(): Promise<void> {
             placeholder="追加跟进"
             :running="active"
             :busy="app.busy.submit || app.busy.cancel || status === 'cancelling'"
-            :disabled="!app.conn.authorized || app.busy.restore || interrupted"
+            :disabled="!app.conn.authorized || interrupted"
             @submit="send"
             @stop="stop"
           />
@@ -258,7 +260,7 @@ async function copySession(): Promise<void> {
 
     <SidePanel
       v-if="panelOpen"
-      :changes="changes"
+      :git="workspaceGit[currentRecord?.session.project_id || '']"
       :title="repo"
       :subtitle="sessionId ? sessionId.slice(0, 8) : ''"
       @close="emit('toggle-panel')"

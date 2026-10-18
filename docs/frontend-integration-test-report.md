@@ -153,6 +153,6 @@ Web命令：`npm ci; npm run typecheck; npm run lint; npm run test; npm run buil
 
 限制：这是本Run文件工具操作记录和片段，不是完整Git Diff，也不是最终工作区快照；shell/外部进程改动、整文件旧快照/实际行号均不可由当前事件确认。没有新增后端写入路径、依赖、配置或权限机制，没有修改Runner/沙箱。生产Python未改，本轮未重复全量Python；前次928项证据保持。
 
-## 追加：按轮次回退/撤销代码回退
+## 当前变更
 
-已实现新轮次完整边界快照、显式确认式undo/redo、冲突预检、失败恢复日志及重启持久化。原只读范围按用户追加要求扩展。最终Python946、前端51、浏览器16通过，详见 [轮次回退验收](code-restore-test-report.md) 与 [使用说明](code-restore.md)。原验收记录保留为历史阶段证据，不将其旧AST核查误称本次Worker完全未变。
+旧轮次代码快照及回退机制已按用户要求移除。当前 Web 仅呈现 main 的执行逻辑，工作区分支与变更从实际 Git 查询，见 [当前验收](frontend-console-migration.md)。

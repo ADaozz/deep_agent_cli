@@ -3,8 +3,8 @@
  * answer, derived only from documented run snapshots and agent events.
  *
  * Nothing here invents data: elapsed time comes from `created_at`/`updated_at`
- * on the Run, tool rows come from the streamed tool calls, and the changed-file
- * list only contains paths that a write/edit tool call declared.
+ * on the Run and tool rows come from the main Runner event stream. Workspace
+ * Git changes are queried separately; no per-run file-change records are built.
  */
 import type { RunStatus } from '../api/types'
 import { displayItems, type RunRecord, type ToolView } from './runView'
@@ -22,13 +22,6 @@ export interface LogRow {
   isError?: boolean
 }
 
-export interface ChangeEntry {
-  path: string
-  action: string
-  tool: string
-  detail: string
-}
-
 export interface RunTimeline {
   prompt: string
   /** "Worked for 2m 11s" */
@@ -36,7 +29,6 @@ export interface RunTimeline {
   rows: LogRow[]
   /** Markdown of the assistant answer (empty while nothing was produced). */
   answer: string
-  changes: ChangeEntry[]
   status: RunStatus
   running: boolean
   error: string
@@ -142,23 +134,6 @@ export function durationLabel(startIso: string, endIso: string): string {
   return mins ? `${hours} 小时 ${mins} 分` : `${hours} 小时`
 }
 
-export function collectChanges(runs: RunRecord[]): ChangeEntry[] {
-  const map = new Map<string, ChangeEntry>()
-  for (const record of runs) {
-    for (const tool of Object.values(record.view.tools ?? {})) {
-      const info = summarizeTool(tool)
-      if (!['write_file', 'edit_file', 'delete'].includes(tool.name) || !info.path || tool.state !== 'ok') continue
-      const operation = (tool.artifact as { operation?: string } | null)?.operation
-      const action = tool.name === 'write_file' ? operation === 'create' ? '新建' : operation === 'overwrite' ? '覆盖' : '写入（分类未确认）' : info.verb
-      const detail = tool.name === 'edit_file'
-        ? `替换前：\n${String(tool.args.old_string ?? '')}\n替换后：\n${String(tool.args.new_string ?? '')}`
-        : tool.name === 'write_file' ? String(tool.args.content ?? '') : '文件已删除；未记录旧内容。'
-      map.set(info.path, { path: info.path, action, tool: tool.name, detail })
-    }
-  }
-  return [...map.values()]
-}
-
 export function buildTimeline(record: RunRecord): RunTimeline {
   const view = record.view
   const items = displayItems(view)
@@ -228,7 +203,6 @@ export function buildTimeline(record: RunRecord): RunTimeline {
     worked: `工作了 ${durationLabel(record.run.created_at, record.run.updated_at)}`,
     rows,
     answer,
-    changes: collectChanges([record]),
     status: record.run.status,
     running,
     error,
