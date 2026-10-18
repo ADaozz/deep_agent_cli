@@ -1,4 +1,5 @@
 import { computed, reactive } from 'vue'
+import { recentWorkspacePaths, rememberWorkspace } from './workspaces'
 import { applyDraftModel, models } from './models'
 import {
   ApiError,
@@ -8,7 +9,7 @@ import {
   getHealth,
   streamEvents,
 } from '../api/client'
-import type { ApprovalDecision, Run, RunStatus, Session, SseMessage } from '../api/types'
+import type { ApprovalDecision, Run, RunStatus, Session, SseMessage, Workspace } from '../api/types'
 import { isTerminal } from '../api/types'
 import {
   applySseMessage,
@@ -51,7 +52,7 @@ interface StreamState {
 }
 
 export const app = reactive({
-  projects: [] as { id: string }[],
+  projects: [] as Workspace[],
   projectFilter: 'all',
   sessions: [] as Session[],
   loading: { projects: false, sessions: false },
@@ -312,13 +313,12 @@ export async function connect(): Promise<void> {
       app.conn.health = false
       throw new NetworkError('health check failed')
     }
-    const result = await api.projects(apiConfig())
-    app.projects = result.projects ?? []
-    // The home picker starts on "Start from scratch"; the first project is only
-    // used when a run is submitted without an explicit choice.
-    if (app.draftProjectId && !app.projects.some((p) => p.id === app.draftProjectId)) {
-      app.draftProjectId = ''
-    }
+    const result = await api.workspaces(apiConfig())
+    app.projects = result.workspaces ?? []
+    const selected = app.projects.find(project => project.id === app.draftProjectId)
+      || app.projects.find(project => project.path === recentWorkspacePaths[0]) || app.projects[0]
+    app.draftProjectId = selected?.id || ''
+    if (selected) rememberWorkspace(selected.path)
     app.conn.authorized = true
     app.conn.error = ''
     app.conn.checkedAt = new Date().toISOString()

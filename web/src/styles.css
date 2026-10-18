@@ -1894,3 +1894,14 @@ a {
 .model-step { display: flex; gap: 6px; align-items: center; }
 .model-error { color: var(--danger); }
 .model-pick:disabled { opacity: .6; cursor: default; }
+
+.workspace-pick { max-width: min(470px, 65vw); }
+.workspace-label, .workspace-history-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-history-path { max-width: 360px; }
+.workspace-folders { max-height: 340px; overflow-y: auto; }
+.workspace-path-form .field-row { flex-direction: row; align-items: center; margin-top: 6px; }
+.workspace-path-form input { flex: 1; min-width: 0; }
+@media (max-width: 860px) { .workspace-history-path { max-width: 240px; } .workspace-pick { max-width: 60vw; } }
+
+.workspace-history-label { display: flex; flex-direction: column; min-width: 0; }
+.workspace-history-label small { display: block; color: var(--t3); font-size: 11px; }

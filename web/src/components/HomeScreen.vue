@@ -12,18 +12,27 @@ import { app, openSession, sendFromHome, sessionRows, runBannerAction } from '..
 import { longAge } from '../lib/timeline'
 import { refreshGit, workspaceGit } from '../store/git'
 import { models } from '../store/models'
-import { projectLabel, settings } from '../store/settings'
+import WorkspacePathDialog from './WorkspacePathDialog.vue'
+import type { Workspace } from '../api/types'
+import { isTerminal } from '../api/types'
+import { api } from '../api/client'
+import { recentWorkspacePaths, rememberWorkspace } from '../store/workspaces'
+import { projectLabel, apiConfig } from '../store/settings'
 
 const text = ref('')
 const draftOpen = ref(false)
-const cloudOpen = ref(false)
+const branchOpen = ref(false)
+const pathOpen = ref(false)
+const branchBusy = ref(false)
+const branchError = ref('')
 const flashText = ref('')
 
 const recent = computed(() => sessionRows.value.slice(0, 4))
 
-const draftLabel = computed(() =>
-  app.draftProjectId ? projectLabel(app.draftProjectId) : '从零开始',
-)
+const selectedWorkspace = computed(() => app.projects.find(project => project.id === app.draftProjectId) || app.projects[0])
+const workspaceHistory = computed(() => recentWorkspacePaths.map(path => app.projects.find(project => project.path === path)).filter((project): project is Workspace => !!project).slice(0, 4))
+const git = computed(() => workspaceGit[selectedWorkspace.value?.id || ''])
+const workspaceBusy = computed(() => branchBusy.value || app.busy.submit || sessionRows.value.some(row => row.projectId === selectedWorkspace.value?.id && row.status && !isTerminal(row.status)))
 
 function flash(message: string): void {
   flashText.value = message
@@ -33,8 +42,27 @@ function flash(message: string): void {
 }
 
 function pickProject(projectId: string): void {
+  const workspace = app.projects.find(project => project.id === projectId)
+  if (!workspace) return
   app.draftProjectId = projectId
+  rememberWorkspace(workspace.path)
   draftOpen.value = false
+  branchOpen.value = false
+  branchError.value = ''
+  void refreshGit(projectId)
+}
+function selectedPath(workspace: Workspace): void {
+  if (!app.projects.some(project => project.id === workspace.id)) app.projects.push(workspace)
+  pickProject(workspace.id)
+  pathOpen.value = false
+}
+async function switchBranch(branch: string): Promise<void> {
+  if (!selectedWorkspace.value || workspaceBusy.value) return
+  const projectId = selectedWorkspace.value.id
+  branchBusy.value = true; branchError.value = ''
+  try { workspaceGit[projectId] = await api.switchBranch(apiConfig(), projectId, branch); branchOpen.value = false }
+  catch (e) { branchError.value = e instanceof Error ? e.message : '无法切换分支' }
+  finally { branchBusy.value = false }
 }
 
 async function submit(value: string): Promise<void> {
@@ -60,65 +88,37 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
       </div>
       <div class="home-controls">
         <span class="anchor">
-          <button class="pick" type="button" @click="draftOpen = !draftOpen">
-            {{ draftLabel }}
-            <Icon name="chevronDown" :size="11" />
+          <button class="pick workspace-pick" type="button" aria-label="选择 workspace" :title="selectedWorkspace?.path" :disabled="branchBusy" @click="draftOpen = !draftOpen; branchOpen = false">
+            <span class="workspace-label">{{ selectedWorkspace?.path || '选择 workspace' }}</span><Icon name="chevronDown" :size="11" />
           </button>
           <Popover v-if="draftOpen" align="down" @close="draftOpen = false">
-            <div class="pop-head">运行于</div>
-            <button
-              class="pop-item"
-              type="button"
-              @click="pickProject('')"
-            >
-              <Icon name="file" :size="13" />
-              <span class="grow">从零开始</span>
-              <Icon v-if="!app.draftProjectId" name="check" :size="13" />
+            <div class="pop-head">最近 workspace</div>
+            <button v-for="workspace in workspaceHistory" :key="workspace.id" class="pop-item" type="button" :title="workspace.path" @click="pickProject(workspace.id)">
+              <Icon name="folder" :size="13" /><span class="grow workspace-history-label"><span>{{ workspace.path.split('/').pop() || '/' }}</span><small class="workspace-history-path">{{ workspace.path }}</small></span><Icon v-if="selectedWorkspace?.id === workspace.id" name="check" :size="13" />
             </button>
-            <button
-              v-for="project in app.projects"
-              :key="project.id"
-              class="pop-item"
-              type="button"
-              @click="pickProject(project.id)"
-            >
-              <Icon name="file" :size="13" />
-              <span class="grow">{{ projectLabel(project.id) }}</span>
-              <Icon v-if="app.draftProjectId === project.id" name="check" :size="13" />
-            </button>
-            <div class="pop-sep" />
-            <p class="pop-note">
-              项目来自 <code>GET /v1/projects</code>；工作副本由服务端持有。
-            </p>
+            <div v-if="workspaceHistory.length" class="pop-sep" />
+            <button class="pop-item" type="button" @click="draftOpen = false; pathOpen = true"><Icon name="folder" :size="13" /><span class="grow">选择路径…</span></button>
           </Popover>
         </span>
-
-        <span class="anchor">
-          <button class="pick" type="button" title="沙箱" @click="cloudOpen = !cloudOpen">
-            <Icon name="cloud" :size="14" />
-            <Icon name="chevronDown" :size="10" />
+        <span v-if="git?.available" class="anchor">
+          <button class="pick" type="button" aria-label="选择 Git 分支" :disabled="workspaceBusy" @click="branchOpen = !branchOpen; draftOpen = false; branchError = ''; refreshGit(selectedWorkspace!.id)">
+            <Icon name="branch" :size="14" /><span>{{ git.branch }}</span><Icon name="chevronDown" :size="10" />
           </button>
-          <Popover v-if="cloudOpen" align="down" @close="cloudOpen = false">
-            <div class="pop-head">{{ settings.baseUrl }}</div>
-            <button class="pop-item" type="button" @click="cloudOpen = false">
-              <Icon name="cloud" :size="13" />
-              <span class="grow">本地沙箱</span>
-              <Icon name="check" :size="13" />
-            </button>
-            <div class="pop-sep" />
-            <p class="pop-note">
-              deep-agent serve 在自身沙箱中运行 Agent；没有云端/本地切换。
-            </p>
+          <Popover v-if="branchOpen" align="down" end @close="branchOpen = false">
+            <div class="pop-head">Git 分支</div>
+            <button v-for="branch in git.branches || []" :key="branch" class="pop-item" type="button" :disabled="workspaceBusy" @click="switchBranch(branch)"><span class="grow">{{ branch }}</span><Icon v-if="branch === git.branch" name="check" :size="13" /></button>
+            <p v-if="branchError" class="pop-note model-error" role="alert">{{ branchError }}</p>
           </Popover>
         </span>
       </div>
+      <WorkspacePathDialog v-if="pathOpen" :initial-path="selectedWorkspace?.path" @close="pathOpen = false" @selected="selectedPath" />
 
       <PromptComposer
         v-model="text"
         placeholder="让 Deep Agent 构建、修 bug、探索"
         :running="false"
         :busy="app.busy.submit"
-        :disabled="!app.conn.authorized"
+        :disabled="!app.conn.authorized || branchBusy"
         @submit="submit"
       />
 

@@ -1,4 +1,4 @@
-"""Read-only workspace Git presentation; no snapshots or Git writes."""
+"""Workspace Git metadata and explicit native branch selection; no snapshots."""
 from __future__ import annotations
 
 import os
@@ -64,8 +64,29 @@ def workspace_git(workspace: Path) -> dict:
             result = git('merge-base', '--is-ancestor', 'HEAD', base)
             if result.returncode in (0, 1):
                 merged = result.returncode == 0
-        return {'available': True, 'branch': summary.branch, 'changed': summary.changed,
+        branches_result = git('for-each-ref', '--format=%(refname:short)', 'refs/heads/')
+        branches = branches_result.stdout.decode('utf-8', 'replace').splitlines() if branches_result.returncode == 0 else []
+        if not head and summary.branch not in branches:
+            branches.insert(0, summary.branch)
+        return {'available': True, 'branches': branches, 'branch': summary.branch, 'changed': summary.changed,
                 'head': head, 'base_branch': base, 'merged': merged,
                 'added': added, 'removed': removed, 'files': list(files.values())}
     except (OSError, subprocess.SubprocessError, ValueError):
         return {'available': False}
+
+
+def switch_branch(workspace: Path, branch: str) -> dict:
+    info = workspace_git(workspace)
+    if not info.get('available') or branch not in info.get('branches', []):
+        raise ValueError('该 workspace 中没有此本地分支')
+    if info['branch'] == branch:
+        return info
+    try:
+        result = subprocess.run(['git', 'switch', '--', branch], cwd=workspace,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT_SECONDS,
+                                env={**os.environ, 'LC_ALL': 'C'})
+    except (OSError, subprocess.SubprocessError):
+        raise ValueError('无法切换分支，请检查 Git 状态') from None
+    if result.returncode:
+        raise ValueError('Git 未能切换分支，请先处理工作区冲突或被其他 worktree 占用的分支；现有修改已保留')
+    return workspace_git(workspace)

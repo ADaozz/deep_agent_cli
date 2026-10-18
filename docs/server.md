@@ -848,3 +848,12 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的实际 `git diff --numstat`，包括暂存与未暂存修改；未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
 
 查询不 fetch、不 checkout、不提交，也不创建或恢复文件快照。旧的轮次代码快照/回退接口已删除，返回 404。任务执行、审批、取消与清理沿用 main，前端不维护另一套修改/回退机制。
+
+## Workspace 路径与分支选择
+
+- `GET /v1/workspaces` 返回 `{workspaces:[{id,path}]}`，同时包含配置目录和用户选择的目录；原 `/v1/projects` 的仅 ID 结构保持兼容。
+- `POST /v1/workspace-directories` 接受 `{path?:string}`，返回当前规范化路径、parent 和子目录列表。未指定时从服务进程工作目录开始；只列目录，不读取文件内容。目录过多时返回前 500 项及 `truncated`，可直接输入目标路径。
+- `POST /v1/workspaces` 接受 `{path:string}`，只选择实际存在的目录，不创建文件夹。已有目录复用 ID，新目录生成稳定 ID，保存于私有 `state_dir/workspaces.json`，重启后加载。继续使用 main 的 `ServerConfig` / `Settings` 校验：workspace 之间不重叠，服务配置、模型配置及状态目录不位于可写 workspace 中。
+- `POST /v1/projects/{project_id}/git/branch` 接受 `{branch:string}`，只选择该工作区已存在的本地分支，执行原生 `git switch -- branch`，不 force、不丢弃修改。活动任务或 Git 拒绝切换时返回 409，成功后返回更新的 Git 元数据；GET Git 响应新增 `branches`。
+
+以上均要求原服务认证，并由现有同源网关一对一映射。最近四个 workspace 路径与排序保存在浏览器 `deepagent.workspace-history.v1`，服务侧目录索引用于重启后继续访问会话；两者不创建另一套任务执行逻辑。

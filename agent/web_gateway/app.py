@@ -12,6 +12,10 @@ from agent.web_gateway.config import GatewayConfig
 
 ROUTES = (
     ("GET", "/health", "/health"),
+    ("GET", "/workspaces", "/v1/workspaces"),
+    ("POST", "/workspaces", "/v1/workspaces"),
+    ("POST", "/workspace-directories", "/v1/workspace-directories"),
+    ("POST", "/projects/{project_id}/git/branch", "/v1/projects/{project_id}/git/branch"),
     ("GET", "/projects", "/v1/projects"),
     ("GET", "/projects/{project_id}/git", "/v1/projects/{project_id}/git"),
     ("GET", "/projects/{project_id}/models", "/v1/projects/{project_id}/models"),

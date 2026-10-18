@@ -1,6 +1,6 @@
 # 本地 Web Console
 
-当前 `web_beta` 已用 `deep-agent-web-20261018.tar.gz` 的 Vue 3 浅色界面替换旧 Stitch 工作区。首页负责选择项目和启动任务；线程负责回答、工作日志、内联审批、人工输入；首页和右侧变更栏读取对应 workspace 的实际 Git 信息。旧界面的验收报告是历史记录，当前验证见 [新前端适配验收](frontend-console-migration.md)。
+当前 `web_beta` 已用 `deep-agent-web-20261018.tar.gz` 的 Vue 3 浅色界面替换旧 Stitch 工作区。首页负责选择 workspace、Git 分支并启动任务；线程负责回答、工作日志、内联审批、人工输入；首页和右侧变更栏读取对应 workspace 的实际 Git 信息。旧界面的验收报告是历史记录，当前验证见 [新前端适配验收](frontend-console-migration.md)。
 
 ## 安装与开发
 
@@ -54,14 +54,16 @@ python -m agent.web_gateway.main --host 127.0.0.1 --port 8765
 
 ## 功能与恢复
 
-- 服务配置的项目选择、创建会话、文本任务、五类人工输入与 Other、工具批量审批、暂停继续、取消和中断恢复。
+- workspace 左侧菜单显示最近选择的四个历史目录，最后一项“选择路径”打开目录浏览器。可输入路径、浏览子目录或返回上一级；选中目录会保存到服务目录索引并用于新会话。
+- 右侧菜单显示所选 workspace 的实际本地 Git 分支，支持原生分支切换。无 Git 时隐藏，活动任务期间禁用；遇到 Git 冲突时保留现有修改并提示失败。
+- 创建会话、文本任务、五类人工输入与 Other、工具批量审批、暂停继续、取消和中断恢复。
 - 从服务发现活动任务和运行历史；缺少本机记录时仍能回放日志与最终回答，但原始提问会显示不可用。每次加载 20 轮，可继续加载更早记录。
 - 浏览器为每轮保存已应用的 SSE 游标，断线先校正状态再重连，轮询兜底。服务重启后旧 Run 为 `interrupted`，点击“恢复”会创建新 Run，并可能重新出现尚未处理的审批/提问。
 - 取消是 `cancelling` 到终态的协作过程，不撤销文件改动；关闭页面也不取消任务。
 - 首页卡片和变更侧栏直接读取 workspace 的 Git 分支、diff 统计与文件状态。无 Git 时隐藏相关卡片信息；“已合入”只依据当前 HEAD 在默认分支中的实际祖先关系。
 - 已移除每轮代码快照、回退/撤销回退以及对应接口；任务执行、交互与取消复用 main。
 - 加号菜单只显示“上传文件”和“上传图片”两个入口；本次调整菜单呈现。
-- 模型下拉读取服务配置的组织、模型与可用思考强度，按该顺序选择；收起只显示模型名称。首页选择在首轮提交前应用，会话内选择立即保存，后续运行及重启恢复使用该设置。运行中或等待交互时不能切换。权限、Skills、MCP 和项目工作副本仍由服务配置。HTTP 不支持上传、语音、桌面、终端交互、PR 或提交操作，对应入口说明能力边界。
+- 模型下拉读取服务配置的组织、模型与可用思考强度，按该顺序选择；收起只显示模型名称。首页选择在首轮提交前应用，会话内选择立即保存，后续运行及重启恢复使用该设置。运行中或等待交互时不能切换。权限、Skills 和 MCP 仍由服务配置。新增 workspace 继续使用 main 的目录边界与沙箱校验。HTTP 不支持上传、语音、桌面、终端交互、PR 或提交操作，对应入口说明能力边界。
 
 ## 本机配置
 
@@ -78,7 +80,7 @@ python -m agent.web_gateway.main --host 127.0.0.1 --port 8765
 ## 自动验证
 
 ```bash
-TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server_models.py tests/test_server.py tests/test_web_gateway.py tests/test_server_gitinfo.py tests/test_gitinfo.py -q
+TERM=xterm-256color REQUIRE_BWRAP_TEST=1 .venv/bin/python -m pytest tests/test_server_models.py tests/test_server.py tests/test_web_gateway.py tests/test_server_gitinfo.py tests/test_server_workspaces.py tests/test_gitinfo.py -q
 cd web
 npm ci
 npm run typecheck

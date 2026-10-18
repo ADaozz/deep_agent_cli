@@ -19,6 +19,7 @@ from agent.sandbox import select_backend
 from agent.session import SessionStore
 from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
+from agent.server.workspaces import restore_workspaces, prepare_workspace, save_workspace
 from agent.server.store import ServiceStore, TERMINAL
 
 LOG = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class RunManager:
             self.lease.close()
             raise RuntimeError("Only one service process may use this state directory") from None
         try:
+            restore_workspaces(config)
             # Validate model/paths and sandbox before accepting requests.
             secrets = [config.token]
             if factory is runner_factory:
@@ -122,6 +124,44 @@ class RunManager:
             raise ServiceError(404, "Unknown run")
         self.require_project(run["project_id"])
         return run
+
+    def workspaces(self) -> dict[str, Any]:
+        with self.lock:
+            return {"workspaces": [{"id": key, "path": str(path)} for key, path in self.config.projects.items()]}
+
+    def select_workspace(self, path: str) -> dict[str, Any]:
+        with self.lock:
+            if self.closing:
+                raise ServiceError(503, "Service is shutting down")
+            try:
+                project_id, candidate = prepare_workspace(self.config, path)
+                if project_id in self.config.projects:
+                    return {"id": project_id, "path": str(self.config.projects[project_id])}
+                settings = candidate.settings_for(project_id)
+                if self.factory is runner_factory:
+                    select_backend(settings.sandbox)
+            except (OSError, ValueError):
+                raise ServiceError(422, "无法选择该目录：请确认路径存在，且不与已配置 workspace 或服务配置/状态目录重叠") from None
+            try:
+                save_workspace(self.config, project_id, candidate.projects[project_id])
+            except (OSError, ValueError):
+                raise ServiceError(503, "Unable to save workspace selection") from None
+            self.config.projects.update(candidate.projects)
+            self.settings_by_project[project_id] = settings
+            return {"id": project_id, "path": str(candidate.projects[project_id])}
+
+    def switch_branch(self, project_id: str, branch: str) -> dict[str, Any]:
+        from agent.server.gitinfo import switch_branch
+        with self.lock:
+            self.require_project(project_id)
+            if self.closing:
+                raise ServiceError(503, "Service is shutting down")
+            if any(active.project_id == project_id for active in self.active.values()):
+                raise ServiceError(409, "请先结束当前 workspace 的任务或交互")
+            try:
+                return switch_branch(self.config.projects[project_id], branch)
+            except ValueError as exc:
+                raise ServiceError(409, str(exc)) from None
 
     def _model_settings(self, project_id: str) -> Settings:
         self.require_project(project_id)

@@ -1,4 +1,4 @@
-import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit } from './types'
+import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing } from './types'
 
 export interface ApiConfig {
   baseUrl: string
@@ -97,6 +97,10 @@ export async function getHealth(baseUrl: string): Promise<boolean> {
 }
 
 export const api = {
+  workspaces: (config: ApiConfig) => request<{ workspaces: Workspace[] }>(config, '/v1/workspaces'),
+  selectWorkspace: (config: ApiConfig, path: string) => request<Workspace>(config, '/v1/workspaces', { method: 'POST', body: { path } }),
+  directories: (config: ApiConfig, path?: string) => request<DirectoryListing>(config, '/v1/workspace-directories', { method: 'POST', body: path ? { path } : {} }),
+  switchBranch: (config: ApiConfig, projectId: string, branch: string) => request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/branch`, { method: 'POST', body: { branch } }),
   projectGit: (config: ApiConfig, projectId: string) =>
     request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git`),
   models: (config: ApiConfig, projectId: string) =>

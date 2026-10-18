@@ -111,7 +111,7 @@ def orchestrate():
     from fastapi import FastAPI
     with tempfile.TemporaryDirectory(prefix='deep-agent-web-e2e-') as folder:
         base=Path(folder)
-        for p in ('app','worker','third'):(base/p).mkdir()
+        for p in ('app','worker','third','extra-one','extra-two'):(base/p).mkdir()
         repo=base/'app'
         def git(*args):
             subprocess.run(['git','-c','user.name=Test','-c','user.email=test@example.invalid',*args],cwd=repo,check=True,capture_output=True)

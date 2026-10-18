@@ -167,6 +167,7 @@ export interface ModelCatalog {
 export interface WorkspaceGit {
   available: boolean
   branch?: string
+  branches?: string[]
   changed?: number
   head?: string | null
   base_branch?: string | null
@@ -174,4 +175,12 @@ export interface WorkspaceGit {
   added?: number | null
   removed?: number | null
   files?: { path: string; added: number | null; removed: number | null; status: string; binary: boolean }[]
+}
+
+export interface Workspace extends Project { path: string }
+export interface DirectoryListing {
+  path: string
+  parent: string | null
+  directories: { name: string; path: string }[]
+  truncated: boolean
 }

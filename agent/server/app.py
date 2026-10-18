@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.server.config import ServerConfig
 from agent.server.gitinfo import workspace_git
+from agent.server.workspaces import directories
 from agent.server.runtime import RunManager, ServiceError, runner_factory
 from agent.server.store import TERMINAL
 
@@ -60,6 +61,18 @@ class Continue(Body):
     interrupt_id: str
 
 
+class WorkspacePath(Body):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+class DirectoryPath(Body):
+    path: str | None = Field(default=None, max_length=4096)
+
+
+class BranchSelection(Body):
+    branch: str = Field(min_length=1, max_length=512)
+
+
 class ModelSelection(Body):
     model_id: str = Field(min_length=1, max_length=512)
     reasoning_effort: str = Field(min_length=1, max_length=64)
@@ -101,8 +114,27 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     api = APIRouter(prefix="/v1", dependencies=[Depends(authenticate)])
 
     @api.get("/projects")
-    def projects():
-        return {"projects": [{"id": project_id} for project_id in config.projects]}
+    def projects(service: RunManager = Depends(manager)):
+        return {"projects": [{"id": item["id"]} for item in service.workspaces()["workspaces"]]}
+
+    @api.get("/workspaces")
+    def workspaces(service: RunManager = Depends(manager)):
+        return service.workspaces()
+
+    @api.post("/workspaces")
+    def select_workspace(body: WorkspacePath, service: RunManager = Depends(manager)):
+        return service.select_workspace(body.path)
+
+    @api.post("/workspace-directories")
+    def workspace_directories(body: DirectoryPath):
+        try:
+            return directories(body.path)
+        except (OSError, ValueError):
+            raise HTTPException(422, "无法读取该目录，请检查路径和访问权限") from None
+
+    @api.post("/projects/{project_id}/git/branch")
+    def switch_branch(project_id: str, body: BranchSelection, service: RunManager = Depends(manager)):
+        return service.switch_branch(project_id, body.branch)
 
     @api.get("/projects/{project_id}/git")
     def project_git(project_id: str, service: RunManager = Depends(manager)):
