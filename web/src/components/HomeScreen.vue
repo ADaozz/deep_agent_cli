@@ -154,7 +154,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
             <span class="thumb-note">
               <span>{{ row.label }}</span>
               <span v-if="workspaceGit[row.projectId]?.available" class="git-diff" aria-label="Git diff">
-                <template v-if="workspaceGit[row.projectId].added != null">+{{ workspaceGit[row.projectId].added }} / -{{ workspaceGit[row.projectId].removed }}</template>
+                <template v-if="workspaceGit[row.projectId].added != null"><span class="git-added">+{{ workspaceGit[row.projectId].added }}</span> / <span class="git-removed">-{{ workspaceGit[row.projectId].removed }}</span></template>
                 <template v-else>{{ workspaceGit[row.projectId].changed }} 个变更路径</template>
               </span>
             </span>

@@ -661,6 +661,32 @@ a {
   background: rgba(20, 20, 20, 0.03);
 }
 
+.recent-row .git-diff,
+.recent-row .git-added,
+.recent-row .git-removed,
+.recent-row .mini-pill,
+.recent-row .git-merged {
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.recent-row:is(:hover, :focus-visible) .git-diff {
+  color: var(--purple);
+}
+
+.recent-row:is(:hover, :focus-visible) .git-added,
+.recent-row:is(:hover, :focus-visible) .git-merged {
+  color: var(--green);
+}
+
+.recent-row:is(:hover, :focus-visible) .git-removed {
+  color: var(--danger);
+}
+
+.recent-row:is(:hover, :focus-visible) .mini-pill {
+  color: var(--purple);
+  background-color: rgba(117, 101, 204, 0.12);
+}
+
 .thumb {
   width: 134px;
   height: 84px;
