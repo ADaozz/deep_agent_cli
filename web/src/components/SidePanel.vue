@@ -74,7 +74,7 @@ const tracked = computed(() => files.value.filter((file) => {
 
 const untrackedFiles = computed(() => (scope.value === 'staged' ? [] : files.value.filter(isUntracked)))
 const groups = computed(() => [
-  { label: '变更文件', files: tracked.value },
+  { label: '', files: tracked.value },
   { label: '未跟踪', files: untrackedFiles.value },
 ].filter((group) => group.files.length))
 const shown = computed(() => groups.value.flatMap((group) => group.files))
@@ -283,8 +283,8 @@ async function copyPaths(): Promise<void> {
         </div>
 
         <template v-if="shown.length">
-          <div v-for="group in groups" :key="group.label" class="panel-group">
-            <p class="panel-label">{{ group.label }}</p>
+          <div v-for="(group, groupIndex) in groups" :key="group.label || groupIndex" class="panel-group">
+            <p v-if="group.label" class="panel-label">{{ group.label }}</p>
             <article v-for="file in group.files" :key="file.path">
               <button
                 class="file-row"
