@@ -88,6 +88,30 @@ it('removes the empty session when the first run is rejected', async () => {
   expect(store.app.sessions.some((item) => item.id === 'empty')).toBe(false)
   expect(store.app.sessionId).toBe('')
   expect(calls.some((call) => call.startsWith('DELETE '))).toBe(true)
+  expect(store.app.banner?.hint).toContain('每个项目只允许一个未结束的运行')
+})
+
+it('explains a workspace lock separately from an unfinished run', async () => {
+  vi.resetModules()
+  vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
+    const method = init?.method || 'GET'
+    if (method === 'POST' && String(input).endsWith('/sessions')) {
+      return new Response(JSON.stringify({ id: 'empty', project_id: 'app', created_at: '2026-10-18T00:00:00Z' }), { status: 201 })
+    }
+    if (method === 'POST' && String(input).includes('/runs')) {
+      return new Response(JSON.stringify({ detail: '这个 workspace 正在被另一个 Deep Agent 使用' }), { status: 409 })
+    }
+    if (method === 'DELETE') return new Response(JSON.stringify({ deleted: true }))
+    return new Response('{}', { status: 404 })
+  }))
+  const store = await import('../store/app')
+  stop = store.stopStreams
+  store.app.projects = [{ id: 'app', path: '/repo' }]
+  store.app.draftProjectId = 'app'
+  expect(await store.sendFromHome('hello')).toBe(false)
+  expect(store.app.banner?.text).toContain('这个 workspace 正在被另一个 Deep Agent 使用')
+  expect(store.app.banner?.hint).toBe('请先结束另一端再提交。已保留你输入的文本。')
+  expect(store.app.banner?.hint).not.toContain('每个项目只允许一个未结束的运行')
 })
 
 it('appends to the URL thread instead of creating a session during connect', async () => {
