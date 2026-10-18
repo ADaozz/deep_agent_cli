@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { api } from '../api/client'
-import type { Capabilities, SkillReference } from '../api/types'
+import type { Capabilities } from '../api/types'
 import { apiConfig } from '../store/settings'
 import { permissionDrafts } from '../store/capabilities'
 import { models } from '../store/models'
 import Popover from './Popover.vue'
 import Icon from './Icon.vue'
 const props = defineProps<{ projectId: string; sessionId: string; disabled: boolean }>()
-const emit = defineEmits<{ skill: [SkillReference] }>()
 const open = ref(false)
 const catalog = ref<Capabilities>()
 const mode = ref<'ask' | 'allow'>('ask')
@@ -28,7 +27,7 @@ watch(() => [props.projectId, props.sessionId], async () => {
       props.sessionId ? api.permission(apiConfig(), props.sessionId) : Promise.resolve(permissionDrafts[props.projectId] || { mode: 'ask' as const }),
     ])
     if (version === generation) { catalog.value = result; mode.value = permission.mode }
-  } catch (e) { if (version === generation) error.value = e instanceof Error ? e.message : '无法加载能力' }
+  } catch (e) { if (version === generation) error.value = e instanceof Error ? e.message : '无法加载权限' }
 }, { immediate: true })
 async function selectPermission(value: 'ask' | 'allow'): Promise<void> {
   if (blocked.value) return
@@ -39,22 +38,18 @@ async function selectPermission(value: 'ask' | 'allow'): Promise<void> {
   try {
     if (session) await api.selectPermission(apiConfig(), session, value, confirmation.value)
     else permissionDrafts[props.projectId] = { mode: value, confirmation: confirmation.value }
-    if (version === generation) { mode.value = value; confirmOpen.value = false; confirmation.value = '' }
+    if (version === generation) { mode.value = value; open.value = false; confirmOpen.value = false; confirmation.value = '' }
   } catch (e) { if (version === generation) error.value = e instanceof Error ? e.message : '无法切换权限' }
   finally { busy.value = false; if (session) models.changing[session] = false }
 }
 </script>
 <template>
   <span class="anchor">
-    <button class="model-pick" type="button" aria-label="能力和权限" :disabled="blocked" @click="open = !open">
-      能力 · {{ mode }}<Icon name="chevronDown" :size="10" />
+    <button class="model-pick" type="button" aria-label="切换权限" :disabled="blocked" @click="open = !open">
+      {{ mode }}<Icon name="chevronDown" :size="10" />
     </button>
     <Popover v-if="open" align="up" end @close="open = false">
-      <div class="pop-head">Skill</div>
-      <button v-for="skill in catalog?.skills || []" :key="skill.path" class="pop-item" type="button" :title="skill.description" :disabled="blocked" @click="emit('skill', skill); open = false"><span class="grow">{{ skill.name }}</span></button>
-      <p v-if="catalog && !catalog.skills.length" class="pop-note">没有可用的 Skill</p>
-      <p v-for="warning in catalog?.warnings || []" :key="warning" class="pop-note">{{ warning }}</p>
-      <div class="pop-sep" /><div class="pop-head">权限</div>
+      <div class="pop-head">权限</div>
       <button class="pop-item" type="button" :disabled="blocked || !catalog" @click="selectPermission('ask')"><span class="grow">ask · 逐次审批</span><Icon v-if="mode === 'ask'" name="check" :size="12" /></button>
       <button class="pop-item" type="button" :disabled="blocked || !catalog?.allow_available" @click="confirmOpen = true; confirmation = ''"><span class="grow">allow · 自动批准</span><Icon v-if="mode === 'allow'" name="check" :size="12" /></button>
       <p v-if="catalog && !catalog.allow_available" class="pop-note">allow 仅在沙箱模式下可用</p>

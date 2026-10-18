@@ -4,7 +4,7 @@
  *   card (home)  → rounded 12 card, 640×120, textarea above the control bar
  *   pill (thread) → 44px pill with the textarea inline between + and the buttons
  *
- * Left: circular "+" (upload file / upload image) and the model label. Right: the round black send / stop button. Model selection uses the service catalog
+ * Left: circular "+" (files / images / Skills), permission mode and model label. Right: the round black send / stop button. Model selection uses the service catalog
  * and session settings; attachments are plain path references.
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
@@ -13,7 +13,8 @@ import AttachmentPathDialog from './AttachmentPathDialog.vue'
 import type { PathReference } from '../store/drafts'
 import Popover from './Popover.vue'
 import { models } from '../store/models'
-import CapabilityPicker from './CapabilityPicker.vue'
+import PermissionPicker from './PermissionPicker.vue'
+import SkillsMenu from './SkillsMenu.vue'
 import type { SkillReference } from '../api/types'
 import ModelPicker from './ModelPicker.vue'
 import { app, currentRecord } from '../store/app'
@@ -43,6 +44,12 @@ const emit = defineEmits<{
 
 const area = ref<HTMLTextAreaElement | null>(null)
 const plusOpen = ref(false)
+const skillsOpen = ref(false)
+watch(plusOpen, () => { skillsOpen.value = false })
+function selectSkill(skill: SkillReference): void {
+  if (!props.skills.some(item => item.path === skill.path)) emit('update:skills', [...props.skills, skill])
+  plusOpen.value = false
+}
 const pathKind = ref<'file' | 'image' | null>(null)
 watch(() => props.draftKey, () => { pathKind.value = null; plusOpen.value = false })
 function pickPath(kind: 'file' | 'image'): void { plusOpen.value = false; pathKind.value = kind }
@@ -122,18 +129,22 @@ function onRound(): void {
             <Icon name="plus" :size="12" />
           </button>
           <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
-            <button class="pop-item" type="button" @click="pickPath('file')">
-              <Icon name="file" :size="13" />
-              <span class="grow">上传文件</span>
-            </button>
-            <button class="pop-item" type="button" @click="pickPath('image')">
-              <Icon name="image" :size="13" />
-              <span class="grow">上传图片</span>
-            </button>
+            <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
+            <template v-else>
+              <button class="pop-item" type="button" @click="pickPath('file')">
+                <Icon name="file" :size="13" />
+                <span class="grow">上传文件</span>
+              </button>
+              <button class="pop-item" type="button" @click="pickPath('image')">
+                <Icon name="image" :size="13" />
+                <span class="grow">上传图片</span>
+              </button>
+              <button class="pop-item" type="button" :disabled="disabled || running || busy" @click="skillsOpen = true"><span class="grow">Skills</span><Icon name="chevronRight" :size="11" /></button>
+            </template>
           </Popover>
         </span>
 
-        <CapabilityPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" @skill="skill => emit('update:skills', skills.some(s => s.path === skill.path) ? skills : [...skills, skill])" />
+        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" />
         <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
 
         <span class="spacer" />
@@ -156,14 +167,18 @@ function onRound(): void {
           <Icon name="plus" :size="12" />
         </button>
         <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
-          <button class="pop-item" type="button" @click="pickPath('file')">
-            <Icon name="file" :size="13" />
-            <span class="grow">上传文件</span>
-          </button>
-          <button class="pop-item" type="button" @click="pickPath('image')">
-            <Icon name="image" :size="13" />
-            <span class="grow">上传图片</span>
-          </button>
+          <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
+          <template v-else>
+            <button class="pop-item" type="button" @click="pickPath('file')">
+              <Icon name="file" :size="13" />
+              <span class="grow">上传文件</span>
+            </button>
+            <button class="pop-item" type="button" @click="pickPath('image')">
+              <Icon name="image" :size="13" />
+              <span class="grow">上传图片</span>
+            </button>
+            <button class="pop-item" type="button" :disabled="disabled || running || busy" @click="skillsOpen = true"><span class="grow">Skills</span><Icon name="chevronRight" :size="11" /></button>
+          </template>
         </Popover>
       </span>
 
@@ -179,7 +194,7 @@ function onRound(): void {
       />
 
       <div class="right">
-        <CapabilityPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" @skill="skill => emit('update:skills', skills.some(s => s.path === skill.path) ? skills : [...skills, skill])" />
+        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" />
         <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
         <button
           class="round round-send"
