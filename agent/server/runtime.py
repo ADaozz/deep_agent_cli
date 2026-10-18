@@ -370,7 +370,7 @@ class RunManager:
             if len(self.active) >= self.config.max_runs:
                 raise ServiceError(429, "Run capacity reached")
             run_id = str(uuid4())
-            result = self.store.create_run(run_id, session)
+            result = self.store.create_run(run_id, session, "" if resume or not text else text)
             active = ActiveRun(session["project_id"])
             self.active[run_id] = active
             self.store.emit(run_id, "run_started", result)

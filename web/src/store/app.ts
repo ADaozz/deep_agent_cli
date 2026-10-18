@@ -305,7 +305,18 @@ function showError(error: unknown, context: string): void {
 
 // ---------------------------------------------------------------- connections
 
-export async function connect(): Promise<void> {
+let connecting: Promise<void> | null = null
+
+export function connect(): Promise<void> {
+  if (!connecting) {
+    connecting = connectOnce().finally(() => {
+      connecting = null
+    })
+  }
+  return connecting
+}
+
+async function connectOnce(): Promise<void> {
   clearBanner()
   app.loading.projects = true
   try {
@@ -348,7 +359,12 @@ export async function loadSessions(): Promise<void> {
     app.sessions = (result.sessions ?? []).slice().sort((a, b) => b.created_at.localeCompare(a.created_at))
     for (const session of app.sessions) {
       const existing = app.records[session.id]
-      if (existing) existing.session = session
+      if (existing) {
+        existing.session = session
+        if (!existing.title && session.title) existing.title = session.title
+      } else if (session.title) {
+        ensureRecord(session).title = session.title
+      }
     }
   } catch (error) {
     showError(error, '加载会话')
@@ -403,9 +419,38 @@ export function setDraftProject(projectId: string): void {
  * first run in it. The session is only shown as "active" once the run exists,
  * so a rejected submit keeps the user on the home screen with their text.
  */
+async function discardEmptySession(sessionId: string): Promise<void> {
+  app.sessions = app.sessions.filter((item) => item.id !== sessionId)
+  delete app.records[sessionId]
+  delete app.history[sessionId]
+  if (app.sessionId === sessionId) {
+    app.sessionId = ''
+    app.view = 'home'
+    writeThreadLocation('')
+  }
+  try {
+    await api.deleteSession(apiConfig(), sessionId)
+  } catch {
+    await loadSessions().catch(() => undefined)
+  }
+}
+
 export async function sendFromHome(text: string, filePaths: string[] = []): Promise<boolean> {
   const value = text.trim()
   if (!value && !filePaths.length) return false
+  if (app.busy.submit) return false
+  app.busy.submit = true
+  const located = readThreadLocation()
+  if (located && located !== app.sessionId) {
+    await connect()
+    const known = app.sessions.some((item) => item.id === located) || Boolean(app.records[located])
+    if (known) {
+      selectSession(located)
+      app.view = 'thread'
+      app.busy.submit = false
+      return submitText(value, filePaths)
+    }
+  }
   const projectId = app.draftProjectId || app.projects[0]?.id || ''
   if (!projectId) {
     setBanner(
@@ -413,13 +458,14 @@ export async function sendFromHome(text: string, filePaths: string[] = []): Prom
       '没有可用的仓库。',
       '服务配置里没有任何项目。请在服务 YAML 中添加后重新连接。',
     )
+    app.busy.submit = false
     return false
   }
-  if (app.busy.submit) return false
-  app.busy.submit = true
   clearBanner()
+  let sessionId = ''
   try {
     const session = await api.createSession(apiConfig(), projectId)
+    sessionId = session.id
     ensureRecord(session)
     if (!app.sessions.some((item) => item.id === session.id)) {
       app.sessions = [session, ...app.sessions]
@@ -436,6 +482,10 @@ export async function sendFromHome(text: string, filePaths: string[] = []): Prom
     return true
   } catch (error) {
     showError(error, '启动 Agent')
+    const record = sessionId ? app.records[sessionId] : undefined
+    if (sessionId && (!record || record.runs.length === 0)) {
+      await discardEmptySession(sessionId)
+    }
     return false
   } finally {
     app.busy.submit = false
@@ -522,7 +572,8 @@ export async function loadSessionHistory(sessionId: string, more = false): Promi
         applyRunSnapshot(existing, snapshot)
         streamRun(existing)
       } else {
-        const restored = makeRunRecord(snapshot, '原始指令不可用（服务未持久化提交文本）', false)
+        const saved = typeof snapshot.prompt === 'string' ? snapshot.prompt.trim() : ''
+        const restored = makeRunRecord(snapshot, saved || '原始指令不可用（服务未持久化提交文本）', false)
         attachRun(record, restored)
         streamRun(restored)
       }

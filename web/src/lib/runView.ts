@@ -118,7 +118,8 @@ function ensureBlock(view: RunView): AssistantBlock {
 function openThinking(block: AssistantBlock, text: string): void {
   if (!text.trim()) return
   if (!block.thinkingStartedAt) block.thinkingStartedAt = Date.now()
-  block.thinkingEndedAt = 0
+  // Later cumulative reasoning snapshots must not reopen a window that already
+  // closed, or the label grows to the whole turn.
 }
 
 /** Reasoning gave way to prose/tools: close the window once. */

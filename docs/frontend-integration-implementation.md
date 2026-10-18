@@ -20,7 +20,7 @@
 1. `agent/stream.py::StreamDeltaCallback` 发送 `assistant` / `reasoning` **累计文本**，不是附件 `answer` 示例的逐片追加。实际 assistant 更新替换；测试文档 answer 增量以兼容方式单独归并。reasoning 不展开正文。最终 `result.output` 权威覆盖。
 2. `agent_event` 是工具/计划等结构化事件，不能再追加 Assistant 文本；只有服务顶层 interaction_requested 的 Run 快照带当前 interrupt_id。
 3. Human-input 已由共享函数基于 Runner payload 校验 required 空值，HTTP 入队前 422；false 有效，可选可省略。后端未强制字段类型/枚举成员。Other 的实际 CLI 编码是自由文本直接替代 marker，多选用原选项值加自由文本；须用真实 Runner 测试确认后才开放。
-4. 现有 Run 表没有用户 prompt/会话标题。新浏览器以 Session ID 片段命名，指令缺失有明确提示；不加敏感文本存储字段。
+4. Run 表现保存提交文本，会话列表返回截断标题。更早没有该字段的运行仍提示指令不可用。保存前会按服务密钥表打码。
 5. M0 时两个只读 API 尚不存在；M3 实现前不使用虚构响应。模型/分支/Diff/测试统计/截图均无可信 HTTP 来源，隐藏或明确空态。
 
 ## API 映射

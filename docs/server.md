@@ -239,9 +239,11 @@ GET /v1/projects
 
 **列表**：`GET /v1/sessions` 或 `GET /v1/sessions?project_id=app`。
 
-返回 `200 {"sessions":[Session, ...]}`。按创建时间倒序，最多 100 条，没有分页参数；不按最后聊天时间排序。过滤条件不存在返回 `404`，只返回目前配置中仍存在的项目会话。页面不能据此判断项目是否空闲。
+返回 `200 {"sessions":[Session, ...]}`。按创建时间倒序，最多 100 条，没有分页参数；不按最后聊天时间排序。每项多一个 `title`：该会话第一条非空提问折叠空白后的前 80 字，没有提问时为空字符串。过滤条件不存在返回 `404`，只返回目前配置中仍存在的项目会话。页面不能据此判断项目是否空闲。
 
 **详情**：`GET /v1/sessions/{session_id}`，返回 `200 Session`。会话不存在，或其项目已经移出当前配置，返回 `404`。
+
+**丢弃空会话**：`DELETE /v1/sessions/{session_id}`。只有还没有任何任务的会话会被删除，返回 `{"deleted": true}`。已有任务返回 `409`，未知会话返回 `404`。这只用于提交被拒绝后的清理，不是会话归档接口。
 
 ### 4.4 提交文字任务 / 恢复中断
 
@@ -261,7 +263,7 @@ POST /v1/sessions/{session_id}/runs
 
 | 字段 | 类型与默认值 | 约束 |
 | --- | --- | --- |
-| `text` | string 或 null；默认 null | 无 file_paths 时必填，长度 1–100000；有路径时可为空或省略 |
+| `text` | string 或 null；默认 null | 无 file_paths 时必填，长度 1–100000；有路径时可为空或省略。受理后与路径一起写入该 run 的 `prompt`，GET run 会返回；列表摘要不含这段文字。`resume=true` 的 `prompt` 为空 |
 | `file_paths` | string[]；默认 [] | 最多 100 个单行路径；后缀与模型能力校验见 Web 扩展接口 |
 | `resume` | boolean；默认 false | true 时不能同时提供非 null 的 text 或非空 file_paths；用于恢复 checkpoint 中已有中断 |
 
@@ -847,7 +849,7 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 `GET /v1/projects/{project_id}/git`（网关 `/api/agent/projects/{project_id}/git`）读取对应工作区的 Git 元数据，复用 main CLI 的分支/变更数量解析。没有仓库或 Git 不可用时返回 `{available:false}`，前端隐藏 diff、分支与合并信息。
 
-可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的实际 `git diff --numstat`，包括暂存与未暂存修改；未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
+可用时返回 `branch`、`changed`、`head`、`added`、`removed`、`files`、`base_branch` 和 `merged`。行数来自工作区相对 HEAD 的 `git diff -M --numstat`，包括暂存与未暂存修改，并检测重命名。纯重命名计为 0/0，内容改动只计实际增删；首页卡片的合计与文件列表使用同一组数字。未跟踪或二进制文件不伪造行数。无提交的仓库行数为 null。默认分支优先使用本地已知的 `origin/HEAD`，否则查找 main/master。`merged=true` 仅表示当前分支 HEAD 是默认分支的祖先；当前即默认分支或 detached HEAD 时不显示合并标记，不推断 PR 状态。
 
 `files` 各项除 `path`、`added`、`removed`、`status`、`binary` 外，还包含 `staged`、`unstaged`、`untracked` 和重命名/复制时的 `old_path`。文件列表用 `git status --porcelain=v1 -z --untracked-files=all` 解析，因此空格、引号和换行文件名按原始路径返回，未跟踪目录会展开为其中的文件。`changed` 仍沿用 CLI 的分支状态行计数。
 

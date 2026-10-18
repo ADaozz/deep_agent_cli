@@ -197,3 +197,15 @@ def test_gateway_forwards_file_diff_and_rejects_unknown_query():
         assert seen[0].url.params['scope'] == 'staged'
         assert seen[0].url.params['full'] == '1'
         assert client.get('/api/agent/projects/app/git/diff', params={'path': 'a', 'extra': '1'}).status_code == 422
+
+
+def test_gateway_forwards_discard_of_empty_session():
+    seen = []
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={'deleted': True})
+    with TestClient(create_app(GatewayConfig(token=TOKEN), transport=httpx.MockTransport(upstream)), base_url=ORIGIN) as client:
+        response = client.request('DELETE', '/api/agent/sessions/s', headers={'Origin': ORIGIN, 'Content-Type': 'application/json'}, content=b'{}')
+        assert response.status_code == 200 and response.json() == {'deleted': True}
+        assert seen[0].method == 'DELETE' and seen[0].url.path == '/v1/sessions/s'
+        assert seen[0].headers['Authorization'] == 'Bearer ' + TOKEN

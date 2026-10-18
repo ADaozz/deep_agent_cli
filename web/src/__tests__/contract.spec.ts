@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api, endpoint, streamEvents } from '../api/client'
 import { applySseMessage, emptyView, type RunRecord } from '../lib/runView'
+import { buildTimeline } from '../lib/timeline'
 import { renderMarkdown } from '../lib/markdown'
 import type { Run } from '../api/types'
 
@@ -45,5 +46,25 @@ describe('current gateway contract', () => {
     const node = document.createElement('div'); node.innerHTML = html
     expect(node.querySelector('img,script')).toBeNull()
     expect([...node.querySelectorAll('a')].map(a => a.href)).toEqual(['https://example.com/'])
+  })
+  it('keeps inline code nested inside bold', () => {
+    const html = renderMarkdown('1. **glob `**/*.py`**：成功')
+    expect(html).toContain('<code>**/*.py</code>')
+    expect(html).toContain('<strong>glob <code>**/*.py</code></strong>')
+    expect(html).not.toMatch(/\u0000/)
+    expect(html).not.toContain('>0<')
+  })
+  it('keeps a closed thinking window when a later reasoning snapshot arrives', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-18T00:00:00Z'))
+    const r = record()
+    r.run.status = 'running'
+    applySseMessage(r, { id: '1', event: 'delta', data: { kind: 'reasoning', text: '先看调用' } })
+    vi.setSystemTime(new Date('2026-10-18T00:00:05Z'))
+    applySseMessage(r, { id: '2', event: 'delta', data: { kind: 'assistant', text: '完成' } })
+    vi.setSystemTime(new Date('2026-10-18T00:00:12Z'))
+    applySseMessage(r, { id: '3', event: 'delta', data: { kind: 'reasoning', text: '先看调用（累计快照）' } })
+    expect(buildTimeline(r).rows.find((row) => row.kind === 'thinking')?.verb).toBe('思考了 5 秒')
+    vi.useRealTimers()
   })
 })

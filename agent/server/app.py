@@ -203,6 +203,13 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
     def session(session_id: str, service: RunManager = Depends(manager)):
         return service.session(session_id)
 
+    @api.delete("/sessions/{session_id}")
+    def discard_session(session_id: str, service: RunManager = Depends(manager)):
+        service.session(session_id)
+        if not service.store.delete_empty_session(session_id):
+            raise HTTPException(409, "会话已有任务，不能删除")
+        return {"deleted": True}
+
     @api.get("/sessions/{session_id}/runs")
     def session_runs(session_id: str, limit: int = Query(default=50, ge=1, le=100),
                      cursor: str | None = Query(default=None, max_length=512),

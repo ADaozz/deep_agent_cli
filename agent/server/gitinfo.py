@@ -151,24 +151,38 @@ def _numstat(workspace: Path, head: str | None) -> dict[str, dict] | None:
         return {'files': {}, 'added': None, 'removed': None}
     code, payload, truncated = _run_git(
         workspace,
-        ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--numstat', '-z', 'HEAD', '--'],
+        ['diff', '--no-ext-diff', '--no-textconv', '-M', '--numstat', '-z', 'HEAD', '--'],
         STATUS_BYTES,
     )
     if code not in (0, 1) or truncated:
         return None
     files: dict[str, dict] = {}
     added = removed = 0
-    for record in payload.split(b'\0'):
+    parts = payload.split(b'\0')
+    index = 0
+    while index < len(parts):
+        record = parts[index]
         if not record:
+            index += 1
             continue
         plus, minus, path = record.split(b'\t', 2)
+        old_path = None
+        if path == b'':
+            # Rename records are `added\tremoved\t\0old\0new\0`.
+            if index + 2 >= len(parts):
+                break
+            old_path = _decode(parts[index + 1])
+            name = _decode(parts[index + 2])
+            index += 3
+        else:
+            name = _decode(path)
+            index += 1
         binary = plus == b'-' or minus == b'-'
         plus_count, minus_count = (None, None) if binary else (int(plus), int(minus))
-        name = _decode(path)
         files[name] = {
             'path': name, 'added': plus_count, 'removed': minus_count,
-            'status': 'modified', 'binary': binary, 'staged': False, 'unstaged': False,
-            'untracked': False, 'old_path': None,
+            'status': 'renamed' if old_path else 'modified', 'binary': binary,
+            'staged': False, 'unstaged': False, 'untracked': False, 'old_path': old_path,
         }
         if not binary and plus_count is not None and minus_count is not None:
             added += plus_count

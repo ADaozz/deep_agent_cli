@@ -124,6 +124,8 @@ def test_file_diff_handles_rename_binary_and_unborn_repository(tmp_path):
     info = workspace_git(root)
     renamed = next(item for item in info['files'] if item['path'] == 'renamed.txt')
     assert renamed['status'] == 'renamed' and renamed['old_path'] == 'file.txt'
+    assert (renamed['added'], renamed['removed']) == (1, 0)
+    assert (info['added'], info['removed']) == (1, 0)
     assert all(item['path'] != 'file.txt' for item in info['files'])
     diff = file_diff(root, 'renamed.txt', 'all')
     assert diff['old_path'] == 'file.txt'
@@ -140,6 +142,25 @@ def test_file_diff_handles_rename_binary_and_unborn_repository(tmp_path):
     staged = file_diff(empty, 'first.txt', 'staged')
     assert lines(staged, 'add') == ['first']
     assert workspace_git(empty)['head'] is None
+
+
+def test_pure_rename_counts_match_between_summary_and_files(tmp_path):
+    root = tmp_path / 'repo'
+    repository(root)
+    (root / 'other.txt').write_text('one\n')
+    git(root, 'add', 'other.txt')
+    git(root, 'commit', '-m', 'other')
+    git(root, 'mv', 'file.txt', 'lib.py')
+    (root / 'other.txt').write_text('one\nmore\n')
+    info = workspace_git(root)
+    renamed = next(item for item in info['files'] if item['path'] == 'lib.py')
+    other = next(item for item in info['files'] if item['path'] == 'other.txt')
+    assert renamed['status'] == 'renamed' and renamed['old_path'] == 'file.txt'
+    assert (renamed['added'], renamed['removed']) == (0, 0)
+    assert (other['added'], other['removed']) == (1, 0)
+    counted = [item for item in info['files'] if item['added'] is not None and item['removed'] is not None]
+    assert (info['added'], info['removed']) == (sum(item['added'] for item in counted), sum(item['removed'] for item in counted))
+    assert (info['added'], info['removed']) == (1, 0)
 
 
 def test_file_diff_rejects_paths_outside_workspace_and_keeps_special_names(tmp_path):
