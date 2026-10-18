@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -87,6 +88,50 @@ class TranscriptBlock:
     # Raw ToolMessage.artifact restored from the checkpoint; UI previews are
     # re-derived from it instead of being persisted.
     artifact: Any = None
+
+
+class WorkspaceLease:
+    """Exclusive hold on one workspace. Release drops the flock; the file stays."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self.released = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+
+
+def try_acquire_workspace(workspace: Path, *, state_path: str | Path | None = None) -> WorkspaceLease | None:
+    """One operator per workspace, shared by the CLI and the HTTP service.
+
+    The lock file sits beside the session database ``main`` already uses for
+    that workspace, so both entry points contend for the same hold.
+    """
+    database = workspace_state_path(workspace, override=state_path)
+    database.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(database.parent, 0o700)
+    except OSError:
+        pass
+    path = database.parent / f"{database.name}.workspace.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    handle = os.fdopen(fd, "r+b")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return WorkspaceLease(handle)
 
 
 def workspace_state_path(workspace: Path, *, override: str | Path | None = None) -> Path:
@@ -308,6 +353,15 @@ class SessionStore:
         if len(rows) != 1:
             return None
         return _session_info(rows[0])
+
+    def delete_unused(self, session_id: str) -> bool:
+        """Drop a catalog row that has never stored a checkpoint."""
+        if self.checkpointer.get_tuple({"configurable": {"thread_id": session_id}}) is not None:
+            return False
+        with self.checkpointer.lock:
+            cursor = self._conn.execute("DELETE FROM session_catalog WHERE id = ?", (session_id,))
+            self._conn.commit()
+            return cursor.rowcount > 0
 
 
 def _session_info(row: Any) -> SessionInfo:

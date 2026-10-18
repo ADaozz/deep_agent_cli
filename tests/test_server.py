@@ -494,7 +494,7 @@ def test_server_settings_validate_project_instead_of_launch_directory(config, mo
     settings = config.settings_for("one")
     assert settings.sandbox.workspace == config.projects["one"]
     assert settings.sandbox.allow_unsandboxed is False
-    assert settings.state_path == config.state_dir / "projects" / "one" / "sessions.sqlite3"
+    assert settings.state_path is None
 
 
 @pytest.mark.parametrize("unsafe_project", ["one", "two"])

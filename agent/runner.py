@@ -217,6 +217,7 @@ class AgentRunner:
         self._event_handler: RunEventHandler | None = None
         self._seen_tool_calls: set[str] = set()
         self.settings = settings
+        self.workspace_lease = None
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
         self._operation_lock = Lock()
@@ -945,6 +946,10 @@ class AgentRunner:
         if self._attachment_tempdir is not None:
             self._attachment_tempdir.cleanup()
             self._attachment_tempdir = None
+        lease = self.workspace_lease
+        if lease is not None:
+            lease.release()
+            self.workspace_lease = None
 
     def _require_empty_input_queue(self) -> None:
         if self.control.pending_steering_count() or self.control.pending_follow_up_count():

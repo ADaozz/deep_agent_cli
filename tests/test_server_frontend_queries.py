@@ -59,6 +59,41 @@ def test_active_run_returns_real_nonterminal_snapshot(config,text,status):
         assert client.get('/v1/projects/one/active-run',headers=AUTH).json()=={'run':None}
 
 
+def test_session_catalog_is_shared_and_workspace_operation_is_exclusive(config):
+    from agent.session import SessionStore, try_acquire_workspace
+    with TestClient(create_app(config, factory=lambda *args: FakeRunner())) as client:
+        sid = session(client)
+        catalog = SessionStore.for_workspace(config.projects['one'])
+        try:
+            assert catalog.get(sid) is not None
+            cli = catalog.create_session(title='来自终端')
+        finally:
+            catalog.close()
+        listed = client.get('/v1/sessions?project_id=one', headers=AUTH).json()['sessions']
+        assert any(item['id'] == cli.id and item['title'] == '来自终端' for item in listed)
+        assert client.get(f'/v1/sessions/{cli.id}', headers=AUTH).status_code == 200
+        held = try_acquire_workspace(config.projects['one'])
+        assert held is not None
+        try:
+            rejected = client.post(f'/v1/sessions/{sid}/runs', json={'text': '占用中'}, headers=AUTH)
+            assert rejected.status_code == 409
+            assert 'workspace' in rejected.json()['detail']
+        finally:
+            held.release()
+        continued = submit(client, cli.id, '终端会话继续')
+        wait(client, continued, 'completed')
+        assert client.get(f'/v1/runs/{continued}', headers=AUTH).json()['prompt'] == '终端会话继续'
+        titled = client.get('/v1/sessions?project_id=one', headers=AUTH).json()['sessions']
+        assert any(item['id'] == cli.id and item['title'] == '终端会话继续' for item in titled)
+        assert client.request('DELETE', f'/v1/sessions/{sid}', headers=AUTH).json() == {'deleted': True}
+        reopened = SessionStore.for_workspace(config.projects['one'])
+        try:
+            assert reopened.get(sid) is None
+            assert reopened.get(cli.id) is not None
+        finally:
+            reopened.close()
+
+
 def test_submitted_prompt_is_restored_and_empty_sessions_can_be_discarded(config):
     with TestClient(create_app(config, factory=lambda *args: FakeRunner())) as client:
         sid = session(client)

@@ -16,7 +16,7 @@ from agent.bootstrap import initialize_user_files
 from agent.config import ConfigError, Settings, require_keybindings_outside_workspace
 from agent.runner import AgentRunner
 from agent.sandbox import ExecutionMode, SandboxUnavailableError, UNSANDBOXED_WARNING
-from agent.session import SessionStore
+from agent.session import SessionStore, try_acquire_workspace
 from agent.version import package_version
 
 
@@ -25,31 +25,40 @@ def create_runner(settings: Settings) -> AgentRunner:
         settings.sandbox.workspace,
         override=settings.state_path,
     )
+    lease = try_acquire_workspace(settings.sandbox.workspace, state_path=settings.state_path)
+    if lease is None:
+        session_store.close()
+        raise SystemExit("这个 workspace 正在被另一个 Deep Agent 使用。请先结束另一端再打开。")
     try:
-        runner = AgentRunner(
-            settings=settings,
-            sandbox_config=settings.sandbox,
-            session_store=session_store,
-            enable_sessions=True,
-            persist_on_first_message=True,
-            workspace=settings.sandbox.workspace,
-        )
-    except SandboxUnavailableError as exc:
-        if not sys.stdin.isatty():
-            raise SystemExit(
-                "Non-interactive startup refused UNSANDBOXED fallback. Install bwrap or set "
-                "sandbox.allow_unsandboxed: true in ~/.deep-agent/config.yaml。"
-            ) from exc
-        _confirm_unsandboxed(str(exc))
-        runner = AgentRunner(
-            settings=settings,
-            sandbox_config=replace(settings.sandbox, allow_unsandboxed=True),
-            session_store=session_store,
-            enable_sessions=True,
-            persist_on_first_message=True,
-            workspace=settings.sandbox.workspace,
-        )
-    return runner
+        try:
+            runner = AgentRunner(
+                settings=settings,
+                sandbox_config=settings.sandbox,
+                session_store=session_store,
+                enable_sessions=True,
+                persist_on_first_message=True,
+                workspace=settings.sandbox.workspace,
+            )
+        except SandboxUnavailableError as exc:
+            if not sys.stdin.isatty():
+                raise SystemExit(
+                    "Non-interactive startup refused UNSANDBOXED fallback. Install bwrap or set "
+                    "sandbox.allow_unsandboxed: true in ~/.deep-agent/config.yaml。"
+                ) from exc
+            _confirm_unsandboxed(str(exc))
+            runner = AgentRunner(
+                settings=settings,
+                sandbox_config=replace(settings.sandbox, allow_unsandboxed=True),
+                session_store=session_store,
+                enable_sessions=True,
+                persist_on_first_message=True,
+                workspace=settings.sandbox.workspace,
+            )
+        runner.workspace_lease = lease
+        return runner
+    except BaseException:
+        lease.release()
+        raise
 
 
 def _confirm_unsandboxed(error: str) -> None:

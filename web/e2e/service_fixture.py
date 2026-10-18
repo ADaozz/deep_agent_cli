@@ -93,7 +93,7 @@ def service(base):
     def factory(config,project_id,session_id):
         return Runner(model=scripted_model([AIMessage(content='恢复完成')]),
                       settings=config.settings_for(project_id),
-                      session_store=SessionStore(config.settings_for(project_id).state_path),
+                      session_store=SessionStore.for_workspace(config.projects[project_id], override=config.settings_for(project_id).state_path),
                       sandbox_config=SandboxConfig(workspace=config.projects[project_id]),thread_id=session_id)
 
     import yaml
