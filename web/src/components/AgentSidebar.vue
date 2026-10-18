@@ -1,8 +1,6 @@
 <script setup lang="ts">
 /**
- * Left rail: 280px, `#f3f3f3`, 32px rows. Collapse + search on top, New Chat /
- * Automations / Codebase, the grouped session list and the account row with the
- * connection settings entry point.
+ * Left rail with collapse/search, new chat, grouped sessions and connection settings.
  */
 import { computed, nextTick, ref } from 'vue'
 import Icon from './Icon.vue'
@@ -17,15 +15,6 @@ const userMenu = ref(false)
 const searchOpen = ref(false)
 const searchInput = ref<HTMLInputElement | null>(null)
 const query = ref('')
-const inertNote = ref('')
-
-function note(message: string): void {
-  inertNote.value = message
-  window.setTimeout(() => {
-    if (inertNote.value === message) inertNote.value = ''
-  }, 4000)
-}
-
 const rows = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = sessionRows.value
@@ -86,23 +75,6 @@ function clearLocal(): void {
           <Icon name="wand" :size="14" />
           <span class="chat-title">新对话</span>
         </button>
-        <button
-          class="nav-row"
-          type="button"
-          @click="note('自动化不属于 deep-agent serve API。')"
-        >
-          <Icon name="clock" :size="14" />
-          <span class="chat-title">自动化</span>
-        </button>
-        <button
-          class="nav-row"
-          type="button"
-          @click="note('代码库索引不属于 deep-agent serve API。')"
-        >
-          <Icon name="code" :size="14" />
-          <span class="chat-title">代码库</span>
-          <span class="badge">早期预览</span>
-        </button>
       </nav>
 
       <div v-if="searchOpen" class="side-search">
@@ -149,7 +121,6 @@ function clearLocal(): void {
       <p v-if="!groups.length" class="side-empty">
         {{ query ? '没有匹配的会话。' : '还没有会话，从「新对话」开始。' }}
       </p>
-      <p v-if="inertNote" class="side-empty">{{ inertNote }}</p>
     </div>
 
     <div class="side-foot">
