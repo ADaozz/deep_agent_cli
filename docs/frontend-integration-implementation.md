@@ -1,5 +1,7 @@
 # Stitch Web / HTTP 集成实施记录
 
+> 历史记录：该 Stitch 前端已于 2026-10-18 被替换。当前界面与验证见 [新前端适配验收](frontend-console-migration.md)。
+
 ## M0 基线
 
 本轮基线：`main` / `f9d1e028bc92ee18f4efd462fbd2c50191c78087`，开始时工作区干净，无 web/、无 AGENTS.md。实施分支 `feat/stitch-web-workspace`。输入保留在 `.codex-input/DeepAgentCLI_Stitch_Codex`，20 个文件的 MANIFEST 校验全部通过；不修改附件。未执行 reset/clean/rebase/stash；不推送、合并或发布。

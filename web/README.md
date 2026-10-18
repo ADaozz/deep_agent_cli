@@ -1,0 +1,44 @@
+# Deep Agent Web Console
+
+Vue 3 + TypeScript + Vite。采用 `deep-agent-web-20261018.tar.gz` 的浅色双屏界面，替换原 Stitch 前端：侧栏会话导航、首页项目选择与输入框、会话线程、内联审批/人工输入、可展开工作日志和变更侧栏。
+
+## 启动
+
+从仓库根目录启动 HTTP 服务和本地网关；完整配置见 [Web 启动说明](../docs/web.md)。
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+访问 `http://127.0.0.1:5173`。浏览器仅访问 `/api/agent`，Vite 转发到 `127.0.0.1:8765` 的 Python 网关，由网关向 `127.0.0.1:8080` 服务注入令牌。连接设置用于测试连接、修改本机项目/模型显示名和清除本地记录；不需要在浏览器填写服务令牌。模型显示名不改变服务端模型。
+
+```bash
+npm run typecheck
+npm run lint
+npm run test
+npm run build
+npm run test:e2e
+```
+
+端到端测试使用系统 Chromium（默认 `/usr/bin/chromium`，可通过 `PLAYWRIGHT_EXECUTABLE_PATH` 修改），启动真实 Python 服务、网关、AgentRunner、SQLite 和 Bubblewrap，以脚本模型执行临时项目任务，不使用真实模型。需要先安装根目录的 `.[dev,server]` 到 `.venv`，且 5173、8080、8765、8766 端口空闲。
+
+## 行为
+
+- 首页选择服务已配置的项目，首次提交自动创建会话；线程内追加任务。
+- 审批按整批提交；人工输入支持 text、textarea、boolean、单选、多选和服务声明的自定义选项；暂停后可继续。
+- SSE 使用每轮独立游标、累计快照替换、断线重连和 GET 轮询。关闭页面不取消任务，取消不回滚文件。
+- 服务端运行摘要分页和项目活动任务用于跨浏览器发现；终态也回放事件恢复日志。没有本机原始提问时明确提示不可用。每次加载 20 轮，可点击“加载更早运行”。
+- “本轮代码”提供快照检查、代码回退/撤销和冲突提示；回退保留对话，只修改快照中的文件。
+- 变更侧栏仅展示成功的 `write_file` / `edit_file` / `delete` 工具事件及其内容/替换片段，不将失败调用当作改动，不虚构 Git Diff。`execute` 的文件影响通过本轮快照检查。
+- `localStorage` 缓存提问、草稿、游标和展示偏好（40 个会话，每会话 20 轮）；旧版独立前端配置中的令牌和直连地址会移除。
+
+## 目录
+
+- `src/api`：网关 API 类型、请求与 SSE 解码。
+- `src/store`：连接、历史分页、事件恢复和本机记录。
+- `src/lib`：日志/文件变更展示模型及转义的 Markdown 渲染。
+- `src/components`：新界面组件与轮次代码回退控件。
+- `e2e`：真实服务联调，包含审批、输入、跨浏览器历史、重启恢复、回退和窄屏。
+- `scripts/mock-server.mjs`：上传包附带的可选开发 Mock。生产和自动验收使用真实服务；如需使用 Mock，应另行用同源网关接入。

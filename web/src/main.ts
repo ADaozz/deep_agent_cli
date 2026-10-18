@@ -1,5 +1,5 @@
-import { createApp } from 'vue';
-import App from './App.vue';
-import './assets/stitch.css';
-import './assets/workspace.css';
-createApp(App).mount('#app');
+import { createApp } from 'vue'
+import App from './App.vue'
+import './styles.css'
+
+createApp(App).mount('#app')

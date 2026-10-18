@@ -1,5 +1,7 @@
 # DeepAgentCLI Web 交付验收报告
 
+> 历史记录：该 Stitch 前端已于 2026-10-18 被替换。当前界面与验证见 [新前端适配验收](frontend-console-migration.md)。
+
 ## 基线与交付范围
 
 - 本地及只读核对的远程 main：`f9d1e028bc92ee18f4efd462fbd2c50191c78087`；版本仍0.1.3。
