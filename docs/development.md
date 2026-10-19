@@ -5,7 +5,7 @@
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,server]"
+pip install -e ".[dev]"
 ```
 
 需要 Python 3.12+。依赖只在 [`pyproject.toml`](../pyproject.toml) 中维护；`requirements.lock` 是某个 Python 3.12 开发环境的 `pip freeze` 快照，仅供参考。升级依赖后，在干净环境中安装 `.[dev]`、跑通测试，再更新快照。
@@ -22,7 +22,6 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 
 - `integration` 测试启动一个本地模拟的 OpenAI Chat Completions 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。
 - `sandbox` 标记的测试需要真实可用的 Bubblewrap；不可用时默认跳过。跳过不代表当前环境兼容。
-- `tests/test_server.py` 验证 HTTP 服务接口、审批、并发、事件续接和会话恢复；未安装 `server` 依赖时跳过，CI 安装该依赖并执行这些测试。
 
 ## 真实模型冒烟
 

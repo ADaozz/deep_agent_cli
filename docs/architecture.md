@@ -2,7 +2,7 @@
 
 `deep_agent_cli` 使用 Deep Agents 和 LangGraph 执行 Agent 图。Harness 负责将模型、工具、工作区、人工干预、沙箱、会话和前端组织成可控制、可恢复的运行系统，不另行实现推理循环。
 
-本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)、[HTTP 服务](server.md)；Python 接入见 [library.md](library.md)。
+本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)；Python 接入见 [library.md](library.md)。
 
 ## 职责与设计约束
 
@@ -21,8 +21,6 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 ```mermaid
 flowchart TB
     CLI["TUI / CLI · agent/cli"] --> RUN["AgentRunner"]
-    HTTP["HTTP / SSE · agent/server/app.py"] --> SERVICE["RunManager / ServiceStore"]
-    SERVICE --> RUN
     RUN <--> CONTROL["RunController · 取消 / 暂停 / 消息队列"]
     RUN <--> SESSION["SessionRuntime / SessionStore / 会话租约"]
     SESSION --> DB["SQLite checkpoint / catalog / 附件"]
@@ -39,8 +37,7 @@ flowchart TB
 
 | 层 | 实现 | 职责 |
 |---|---|---|
-| 交互入口 | `agent/cli/`、`agent/server/app.py` | 输入、渲染、审批/提问界面、HTTP 鉴权与 SSE |
-| 服务调度 | `agent/server/runtime.py`、`store.py` | 后台任务、项目并发限制、交互与事件持久化 |
+| 交互入口 | `agent/cli/` | 输入、渲染、审批与提问界面 |
 | 运行控制 | `agent/runner.py`、`control.py` | Run 生命周期、中断恢复、取消、steering、统一事件 |
 | 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
@@ -48,7 +45,7 @@ flowchart TB
 | 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 虚拟路径、命名空间、持久进程、超时与清理 |
 | 会话状态 | `agent/session.py`、`session_runtime.py`、`session_lock.py` | Checkpoint、元数据、附件、独占租约与恢复 |
 
-核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，TUI 和 HTTP 各自转换和展示。
+核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
 ### 状态文案设计规范
 
@@ -115,7 +112,7 @@ Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工
 
 ```mermaid
 sequenceDiagram
-    participant U as TUI / HTTP
+    participant U as TUI
     participant R as AgentRunner
     participant G as LangGraph
     participant T as Tool
@@ -164,7 +161,7 @@ sequenceDiagram
 
 `ask` 默认审批文件修改、每次 `execute` 和每次 `web_search`。只读文件搜索免审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
 
-`UNSANDBOXED` 需显式授权回退，只允许 `ask`，命令以宿主当前用户权限执行。`CUSTOM` 由调用方注入的 Backend 决定资源边界。HTTP 服务固定 `ask`，强制沙箱，不支持宿主回退。
+`UNSANDBOXED` 需显式授权回退，只允许 `ask`，命令以宿主当前用户权限执行。`CUSTOM` 由调用方注入的 Backend 决定资源边界。
 
 ## Backend 与路径
 
@@ -249,15 +246,9 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 上一轮 `pending` 且已有 checkpoint，或以 `aborted` / `error` 结束时，下一次用户输入会附加一次性恢复说明。明确的审批、人工输入、暂停中断按各自 checkpoint 恢复，不重新生成或自动重放未知结果的工具。持久化图状态不等于恢复沙箱进程；会话重新打开时按需启动新沙箱。
 
-## TUI 与 HTTP 服务
+## 终端界面
 
-TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展示、审批、提问及选择器。HTTP 由 FastAPI 提供，`RunManager` 管理后台 worker、任务状态、人工交互与取消，`ServiceStore` 将 Run 和 SSE 事件持久化到服务自己的 SQLite。
-
-两者共享执行语义，但 HTTP 当前只是能力子集：固定 `ask`、强制沙箱，接受文字任务，不暴露 TUI 的模型/权限切换、图片上传、Skills 选择器、主动暂停、手动压缩或运行中 steering。服务每个项目最多一个未结束 Run，并受 `max_runs` 总量限制；等待审批或人工输入仍占用名额。完整接口以 [server.md](server.md) 为准。
-
-服务审批携带 `interrupt_id`，防止向过期快照提交决定；批量决定必须覆盖待审批工具集合。`interaction_submitted` 先写事件存储再通知 worker，最终状态与 `run_finished` 在同一事务提交，供 SSE 续接。取消接口返回 `202` 只表示受理，最终 Run 状态才表示实际结果；断开 SSE 不取消任务。
-
-服务 Bearer token 不区分最终用户。多用户产品需由上层业务后端校验用户、项目及 session/run 归属，不能把服务凭据直接当作浏览器用户权限。
+TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展示、审批、提问及选择器。操作与显示见 [tui.md](tui.md)。
 
 ## 观察与验证
 
@@ -270,7 +261,6 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 | 双沙箱复用、argv/Shell、网络模式、超时及 Worker 失效 | `test_sandbox.py`、`test_persistent_sandbox.py` |
 | 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
-| HTTP 交互、取消、SSE 与终态一致性 | `test_server.py`、`test_server_terminal.py` |
 | 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
 
 运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟 HTTP、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
@@ -279,7 +269,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。未来接入 MCP 时，还需明确远程请求实际发生的位置与授权上下文，不能声称它自动受到 Bubblewrap 保护。
 
-增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。前端以既有 RunResult、RunEvent 和 HTTP 交互 Schema 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
+增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。前端以既有 RunResult 和 RunEvent 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
 
 ## 依赖
 
@@ -290,4 +280,3 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 - 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
 - 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
 - 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。
-- HTTP 服务：[app.py](../agent/server/app.py)、[runtime.py](../agent/server/runtime.py)、[store.py](../agent/server/store.py)。

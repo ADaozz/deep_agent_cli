@@ -23,8 +23,6 @@
 pipx install deep-agent-cli
 # 已安装：
 pipx upgrade deep-agent-cli
-# 需要 HTTP 服务：
-pipx install --force 'deep-agent-cli[server]'
 ```
 
 GitHub Release 与 PyPI 由同一个发布工作流构建并发布。更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.8/docs/tui.md)和[架构设计](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.8/docs/architecture.md)。
