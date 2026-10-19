@@ -410,12 +410,20 @@ def workspace_git(workspace: Path) -> dict:
             result = _run_git(workspace, ['merge-base', '--is-ancestor', 'HEAD', base], 64)
             if result[0] in (0, 1):
                 merged = result[0] == 0
-        branches_result = _run_git(workspace, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], STATUS_BYTES)
-        branches = _decode(branches_result[1]).splitlines() if branches_result[0] == 0 and not branches_result[2] else []
+        branches_result = _run_git(workspace, ['for-each-ref', '--format=%(refname)', 'refs/heads/'], STATUS_BYTES)
+        branches = [ref.removeprefix('refs/heads/') for ref in _decode(branches_result[1]).splitlines()] if branches_result[0] == 0 and not branches_result[2] else []
+        remote_result = _run_git(workspace, ['for-each-ref', '--format=%(refname)%09%(symref)', 'refs/remotes/'], STATUS_BYTES)
+        remote_branches = []
+        if remote_result[0] == 0 and not remote_result[2]:
+            for line in _decode(remote_result[1]).splitlines():
+                ref, _, symbolic = line.partition('\t')
+                if not symbolic:
+                    remote_branches.append(ref.removeprefix('refs/remotes/'))
         if not head and summary.branch not in branches:
             branches.insert(0, summary.branch)
         return {
-            'available': True, 'branches': branches, 'branch': summary.branch, 'changed': summary.changed,
+            'available': True, 'branches': branches, 'remote_branches': remote_branches,
+            'branch': summary.branch, 'changed': summary.changed,
             'head': head, 'base_branch': base, 'merged': merged,
             'added': stats['added'], 'removed': stats['removed'], 'files': list(files.values()),
         }
@@ -425,13 +433,14 @@ def workspace_git(workspace: Path) -> dict:
 
 def switch_branch(workspace: Path, branch: str) -> dict:
     info = workspace_git(workspace)
-    if not info.get('available') or branch not in info.get('branches', []):
-        raise ValueError('该 workspace 中没有此本地分支')
+    remote = branch.startswith('refs/remotes/') and branch.removeprefix('refs/remotes/') in info.get('remote_branches', [])
+    if not info.get('available') or (not remote and branch not in info.get('branches', [])):
+        raise ValueError('该 workspace 中没有此本地或远程分支')
     if info['branch'] == branch:
         return info
     try:
         result = subprocess.run(
-            [GIT_BIN, 'switch', '--', branch], cwd=workspace,
+            [GIT_BIN, 'switch', *(['--detach'] if remote else []), '--', branch], cwd=workspace,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT_SECONDS, env=_env(),
         )
     except (OSError, subprocess.SubprocessError):

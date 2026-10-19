@@ -87,3 +87,37 @@ def test_branch_conflict_does_not_discard_existing_edits(config):
         assert response.status_code==409
         assert (root/'file.txt').read_text()=='unsaved user edit\n'
         assert git(root,'branch','--show-current')=='main'
+
+
+def test_remote_branches_are_listed_and_switch_to_the_exact_remote_commit(config):
+    root=config.projects['initial'];root.rmdir();repository(root)
+    base=git(root,'rev-parse','HEAD')
+    git(root,'update-ref','refs/remotes/origin/topic',base)
+    git(root,'update-ref','refs/remotes/upstream/nested/topic',base)
+    git(root,'symbolic-ref','refs/remotes/origin/HEAD','refs/remotes/origin/topic')
+    # A same-named local branch must not override the selected remote ref.
+    git(root,'switch','-c','origin/topic')
+    (root/'file.txt').write_text('local version\n');git(root,'commit','-am','local')
+    with TestClient(create_app(config,factory=lambda *args:None)) as client:
+        info=client.get('/v1/projects/initial/git',headers=AUTH).json()
+        assert info['branches']==['main','origin/topic']
+        assert info['remote_branches']==['origin/topic','upstream/nested/topic']
+        response=client.post('/v1/projects/initial/git/branch',headers=AUTH,json={'branch':'refs/remotes/origin/topic'})
+        assert response.status_code==200,response.text
+        assert response.json()['branch']=='detached'
+        assert git(root,'rev-parse','HEAD')==base
+        assert git(root,'branch','--show-current')==''
+        assert client.post('/v1/projects/initial/git/branch',headers=AUTH,json={'branch':'refs/remotes/origin/HEAD'}).status_code==409
+
+
+def test_remote_branch_conflict_preserves_edits(config):
+    root=config.projects['initial'];root.rmdir();repository(root)
+    git(root,'switch','-c','topic')
+    (root/'file.txt').write_text('remote version\n');git(root,'commit','-am','remote')
+    git(root,'update-ref','refs/remotes/origin/topic','HEAD')
+    git(root,'switch','main');(root/'file.txt').write_text('unsaved edit\n')
+    with TestClient(create_app(config,factory=lambda *args:None)) as client:
+        response=client.post('/v1/projects/initial/git/branch',headers=AUTH,json={'branch':'refs/remotes/origin/topic'})
+        assert response.status_code==409
+        assert (root/'file.txt').read_text()=='unsaved edit\n'
+        assert git(root,'branch','--show-current')=='main'

@@ -184,6 +184,7 @@ export interface WorkspaceGit {
   available: boolean
   branch?: string
   branches?: string[]
+  remote_branches?: string[]
   changed?: number
   head?: string | null
   base_branch?: string | null

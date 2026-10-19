@@ -102,9 +102,11 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
           <button class="pick" type="button" aria-label="选择 Git 分支" :disabled="workspaceBusy" @click="branchOpen = !branchOpen; draftOpen = false; branchError = ''; refreshGit(selectedWorkspace!.id)">
             <Icon name="branch" :size="14" /><span>{{ git.branch }}</span><Icon name="chevronDown" :size="10" />
           </button>
-          <Popover v-if="branchOpen" align="down" end @close="branchOpen = false">
-            <div class="pop-head">Git 分支</div>
+          <Popover v-if="branchOpen" align="down" class="branch-menu" @close="branchOpen = false">
+            <div v-if="git.branches?.length" class="pop-head">本地分支</div>
             <button v-for="branch in git.branches || []" :key="branch" class="pop-item" type="button" :disabled="workspaceBusy" @click="switchBranch(branch)"><span class="grow">{{ branch }}</span><Icon v-if="branch === git.branch" name="check" :size="13" /></button>
+            <div v-if="git.remote_branches?.length" class="pop-head">远程分支</div>
+            <button v-for="branch in git.remote_branches || []" :key="'refs/remotes/' + branch" class="pop-item" type="button" :disabled="workspaceBusy" @click="switchBranch('refs/remotes/' + branch)"><span class="grow">{{ branch }}</span></button>
             <p v-if="branchError" class="pop-note model-error" role="alert">{{ branchError }}</p>
           </Popover>
         </span>

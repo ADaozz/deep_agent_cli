@@ -865,7 +865,7 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 - `GET /v1/workspaces` 返回 `{workspaces:[{id,path}]}`，同时包含配置目录和用户选择的目录；原 `/v1/projects` 的仅 ID 结构保持兼容。
 - `POST /v1/workspace-directories` 接受 `{path?:string}`，返回当前规范化路径、parent 和子目录列表。未指定时从服务进程工作目录开始；只列目录，不读取文件内容。目录过多时返回前 500 项及 `truncated`，可直接输入目标路径。
 - `POST /v1/workspaces` 接受 `{path:string}`，只选择实际存在的目录，不创建文件夹。已有目录复用 ID，新目录生成稳定 ID，保存于私有 `state_dir/workspaces.json`，重启后加载。继续使用 main 的 `ServerConfig` / `Settings` 校验：workspace 之间不重叠，服务配置、模型配置及状态目录不位于可写 workspace 中。
-- `POST /v1/projects/{project_id}/git/branch` 接受 `{branch:string}`，只选择该工作区已存在的本地分支，执行原生 `git switch -- branch`，不 force、不丢弃修改。活动任务或 Git 拒绝切换时返回 409，成功后返回更新的 Git 元数据；GET Git 响应新增 `branches`。
+- `POST /v1/projects/{project_id}/git/branch` 接受 `{branch:string}`，可选择该工作区已存在的本地分支或远程跟踪分支。本地分支名执行原生 `git switch -- branch`；远程分支传完整 `refs/remotes/<remote>/<branch>`，以分离 HEAD 切换到该引用的提交。不 force、不丢弃修改，也不自动 fetch。活动任务或 Git 拒绝切换时返回 409，成功后返回更新的 Git 元数据；GET Git 响应包含本地 `branches` 和远程 `remote_branches`，远程列表排除 `origin/HEAD` 等符号引用。
 
 以上均要求原服务认证，并由现有同源网关一对一映射。最近四个 workspace 路径与排序保存在浏览器 `deepagent.workspace-history.v1`，服务侧目录索引用于重启后继续访问会话；两者不创建另一套任务执行逻辑。
 
