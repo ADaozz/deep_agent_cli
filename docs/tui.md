@@ -112,7 +112,7 @@ deep-agent --version
 - **思考区**：默认折叠，保留按当前终端宽度折行后的最后 5 行正文（`ui.thinking_tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
 - **用户长消息**：发送后默认显示前 3 个终端显示行，超出时显示隐藏行数和 `Ctrl+B` 提示。`Ctrl+B` 统一切换长消息与队列的展开状态；只改变显示，发送给模型和会话中保存的内容保持完整。
 - **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
-- **探索类工具**（`ls`、`read_file`、`glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。
+- **探索类工具**（`ls`、`read_file`，以及历史会话里的 `glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。当前模型工具表不再提供 `glob` 和 `grep`。
 - **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
 

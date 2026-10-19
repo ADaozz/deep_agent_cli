@@ -689,17 +689,17 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
     (workspace / "a.py").write_text("needle\n")
     def call(identifier, name, args):
         return AIMessage(content="", tool_calls=[{"id": identifier, "name": name, "args": args}])
-    grep_args = {"pattern": "needle"}
+    list_args = {"path": "/workspace"}
     runner = _sandbox_runner(workspace, [
-        call("g1", "grep", grep_args),
+        call("g1", "ls", list_args),
         call("off", "execute", {"command": "printf offline", "network": False}),
-        call("g2", "grep", grep_args),
+        call("g2", "ls", list_args),
         call("net", "execute", {"command": "printf online", "network": True}),
-        call("g3", "grep", grep_args), AIMessage(content="ask done"),
-        call("g4", "grep", grep_args),
+        call("g3", "ls", list_args), AIMessage(content="ask done"),
+        call("g4", "ls", list_args),
         call("allowed", "execute", {"command": "printf allowed", "network": False}),
-        call("g5", "grep", grep_args), AIMessage(content="allow done"),
-        call("g6", "grep", grep_args), AIMessage(content="ask again"),
+        call("g5", "ls", list_args), AIMessage(content="allow done"),
+        call("g6", "ls", list_args), AIMessage(content="ask again"),
     ])
     started = []
     original = PersistentSandbox.start
@@ -712,11 +712,11 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
     pool = runner.sandbox_pool
     try:
         assert runner.invoke("ask search and execute", on_event=events.append).status == "waiting_confirmation"
-        offline = pool.sandbox(False)
-        assert offline is not None and pool.sandbox(True) is None
+        assert pool.sandbox(False) is None and pool.sandbox(True) is None
         assert runner.current_interrupt().pending_tools[0]["name"] == "execute"
         assert runner.approve_tool("off", on_event=events.append).status == "waiting_confirmation"
-        assert pool.sandbox(False) is offline and pool.sandbox(True) is None
+        offline = pool.sandbox(False)
+        assert offline is not None and pool.sandbox(True) is None
         assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "net"
         assert runner.approve_tool("net", on_event=events.append).status == "completed"
         online = pool.sandbox(True)
@@ -728,11 +728,10 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
         assert runner.invoke("ask search again", on_event=events.append).status == "completed"
         assert pool.sandbox(False) is offline and pool.sandbox(True) is online
         assert started == [(False, offline.host_pid), (True, online.host_pid)]
-        # Only the three explicitly scripted execute calls appear; grep creates none.
         assert {event.tool_call_id for event in events if event.type == "tool_started" and event.name == "execute"} == {"off", "net", "allowed"}
-        assert {event.tool_call_id for event in events if event.type == "tool_completed" and event.name == "grep"} == {"g1", "g2", "g3", "g4", "g5", "g6"}
-        print(json.dumps({"ask_grep_and_approved_execute_pid": offline.host_pid,
-                          "allow_grep_and_execute_pid": online.host_pid,
+        assert {event.tool_call_id for event in events if event.type == "tool_completed" and event.name == "ls"} == {"g1", "g2", "g3", "g4", "g5", "g6"}
+        print(json.dumps({"ask_approved_execute_pid": offline.host_pid,
+                          "allow_execute_pid": online.host_pid,
                           "ask_allow_ask_reused": True, "new_bwrap_instances": len(started)}))
     finally:
         runner.close()

@@ -10,7 +10,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 
 - 模型提出工具调用，Harness 按既定策略决定是否执行，以及在哪里执行。
 - 权限模式决定调用前是否审批；沙箱决定执行进程能访问的资源。提示词、`AGENTS.md` 和工具描述不承担操作系统安全边界。
-- 不同模型工具可以共享执行资源。`grep` 与 `execute` 共用沙箱，但各自保留参数、输出与审批语义。
+- 不同模型工具可以共享执行资源。`execute` 按有网和无网实例复用沙箱，并保留自己的参数、输出与审批语义。
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一会话的模型、权限切换复用沙箱；新建、切换和关闭会话清理原会话的沙箱。
 
@@ -33,7 +33,7 @@ flowchart TB
     EXEC --> WORKER["持久 Worker · Shell / argv 子进程"]
 ```
 
-文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。本地 `grep` 独立注册，在沙箱模式且有 rg 时共享命令执行的 SandboxPool。
+文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。模型工具表不包含 `grep` 和 `glob`。
 
 | 层 | 实现 | 职责 |
 |---|---|---|
@@ -73,9 +73,8 @@ flowchart TB
 
 | 工具 | 来源与条件 | 默认 `ask` 下的交互 |
 |---|---|---|
-| `ls`、`read_file`、`glob` | Deep Agents 文件系统中间件 | 免审批 |
+| `ls`、`read_file` | Deep Agents 文件系统中间件 | 免审批 |
 | `write_file`、`edit_file`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
-| `grep` | 本地工作区注册自定义正则工具；其他 Backend 保留原生接口 | 免审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
 | `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
 | `request_human_input` | 始终注册 | 独立的人工输入中断 |
@@ -84,7 +83,7 @@ flowchart TB
 
 `web_search` 是可用的内置工具，有密钥时正常提供，未配置时不注册。其 Tavily 请求在宿主进程中发送，不受 Shell 的网络命名空间约束。
 
-文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。默认本地工具集从上游文件工具列表排除 `grep`，再独立注册自定义实现，确保只暴露一个 `grep`；不会把远程或虚拟 Backend 的路径解释为宿主路径。
+文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read_file`、`write_file`、`edit_file` 和 `delete`，不包含 `grep` 或 `glob`。
 
 Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工具。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
@@ -147,7 +146,7 @@ sequenceDiagram
 - 暂停和排队的模型/权限修改在下一次模型调用前处理；切到 `allow` 不会自动同意已经等待中的审批。
 - 用户追加的消息不被当作工具审批的同意。
 
-`RunController` 按运行代际隔离取消信号，也处理已经调度但尚未 `begin_run` 的取消。取消会关闭模型流、请求图停止，并通知活动工具。`execute` 和 `grep` 最终终止本条命令的进程组，正常情况下保留持久沙箱。
+`RunController` 按运行代际隔离取消信号，也处理已经调度但尚未 `begin_run` 的取消。取消会关闭模型流、请求图停止，并通知活动工具。`execute` 最终终止本条命令的进程组，正常情况下保留持久沙箱。
 
 最终回答已经 checkpoint 后到达的取消，不把完成结果改写为取消。文件写入、外部请求等已经发生的副作用不会回滚；失败后需要核对 checkpoint 与实际工作区状态。
 
@@ -192,7 +191,7 @@ Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这�
 
 ## grep 搜索
 
-本地 `grep` 是独立的只读工具，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。工具没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
+`grep` 和 `glob` 不在模型工具表中。代码里仍保留本地搜索实现，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。该实现没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
 
 ```text
 参数与 Glob 校验

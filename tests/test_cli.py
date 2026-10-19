@@ -445,8 +445,9 @@ def test_thinking_collapses_to_latest_five_lines_by_default() -> None:
 
 
 def test_explore_tools_collapse_into_summary() -> None:
-    assert {"ls", "read_file", "glob"}.issubset(DEFAULT_FS_TOOLS)
-    assert "grep" not in DEFAULT_FS_TOOLS  # Registered separately for local workspaces.
+    assert {"ls", "read_file"}.issubset(DEFAULT_FS_TOOLS)
+    assert "grep" not in DEFAULT_FS_TOOLS
+    assert "glob" not in DEFAULT_FS_TOOLS
     state = CliState(blocks=[
         ToolBlock(
             tool_call_id="r1", name="read_file",

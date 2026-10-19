@@ -14,7 +14,7 @@ import time
 
 import pytest
 from deepagents.backends import StateBackend
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.cancel import ToolCancelContext, clear_cancel_context, set_cancel_context
 from agent.config import SandboxConfig
@@ -417,15 +417,10 @@ def test_rg_engine_starts_exactly_one_process(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("permission", [PermissionMode.ASK, PermissionMode.ALLOW])
-def test_model_schema_and_readonly_call(workspace, monkeypatch, permission):
+def test_grep_and_glob_are_not_registered(workspace, monkeypatch, permission):
     local = BubblewrapBackend(SandboxConfig(workspace=workspace[1]), executable=usable_bwrap())
     backend = WorkspaceCompositeBackend(local, skills_dir=workspace[2])
-    model = scripted_model([
-        AIMessage(content="", tool_calls=[{"id": "g1", "name": "grep", "args": {"pattern": "foo|bar", "glob": "*.py"}}]),
-        AIMessage(content="", tool_calls=[{"id": "g2", "name": "grep", "args": {
-            "pattern": "foo", "glob": ["*.py", "!src/**"], "output_mode": "count"}}]),
-        AIMessage(content="done"),
-    ])
+    model = scripted_model([AIMessage(content="done")])
     schemas = []
     original = type(model).bind_tools
     def bind(self, tools, **kwargs):
@@ -435,62 +430,23 @@ def test_model_schema_and_readonly_call(workspace, monkeypatch, permission):
     prepared = build_agent(AgentSpec(sandbox=local.config, skills=()), model,
                            permission, None, RunController(), lambda: False,
                            backend_selection=BackendSelection(backend, ExecutionMode.SANDBOXED))
-    result = prepared.graph.invoke({"messages": [HumanMessage(content="search")]},
-                                   {"configurable": {"thread_id": "grep-schema"}})
+    prepared.graph.invoke({"messages": [HumanMessage(content="search")]},
+                          {"configurable": {"thread_id": "grep-schema"}})
     names = [tool.name for tool in schemas[-1]]
-    assert names.count("grep") == 1
+    assert "grep" not in names
+    assert "glob" not in names
     assert "write_todos" not in names
-    grep = next(tool for tool in schemas[-1] if tool.name == "grep")
-    assert local.pool.sandbox(permission is PermissionMode.ALLOW) is not None
-    assert local.pool.sandbox(permission is not PermissionMode.ALLOW) is None
-    properties = grep.args_schema.model_json_schema()["properties"]
-    assert "network" not in properties
-    assert properties["fixed_string"]["default"] is False
-    assert {"type": "array", "items": {"type": "string"}} in properties["glob"]["anyOf"]
-    outputs = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
-    assert "/workspace/b.py" in outputs["g1"]
-    assert outputs["g2"] == "/workspace/a.py: 1"
-    assert "__interrupt__" not in result
-    assert set(names) == {"ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete",
+    assert set(names) == {"ls", "read_file", "write_file", "edit_file", "delete",
                           "execute", "request_human_input", "compact_conversation"}
 
 
-def test_timeout_does_not_break_agent_session(tmp_path, monkeypatch):
-    work = tmp_path / "work"
-    work.mkdir()
-    (work / "a.py").write_text("session-marker\n")
-    local = BubblewrapBackend(SandboxConfig(workspace=work), executable=usable_bwrap())
-    backend = WorkspaceCompositeBackend(local, skills_dir=None)
-    os.mkfifo(work / "hang.fifo")
-    monkeypatch.setattr(implementation, "SEARCH_TIMEOUT", 1.0)
-    original = implementation._rg_arguments
-    calls = []
-    def arguments(*args):
-        calls.append(args)
-        hang = ["-e", "absent", "hang.fifo"] if len(calls) == 1 else []
-        return [*original(*args), *hang]
-    monkeypatch.setattr(implementation, "_rg_arguments", arguments)
-    model = scripted_model([
-        AIMessage(content="", tool_calls=[{"id": "slow", "name": "grep", "args": {"pattern": "absent"}}]),
-        AIMessage(content="", tool_calls=[{"id": "fast", "name": "grep", "args": {"pattern": "session-marker"}}]),
-        AIMessage(content="done"),
-    ])
-    prepared = build_agent(AgentSpec(sandbox=local.config, skills=()), model,
-                           PermissionMode.ALLOW, None, RunController(), lambda: False,
-                           backend_selection=BackendSelection(backend, ExecutionMode.SANDBOXED))
-    result = prepared.graph.invoke({"messages": [HumanMessage(content="search")]},
-                                   {"configurable": {"thread_id": "grep-timeout"}})
-    outputs = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
-    assert "timed out" in outputs["slow"]
-    assert outputs["fast"] == "/workspace/a.py"
-    assert result["messages"][-1].content == "done"
-
-
-def test_custom_backend_uses_its_own_grep(fake_done):
+def test_custom_backend_does_not_register_grep_or_glob(fake_done):
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
-    assert "grep" in prepared.filesystem_tools
-    assert "grep" not in prepared.exposed_tool_names
-    assert "grep" in graph_tool_names(prepared.graph)
+    names = graph_tool_names(prepared.graph)
+    assert "grep" not in prepared.filesystem_tools
+    assert "glob" not in prepared.filesystem_tools
+    assert "grep" not in names
+    assert "glob" not in names
 
 
 def test_python_unsupported_syntax_and_literal_escape(workspace):
@@ -508,12 +464,6 @@ def test_sandboxed_backend_without_rg_uses_python_engine(tmp_path, monkeypatch):
     processes = _record_processes(monkeypatch)
     assert implementation.search(backend, "foo", None, None, "files_with_matches", None, False) == "/workspace/a.py"
     assert processes[0].args[0] != "/bin/true"
-
-
-def test_duplicate_grep_is_rejected(workspace, fake_done):
-    with pytest.raises(ValueError, match="extra grep"):
-        create_agent(model=fake_done, backend=workspace[0], skills=[],
-                     extra_tools=[implementation.build_regex_grep_tool(workspace[0])])
 
 
 def test_resolve_rg_prefers_python_scripts(tmp_path, monkeypatch):

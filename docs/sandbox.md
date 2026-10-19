@@ -85,7 +85,7 @@
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
+`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
 
 | 路径 | 文件工具 |
 |---|---|
@@ -105,7 +105,7 @@ Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib
 
 UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录权限，文件工具仍只使用工作区和只读 Skills。CUSTOM backend 保留调用方自己的规则。
 
-`grep` 是免审批探索工具，不调用 `execute`。SANDBOXED 且有 rg 时，在现有 SandboxPool 中以 argv 运行 rg：`ask` 复用无网实例，`allow` 复用有网实例，不创建专用 grep 沙箱。rg 在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。`path` 可以指向已经声明的挂载；未授权路径被拒绝。UNSANDBOXED 或缺少 rg 时使用可终止的宿主 Python 正则回退，两种实现对已授权路径的结果一致。参数、Glob 与结果限制见 [search.md](search.md)，进程路径见 [architecture.md](architecture.md#grep-搜索)。execute 的 `network` 参数、审批和网络规则不受 grep 选择影响。
+`grep` 和 `glob` 不在模型工具表中。搜索实现仍留在代码里，但不会作为工具交给模型，也不再占用单独的审批或沙箱选择。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 

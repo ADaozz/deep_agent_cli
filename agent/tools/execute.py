@@ -20,13 +20,13 @@ _ASK_DESCRIPTION = (
     + "network=true and offline commands run in two separate sandboxes that share "
     "only /workspace, so use the same network value for commands that depend on "
     "each other's /tmp files or background processes. "
-    "Prefer ls/read_file/glob/grep/write_file for filesystem work."
+    "Prefer ls/read_file/write_file for filesystem work."
 )
 _ALLOW_DESCRIPTION = (
     "Run a shell command inside the sandbox workspace (/workspace). "
     "Permission allow mode: commands run without approval and host network "
     "(internet, localhost, LAN) is enabled by default for every call. " + _PERSISTENCE
-    + "Prefer ls/read_file/glob/grep/write_file for filesystem work."
+    + "Prefer ls/read_file/write_file for filesystem work."
 )
 
 
