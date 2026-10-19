@@ -40,7 +40,7 @@ describe('workspace diff panel', () => {
     vi.spyOn(api, 'projectGit').mockResolvedValue(git)
     const panel = mount(SidePanel, { props: { git, projectId: 'app', title: 'app', subtitle: '' } })
     expect(panel.text()).toContain('agent/server/gitinfo.py')
-    expect(panel.text()).toContain('notes/new.txt')
+    expect(panel.text()).not.toContain('notes/new.txt')
     expect(panel.text()).not.toContain('变更文件')
     await panel.get('button[title="agent/server/gitinfo.py"]').trigger('click')
     await flushPromises()
