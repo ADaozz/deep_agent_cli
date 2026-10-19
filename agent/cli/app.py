@@ -52,7 +52,7 @@ from agent.cli.clipboard import (
     windows_path_to_wsl,
 )
 from agent.cli.commands import Command, command_table
-from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe, GitSummary
+from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
 from agent.cli.pasted_content import PastedContentDraft
@@ -1243,7 +1243,7 @@ class CliApplication:
         index = next((i for i, item in enumerate(profiles) if item.id == current_id), 0)
         nxt = profiles[(index + delta) % len(profiles)]
         try:
-            profile = self._switch_model(nxt.id)
+            self._switch_model(nxt.id)
         except (KeyError, RuntimeError) as exc:
             self.state.add_system(str(exc), error=True)
             return
@@ -1324,10 +1324,6 @@ class CliApplication:
     def _transcript_cursor(self) -> Point:
         last = max(0, self._transcript_line_count - 1)
         return Point(x=0, y=min(last, self.transcript_top()))
-
-    def transcript_anchor(self) -> int | None:
-        """Top row to pin the viewport to, or None while following new output."""
-        return self._transcript_anchor
 
     def transcript_rows(self) -> int:
         """Total transcript rows as of the most recent paint."""

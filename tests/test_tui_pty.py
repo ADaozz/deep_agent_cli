@@ -21,7 +21,7 @@ import time
 
 import pytest
 
-from tests.test_playwright_sandbox import page_url
+from tests.test_playwright_sandbox import page_url  # noqa: F401  pytest fixture for the Playwright PTY test
 
 pytestmark = pytest.mark.sandbox
 

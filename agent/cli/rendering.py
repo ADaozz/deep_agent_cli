@@ -22,7 +22,6 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
 from rich.segment import Segment
-from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
@@ -30,7 +29,6 @@ from rich.theme import Theme
 from agent.cli.previews import (
     CommandExecutionPreview,
     EXPAND_HINT,
-    REVIEW_HINT,
     ToolPreview,
     added_line_label,
     aggregate_file_mutations,
@@ -78,7 +76,7 @@ def render_transcript(
 # one tool, or one collapsed explore group. A unit is pushed through Rich and
 # parsed into prompt_toolkit fragments exactly once, then replayed from cache
 # until its fingerprint changes. While streaming, only the active block is
-# dirty, so frozen history never pays for Markdown/Syntax parsing again.
+# dirty, so frozen history never pays for Markdown parsing again.
 
 
 @dataclass

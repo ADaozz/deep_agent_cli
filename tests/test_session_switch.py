@@ -12,7 +12,7 @@ import pytest
 
 from agent.config import Settings
 from agent.runner import AgentRunner
-from agent.session import SessionStore, StopReason
+from agent.session import SessionStore
 from agent.session_lock import SessionLockBusyError
 from tests.conftest import scripted_model
 

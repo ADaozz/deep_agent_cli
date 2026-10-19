@@ -44,12 +44,6 @@ class SessionController:
         assert self._wait_target is not None
         return WAIT_STATUS.format(self._wait_target[:8])
 
-    def schedule_start(self, loop: asyncio.AbstractEventLoop) -> None:
-        if self.startup_session_id is not None:
-            loop.create_task(self._switch_with_wait(self.startup_session_id))
-        elif self.open_picker_on_start:
-            loop.create_task(self.resume())
-
     async def start(self) -> None:
         if self.startup_session_id is not None:
             await self._switch_with_wait(self.startup_session_id)

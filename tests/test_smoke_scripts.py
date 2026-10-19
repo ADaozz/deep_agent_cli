@@ -1,8 +1,6 @@
 """Smoke entrypoints: configuration is explicit and live calls remain opt-in."""
 import argparse
 import asyncio
-from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
