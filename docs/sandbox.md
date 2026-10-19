@@ -34,6 +34,13 @@
 
 额外挂载的限制：`destination` 必须是沙箱内的绝对路径，不能是 `/workspace`、`/tmp`、`/home/agent`，也不能与 `/skills` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选挂载的源目录不存在时会被跳过。
 
+文件工具使用同一份启动配置。能安全表达的挂载才会同时进入 Bubblewrap 和文件工具路由：
+
+- 同一 `destination` 不能出现两次。后应用的挂载如果盖住先前的目标，启动直接失败，避免只读声明被后面的读写挂载悄悄覆盖。
+- 嵌套目标的 `source` 必须就是父挂载里的对应路径。不能把另一棵目录叠进已挂载的父目录，否则列举父目录会和沙箱里看到的内容不一致。
+- 同一宿主目录可以同时挂到不同的虚拟路径，并且权限可以不同。文件工具按虚拟路径判断只读或读写：只读路径不能改，读写路径可以改，两边看到的是同一份数据。
+- 这些检查发生在 Backend 初始化时。Agent 不能在运行中新增挂载或改写这张表。
+
 其他隔离设置：
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
@@ -51,7 +58,7 @@
 | 有网沙箱 | `network=true` 或 `allow` 模式下的 `execute` | 共享宿主网络 |
 
 - 每次 `execute` 都启动一个新的 `/bin/sh -lc`：`cd`、shell 变量等状态不保留；保留的是沙箱环境本身——`/tmp`、`/home` 中的文件和后台进程（例如 `nohup cmd > log 2>&1 &`）在后续调用中仍然存在。
-- 两个沙箱只共享 `/workspace`（以及只读挂载）；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
+- 两个沙箱只共享 `/workspace` 和启动时声明的额外挂载；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
 - 沙箱的主进程是一个常驻 Worker，宿主只通过它继承的管道下发命令。这个控制通道不出现在文件系统或网络中，Worker 本身设为不可 dump，沙箱内的进程不能通过 `/proc` 接管它；无网沙箱看不到有网沙箱的进程、`/tmp` 中的 socket，也连不上它的抽象 Unix socket（抽象 socket 随网络命名空间隔离）。
 - 取消和超时只杀掉当前命令的进程组（包括它启动的后台进程），沙箱继续可用。
 - Worker 异常退出时，正在执行的命令返回 `sandbox_lost` 错误，不会自动重试；下一次 `execute` 启动新的沙箱。
@@ -78,9 +85,27 @@
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件。它们只接受 `/workspace/...` 和 `/skills/...` 路径：前者映射到工作区，后者只读；其他路径返回权限错误。单个文件读写上限 10 MiB。
+`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
 
-`grep` 是免审批探索工具，不调用 `execute`。SANDBOXED 且有 rg 时，在现有 SandboxPool 中以 argv 运行 rg：`ask` 复用无网实例，`allow` 复用有网实例，不创建专用 grep 沙箱。rg 在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。UNSANDBOXED 或缺少 rg 时使用可终止的宿主 Python 正则回退。参数、Glob 与结果限制见 [search.md](search.md)，进程路径见 [architecture.md](architecture.md#grep-搜索)。execute 的 `network` 参数、审批和网络规则不受 grep 选择影响。
+| 路径 | 文件工具 |
+|---|---|
+| `/workspace` | 工作区，读写 |
+| `/skills` | Skills 目录，只读（目录存在时） |
+| `extra_read_write_mounts` 的目标 | 对应宿主路径，读写 |
+| `extra_read_only_mounts` 的目标 | 对应宿主路径，只读 |
+| 其他虚拟路径 | `Permission denied` |
+
+目录挂载授权整个目标目录。单文件挂载只授权那个文件，不开放它所在目录里的其他文件，也不为了挂载文件而授权父目录。只读目标上的 `write_file`、`edit_file`、`delete` 和上传在接触宿主文件之前被拒绝；列举、读取、搜索和下载仍然允许。只读拒绝不依赖宿主目录本身的权限位，也不因为同一份数据另有读写别名而放行。
+
+写入、编辑和上传会解析完整的宿主路径。路径落在当前虚拟路由下更具体的只读子挂载时直接拒绝，相对路径、链式和多级符号链接都不能绕过。指向同一宿主目录的只读别名和读写别名仍按各自的虚拟路径授权。
+
+`delete` 不能删除挂载点本身，包括 `/workspace`、其他目录挂载的根，以及单文件挂载。通过别名或父目录把挂载源删掉也同样拒绝，避免持久沙箱仍绑定已经消失的 inode。挂载内部的普通文件可以删除。删除时先解析父目录的真实路径，父目录落在只读子挂载里则拒绝。最后一级如果是符号链接，只删除链接本身，不跟随目标；链接所在的真实目录是只读的时候，链接也不能删。
+
+Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib64` 以及少量 `/etc` 文件不会自动成为文件工具的授权路径。`ls('/')` 和无路径 `glob` 聚合已经授权的虚拟目录；明确访问未授权路径返回 `Permission denied`。空的已授权目录返回空结果，而不是权限错误。`/workspace2` 不会被当成 `/workspace`。`..` 和指向授权根之外的符号链接都不能逃逸。单个文件的搜索上限仍是 10 MiB。
+
+UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录权限，文件工具仍只使用工作区和只读 Skills。CUSTOM backend 保留调用方自己的规则。
+
+`grep` 是免审批探索工具，不调用 `execute`。SANDBOXED 且有 rg 时，在现有 SandboxPool 中以 argv 运行 rg：`ask` 复用无网实例，`allow` 复用有网实例，不创建专用 grep 沙箱。rg 在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。`path` 可以指向已经声明的挂载；未授权路径被拒绝。UNSANDBOXED 或缺少 rg 时使用可终止的宿主 Python 正则回退，两种实现对已授权路径的结果一致。参数、Glob 与结果限制见 [search.md](search.md)，进程路径见 [architecture.md](architecture.md#grep-搜索)。execute 的 `network` 参数、审批和网络规则不受 grep 选择影响。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 

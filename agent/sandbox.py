@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from codecs import IncrementalDecoder, getincrementaldecoder
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -20,6 +21,7 @@ import warnings
 from agent.cancel import emit_tool_output, get_cancel_context
 
 from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellBackend
+from deepagents.backends.utils import InvalidGlobPatternError, compile_grep_include_glob
 from deepagents.backends.protocol import (
     BackendProtocol,
     DeleteResult,
@@ -96,17 +98,169 @@ class BackendSelection:
     warning: str = ""
 
 
-_OUTSIDE_WORKSPACE_ERROR = "Permission denied: paths must be under /workspace or /skills"
+_PATH_ESCAPE = "Permission denied: path escapes its authorized mount"
+_MOUNT_DELETE = "Permission denied: cannot delete a sandbox mount point"
+
+
+def _component_within(path: str, root: str) -> bool:
+    """Match ``path`` to ``root`` on a path-component boundary.
+
+    ``/workspace2`` is not inside ``/workspace``.
+    """
+    normalized = path.rstrip("/") or "/"
+    base = root.rstrip("/") or "/"
+    return normalized == base or normalized.startswith(base + "/")
+
+
+def _permission_denied(directories: tuple[str, ...], files: tuple[str, ...] = ()) -> str:
+    roots: list[str] = []
+    for root in (SANDBOX_ROOT, *sorted({*directories, *files} - {SANDBOX_ROOT})):
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        roots = [SANDBOX_ROOT]
+    if len(roots) == 1:
+        listing = roots[0]
+    elif len(roots) == 2:
+        listing = f"{roots[0]} or {roots[1]}"
+    else:
+        listing = ", ".join(roots[:-1]) + f", or {roots[-1]}"
+    return f"Permission denied: paths must be under {listing}"
+
+
+def _glob_literal_directory(pattern: str) -> str | None:
+    """Return the absolute literal directory prefix of a glob, or None if relative.
+
+    ``/`` means the pattern is anchored at the composite root (``/*.py``, ``/**``).
+    """
+    if not pattern.startswith("/"):
+        return None
+    literal: list[str] = []
+    for part in pattern.split("/")[1:]:
+        if part == "" or any(char in part for char in "*?["):
+            break
+        literal.append(part)
+    if not literal:
+        return "/"
+    return "/" + "/".join(literal)
+
+
+@dataclass(frozen=True)
+class _MountPoint:
+    """One host path exposed at a fixed virtual destination."""
+
+    destination: PurePosixPath
+    source: Path
+    read_only: bool
+    is_file: bool
+
+    @property
+    def virtual(self) -> str:
+        return self.destination.as_posix()
+
+
+def _host_contains(root: Path, path: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
+def _unfollowed_host_path(backend: BackendProtocol, key: str) -> tuple[Path, Path, bool]:
+    """Return the resolved parent, the final path, and whether that path is a symlink.
+
+    The parent is fully resolved, including intermediate symlinks. The final
+    component is not followed. ``..`` and a symlink that leaves the mount are
+    rejected by the backend's virtual-mode checks.
+    """
+    resolve = backend._resolve_path
+    vpath = key if key.startswith("/") else f"/{key}"
+    if ".." in vpath.split("/") or "~" in vpath or "\x00" in vpath:
+        raise ValueError("Permission denied: invalid virtual path")
+    if vpath in {"/", ""}:
+        cwd = backend.cwd
+        return cwd, cwd, cwd.is_symlink()
+    parent_virtual, name = vpath.rsplit("/", 1)
+    if name in {"", ".", ".."}:
+        raise ValueError("Permission denied: invalid virtual path")
+    parent = resolve(parent_virtual or "/")
+    candidate = parent / name
+    return parent, candidate, candidate.is_symlink()
+
+
+def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_MountPoint, ...]:
+    """Resolve the Bubblewrap mount stack and reject layouts file tools cannot honor.
+
+    Mounts are applied in the same order as ``BubblewrapBackend.sandbox_args``:
+    workspace, then read-only extras, then read-write extras, then skills.
+    A later mount hides an earlier mount at the same path or at a descendant.
+    A nested mount is expressible only when its source is exactly the
+    corresponding path inside the parent mount. The same host directory may
+    also be mounted at several virtual paths with different permissions;
+    file tools then judge read-only versus read-write by the virtual path.
+    """
+    ordered: list[tuple[Path, str, bool]] = [(config.workspace, SANDBOX_ROOT, False)]
+    ordered.extend((mount.source, mount.destination, True) for mount in config.extra_read_only_mounts)
+    ordered.extend((mount.source, mount.destination, False) for mount in config.extra_read_write_mounts)
+    if skills_dir is not None:
+        ordered.append((skills_dir, SKILLS_ROOT, True))
+
+    effective: list[_MountPoint] = []
+    for raw_source, raw_destination, read_only in ordered:
+        source = raw_source.expanduser().resolve()
+        destination = PurePosixPath(PurePosixPath(raw_destination).as_posix())
+        if not destination.is_absolute() or ".." in destination.parts:
+            raise ValueError(f"mount destination must be an absolute sandbox path: {raw_destination!r}")
+        if not source.exists():
+            raise ValueError(f"mount source does not exist: {source}")
+        is_file = source.is_file()
+        if not is_file and not source.is_dir():
+            raise ValueError(f"mount source must be a file or directory: {destination}")
+        point = _MountPoint(destination, source, read_only, is_file)
+        for existing in effective:
+            if existing.destination == destination:
+                raise ValueError(f"duplicate mount destination: {destination}")
+            if existing.destination.is_relative_to(destination):
+                raise ValueError(
+                    f"mount {existing.destination} is hidden by later mount {destination}; "
+                    "file tools cannot preserve the declared permissions"
+                )
+        parents = [
+            item for item in effective
+            if destination.is_relative_to(item.destination) and destination != item.destination
+        ]
+        if parents:
+            parent = max(parents, key=lambda item: len(item.destination.parts))
+            if parent.is_file:
+                raise ValueError(f"cannot mount {destination} inside file mount {parent.destination}")
+            expected = (parent.source / destination.relative_to(parent.destination)).resolve()
+            if source != expected:
+                raise ValueError(
+                    f"nested mount {destination} does not match the contents of {parent.destination}; "
+                    "refusing a file-tool route that would disagree with the sandbox mount"
+                )
+        effective.append(point)
+    return tuple(effective)
 
 
 class _OutsideWorkspaceBackend(BackendProtocol):
-    """默认路由：拒绝 /workspace 与 /skills 之外的路径，不持久化。"""
+    """默认路由：根聚合返回空结果，明确越界返回 Permission denied。"""
+
+    def __init__(self, directories: tuple[str, ...] = (SANDBOX_ROOT,), files: tuple[str, ...] = ()) -> None:
+        self._directories = directories
+        self._files = files
+        self.denied = _permission_denied(directories, files)
+
+    def _allows(self, path: str) -> bool:
+        if any(_component_within(path, root) for root in self._directories):
+            return True
+        normalized = path.rstrip("/") or "/"
+        return normalized in self._files
 
     def ls(self, path: str) -> LsResult:
-        return LsResult(entries=[])
+        if path == "/":
+            return LsResult(entries=[])
+        return LsResult(error=self.denied, entries=None)
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
-        return ReadResult(error=_OUTSIDE_WORKSPACE_ERROR)
+        return ReadResult(error=self.denied)
 
     def grep(
         self,
@@ -116,13 +270,24 @@ class _OutsideWorkspaceBackend(BackendProtocol):
         *,
         max_count: int | None = None,
     ) -> GrepResult:
-        return GrepResult(matches=[])
+        if path in (None, "/"):
+            return GrepResult(matches=[])
+        if self._allows(path):
+            return GrepResult(matches=[])
+        return GrepResult(error=self.denied)
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
-        return GlobResult(matches=[])
+        if path not in (None, "/"):
+            if self._allows(path):
+                return GlobResult(matches=[])
+            return GlobResult(error=self.denied, matches=None)
+        prefix = _glob_literal_directory(pattern)
+        if prefix is None or prefix == "/" or self._allows(prefix):
+            return GlobResult(matches=[])
+        return GlobResult(error=self.denied, matches=None)
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        return WriteResult(error=_OUTSIDE_WORKSPACE_ERROR)
+        return WriteResult(error=self.denied)
 
     def edit(
         self,
@@ -131,53 +296,180 @@ class _OutsideWorkspaceBackend(BackendProtocol):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
-        return EditResult(error=_OUTSIDE_WORKSPACE_ERROR)
+        return EditResult(error=self.denied)
 
     def delete(self, file_path: str) -> DeleteResult:
-        return DeleteResult(error=_OUTSIDE_WORKSPACE_ERROR)
+        return DeleteResult(error=self.denied)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        return [FileUploadResponse(path=path, error=_OUTSIDE_WORKSPACE_ERROR) for path, _ in files]
+        return [FileUploadResponse(path=path, error=self.denied) for path, _ in files]
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        return [FileDownloadResponse(path=path, error=_OUTSIDE_WORKSPACE_ERROR) for path in paths]
+        return [FileDownloadResponse(path=path, error=self.denied) for path in paths]
 
 
-class _ReadOnlySkillsBackend(FilesystemBackend):
-    """向文件工具暴露应用 Skills，禁止写入。"""
+class _ReadOnlyFilesystemBackend(FilesystemBackend):
+    """目录挂载的只读文件后端。写入在接触宿主文件之前被拒绝。"""
 
-    def __init__(self, root: Path) -> None:
+    denies_mutation = True
+
+    def __init__(self, root: Path, *, reason: str) -> None:
         super().__init__(root_dir=root, virtual_mode=True, max_file_size_mb=10)
+        self.mutation_error = f"Permission denied: {reason}"
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        return WriteResult(error="Permission denied: skills are read-only")
+        return WriteResult(error=self.mutation_error)
 
     def edit(self, file_path: str, old_string: str, new_string: str,
              replace_all: bool = False) -> EditResult:
-        return EditResult(error="Permission denied: skills are read-only")
+        return EditResult(error=self.mutation_error)
 
     def delete(self, file_path: str) -> DeleteResult:
-        return DeleteResult(error="Permission denied: skills are read-only")
+        return DeleteResult(error=self.mutation_error)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        return [FileUploadResponse(path=path, error="Permission denied: skills are read-only")
-                for path, _ in files]
+        return [FileUploadResponse(path=path, error=self.mutation_error) for path, _ in files]
+
+
+class _ExactFileBackend(BackendProtocol):
+    """只暴露一个已挂载的文件，不开放其所在目录的其他条目。"""
+
+    def __init__(self, source: Path, *, read_only: bool) -> None:
+        self.source = source
+        self.host_dir = source.parent
+        self.filename = source.name
+        self.cwd = self.host_dir
+        self.max_file_size_bytes = 10 * 1024 * 1024
+        self.denies_mutation = read_only
+        self.mutation_error = "Permission denied: mount is read-only"
+        self._files = FilesystemBackend(root_dir=self.host_dir, virtual_mode=True, max_file_size_mb=10)
+        self._virtual = f"/{self.filename}"
+
+    def _exact(self, path: str) -> bool:
+        normalized = path if path.startswith("/") else f"/{path}"
+        return normalized in {"/", self._virtual}
+
+    def _resolve_path(self, key: str) -> Path:
+        if not self._exact(key):
+            raise ValueError("Permission denied: path is outside the mounted file")
+        return self._files._resolve_path(self._virtual)
+
+    def _outside(self, path: str) -> str:
+        return "Permission denied: path is outside the mounted file"
+
+    def ls(self, path: str) -> LsResult:
+        if not self._exact(path):
+            return LsResult(error=self._outside(path), entries=None)
+        return LsResult(error=f"Path '{path}': not_a_directory", entries=None)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        if not self._exact(file_path):
+            return ReadResult(error=self._outside(file_path))
+        return self._files.read(self._virtual, offset=offset, limit=limit)
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None, *,
+             max_count: int | None = None) -> GrepResult:
+        if path not in (None, "/", self._virtual):
+            return GrepResult(error=self._outside(path or ""))
+        return self._files.grep(pattern, self._virtual, glob, max_count=max_count)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        return GlobResult(matches=[])
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        if self.denies_mutation:
+            return WriteResult(error=self.mutation_error)
+        if not self._exact(file_path):
+            return WriteResult(error=self._outside(file_path))
+        return self._files.write(self._virtual, content)
+
+    def edit(self, file_path: str, old_string: str, new_string: str,
+             replace_all: bool = False) -> EditResult:
+        if self.denies_mutation:
+            return EditResult(error=self.mutation_error)
+        if not self._exact(file_path):
+            return EditResult(error=self._outside(file_path))
+        return self._files.edit(self._virtual, old_string, new_string, replace_all=replace_all)
+
+    def delete(self, file_path: str) -> DeleteResult:
+        if not self._exact(file_path):
+            return DeleteResult(error=self._outside(file_path))
+        return DeleteResult(error=_MOUNT_DELETE)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        responses: list[FileUploadResponse] = []
+        for path, content in files:
+            if self.denies_mutation:
+                responses.append(FileUploadResponse(path=path, error=self.mutation_error))
+                continue
+            if not self._exact(path):
+                responses.append(FileUploadResponse(path=path, error=self._outside(path)))
+                continue
+            result = self._files.upload_files([(self._virtual, content)])[0]
+            responses.append(FileUploadResponse(path=path, error=result.error))
+        return responses
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        responses: list[FileDownloadResponse] = []
+        for path in paths:
+            if not self._exact(path):
+                responses.append(FileDownloadResponse(path=path, error="permission_denied"))
+                continue
+            result = self._files.download_files([self._virtual])[0]
+            responses.append(FileDownloadResponse(path=path, content=result.content, error=result.error))
+        return responses
+
+
+def _directory_backend(point: _MountPoint, executor: SandboxBackendProtocol) -> BackendProtocol:
+    destination = point.virtual
+    if destination == SANDBOX_ROOT:
+        return executor
+    if point.read_only:
+        reason = "skills are read-only" if destination == SKILLS_ROOT else "mount is read-only"
+        return _ReadOnlyFilesystemBackend(point.source, reason=reason)
+    return FilesystemBackend(root_dir=point.source, virtual_mode=True, max_file_size_mb=10)
 
 
 class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
-    """暴露工作区与只读 Skills，执行委托给底层 executor。"""
+    """按启动时固定的挂载表路由文件工具，执行仍委托给底层 executor。"""
 
     def __init__(self, executor: SandboxBackendProtocol, *, skills_dir: Path | None) -> None:
-        routes: dict[str, BackendProtocol] = {f"{SANDBOX_ROOT}/": executor}
-        if skills_dir is not None:
-            routes[f"{SKILLS_ROOT}/"] = _ReadOnlySkillsBackend(skills_dir)
+        config = getattr(executor, "config", None)
+        points = _mount_points(config, skills_dir) if isinstance(config, SandboxConfig) else ()
+        # 额外挂载的虚拟目标只存在于 Bubblewrap 中。UNSANDBOXED 不把它们当成宿主权限。
+        expose_mounts = isinstance(executor, BubblewrapBackend)
+        routes: dict[str, BackendProtocol] = {}
+        directories: list[str] = []
+        files: dict[str, _MountPoint] = {}
+        if expose_mounts:
+            for point in points:
+                if point.is_file:
+                    files[point.virtual] = point
+                    routes[point.virtual + "/"] = _ExactFileBackend(point.source, read_only=point.read_only)
+                    continue
+                directories.append(point.virtual)
+                routes[point.virtual + "/"] = _directory_backend(point, executor)
+        else:
+            routes[f"{SANDBOX_ROOT}/"] = executor
+            directories.append(SANDBOX_ROOT)
+            if skills_dir is not None:
+                routes[f"{SKILLS_ROOT}/"] = _ReadOnlyFilesystemBackend(skills_dir, reason="skills are read-only")
+                directories.append(SKILLS_ROOT)
+        outside = _OutsideWorkspaceBackend(tuple(directories), tuple(files))
         super().__init__(
-            default=_OutsideWorkspaceBackend(),
+            default=outside,
             routes=routes,
             artifacts_root=f"{SANDBOX_ROOT}/.deepagents",
         )
         self.executor = executor
         self.skills_dir = skills_dir
+        self._mount_points = points if expose_mounts else tuple(
+            point for point in points if point.virtual in {SANDBOX_ROOT, SKILLS_ROOT}
+        )
+        self._file_mounts = files
+        self._directory_roots = tuple(directories)
+        self.exact_file_mounts = frozenset(files)
+        self._denied = outside.denied
 
     @property
     def supports_regex_search(self) -> bool:
@@ -192,18 +484,304 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         if not self.supports_regex_search:
             raise ValueError("Backend does not support local regex search")
         virtual = path or SANDBOX_ROOT
-        if not virtual.startswith("/") or ".." in virtual or "~" in virtual or "\x00" in virtual:
+        if not virtual.startswith("/") or ".." in virtual.split("/") or "~" in virtual or "\x00" in virtual:
             raise ValueError("Permission denied: invalid virtual search path")
-        for mount, backend in self.routes.items():
-            prefix = mount.rstrip("/")
-            if virtual == prefix or virtual.startswith(mount):
-                relative = virtual[len(prefix):].lstrip("/")
-                try:
-                    backend._resolve_path(relative or "/")
-                except (ValueError, OSError):
-                    raise ValueError("Permission denied: search path escapes its authorized mount") from None
-                return backend.cwd, relative, prefix, backend.max_file_size_bytes
-        raise ValueError(_OUTSIDE_WORKSPACE_ERROR)
+        for mount, backend in sorted(self.routes.items(), key=lambda item: len(item[0]), reverse=True):
+            prefix = mount.rstrip("/") or "/"
+            if not _component_within(virtual, prefix):
+                continue
+            if isinstance(backend, _ExactFileBackend):
+                if virtual.rstrip("/") != prefix:
+                    raise ValueError("Permission denied: search path escapes its authorized mount")
+                parent = PurePosixPath(prefix).parent.as_posix()
+                return backend.host_dir, backend.filename, parent, backend.max_file_size_bytes
+            relative = virtual[len(prefix):].lstrip("/") if prefix != "/" else virtual.lstrip("/")
+            try:
+                backend._resolve_path(relative or "/")
+            except (ValueError, OSError):
+                raise ValueError("Permission denied: search path escapes its authorized mount") from None
+            return backend.cwd, relative, prefix, backend.max_file_size_bytes
+        raise ValueError(self._denied)
+
+    def _covered_by_directory(self, destination: str) -> bool:
+        return any(_component_within(destination, root) and destination.rstrip("/") != root.rstrip("/")
+                   for root in self._directory_roots)
+
+    def _file_info(self, point: _MountPoint) -> dict[str, object]:
+        info: dict[str, object] = {"path": point.virtual, "is_dir": False}
+        try:
+            stat_result = point.source.stat()
+        except OSError:
+            return info
+        info["size"] = int(stat_result.st_size)
+        info["modified_at"] = datetime.fromtimestamp(stat_result.st_mtime).isoformat()
+        return info
+
+    def _present_ls(self, path: str, result: LsResult) -> LsResult:
+        if path != "/" or result.error or not result.entries or not self._file_mounts:
+            return result
+        entries: list[dict[str, object]] = []
+        for entry in result.entries:
+            route = str(entry.get("path", "")).rstrip("/")
+            point = self._file_mounts.get(route)
+            if point is None:
+                entries.append(dict(entry))
+                continue
+            if self._covered_by_directory(route):
+                continue
+            entries.append(self._file_info(point))
+        entries.sort(key=lambda item: str(item.get("path", "")))
+        return LsResult(entries=entries)  # type: ignore[arg-type]
+
+    def ls(self, path: str) -> LsResult:
+        try:
+            result = super().ls(path)
+        except ValueError:
+            return LsResult(error=_PATH_ESCAPE, entries=None)
+        return self._present_ls(path, result)
+
+    async def als(self, path: str) -> LsResult:
+        return await asyncio.to_thread(self.ls, path)
+
+    def _file_relative(self, destination: str, path: str | None) -> str | None:
+        if path in (None, "/"):
+            return destination.lstrip("/")
+        base = path.rstrip("/") or "/"
+        if destination.rstrip("/") == base:
+            return PurePosixPath(destination).name
+        if _component_within(destination, base) and destination.rstrip("/") != base:
+            return destination[len(base):].lstrip("/")
+        return None
+
+    def _uncovered_file_matches(self, pattern: str, path: str | None) -> list[dict[str, object]]:
+        if not self._file_mounts:
+            return []
+        try:
+            matcher = compile_grep_include_glob(pattern)
+        except InvalidGlobPatternError:
+            return []
+        matches: list[dict[str, object]] = []
+        for destination, point in self._file_mounts.items():
+            if self._covered_by_directory(destination):
+                continue
+            relative = self._file_relative(destination, path)
+            if relative is None or not matcher(relative):
+                continue
+            matches.append(self._file_info(point))
+        return matches
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        try:
+            result = super().glob(pattern, path)
+        except ValueError:
+            return GlobResult(error=_PATH_ESCAPE, matches=None)
+        if result.error:
+            return result
+        extra = self._uncovered_file_matches(pattern, path)
+        if not extra:
+            return result
+        matches = [*(result.matches or []), *extra]
+        matches.sort(key=lambda item: str(item.get("path", "")))
+        return GlobResult(
+            matches=matches,  # type: ignore[arg-type]
+            truncated=result.truncated,
+            truncation_reason=result.truncation_reason,
+        )
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        return await asyncio.to_thread(self.glob, pattern, path)
+
+    def _route_point(self, file_path: str) -> _MountPoint | None:
+        virtual = file_path if file_path.startswith("/") else f"/{file_path}"
+        matches = [point for point in self._mount_points if _component_within(virtual, point.virtual)]
+        if not matches:
+            return None
+        return max(matches, key=lambda point: len(point.destination.parts))
+
+    def _is_mount_virtual(self, file_path: str) -> bool:
+        virtual = file_path if file_path.startswith("/") else f"/{file_path}"
+        normalized = virtual.rstrip("/") or "/"
+        return any((point.virtual.rstrip("/") or "/") == normalized for point in self._mount_points)
+
+    def _more_specific_mount(self, route: _MountPoint, host_path: Path) -> _MountPoint | None:
+        """Return a nested mount under ``route`` that contains ``host_path``.
+
+        Aliases of the same host directory are not more specific: their
+        permission comes from the virtual path that was actually used.
+        """
+        nested = [
+            point for point in self._mount_points
+            if point.destination != route.destination
+            and point.destination.is_relative_to(route.destination)
+            and point.source != route.source
+            and point.source.is_relative_to(route.source)
+            and _host_contains(point.source, host_path)
+        ]
+        if not nested:
+            return None
+        return max(nested, key=lambda point: (len(point.source.parts), len(point.destination.parts)))
+
+    def _mutation_plan(self, file_path: str) -> tuple[BackendProtocol, str] | str:
+        """Choose the backend that may write ``file_path``, or an error string.
+
+        The host path is always fully resolved, whether or not the final
+        component is a symlink. A result that lands in a more specific
+        read-only mount nested under the virtual route is rejected before any
+        write. A same-directory read-only alias is not such a mount: its
+        permission stays with the virtual path that was requested. A symlink
+        that leaves the route is rejected instead of being retargeted.
+        """
+        backend, stripped = self._get_backend_and_key(file_path)
+        resolve = getattr(backend, "_resolve_path", None)
+        if resolve is None:
+            if getattr(backend, "denies_mutation", False):
+                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
+            return backend, stripped
+        try:
+            host_path = resolve(stripped)
+        except (ValueError, OSError):
+            return _PATH_ESCAPE
+        route = self._route_point(file_path)
+        owner = self._more_specific_mount(route, host_path) if route is not None else None
+        if owner is not None and owner.read_only:
+            owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
+            return getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only")
+        if owner is not None:
+            relative = host_path.relative_to(owner.source).as_posix()
+            virtual = owner.virtual if relative in {"", "."} else f"{owner.virtual}/{relative}"
+            return self._get_backend_and_key(virtual)
+        if getattr(backend, "denies_mutation", False):
+            return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
+        return backend, stripped
+
+    def _deletion_removes_mount_source(self, host_path: Path) -> bool:
+        try:
+            real = host_path.resolve()
+        except OSError:
+            return True
+        return any(
+            point.source == real or point.source.is_relative_to(real)
+            for point in self._mount_points
+        )
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        try:
+            return super().read(file_path, offset=offset, limit=limit)
+        except ValueError:
+            return ReadResult(error=_PATH_ESCAPE)
+
+    async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        return await asyncio.to_thread(self.read, file_path, offset, limit)
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        plan = self._mutation_plan(file_path)
+        if isinstance(plan, str):
+            return WriteResult(error=plan)
+        backend, stripped = plan
+        try:
+            result = backend.write(stripped, content)
+        except ValueError:
+            return WriteResult(error=_PATH_ESCAPE)
+        if result.path is not None:
+            result.path = file_path
+        return result
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        return await asyncio.to_thread(self.write, file_path, content)
+
+    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        plan = self._mutation_plan(file_path)
+        if isinstance(plan, str):
+            return EditResult(error=plan)
+        backend, stripped = plan
+        try:
+            result = backend.edit(stripped, old_string, new_string, replace_all=replace_all)
+        except ValueError:
+            return EditResult(error=_PATH_ESCAPE)
+        if result.path is not None:
+            result.path = file_path
+        return result
+
+    async def aedit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        return await asyncio.to_thread(self.edit, file_path, old_string, new_string, replace_all)
+
+    def delete(self, file_path: str) -> DeleteResult:
+        """Delete a file without removing a mount point or following a symlink.
+
+        Mount roots, single-file mounts, and any path whose removal would
+        unlink a mount source through an alias or a parent directory are
+        rejected. The parent directory is resolved first. If that directory
+        lies in a read-only submount of the virtual route, nothing is removed.
+        A final symlink is unlinked itself and its target is left untouched.
+        """
+        backend, stripped = self._get_backend_and_key(file_path)
+        resolve = getattr(backend, "_resolve_path", None)
+        if resolve is None:
+            if getattr(backend, "denies_mutation", False):
+                return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
+            try:
+                return backend.delete(stripped)
+            except ValueError:
+                return DeleteResult(error=_PATH_ESCAPE)
+        if self._is_mount_virtual(file_path) or stripped in {"/", ""}:
+            return DeleteResult(error=_MOUNT_DELETE)
+        try:
+            parent, host_path, is_link = _unfollowed_host_path(backend, stripped)
+        except (ValueError, OSError):
+            return DeleteResult(error=_PATH_ESCAPE)
+        route = self._route_point(file_path)
+        owner = self._more_specific_mount(route, parent) if route is not None else None
+        if owner is not None and owner.read_only:
+            owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
+            return DeleteResult(error=getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only"))
+        if is_link:
+            if getattr(backend, "denies_mutation", False):
+                return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
+            try:
+                host_path.unlink()
+            except OSError:
+                return DeleteResult(error=f"Error deleting '{file_path}'")
+            return DeleteResult(path=file_path)
+        if self._deletion_removes_mount_source(host_path):
+            return DeleteResult(error=_MOUNT_DELETE)
+        if getattr(backend, "denies_mutation", False):
+            return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
+        try:
+            result = backend.delete(stripped)
+        except ValueError:
+            return DeleteResult(error=_PATH_ESCAPE)
+        if result.path is not None:
+            result.path = file_path
+        return result
+
+    async def adelete(self, file_path: str) -> DeleteResult:
+        return await asyncio.to_thread(self.delete, file_path)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        results: list[FileUploadResponse | None] = [None] * len(files)
+        groups: dict[BackendProtocol, list[tuple[int, str, bytes, str]]] = {}
+        for index, (path, content) in enumerate(files):
+            plan = self._mutation_plan(path)
+            if isinstance(plan, str):
+                results[index] = FileUploadResponse(path=path, error=plan)
+                continue
+            backend, stripped = plan
+            groups.setdefault(backend, []).append((index, stripped, content, path))
+        for backend, batch in groups.items():
+            try:
+                responses = backend.upload_files([(stripped, content) for _, stripped, content, _ in batch])
+            except ValueError:
+                responses = [FileUploadResponse(path=stripped, error=_PATH_ESCAPE) for _, stripped, _, _ in batch]
+            for (index, _stripped, _content, original), response in zip(batch, responses, strict=True):
+                results[index] = FileUploadResponse(path=original, error=response.error)
+        return [item or FileUploadResponse(path=files[index][0], error=self._denied)
+                for index, item in enumerate(results)]
+
+    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
+        try:
+            return super().download_files(paths)
+        except ValueError:
+            return [FileDownloadResponse(path=path, error=_PATH_ESCAPE) for path in paths]
 
     @property
     def id(self) -> str:
@@ -469,11 +1047,12 @@ def _validate_config(config: SandboxConfig) -> Path:
         raise ValueError(f"timeout_seconds must be positive, got {config.timeout_seconds}")
     if config.max_output_bytes <= 0:
         raise ValueError(f"max_output_bytes must be positive, got {config.max_output_bytes}")
-    _validated_skills_dir(workspace)
+    skills = _validated_skills_dir(workspace)
     for mount in config.extra_read_only_mounts:
         _mount_args("--ro-bind", mount)
     for mount in config.extra_read_write_mounts:
         _mount_args("--bind", mount)
+    _mount_points(replace(config, workspace=workspace), skills)
     for name in (*config.env_allowlist, *config.env_set):
         if not ENV_NAME.fullmatch(name):
             raise ValueError(f"invalid environment variable name: {name!r}")
