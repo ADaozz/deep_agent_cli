@@ -144,6 +144,11 @@ class ServiceStore:
             result["result"] = json.loads(result["result"])
             return result
 
+    def first_run_at(self, session_id: str) -> str | None:
+        with self.lock:
+            row = self.conn.execute('SELECT MIN(created_at) FROM runs WHERE session_id=?', (session_id,)).fetchone()
+            return row[0] if row else None
+
     def session_runs(self, session_id: str, limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
         after = None
         if cursor is not None:

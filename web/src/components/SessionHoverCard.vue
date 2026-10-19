@@ -9,7 +9,7 @@ import { projectLabel } from '../store/settings'
 const props = defineProps<{ projectId: string; left: number; top: number }>()
 const git = computed(() => workspaceGit[props.projectId])
 const workspace = computed(() => app.projects.find(project => project.id === props.projectId))
-const workspaceName = computed(() => workspace.value?.path.split('/').filter(Boolean).pop() || projectLabel(props.projectId))
+const workspacePath = computed(() => displayPath(workspace.value?.path) || projectLabel(props.projectId))
 const branch = computed(() => {
   if (!git.value?.available) return '无 Git 仓库'
   const name = git.value.branch === 'detached' ? '分离 HEAD · ' + git.value.head?.slice(0, 7) : git.value.branch
@@ -27,7 +27,7 @@ const branch = computed(() => {
     </div>
     <div class="session-hover-line is-workspace">
       <Icon name="branch" :size="13" />
-      <div class="session-hover-workspace"><div :title="displayPath(workspace?.path)">{{ workspaceName }}</div><div class="session-hover-branch" :title="branch">{{ branch }}</div></div>
+      <div class="session-hover-workspace"><div class="session-hover-path" :title="workspacePath">{{ workspacePath }}</div><div class="session-hover-branch" :title="branch">{{ branch }}</div></div>
     </div>
   </div>
 </template>

@@ -140,6 +140,22 @@ export interface PaginatedRuns {
     runs: RunSummary[];
     next_cursor: string | null;
 }
+export interface SavedTranscriptBlock {
+  id: string
+  kind: 'user' | 'assistant' | 'tool'
+  content: string
+  thinking: string
+  name: string
+  arguments: string
+  status: string
+  is_error: boolean
+  attachments: string[]
+  truncated: boolean
+}
+export interface SavedTranscript {
+  blocks: SavedTranscriptBlock[]
+  next_cursor: string | null
+}
 export interface ActiveRunResponse {
     run: RunSummary | null;
     blocked?: boolean;

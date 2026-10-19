@@ -3,8 +3,9 @@ import { afterEach, expect, it, vi } from 'vitest'
 import AgentSidebar from '../components/AgentSidebar.vue'
 import { app } from '../store/app'
 import { workspaceGit } from '../store/git'
+import { homePath } from '../lib/paths'
 
-afterEach(() => { vi.useRealTimers(); document.body.innerHTML = '' })
+afterEach(() => { vi.useRealTimers(); document.body.innerHTML = ''; homePath.value = '' })
 
 it('shows only current workspace diff statistics and repository/branch information on hover', async () => {
   vi.useFakeTimers()
@@ -12,6 +13,7 @@ it('shows only current workspace diff statistics and repository/branch informati
   app.sessions = [session]
   app.records = { s: { session, title: '文件差异审阅', runs: [], draft: '' } }
   app.projects = [{ id: 'app', path: '/home/neo/project/deep_agent_cli' }]
+  homePath.value = '/home/neo'
   workspaceGit.app = { available: true, changed: 6, added: 43, removed: 19, branch: 'web_beta', upstream: 'origin/web_beta' }
   const sidebar = mount(AgentSidebar, { attachTo: document.body })
   await sidebar.get('.chat-row').trigger('mouseenter')
@@ -21,7 +23,7 @@ it('shows only current workspace diff statistics and repository/branch informati
   expect(card.textContent).toContain('6 个文件')
   expect(card.textContent).toContain('+43')
   expect(card.textContent).toContain('-19')
-  expect(card.textContent).toContain('deep_agent_cli')
+  expect(card.querySelector('.session-hover-path')?.textContent).toBe('~/project/deep_agent_cli')
   expect(card.textContent).toContain('web_beta → origin/web_beta')
   expect(card.textContent).not.toContain('文件差异审阅')
   expect(card.textContent).not.toContain('From Website')

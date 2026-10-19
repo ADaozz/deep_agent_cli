@@ -248,6 +248,21 @@ def test_gateway_workspace_files_are_read_only_and_restrict_query_parameters():
         assert len(seen)==2
 
 
+def test_gateway_forwards_only_read_only_saved_transcripts():
+    seen=[]
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200,json={'blocks':[],'next_cursor':None})
+    with TestClient(create_app(GatewayConfig(token=TOKEN),transport=httpx.MockTransport(upstream)),base_url=ORIGIN) as client:
+        path='/api/agent/sessions/old/transcript'
+        assert client.get(path,params={'limit':50,'cursor':'checkpoint:20'}).status_code==200
+        assert seen[0].url.path=='/v1/sessions/old/transcript'
+        assert seen[0].url.params['cursor']=='checkpoint:20'
+        assert client.get(path,params={'extra':'bad'}).status_code==422
+        assert client.post(path,headers={'Origin':ORIGIN},json={}).status_code in (404,405)
+        assert len(seen)==1
+
+
 def test_gateway_forwards_discard_of_empty_session():
     seen = []
     def upstream(request):

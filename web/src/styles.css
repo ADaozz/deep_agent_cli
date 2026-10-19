@@ -1797,7 +1797,18 @@ a.commit-subject:hover { text-decoration: underline; }
 .session-hover-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .session-hover-workspace { min-width: 0; flex: 1; }
 .session-hover-workspace > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-hover-workspace .session-hover-path { white-space: normal; overflow-wrap: anywhere; text-overflow: clip; }
 .session-hover-branch { color: var(--t3); }
+
+.saved-conversation { display: flex; flex-direction: column; gap: 14px; }
+.saved-conversation:empty { display: none; }
+.saved-message { min-width: 0; }
+.saved-tool { padding: 0 9px; color: var(--t2); font-size: 12px; }
+.saved-tool summary { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
+.saved-tool.is-error summary { color: var(--danger); }
+.saved-thinking { margin-bottom: 8px; padding: 0 9px; color: var(--t3); font-size: 12px; }
+.saved-thinking summary { margin-bottom: 6px; cursor: pointer; }
+.saved-history-error { padding: 8px; color: var(--danger); font-size: 12px; }
 
 .diff-view {
   margin: 0 0 8px;

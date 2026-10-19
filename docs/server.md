@@ -862,6 +862,10 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 `GET /v1/projects/{project_id}/git/commits?limit=20&cursor=...` 返回 `{available, commits, next_cursor}`，网关同名路径只接受 `limit` 和 `cursor`。每条提交包含 `sha/subject/message/author/authored_at/committed_at/added/removed/files/url`。统计比较第一父提交（根提交比较空树），二进制文件计入文件数但不伪造文本行数。`limit` 为 1–50，游标固定首屏 HEAD，避免新增提交使后续页重复。空仓库返回空列表，非仓库或 Git 读取失败返回 `available:false`。仅从本地 Git 读取，不 fetch、不修改仓库。
 
+### 保存的 CLI 会话历史
+
+`GET /v1/sessions/{session_id}/transcript?limit=50&cursor=...`（网关同名路径）返回 `{blocks, next_cursor}`，用来读取目录中存在、但不一定有 HTTP Run 的 CLI 旧会话。内容从会话 SQLite checkpoint 以 `mode=ro` 恢复，兼容普通消息和 DeltaChannel 增量消息；不创建 Runner、不调用模型或工具。块包含 user/assistant/tool 类型、正文、思考、工具参数与结果、附件文件名和截断标志。单块最多 32,000 字符，每页 1–100 块，首屏返回最新页，游标固定 checkpoint，后续页向前加载。已有 HTTP Run 时仅读取首个 Run 创建前的旧 checkpoint，避免与 SSE 运行记录重复。接口要求会话鉴权，只有 GET。
+
 ### 只读工作区文件
 
 `GET /v1/projects/{project_id}/files?path=&offset=0&limit=200` 返回 `{path, entries, next_offset}`；目录优先排序，单页最多 500 项。每条记录包含工作区相对 `path`、`name` 和 `kind`（directory/file/symlink/other）。`GET /v1/projects/{project_id}/file-preview?path=...` 返回普通文件的只读预览：UTF-8 文本最多 256 KB，PNG/JPEG/GIF/WebP 图片最多 4 MB（data URL）；另返回字节大小和截断标志。符号链接仅返回目标字符串，二进制文件不返回内容。两个接口均要求原服务认证，网关只转发 GET，并限制查询参数。路径逐级通过目录 FD 打开，不跟随符号链接、不访问工作区以外路径，不提供写入、删除或编辑接口。

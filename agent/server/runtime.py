@@ -16,7 +16,8 @@ from agent.permission import PermissionMode, allow_mode_available, PERMISSION_AL
 from agent.runner import AgentRunner, RunResult
 from agent.tools.human_interaction import validate_human_input_values
 from agent.sandbox import select_backend, sandbox_pool_of
-from agent.session import SessionStore, try_acquire_workspace
+from agent.session import SessionStore, try_acquire_workspace, workspace_state_path
+from agent.server.transcripts import saved_transcript, TranscriptRequestError
 from agent.session_lock import SessionLockBusyError
 from agent.server.config import ServerConfig
 from agent.server.workspaces import restore_workspaces, prepare_workspace, save_workspace
@@ -407,6 +408,16 @@ class RunManager:
             return self.store.session_runs(session_id, limit, cursor)
         except ValueError as exc:
             raise ServiceError(422, str(exc)) from exc
+
+    def session_transcript(self, session_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
+        session = self.session(session_id)
+        project_id = session['project_id']
+        settings = self.settings_by_project.get(project_id)
+        path = workspace_state_path(self.config.projects[project_id], override=settings.state_path if settings else None)
+        try:
+            return saved_transcript(path, session_id, before=self.store.first_run_at(session_id), limit=limit, cursor=cursor)
+        except TranscriptRequestError as exc:
+            raise ServiceError(exc.status, str(exc)) from None
 
     def active_run(self, project_id: str) -> dict[str, Any]:
         with self.lock:

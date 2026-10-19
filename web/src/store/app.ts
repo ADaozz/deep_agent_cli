@@ -16,7 +16,7 @@ import {
   getHealth,
   streamEvents,
 } from '../api/client'
-import type { ApprovalDecision, Run, RunStatus, Session, SseMessage, Workspace } from '../api/types'
+import type { ApprovalDecision, Run, RunStatus, Session, SseMessage, Workspace, SavedTranscriptBlock } from '../api/types'
 import { isTerminal } from '../api/types'
 import {
   applySseMessage,
@@ -60,6 +60,7 @@ export const app = reactive({
   busy: { submit: false, resume: false, cancel: false, session: false },
   settingsOpen: false,
   history: {} as Record<string, { loading: boolean; cursor: string | null }>,
+  transcripts: {} as Record<string, { blocks: SavedTranscriptBlock[]; cursor: string | null; loading: boolean; loaded: boolean; error: string }>,
 })
 
 const streamHandles = new Map<string, AbortController>()
@@ -394,6 +395,7 @@ async function discardEmptySession(sessionId: string): Promise<void> {
   app.sessions = app.sessions.filter((item) => item.id !== sessionId)
   delete app.records[sessionId]
   delete app.history[sessionId]
+  delete app.transcripts[sessionId]
   if (app.sessionId === sessionId) {
     app.sessionId = ''
     app.view = 'home'
@@ -550,8 +552,27 @@ export async function loadSessionHistory(sessionId: string, more = false): Promi
       }
     }
     app.history[sessionId].cursor = page.next_cursor
+    if (page.next_cursor == null) await loadSessionTranscript(sessionId)
   } finally {
     if (app.history[sessionId]) app.history[sessionId].loading = false
+  }
+}
+
+export async function loadSessionTranscript(sessionId: string, more = false): Promise<void> {
+  const record = app.records[sessionId]
+  const previous = app.transcripts[sessionId]
+  if (!record || previous?.loading || (more && !previous?.cursor)) return
+  const state = { blocks: previous?.blocks || [], cursor: previous?.cursor || null,
+    loading: true, loaded: previous?.loaded || false, error: '' }
+  app.transcripts[sessionId] = state
+  try {
+    const page = await api.sessionTranscript(apiConfig(), sessionId, more ? state.cursor || undefined : undefined)
+    if (app.records[sessionId] !== record) return
+    app.transcripts[sessionId] = { blocks: more ? [...(page.blocks || []), ...state.blocks] : page.blocks || [],
+      cursor: page.next_cursor || null, loading: false, loaded: true, error: '' }
+  } catch (error) {
+    if (app.records[sessionId] === record) app.transcripts[sessionId] = { ...state, loading: false,
+      error: error instanceof Error ? error.message : '无法加载保存的历史' }
   }
 }
 
@@ -871,6 +892,7 @@ export function resetRecords(): void {
   writeThreadLocation('')
   app.records = {}
   app.history = {}
+  app.transcripts = {}
   startPolling()
   app.sessionId = ''
   app.view = 'home'

@@ -231,6 +231,12 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
         except ServiceError as exc:
             raise HTTPException(exc.status, str(exc)) from None
 
+    @api.get("/sessions/{session_id}/transcript")
+    def session_transcript(session_id: str, limit: int = Query(default=50, ge=1, le=100),
+                           cursor: str | None = Query(default=None, max_length=128),
+                           service: RunManager = Depends(manager)):
+        return service.session_transcript(session_id, limit, cursor)
+
     @api.get("/sessions/{session_id}/runs")
     def session_runs(session_id: str, limit: int = Query(default=50, ge=1, le=100),
                      cursor: str | None = Query(default=None, max_length=512),

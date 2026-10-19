@@ -1,4 +1,4 @@
-import type { Capabilities, PermissionSelection, GitCommits, WorkspaceDirectory, FilePreview } from './types'
+import type { Capabilities, PermissionSelection, GitCommits, WorkspaceDirectory, FilePreview, SavedTranscript } from './types'
 import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing, GitFileDiff, GitDiffScope } from './types'
 
 export interface ApiConfig {
@@ -122,6 +122,8 @@ export const api = {
     request<ModelSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/model`, { method: 'POST', body: { model_id: modelId, reasoning_effort: effort } }),
   sessionRuns: (config: ApiConfig, sessionId: string, cursor?: string) =>
     request<PaginatedRuns>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/runs?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
+  sessionTranscript: (config: ApiConfig, sessionId: string, cursor?: string) =>
+    request<SavedTranscript>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/transcript?limit=50${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`),
   activeRun: (config: ApiConfig, projectId: string) =>
     request<ActiveRunResponse>(config, `/v1/projects/${encodeURIComponent(projectId)}/active-run`),
   projects: (config: ApiConfig) => request<{ projects: Project[] }>(config, '/v1/projects'),

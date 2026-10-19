@@ -11,6 +11,7 @@ import PromptComposer from './PromptComposer.vue'
 import { useDraft, readDraft, draftPrompt, clearSentDraft } from '../store/drafts'
 import SidePanel from './SidePanel.vue'
 import WorkLog from './WorkLog.vue'
+import SavedConversation from './SavedConversation.vue'
 import {
   app,
   cancelRun,
@@ -21,6 +22,7 @@ import {
   currentRuns,
   latestRecord,
   loadSessionHistory,
+  loadSessionTranscript,
   refreshCurrent,
   resumeSession,
   runBannerAction,
@@ -71,8 +73,10 @@ watch(
     latestRecord.value?.view.items.length ?? 0,
     latestRecord.value?.view.blocks.length ?? 0,
     latestRecord.value?.view.finalized ?? false,
+    app.transcripts[sessionId.value]?.loaded || false,
   ],
   () => scrollToBottom(),
+  { flush: 'post' },
 )
 
 async function send(): Promise<void> {
@@ -158,7 +162,8 @@ async function copySession(): Promise<void> {
 
       <div ref="body" class="thread-body">
         <div class="thread-col">
-          <p v-if="!runs.length" class="log-notice">
+          <SavedConversation v-if="app.transcripts[sessionId]" :history="app.transcripts[sessionId]" @more="loadSessionTranscript(sessionId, true)" @retry="loadSessionTranscript(sessionId)" />
+          <p v-if="!runs.length && app.transcripts[sessionId]?.loaded && !app.transcripts[sessionId]?.blocks.length && !app.transcripts[sessionId]?.loading && !app.transcripts[sessionId]?.error && !app.history[sessionId]?.loading" class="log-notice">
             此会话还没有运行——发送一条跟进即可开始。
           </p>
           <button v-if="app.history[sessionId]?.cursor" class="btn" :disabled="app.history[sessionId]?.loading" @click="loadSessionHistory(sessionId, true)">加载更早运行</button>

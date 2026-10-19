@@ -32,6 +32,7 @@ ROUTES = (
     ("GET", "/sessions/{session_id}", "/v1/sessions/{session_id}"),
     ("DELETE", "/sessions/{session_id}", "/v1/sessions/{session_id}"),
     ("GET", "/sessions/{session_id}/runs", "/v1/sessions/{session_id}/runs"),
+    ("GET", "/sessions/{session_id}/transcript", "/v1/sessions/{session_id}/transcript"),
     ("POST", "/sessions/{session_id}/runs", "/v1/sessions/{session_id}/runs"),
     ("GET", "/projects/{project_id}/active-run", "/v1/projects/{project_id}/active-run"),
     ("GET", "/runs/{run_id}", "/v1/runs/{run_id}"),
@@ -40,6 +41,7 @@ ROUTES = (
        for action in ("approvals", "human-input", "continue", "cancel") ),
 )
 QUERY = {"/sessions": {"project_id"}, "/sessions/{session_id}/runs": {"limit", "cursor"},
+         "/sessions/{session_id}/transcript": {"limit", "cursor"},
          "/projects/{project_id}/git/commits": {"limit", "cursor"},
          "/projects/{project_id}/files": {"path", "offset", "limit"},
          "/projects/{project_id}/file-preview": {"path"},
