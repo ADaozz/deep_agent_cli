@@ -1,12 +1,12 @@
 # Harness 架构
 
-`deep_agent_cli` 使用 Deep Agents 和 LangGraph 执行 Agent 图。Harness 负责将模型、工具、工作区、人工干预、沙箱、会话和前端组织成可控制、可恢复的运行系统，不另行实现推理循环。
+`deep_agent_cli` 使用 Deep Agents 和 LangGraph 执行 Agent 图。Harness 负责将模型、工具、工作区、人工干预、沙箱、会话和终端界面组织成可控制、可恢复的运行系统，不另行实现推理循环。使用入口是交互式 CLI；嵌入其他 Python 程序时走 [Python API](library.md)。
 
 本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)；Python 接入见 [library.md](library.md)。
 
 ## 职责与设计约束
 
-Harness 的职责包括图装配、运行控制、工具审批、命令隔离、状态持久化和前端事件转换。其中有几个需要始终分开的概念：
+Harness 的职责包括图装配、运行控制、工具审批、命令隔离、状态持久化和终端事件转换。其中有几个需要始终分开的概念：
 
 - 模型提出工具调用，Harness 按既定策略决定是否执行，以及在哪里执行。
 - 权限模式决定调用前是否审批；沙箱决定执行进程能访问的资源。提示词、`AGENTS.md` 和工具描述不承担操作系统安全边界。
@@ -263,13 +263,13 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
 | 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
 
-运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟 HTTP、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
+运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟模型端点、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
 
 ## 扩展边界
 
 新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。未来接入 MCP 时，还需明确远程请求实际发生的位置与授权上下文，不能声称它自动受到 Bubblewrap 保护。
 
-增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。前端以既有 RunResult 和 RunEvent 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
+增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。终端和库调用方以既有 RunResult 和 RunEvent 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
 
 ## 依赖
 

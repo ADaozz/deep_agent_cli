@@ -17,6 +17,8 @@ OpenAI 兼容接口 · Bubblewrap
 
 `deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
+在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
+
 > 当前版本 **0.1.8**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
@@ -26,7 +28,7 @@ OpenAI 兼容接口 · Bubblewrap
 - **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
 - **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
 
-支持通过 Skills 和 `AGENTS.md` 扩展项目指令。可选 [Python API](docs/library.md) 复用运行核心。
+支持通过 Skills 和 `AGENTS.md` 扩展项目指令。
 
 ## 快速开始
 

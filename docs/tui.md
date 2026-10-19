@@ -10,6 +10,7 @@ deep-agent --help
 deep-agent --version
 ```
 
+- 子命令只有 `resume`。不带子命令时，在当前目录开始新会话。
 - `--help` 和 `--version` 不读取配置，不启动沙箱和模型。
 - 首次运行只生成配置模板并退出，即使 stdin 来自管道。
 - 之后 stdin 和 stdout 都必须是终端，否则输出错误并以退出码 2 退出。

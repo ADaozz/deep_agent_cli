@@ -15,6 +15,10 @@
 - 在架构文档中明确“运行中用进行式，成功后用过去式”的统一状态文案规范，同步终端与配置文档。
 - 补充运行状态切换、新会话占用、会话恢复、标题版本和家目录缩写的回归验证。
 
+### 运行入口
+
+- 使用入口是交互式终端 `deep-agent`、`deep-agent resume`，以及 Python API。
+
 ### 安装与升级
 
 要求 Python 3.12+、Linux 或 WSL2，以及可用的 Bubblewrap / user namespace。

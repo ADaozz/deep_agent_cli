@@ -16,7 +16,7 @@ pip install -e ".[dev]"
 
 ```bash
 pytest -q                          # 全部自动测试，不调用真实模型
-pytest -m integration              # 只跑本地 HTTP 集成测试，需要能监听 127.0.0.1
+pytest -m integration              # 只跑本地模拟模型端点的集成测试，需要能监听 127.0.0.1
 REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，而不是跳过
 ```
 
