@@ -143,7 +143,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 
 **审批决定是否执行，隔离决定命令能访问哪些资源。** 文件工具和命令走不同通路：
 
-- **文件工具 → 宿主进程**：Backend 将 `/workspace` 映射到工作区，`/skills` 只读，拒绝其他虚拟路径。
+- **文件工具 → 宿主进程**：Backend 将 `/workspace` 映射到工作区，`/skills` 只读。SANDBOXED 下，启动时声明的额外挂载按同样的只读或读写属性授权；未声明路径拒绝访问。
 - **命令 → Bubblewrap**：`execute` 经沙箱池运行，会话内按需复用有网、无网 Worker。模型与 Tavily 请求从宿主发送，不受命令网络策略约束。
 
 <details>

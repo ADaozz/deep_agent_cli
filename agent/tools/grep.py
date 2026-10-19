@@ -219,11 +219,19 @@ def _stream_rg(executor: BubblewrapBackend, argv: list[str], target: _Target,
             return _Run("cancelled", None, "")
         if time.monotonic() >= deadline:
             return _Run("timeout", None, "")
-        identity = os.fstat(target.mount_fd)
+        if target.exact_file:
+            if target.file_identity is None:
+                raise ValueError("search mount changed; retry after restoring the workspace")
+            dev, ino = target.file_identity
+            virtual_file = str(PurePosixPath(target.virtual_root) / target.relative)
+            mount_identity = (virtual_file, dev, ino)
+        else:
+            identity = os.fstat(target.mount_fd)
+            mount_identity = (target.virtual_root, identity.st_dev, identity.st_ino)
         try:
             handle = sandbox.start_argv(
                 argv, target.virtual_dir,
-                mount_identity=(target.virtual_root, identity.st_dev, identity.st_ino),
+                mount_identity=mount_identity,
                 file=PurePosixPath(target.relative).name if target.is_file else None,
             )
         except SandboxLostError:
@@ -340,6 +348,8 @@ class _Target:
     file_limit: int
     mount_fd: int
     is_file: bool
+    exact_file: bool = False
+    file_identity: tuple[int, int] | None = None
 
     @property
     def virtual_dir(self) -> str:
@@ -364,7 +374,15 @@ def _open_target(backend: WorkspaceCompositeBackend, path: str | None) -> tuple[
         os.close(target_fd)
         os.close(mount_fd)
         raise ValueError("search path must be a regular file or directory")
-    return _Target(root, relative, virtual_root, file_limit, mount_fd, stat.S_ISREG(mode)), target_fd
+    virtual_file = str(PurePosixPath(virtual_root) / relative) if relative else virtual_root
+    exact = virtual_file in getattr(backend, "exact_file_mounts", frozenset())
+    file_identity = None
+    if exact:
+        info = os.fstat(target_fd)
+        file_identity = (info.st_dev, info.st_ino)
+    return _Target(
+        root, relative, virtual_root, file_limit, mount_fd, stat.S_ISREG(mode), exact, file_identity,
+    ), target_fd
 
 
 def _explicit_file_excluded(target: _Target, target_fd: int, rules: list, results: _Results) -> bool:
@@ -576,7 +594,7 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend, *, network: bool =
         - Set fixed_string=true for literal text searches.
         - Uses ripgrep when available.
         - Falls back to Python regex search when ripgrep is unavailable.
-        - Searches /workspace by default; /skills is available when mounted.
+        - Searches /workspace by default. /skills and declared sandbox mounts can be searched by path.
         - Like ripgrep, skips hidden files, .gitignore/.ignore/.rgignore matches,
           symlinks, binary files and files over 10 MiB. .git is always skipped.
 

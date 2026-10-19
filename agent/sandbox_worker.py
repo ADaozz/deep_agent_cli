@@ -83,6 +83,7 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
         if structured:
             if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
                 raise ValueError("argv must be a non-empty list of strings")
+            requested_cwd = cwd
             directory_fd = _open_cwd(cwd, mount_identity)
             descriptors.append(directory_fd)
             cwd = f"/proc/self/fd/{directory_fd}"
@@ -91,8 +92,13 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
                     raise ValueError("invalid search file")
                 fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
                 descriptors.append(fd)
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
                     raise ValueError("search file is not a regular file")
+                if mount_identity:
+                    file_virtual = f"/{file}" if requested_cwd == "/" else f"{requested_cwd.rstrip('/')}/{file}"
+                    if mount_identity[0] == file_virtual and (info.st_dev, info.st_ino) != tuple(mount_identity[1:]):
+                        raise ValueError("search mount changed; retry after restoring the workspace")
                 argv = [*argv[:-1], f"/proc/self/fd/{fd}"]
         process = subprocess.Popen(
             argv if structured else ["/bin/sh", "-lc", command],

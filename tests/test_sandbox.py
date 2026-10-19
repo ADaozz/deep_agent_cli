@@ -491,3 +491,351 @@ def test_sandbox_start_failure_is_reported_not_run_on_host(tmp_path: Path) -> No
     assert result.termination_reason == "spawn_error"
     assert "sandbox failed to start" in result.output
     assert not (tmp_path / "host-marker").exists()
+
+
+def _mounted_config(tmp_path: Path, **kwargs) -> tuple[SandboxConfig, Path, Path, Path]:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    project.mkdir()
+    reference.mkdir()
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+        extra_read_only_mounts=(BindMount(reference, "/reference"),),
+        **kwargs,
+    )
+    return config, workspace, project, reference
+
+
+def _mounted_backend(tmp_path: Path, **kwargs):
+    config, workspace, project, reference = _mounted_config(tmp_path, **kwargs)
+    backend = select_backend(config, check=False).backend
+    return backend, workspace, project, reference
+
+
+def test_declared_mounts_are_readable_and_honor_read_only(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    project = tmp_path / "project"
+    reference = tmp_path / "reference"
+    workspace = tmp_path / "workspace"
+    for path in (empty, project, reference, workspace):
+        path.mkdir()
+    backend = select_backend(replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(BindMount(project, "/app"), BindMount(empty, "/empty")),
+        extra_read_only_mounts=(BindMount(reference, "/reference"),),
+    ), check=False).backend
+    (workspace / "note.txt").write_text("from-workspace")
+    (project / "main.py").write_text("print('app')\n")
+    (reference / "guide.txt").write_text("guide")
+
+    assert backend.read("/workspace/note.txt").file_data["content"] == "from-workspace"
+    assert backend.read("/app/main.py").file_data["content"] == "print('app')\n"
+    listed = {entry["path"] for entry in backend.ls("/app").entries or []}
+    assert listed == {"/app/main.py"}
+    assert backend.ls("/empty").error is None
+    assert backend.ls("/empty").entries == []
+    assert [entry["path"] for entry in backend.glob("*.py", "/app").matches or []] == ["/app/main.py"]
+    assert any(entry["path"] == "/reference/guide.txt" for entry in backend.glob("**/*").matches or [])
+
+    written = backend.write("/app/created.txt", "created")
+    assert written.error is None
+    assert (project / "created.txt").read_text() == "created"
+    edited = backend.edit("/app/created.txt", "created", "edited")
+    assert edited.error is None and (project / "created.txt").read_text() == "edited"
+    uploaded = backend.upload_files([("/app/uploaded.txt", b"bytes")])[0]
+    assert uploaded.error is None and (project / "uploaded.txt").read_bytes() == b"bytes"
+    assert backend.delete("/app/uploaded.txt").error is None
+    assert not (project / "uploaded.txt").exists()
+
+    assert backend.read("/reference/guide.txt").file_data["content"] == "guide"
+    assert backend.download_files(["/reference/guide.txt"])[0].content == b"guide"
+    for denied in (
+        backend.write("/reference/new.txt", "no"),
+        backend.edit("/reference/guide.txt", "guide", "changed"),
+        backend.delete("/reference/guide.txt"),
+    ):
+        assert denied.error and "Permission denied" in denied.error
+    assert backend.upload_files([("/reference/new.txt", b"no")])[0].error
+    assert (reference / "guide.txt").read_text() == "guide"
+    assert not (reference / "new.txt").exists()
+    assert backend.routes["/app/"].max_file_size_bytes == 10 * 1024 * 1024
+    assert backend.routes["/reference/"].max_file_size_bytes == 10 * 1024 * 1024
+
+
+def test_root_listing_and_unscoped_glob_aggregate_without_hiding_denials(tmp_path: Path) -> None:
+    backend, workspace, project, reference = _mounted_backend(tmp_path)
+    (workspace / "note.txt").write_text("ws")
+    (project / "main.py").write_text("app")
+    (reference / "guide.txt").write_text("ref")
+    root_paths = {entry["path"] for entry in backend.ls("/").entries or []}
+    assert {"/workspace/", "/app/", "/reference/"} <= root_paths
+    aggregated = {entry["path"] for entry in backend.glob("**/*").matches or []}
+    assert {"/workspace/note.txt", "/app/main.py", "/reference/guide.txt"} <= aggregated
+    for path in ("/etc", "/usr", "/workspace2", "/app2"):
+        assert backend.ls(path).error and "Permission denied" in backend.ls(path).error
+        assert backend.ls(path).entries is None
+    assert backend.glob("/etc/**").error and "Permission denied" in backend.glob("/etc/**").error
+    assert backend.glob("*.py", "/etc").error and "Permission denied" in backend.glob("*.py", "/etc").error
+    assert "/usr/" not in backend.routes
+    assert "/etc/" not in backend.routes
+
+
+def test_mount_routes_reject_traversal_symlink_escape_and_prefix_confusion(tmp_path: Path) -> None:
+    backend, _workspace, project, _reference = _mounted_backend(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret")
+    (project / "escape").symlink_to(secret)
+    (project / "inside.txt").write_text("inside")
+    escaped = backend.read("/app/escape")
+    assert escaped.error and "Permission denied" in escaped.error
+    assert str(secret) not in escaped.error
+    write = backend.write("/app/escape", "pwned")
+    assert write.error and "Permission denied" in write.error
+    assert secret.read_text() == "secret"
+    traversal = backend.ls("/app/../../etc")
+    assert traversal.error and "Permission denied" in traversal.error
+    assert str(tmp_path) not in traversal.error
+    assert backend.ls("/workspace2").error and "Permission denied" in backend.ls("/workspace2").error
+    sibling = tmp_path / "workspace2"
+    sibling.mkdir()
+    (sibling / "hidden.txt").write_text("hidden")
+    assert backend.read("/workspace2/hidden.txt").error
+    assert "hidden" not in (backend.read("/workspace2/hidden.txt").file_data or {}).get("content", "")
+
+
+def test_same_directory_alias_is_allowed_and_runtime_routes_stay_fixed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "shared.txt").write_text("one")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(BindMount(workspace, "/app"),),
+    )
+    backend = select_backend(config, check=False).backend
+    assert backend.write("/app/shared.txt", "two").error is None
+    assert (workspace / "shared.txt").read_text() == "two"
+    assert backend.read("/workspace/shared.txt").file_data["content"] == "two"
+    routes = set(backend.routes)
+    backend.executor.config = replace(
+        backend.executor.config,
+        extra_read_write_mounts=(*backend.executor.config.extra_read_write_mounts, BindMount(workspace, "/elsewhere")),
+    )
+    assert set(backend.routes) == routes
+    assert backend.ls("/elsewhere").error and "Permission denied" in backend.ls("/elsewhere").error
+
+
+def test_overlapping_and_nested_mounts_fail_closed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    child = parent / "child"
+    child.mkdir()
+    conflicts = [
+        replace(config_for(workspace), extra_read_only_mounts=(BindMount(workspace, "/reference"),)),
+        replace(
+            config_for(workspace),
+            extra_read_only_mounts=(BindMount(parent, "/data"),),
+            extra_read_write_mounts=(BindMount(other, "/data/child"),),
+        ),
+        replace(
+            config_for(workspace),
+            extra_read_only_mounts=(BindMount(child, "/data/child"),),
+            extra_read_write_mounts=(BindMount(parent, "/data"),),
+        ),
+        replace(
+            config_for(workspace),
+            extra_read_only_mounts=(BindMount(parent, "/app"),),
+            extra_read_write_mounts=(BindMount(parent, "/app"),),
+        ),
+    ]
+    for config in conflicts:
+        with pytest.raises(ValueError):
+            select_backend(replace(config, bwrap_path="/bin/true"), check=False)
+
+
+def test_aligned_nested_mount_keeps_the_narrower_permission(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    parent = tmp_path / "data"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+    (parent / "root.txt").write_text("root")
+    (child / "leaf.txt").write_text("leaf")
+    (parent / "link").symlink_to(child / "leaf.txt")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(parent, "/data"),),
+        extra_read_write_mounts=(BindMount(child, "/data/sub"),),
+    )
+    backend = select_backend(config, check=False).backend
+    assert backend.write("/data/root.txt", "changed").error
+    assert (parent / "root.txt").read_text() == "root"
+    assert backend.write("/data/sub/leaf.txt", "changed").error is None
+    assert (child / "leaf.txt").read_text() == "changed"
+    (child / "leaf.txt").write_text("leaf")
+    assert backend.write("/data/link", "pwn").error is None
+    assert (child / "leaf.txt").read_text() == "pwn"
+
+    readonly_child = workspace / "secret"
+    readonly_child.mkdir()
+    (readonly_child / "file.txt").write_text("safe")
+    (workspace / "link").symlink_to(readonly_child / "file.txt")
+    nested = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(readonly_child, "/workspace/secret"),),
+    )
+    protected = select_backend(nested, check=False).backend
+    assert protected.write("/workspace/secret/file.txt", "no").error
+    assert protected.write("/workspace/link", "no").error
+    assert protected.delete("/workspace/secret").error
+    assert protected.delete("/workspace").error
+    assert (readonly_child / "file.txt").read_text() == "safe"
+    assert protected.write("/workspace/other.txt", "yes").error is None
+    assert (workspace / "other.txt").read_text() == "yes"
+
+
+def test_exact_file_mount_does_not_expose_its_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "only.txt"
+    source.write_text("only")
+    (tmp_path / "neighbor.txt").write_text("neighbor")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(source, "/opt/config.yaml"),),
+    )
+    backend = select_backend(config, check=False).backend
+    assert backend.read("/opt/config.yaml").file_data["content"] == "only"
+    assert backend.download_files(["/opt/config.yaml"])[0].content == b"only"
+    assert backend.ls("/opt").error and "Permission denied" in backend.ls("/opt").error
+    assert backend.read("/opt/neighbor.txt").error
+    assert backend.write("/opt/config.yaml", "changed").error
+    assert source.read_text() == "only"
+    root = {entry["path"]: entry.get("is_dir") for entry in backend.ls("/").entries or []}
+    assert root["/opt/config.yaml"] is False
+    assert "/opt/" not in root
+    assert [entry["path"] for entry in backend.glob("**/config.yaml").matches or []] == ["/opt/config.yaml"]
+    assert backend.glob("/opt/**").error and "Permission denied" in backend.glob("/opt/**").error
+
+
+def test_optional_missing_mount_is_not_authorized(tmp_path: Path) -> None:
+    from agent.config import Settings
+
+    workspace = tmp_path / "workspace"
+    present = tmp_path / "present"
+    workspace.mkdir()
+    present.mkdir()
+    (present / "here.txt").write_text("here")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
+        "sandbox:\n"
+        "  extra_read_only_mounts:\n"
+        f"    - source: {present}\n      destination: /opt/present\n      optional: true\n"
+        f"    - source: {tmp_path / 'missing'}\n      destination: /opt/missing\n      optional: true\n"
+    )
+    settings = Settings.load(config, workspace=workspace)
+    assert [mount.destination for mount in settings.sandbox.extra_read_only_mounts] == ["/opt/present"]
+    backend = select_backend(replace(settings.sandbox, bwrap_path="/bin/true"), check=False).backend
+    assert backend.read("/opt/present/here.txt").file_data["content"] == "here"
+    assert backend.ls("/opt/missing").error and "Permission denied" in backend.ls("/opt/missing").error
+
+
+def test_unsandboxed_mode_does_not_treat_virtual_mounts_as_host_permissions(tmp_path: Path) -> None:
+    config, workspace, project, _reference = _mounted_config(tmp_path, allow_unsandboxed=True)
+    (project / "main.py").write_text("app")
+    (workspace / "note.txt").write_text("ws")
+    with pytest.warns(RuntimeWarning, match="UNSANDBOXED MODE"):
+        backend = select_backend(config).backend
+    assert backend.ls("/app").error and "Permission denied" in backend.ls("/app").error
+    assert backend.ls("/usr").error and "Permission denied" in backend.ls("/usr").error
+    assert backend.ls("/etc").error and "Permission denied" in backend.ls("/etc").error
+    assert backend.read("/workspace/note.txt").file_data["content"] == "ws"
+    assert not (project / "created-by-file-tool.txt").exists()
+    assert backend.write("/app/created-by-file-tool.txt", "no").error
+
+
+def test_bubblewrap_execute_and_file_tools_share_declared_mounts(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    from agent.tools.grep import search
+
+    executable = shutil.which("bwrap")
+    if not executable:
+        pytest.skip("UNSUPPORTED SANDBOX ENVIRONMENT: bubblewrap is not installed")
+    probe = subprocess.run(
+        [executable, "--unshare-all", "--ro-bind", "/", "/", "true"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT: {probe.stderr.strip()}")
+
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    project.mkdir()
+    reference.mkdir()
+    (reference / "guide.txt").write_text("guide-marker\n")
+    (project / "code.py").write_text("mount-marker\n")
+    config = SandboxConfig(
+        workspace=workspace,
+        bwrap_path=executable,
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+        extra_read_only_mounts=(BindMount(reference, "/reference"),),
+    )
+    backend = select_backend(config).backend
+    try:
+        assert "--unshare-net" in backend.executor.command_args("true", network=False)
+        assert "--unshare-net" not in backend.executor.command_args("true", network=True)
+        joined = " ".join(backend.executor.sandbox_args())
+        assert f"--bind {project.resolve()} /app" in joined
+        assert f"--ro-bind {reference.resolve()} /reference" in joined
+
+        created = backend.execute("printf from-exec > /app/test.txt")
+        assert created.exit_code == 0
+        assert (project / "test.txt").read_text() == "from-exec"
+        assert backend.read("/app/test.txt").file_data["content"] == "from-exec"
+        assert backend.write("/app/test.txt", "from-file").error is None
+        assert (project / "test.txt").read_text() == "from-file"
+        echoed = backend.execute("cat /app/test.txt")
+        assert echoed.exit_code == 0 and "from-file" in echoed.output
+        first_worker = backend.executor.pool.sandbox(False)
+        assert backend.execute("true").exit_code == 0
+        assert backend.executor.pool.sandbox(False) is first_worker
+
+        readonly = backend.execute("printf nope > /reference/guide.txt")
+        assert readonly.exit_code != 0
+        assert (reference / "guide.txt").read_text() == "guide-marker\n"
+        assert backend.write("/reference/new.txt", "no").error
+        assert not (reference / "new.txt").exists()
+        assert "mount-marker" in search(backend, "mount-marker", "/app", None, "content", None, False)
+        assert "guide-marker" in search(backend, "guide-marker", "/reference", None, "content", None, False)
+        assert search(backend, "marker", "/etc", None, "content", None, False).startswith("Error:")
+
+        pool_id = id(backend.executor.pool)
+        backend.executor.pool.shutdown("mount integration finished")
+        replacement = select_backend(config).backend
+        try:
+            assert id(replacement.executor.pool) != pool_id
+            assert (project / "test.txt").read_text() == "from-file"
+            assert replacement.read("/app/test.txt").file_data["content"] == "from-file"
+            reread = replacement.execute("cat /app/test.txt")
+            assert reread.exit_code == 0 and "from-file" in reread.output
+        finally:
+            replacement.executor.pool.shutdown("replacement finished")
+    finally:
+        backend.executor.pool.shutdown("mount integration finished")

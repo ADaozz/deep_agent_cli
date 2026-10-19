@@ -989,3 +989,54 @@ def test_grep_worker_loss_is_not_retried_and_next_search_recovers(tmp_path, monk
     monkeypatch.undo()
     assert implementation.search(backend, marker, None, None, "files_with_matches", None, False) == "/workspace/a.py"
     assert backend.executor.pool.sandbox(False).host_pid != sandbox.host_pid
+
+
+@pytest.mark.parametrize("engine_name", ["python", "rg"])
+def test_grep_searches_declared_mounts_and_rejects_the_rest(engine_name, tmp_path, monkeypatch):
+    from agent.config import BindMount
+
+    if engine_name == "rg":
+        assert implementation.resolve_rg()
+        executable = usable_bwrap()
+    else:
+        monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
+        executable = "/bin/true"
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    project.mkdir()
+    reference.mkdir()
+    (workspace / "a.py").write_text("workspace-hit\n")
+    (project / "b.py").write_text("mount-hit\n")
+    (reference / "c.py").write_text("readonly-hit\n")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret-hit\n")
+    (project / "escape.py").symlink_to(secret)
+    only = tmp_path / "only.py"
+    only.write_text("file-hit\n")
+    backend = WorkspaceCompositeBackend(BubblewrapBackend(SandboxConfig(
+        workspace=workspace,
+        bwrap_path=executable,
+        extra_read_only_mounts=(BindMount(only, "/opt/only.py"), BindMount(reference, "/reference")),
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+    ), executable=executable), skills_dir=None)
+
+    def found(path, pattern):
+        return implementation.search(backend, pattern, path, None, "content", None, False)
+
+    assert "mount-hit" in found("/app", "mount-hit")
+    assert "readonly-hit" in found("/reference", "readonly-hit")
+    assert "file-hit" in found("/opt/only.py", "file-hit")
+    assert "workspace-hit" in found(None, "workspace-hit")
+    assert "mount-hit" not in found(None, "mount-hit")
+    for path in ("/etc", "/workspace2", "/opt", "/opt/neighbor.py"):
+        result = found(path, "hit")
+        assert result.startswith("Error:")
+        assert str(tmp_path) not in result
+    assert "secret-hit" not in found("/app", "secret-hit")
+    assert found("/app/escape.py", "secret-hit").startswith("Error:")
+    assert secret.read_text() == "secret-hit\n"
+    assert reference.joinpath("c.py").read_text() == "readonly-hit\n"
+    assert backend.regex_search_location("/app")[3] == 10 * 1024 * 1024
+    assert backend.regex_search_location("/opt/only.py")[3] == 10 * 1024 * 1024
