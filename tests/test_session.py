@@ -13,7 +13,7 @@ import pytest
 
 from agent.factory import create_agent
 from agent.runner import AgentRunner
-from agent.session import SessionStore, StopReason, messages_to_transcript, settle_restored_tools, workspace_state_path
+from agent.session import SessionStore, StopReason, messages_to_transcript, settle_restored_tools, try_acquire_workspace, workspace_state_path
 from tests.conftest import scripted_model
 
 
@@ -87,6 +87,29 @@ def test_workspace_state_path_is_isolated(tmp_path: Path, monkeypatch) -> None:
     assert a != b
     assert a.parent == b.parent
     assert a.suffix == ".sqlite3"
+
+
+def test_shared_state_path_does_not_share_workspace_lock(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    shared = tmp_path / "shared" / "sessions.db"
+    monkeypatch.setenv("DEEP_AGENT_STATE_PATH", str(shared))
+    first_root = tmp_path / "a"
+    second_root = tmp_path / "b"
+    first_root.mkdir()
+    second_root.mkdir()
+    assert workspace_state_path(first_root) == workspace_state_path(second_root) == shared.resolve()
+    first = try_acquire_workspace(first_root)
+    second = try_acquire_workspace(second_root)
+    assert first is not None and second is not None
+    assert try_acquire_workspace(first_root) is None
+    first.release()
+    again = try_acquire_workspace(first_root)
+    assert again is not None
+    again.release()
+    second.release()
+    locks = list((tmp_path / "home" / ".deep-agent" / "sessions").glob("*.workspace.lock"))
+    assert len(locks) == 2
+    assert not (shared.parent / f"{shared.name}.workspace.lock").exists()
 
 
 def test_session_catalog_sorted_and_prefix_resolve(tmp_path: Path) -> None:
