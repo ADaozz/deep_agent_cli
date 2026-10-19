@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="sec-title sec-desc">
+  <title id="sec-title">deep-agent 安全边界</title>
+  <desc id="sec-desc">ask 与 allow 决定是否审批。SANDBOXED 与 UNSANDBOXED 决定命令在 Bubblewrap 还是宿主。allow 只在沙箱模式可用，并且每条命令都有网。</desc>
+  <rect width="1200" height="640" fill="#0c0c0c"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Noto Sans CJK SC, sans-serif">
+    <text x="48" y="52" fill="#eceae6" font-size="32" font-weight="700">审批和隔离是两件事</text>
+    <text x="48" y="88" fill="#8d8d8d" font-size="20">权限模式决定要不要确认。执行模式决定命令在哪里跑。</text>
+    <text x="274" y="150" fill="#eceae6" font-size="24" font-weight="700">ask · 默认</text>
+    <text x="728" y="150" fill="#ffb4a8" font-size="24" font-weight="700">allow</text>
+    <text x="48" y="230" fill="#13a10e" font-size="22" font-weight="700">SANDBOXED</text>
+    <text x="48" y="258" fill="#8d8d8d" font-size="18">Bubblewrap</text>
+    <rect x="250" y="176" width="430" height="156" fill="#141816" stroke="#13a10e"/>
+    <text x="274" y="216" fill="#eceae6" font-size="22">批准写文件、执行和搜索</text>
+    <text x="274" y="252" fill="#eceae6" font-size="22">execute 默认无网</text>
+    <text x="274" y="288" fill="#eceae6" font-size="22">network=true 单独审批</text>
+    <rect x="704" y="176" width="448" height="156" fill="#2a1414" stroke="#c45c4a"/>
+    <text x="728" y="228" fill="#ffb4a8" font-size="22">免审批</text>
+    <text x="728" y="264" fill="#ffb4a8" font-size="22">每条 execute 都有网</text>
+    <text x="728" y="300" fill="#8d8d8d" font-size="20">仅沙箱模式可开</text>
+    <text x="48" y="430" fill="#eceae6" font-size="20" font-weight="700">UNSANDBOXED</text>
+    <text x="48" y="458" fill="#8d8d8d" font-size="18">宿主用户权限</text>
+    <rect x="250" y="360" width="430" height="156" fill="#161616" stroke="#5a5a5a"/>
+    <text x="274" y="412" fill="#eceae6" font-size="22">显式确认后才启动</text>
+    <text x="274" y="448" fill="#eceae6" font-size="22">命令在宿主执行</text>
+    <text x="274" y="484" fill="#8d8d8d" font-size="20">未授权则拒绝启动</text>
+    <rect x="704" y="360" width="448" height="156" fill="#2a1414" stroke="#c45c4a"/>
+    <text x="728" y="428" fill="#ffb4a8" font-size="22">不可用</text>
+    <text x="728" y="464" fill="#8d8d8d" font-size="20">HTTP 固定 ask，并强制沙箱</text>
+    <text x="48" y="580" fill="#8d8d8d" font-size="18">只读文件工具和 grep 默认免审批。模型与 Tavily 请求在宿主发出。</text>
+  </g>
+</svg>

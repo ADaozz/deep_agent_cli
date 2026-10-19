@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+  <title id="title">deep-agent：审批与隔离独立</title>
+  <desc id="desc">默认沙箱 ask：文件变更、命令和网页搜索需审批，execute 默认隔离直接 IP 网络。沙箱 allow：全部工具免审批，所有 execute 共享宿主网络。宿主回退：显式授权，仅支持 ask，命令以宿主用户权限执行。只读文件工具和 grep 免审批；命令网络策略不约束宿主的模型和 Tavily 请求。</desc>
+  <rect width="1200" height="650" rx="16" fill="#0c0c0c"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, sans-serif">
+    <text x="48" y="64" fill="#61d6d6" font-size="22" font-family="ui-monospace, monospace">deep-agent / permissions</text>
+    <text x="48" y="120" fill="#f0f2f3" font-size="42" font-weight="700">审批 ≠ 隔离</text>
+    <text x="48" y="167" fill="#acb6bc" font-size="28">是否批准调用，与命令在哪里执行，是两个独立维度。</text>
+    <g id="sandboxed-ask">
+      <rect x="48" y="206" width="1104" height="110" rx="8" fill="#122526" stroke="#61d6d6" stroke-width="2"/>
+      <text x="76" y="249" fill="#61d6d6" font-size="28" font-weight="700">沙箱 · ask</text>
+      <text x="76" y="288" fill="#acb6bc" font-size="26">默认</text>
+      <text x="372" y="249" fill="#f0f2f3" font-size="30">变更 / 执行 / 搜索需审批</text>
+      <text x="372" y="290" fill="#acb6bc" font-size="28">execute 默认隔离直接 IP 网络</text>
+    </g>
+    <g id="sandboxed-allow">
+      <rect x="48" y="334" width="1104" height="110" rx="8" fill="#261e18" stroke="#d8ab70" stroke-width="2"/>
+      <text x="76" y="377" fill="#e9bd87" font-size="28" font-weight="700">沙箱 · allow</text>
+      <text x="76" y="416" fill="#acb6bc" font-size="26">仅沙箱可用</text>
+      <text x="372" y="377" fill="#f0f2f3" font-size="30">全部工具免审批</text>
+      <text x="372" y="418" fill="#e9bd87" font-size="28">所有 execute 共享宿主网络</text>
+    </g>
+    <g id="host-fallback">
+      <rect x="48" y="462" width="1104" height="110" rx="8" fill="#20191a" stroke="#b67979" stroke-width="2"/>
+      <text x="76" y="505" fill="#e8adad" font-size="28" font-weight="700">宿主回退 · ask</text>
+      <text x="76" y="544" fill="#acb6bc" font-size="26">须显式授权</text>
+      <text x="372" y="505" fill="#f0f2f3" font-size="30">保留审批</text>
+      <text x="372" y="546" fill="#e8adad" font-size="28">宿主用户权限 · 无沙箱网络隔离</text>
+    </g>
+    <text x="48" y="618" fill="#acb6bc" font-size="24">只读文件工具与 grep 免审批。模型 / Tavily 使用宿主网络。</text>
+  </g>
+</svg>
