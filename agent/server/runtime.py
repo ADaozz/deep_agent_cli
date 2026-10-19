@@ -442,11 +442,7 @@ class RunManager:
                 raise ServiceError(409, "Project already has an unfinished run")
             if len(self.active) >= self.config.max_runs:
                 raise ServiceError(429, "Run capacity reached")
-            settings = self.settings_by_project.get(session["project_id"])
-            lease = try_acquire_workspace(
-                self.config.projects[session["project_id"]],
-                state_path=None if settings is None else settings.state_path,
-            )
+            lease = try_acquire_workspace(self.config.projects[session["project_id"]])
             if lease is None:
                 raise ServiceError(409, "这个 workspace 正在被另一个 Deep Agent 使用")
             if self.store.session(session["id"]) is None:

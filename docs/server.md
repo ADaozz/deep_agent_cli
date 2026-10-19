@@ -631,7 +631,7 @@ FastAPI/Pydantic 的参数校验错误使用数组型 detail，例如：
 用户提交 approvals → running → completed
 ```
 
-恢复不保证工具恰好执行一次。取消、崩溃或请求超时后，之前的文件修改和外部副作用可能已经发生，恢复前检查工作区。同一个 workspace 同时只能有一个 Deep Agent 在操作：CLI 启动时占用，HTTP 任务从受理到结束占用。另一端再打开或提交时，CLI 直接退出，HTTP 返回 `409`「这个 workspace 正在被另一个 Deep Agent 使用」。
+恢复不保证工具恰好执行一次。取消、崩溃或请求超时后，之前的文件修改和外部副作用可能已经发生，恢复前检查工作区。同一个 workspace 同时只能有一个 Deep Agent 在操作：CLI 启动时占用，HTTP 任务从受理到结束占用。锁按 workspace 路径分开；几个 workspace 共用一个 `paths.state_path` 时，会话库可以相同，占用互不影响。另一端再打开或提交时，CLI 直接退出，HTTP 返回 `409`「这个 workspace 正在被另一个 Deep Agent 使用」。
 
 ## 8. 调用示例
 

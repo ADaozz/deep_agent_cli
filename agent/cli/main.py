@@ -25,7 +25,7 @@ def create_runner(settings: Settings) -> AgentRunner:
         settings.sandbox.workspace,
         override=settings.state_path,
     )
-    lease = try_acquire_workspace(settings.sandbox.workspace, state_path=settings.state_path)
+    lease = try_acquire_workspace(settings.sandbox.workspace)
     if lease is None:
         session_store.close()
         raise SystemExit("这个 workspace 正在被另一个 Deep Agent 使用。请先结束另一端再打开。")

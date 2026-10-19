@@ -107,19 +107,25 @@ class WorkspaceLease:
             self._handle.close()
 
 
-def try_acquire_workspace(workspace: Path, *, state_path: str | Path | None = None) -> WorkspaceLease | None:
+def _workspace_digest(workspace: Path) -> str:
+    resolved = str(workspace.expanduser().resolve())
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+
+
+def try_acquire_workspace(workspace: Path) -> WorkspaceLease | None:
     """One operator per workspace, shared by the CLI and the HTTP service.
 
-    The lock file sits beside the session database ``main`` already uses for
-    that workspace, so both entry points contend for the same hold.
+    The lock follows the workspace path. An explicit ``paths.state_path`` or
+    ``DEEP_AGENT_STATE_PATH`` may point several workspaces at one session
+    database, and those workspaces still take separate locks.
     """
-    database = workspace_state_path(workspace, override=state_path)
-    database.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    directory = Path.home() / ".deep-agent" / "sessions"
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     try:
-        os.chmod(database.parent, 0o700)
+        os.chmod(directory, 0o700)
     except OSError:
         pass
-    path = database.parent / f"{database.name}.workspace.lock"
+    path = directory / f"{_workspace_digest(workspace)}.sqlite3.workspace.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     handle = os.fdopen(fd, "r+b")
     try:
@@ -140,8 +146,7 @@ def workspace_state_path(workspace: Path, *, override: str | Path | None = None)
     env = os.environ.get("DEEP_AGENT_STATE_PATH")
     if env:
         return Path(env).expanduser().resolve()
-    digest = hashlib.sha256(str(workspace.expanduser().resolve()).encode("utf-8")).hexdigest()[:16]
-    return Path.home() / ".deep-agent" / "sessions" / f"{digest}.sqlite3"
+    return Path.home() / ".deep-agent" / "sessions" / f"{_workspace_digest(workspace)}.sqlite3"
 
 
 def _utc_now() -> datetime:

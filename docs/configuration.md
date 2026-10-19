@@ -160,7 +160,7 @@ web_search:
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `state_path` | `null` | 会话数据库路径。默认 `~/.deep-agent/sessions/<工作区路径哈希>.sqlite3`，每个工作区一个文件。设置后所有工作区共用这一个文件 |
+| `state_path` | `null` | 会话数据库路径。默认 `~/.deep-agent/sessions/<工作区路径哈希>.sqlite3`，每个工作区一个文件。设置后所有工作区共用这一个文件。workspace 占用锁仍按工作区路径分开，不跟这个文件走 |
 | `config_dir` | `null` | `keybindings.json` 和 `working_messages.yaml` 所在目录，默认 `~/.deep-agent` |
 
 ## 界面（`ui`）
@@ -242,7 +242,7 @@ fgo:
 |---|---|
 | `DEEP_AGENT_CONFIG` | 主配置文件路径 |
 | `DEEP_AGENT_CONFIG_DIR` | `paths.config_dir` 未设置时的按键与文案目录 |
-| `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径 |
+| `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径。workspace 占用锁仍按工作区路径分开 |
 | `TAVILY_API_KEY` | Tavily 密钥，优先于配置文件 |
 
 
