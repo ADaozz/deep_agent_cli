@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="940" viewBox="0 0 1200 940" role="img" aria-labelledby="title desc">
   <title id="title">deep-agent：从任务到文件与命令</title>
-  <desc id="desc">TUI 和可选 HTTP 服务共享 AgentRunner 与 Deep Agents / LangGraph。宿主内的普通文件工具经 Backend 访问工作区，模型和 Tavily 请求从宿主发出；execute 经 SandboxPool 进入 Bubblewrap Worker。工作区为共享可写挂载，Skills 只读。审批与执行隔离独立。</desc>
+  <desc id="desc">TUI 进入 AgentRunner 与 Deep Agents / LangGraph。宿主内的普通文件工具经 Backend 访问工作区，模型和 Tavily 请求从宿主发出；execute 经 SandboxPool 进入 Bubblewrap Worker。工作区为共享可写挂载，Skills 只读。审批与执行隔离独立。</desc>
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8Z" fill="#8b969c"/></marker>
   </defs>
@@ -11,7 +11,7 @@
     <g id="host-process">
       <rect x="48" y="160" width="1104" height="478" rx="12" fill="#141719" stroke="#485158" stroke-width="2"/>
       <text x="76" y="202" fill="#acb6bc" font-size="24">宿主进程</text>
-      <text x="600" y="233" text-anchor="middle" fill="#f0f2f3" font-size="32" font-weight="600">TUI / HTTP（可选）</text>
+      <text x="600" y="233" text-anchor="middle" fill="#f0f2f3" font-size="32" font-weight="600">TUI</text>
       <rect x="354" y="278" width="492" height="76" rx="8" fill="#20272a" stroke="#61d6d6" stroke-width="2"/>
       <text x="600" y="326" text-anchor="middle" fill="#f0f2f3" font-size="32" font-weight="600">AgentRunner · 运行控制</text>
       <rect x="354" y="394" width="492" height="76" rx="8" fill="#20272a" stroke="#65747d" stroke-width="2"/>

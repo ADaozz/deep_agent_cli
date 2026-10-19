@@ -1,16 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="arch-title arch-desc">
   <title id="arch-title">deep-agent 运行通路</title>
-  <desc id="arch-desc">任务从 TUI 或 HTTP 进入 AgentRunner 和 LangGraph。文件工具在宿主进程访问授权路径，execute 在会话内的 Bubblewrap Worker 中运行。</desc>
+  <desc id="arch-desc">任务从 TUI 进入 AgentRunner 和 LangGraph。文件工具在宿主进程访问授权路径，execute 在会话内的 Bubblewrap Worker 中运行。</desc>
   <rect width="1200" height="680" fill="#0c0c0c"/>
   <g font-family="-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Noto Sans CJK SC, sans-serif">
     <text x="56" y="58" fill="#eceae6" font-size="32" font-weight="700">一次任务经过哪里</text>
     <text x="56" y="96" fill="#8d8d8d" font-size="20">模型提出调用。Harness 决定批不批准，以及在宿主还是沙箱执行。</text>
-    <rect x="96" y="132" width="420" height="84" fill="#141414" stroke="#2e2e2e"/>
-    <text x="116" y="170" fill="#eceae6" font-size="24" font-weight="700">TUI / CLI</text>
-    <text x="116" y="198" fill="#8d8d8d" font-size="18">agent/cli</text>
-    <rect x="684" y="132" width="420" height="84" fill="#141414" stroke="#2e2e2e"/>
-    <text x="704" y="170" fill="#eceae6" font-size="24" font-weight="700">HTTP / SSE</text>
-    <text x="704" y="198" fill="#8d8d8d" font-size="18">agent/server · 可选</text>
+    <rect x="390" y="132" width="420" height="84" fill="#141414" stroke="#2e2e2e"/>
+    <text x="410" y="170" fill="#eceae6" font-size="24" font-weight="700">TUI / CLI</text>
+    <text x="410" y="198" fill="#8d8d8d" font-size="18">agent/cli</text>
     <rect x="340" y="268" width="520" height="84" fill="#141414" stroke="#2e2e2e"/>
     <text x="360" y="306" fill="#eceae6" font-size="24" font-weight="700">AgentRunner</text>
     <text x="360" y="334" fill="#8d8d8d" font-size="18">取消 · 暂停 · 排队</text>
@@ -25,8 +22,7 @@
     <text x="664" y="612" fill="#eceae6" font-size="20">默认无网 · 有网需单独声明</text>
   </g>
   <g fill="none" stroke="#8a8a8a" stroke-width="2">
-    <path d="M306 216 V242 H600 V268"/>
-    <path d="M894 216 V242 H600"/>
+    <path d="M600 216 V268"/>
     <path d="M600 352 V404"/>
     <path d="M600 488 V514 H306 V540"/>
     <path d="M600 514 H894 V540"/>

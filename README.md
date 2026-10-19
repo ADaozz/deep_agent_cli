@@ -17,6 +17,8 @@ OpenAI 兼容接口 · Bubblewrap
 
 `deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
+在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
+
 > 当前版本 **0.1.8**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
@@ -26,7 +28,7 @@ OpenAI 兼容接口 · Bubblewrap
 - **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
 - **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
 
-支持通过 Skills 和 `AGENTS.md` 扩展项目指令。可选 [HTTP 服务](docs/server.md) 与 [Python API](docs/library.md) 复用运行核心。
+支持通过 Skills 和 `AGENTS.md` 扩展项目指令。
 
 ## 快速开始
 
@@ -147,7 +149,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 <details>
 <summary>展开运行架构图</summary>
 
-![TUI 或 HTTP 进入共享的 AgentRunner 和 Deep Agents / LangGraph；普通文件工具在宿主进程访问授权路径，execute 经 SandboxPool 进入 Bubblewrap Worker。](assets/readme/runtime-map.svg)
+![TUI 进入共享的 AgentRunner 和 Deep Agents / LangGraph；普通文件工具在宿主进程访问授权路径，execute 经 SandboxPool 进入 Bubblewrap Worker。](assets/readme/runtime-map.svg)
 
 SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模式下有 rg 时复用沙箱池，否则使用宿主 Python 正则回退。完整分层与生命周期见 [架构文档](docs/architecture.md)。
 
@@ -167,7 +169,6 @@ SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模�
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。会话切换及关闭时清理沙箱。
 - **挂载与资源**：额外挂载会扩大访问范围；没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
 - **本地状态**：同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **HTTP 接入**：固定 `ask`、强制沙箱。服务级 Bearer 令牌不区分最终用户，接入方需校验登录、项目权限和会话归属，见 [服务接入边界](docs/server.md#推荐连接方式)。
 - **客户端**：模型与 Tavily 请求忽略代理环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加；当前不提供 MCP 或子 Agent。
 
 完整隔离范围、环境变量与宿主回退说明见 [沙箱与权限](docs/sandbox.md)。
@@ -178,7 +179,7 @@ SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模�
 
 - **使用**：[配置参考](docs/configuration.md) · [终端界面](docs/tui.md) · [正则搜索](docs/search.md)
 - **机制**：[沙箱与权限](docs/sandbox.md) · [架构设计](docs/architecture.md)
-- **集成**：[HTTP 服务](docs/server.md) · [Python API](docs/library.md) · [开发指南](docs/development.md)
+- **集成**：[Python API](docs/library.md) · [开发指南](docs/development.md)
 
 <details>
 <summary>扩展 Skills 与网页搜索</summary>
@@ -195,7 +196,7 @@ git clone https://github.com/ADaozz/deep_agent_cli.git
 cd deep_agent_cli
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,server]"
+pip install -e ".[dev]"
 pytest -q
 ```
 

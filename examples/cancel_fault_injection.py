@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Silent model stream fault injection against the real ``deep-agent`` TUI or HTTP service.
+"""Silent model stream fault injection against the real ``deep-agent`` TUI.
 
 The scripted model endpoint (``tests.model_stream_server``) runs in this process;
 the agent runs as a separate ``deep-agent`` process built from ``--repo``, so
@@ -7,7 +7,7 @@ the same driver can exercise a baseline checkout and the fixed one. Each cycle:
 
 1. submits a task whose model stream goes silent (before the first chunk, mid
    stream, or keeps streaming),
-2. cancels it (Esc in the PTY, or ``POST /runs/{id}/cancel``),
+2. cancels it with Esc in the PTY,
 3. samples process threads, model TCP connections, the scripted server's open
    requests, session lease and run state at the requested offsets,
 4. submits a simple task in the same session and times it.
@@ -33,7 +33,6 @@ import re
 import select
 import shutil
 import signal
-import socket
 import sqlite3
 import struct
 import subprocess
@@ -43,8 +42,6 @@ import termios
 import threading
 import time
 from typing import Any, Callable
-import urllib.error
-import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -55,7 +52,6 @@ from tests.model_stream_server import ScriptedSSEServer, Turn  # noqa: E402
 
 SCENARIOS = ("before_first_chunk", "mid_stream", "continuous")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b[=>78]")
-TOKEN = "fault-injection-token"
 
 
 def stalled_turn(scenario: str) -> Turn:
@@ -278,23 +274,6 @@ class PtyAgent:
         return self.process.returncode
 
 
-def http(method: str, url: str, body: dict | None = None, timeout: float = 10) -> tuple[int, Any]:
-    request = urllib.request.Request(url, method=method, data=None if body is None else json.dumps(body).encode(),
-                                     headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read() or b"null")
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read() or b"null")
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 # -- driver --------------------------------------------------------------------------------
 class Driver:
     def __init__(self, args: argparse.Namespace, server: ScriptedSSEServer, root: Path) -> None:
@@ -420,140 +399,6 @@ class TuiDriver(Driver):
         return report
 
 
-class HttpDriver(Driver):
-    def run(self) -> dict[str, Any]:
-        state_dir = self.root / "service-state"
-        model_config = self.root / "model.yaml"
-        model_config.write_text(model_yaml(self.server.base_url, self.args.api, self.workspace, None,
-                                           self.config_dir))
-        service = self.root / "service.yaml"
-        service.write_text(f"projects:\n  demo: {self.workspace}\nmodel_config: {model_config}\n"
-                           f"state_dir: {state_dir}\ntoken_env: FAULT_INJECTION_TOKEN\nmax_runs: 2\n")
-        port = free_port()
-        base = f"http://127.0.0.1:{port}"
-        log = (self.root / "serve.log").open("w")
-        process = subprocess.Popen(
-            [sys.executable, "-c", "from agent.cli.main import main; main()", "serve", "--config", str(service),
-             "--port", str(port)], cwd=self.root,
-            env=child_env(self.args.repo, self.home, {"FAULT_INJECTION_TOKEN": TOKEN}),
-            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        report: dict[str, Any] = {"pid": process.pid, "normal_tasks": [], "cycles": []}
-        lock_dir = state_dir / "projects" / "demo" / "sessions.sqlite3.locks"
-        current: dict[str, str] = {}
-
-        def extra() -> dict[str, Any]:
-            status = http("GET", f"{base}/v1/runs/{current['run']}")[1]["status"] if current.get("run") else None
-            return {"run_status": status, "held_session_leases": held_leases(lock_dir)}
-
-        def task(session: str, marker: str, timeout: float) -> dict[str, Any]:
-            first = len(self.server.connections)
-            self.server.add(answer_turn(marker))
-            started = time.monotonic()
-            code, run = http("POST", f"{base}/v1/sessions/{session}/runs", {"text": f"reply with {marker}"})
-            if code != 202:
-                self.server._turns.clear()
-                return {"marker": marker, "completed": False, "submit_status": code, "detail": run}
-            final = wait_for(lambda: (r := http("GET", f"{base}/v1/runs/{run['id']}")[1])["status"]
-                             in {"completed", "failed", "cancelled"} and r, timeout)
-            return {"marker": marker, "completed": bool(final) and final["status"] == "completed",
-                    "final_status": final["status"] if final else None,
-                    "elapsed_s": round(time.monotonic() - started, 3), **self.request_stats(first)}
-
-        try:
-            if not wait_for(lambda: _health(base), 30, 0.1):
-                raise RuntimeError("service did not start")
-            report["baseline_threads"] = len(thread_names(process.pid))
-            code, session = http("POST", f"{base}/v1/sessions", {"project_id": "demo"})
-            assert code == 201, session
-            for index in range(self.args.normal):
-                report["normal_tasks"].append(task(session["id"], f"NORMAL-{index}", 30))
-            for index in range(self.args.cycles):
-                scenario = SCENARIOS[index % len(SCENARIOS)] if self.args.scenario == "mixed" else self.args.scenario
-                first = len(self.server.connections)
-                self.server.add(stalled_turn(scenario))
-                code, run = http("POST", f"{base}/v1/sessions/{session['id']}/runs", {"text": f"cancel probe {index}"})
-                if code != 202:
-                    self.server._turns.clear()
-                    report["stopped_early"] = f"cycle {index} submit returned {code}: {run}"
-                    break
-                current["run"] = run["id"]
-                connection = self.server.wait_for_connection(first, 30)
-                if scenario == "continuous":
-                    connection.first_chunk_sent.wait(10)
-                    time.sleep(0.3)
-                else:
-                    connection.hanging.wait(10)
-                    time.sleep(0.5)
-                before = self.sample(process.pid, extra, dump=True)
-                started = time.monotonic()
-                cancel_code, _ = http("POST", f"{base}/v1/runs/{run['id']}/cancel")
-                cancel_response_s = time.monotonic() - started
-                terminal = {"at": None}
-
-                def watch_terminal() -> dict[str, Any]:
-                    data = extra()
-                    if terminal["at"] is None and data["run_status"] in {"cancelled", "completed", "failed"}:
-                        terminal["at"] = round(time.monotonic() - started, 4)
-                    return data
-
-                samples, closed_after = self.observe(started, process.pid, watch_terminal, connection)
-                events = _events(base, run["id"])
-                follow = task(session["id"], f"FOLLOW-{index}", self.args.follow_timeout)
-                follow_body = json.dumps(self.server.connections[first + 1].body) \
-                    if len(self.server.connections) > first + 1 else ""
-                cycle = {
-                    "index": index, "scenario": scenario, "before_cancel": before,
-                    "cancel_http_status": cancel_code, "cancel_response_s": round(cancel_response_s, 4),
-                    "samples": samples,
-                    "server_saw_close_after_s": None if closed_after is None else round(closed_after, 4),
-                    "events": events, "follow_up": follow,
-                    "follow_up_has_cancelled_prompt": f"cancel probe {index}" in follow_body,
-                }
-                report["cycles"].append(cycle)
-                print(json.dumps({"mode": "http", "api": self.args.api, **cycle}, ensure_ascii=False), flush=True)
-                if not follow["completed"]:
-                    report["stopped_early"] = f"follow-up task after cycle {index} did not complete"
-                    break
-        finally:
-            process.send_signal(signal.SIGINT)
-            try:
-                report["exit_code"] = process.wait(45)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                report["exit_code"] = f"killed after 45s ({process.wait(5)})"
-            report["leases_after_exit"] = held_leases(lock_dir)
-            log.close()
-            report["log_tail"] = (self.root / "serve.log").read_text()[-1500:]
-        return report
-
-
-def _health(base: str) -> bool:
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(f"{base}/health", timeout=1):
-            return True
-    except OSError:
-        return False
-
-
-def _events(base: str, run_id: str) -> list[str]:
-    request = urllib.request.Request(f"{base}/v1/runs/{run_id}/events",
-                                     headers={"Authorization": f"Bearer {TOKEN}"})
-    names: list[str] = []
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
-            event = ""
-            for line in response:
-                if line.startswith(b"event: "):
-                    event = line[7:].decode().strip()
-                elif line.startswith(b"data: ") and event != "delta":
-                    data = json.loads(line[6:])
-                    inner = data.get("type") if event == "agent_event" and isinstance(data, dict) else None
-                    names.append(f"agent_event:{inner}" if inner else event)
-    except (OSError, TimeoutError):
-        names.append("<stream still open>")
-    return names
-
-
 def summarize(report: dict[str, Any]) -> dict[str, Any]:
     cycles = report["cycles"]
     final_key = list(cycles[0]["samples"])[-1] if cycles else None
@@ -580,7 +425,6 @@ def summarize(report: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("tui", "http"), required=True)
     parser.add_argument("--api", choices=("chat_completions", "responses"), default="chat_completions")
     parser.add_argument("--scenario", choices=(*SCENARIOS, "mixed"), default="mixed")
     parser.add_argument("--cycles", type=int, default=10)
@@ -596,17 +440,17 @@ def main() -> None:
     commit = subprocess.run(["git", "-C", str(args.repo), "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="cancel-fi-") as tmp, ScriptedSSEServer(args.api) as server:
-        driver = (TuiDriver if args.mode == "tui" else HttpDriver)(args, server, Path(tmp))
+        driver = TuiDriver(args, server, Path(tmp))
         started = time.time()
         report = driver.run()
-    result = {"label": args.label, "mode": args.mode, "api": args.api, "repo_commit": commit,
+    result = {"label": args.label, "mode": "tui", "api": args.api, "repo_commit": commit,
               "scenario": args.scenario, "samples_s": args.samples, "started_at": started,
               "summary": summarize(report), **report}
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text + "\n")
-    print(json.dumps({"label": args.label, "mode": args.mode, "api": args.api, "commit": commit,
+    print(json.dumps({"label": args.label, "mode": "tui", "api": args.api, "commit": commit,
                       **result["summary"]}, ensure_ascii=False))
 
 

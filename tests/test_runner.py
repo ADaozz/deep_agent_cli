@@ -4,8 +4,6 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
-from langgraph.checkpoint.memory import InMemorySaver
-
 from agent.factory import create_agent
 from agent.config import SandboxConfig, Settings
 from agent.sandbox import UnsandboxedShellBackend

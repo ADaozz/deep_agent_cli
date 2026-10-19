@@ -25,7 +25,7 @@
     <text x="274" y="484" fill="#8d8d8d" font-size="20">未授权则拒绝启动</text>
     <rect x="704" y="360" width="448" height="156" fill="#2a1414" stroke="#c45c4a"/>
     <text x="728" y="428" fill="#ffb4a8" font-size="22">不可用</text>
-    <text x="728" y="464" fill="#8d8d8d" font-size="20">HTTP 固定 ask，并强制沙箱</text>
+    <text x="728" y="464" fill="#8d8d8d" font-size="20">宿主执行不能免审批</text>
     <text x="48" y="580" fill="#8d8d8d" font-size="18">只读文件工具和 grep 默认免审批。模型与 Tavily 请求在宿主发出。</text>
   </g>
 </svg>

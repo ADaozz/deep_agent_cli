@@ -6,7 +6,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from agent.attachments import ImageAttachmentRef
-from agent.runner import RunEvent, RunResult, TurnTiming
+from agent.runner import RunEvent, TurnTiming
 from agent.session import TranscriptBlock
 
 
