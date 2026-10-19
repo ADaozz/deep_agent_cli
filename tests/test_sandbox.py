@@ -640,7 +640,6 @@ def test_overlapping_and_nested_mounts_fail_closed(tmp_path: Path) -> None:
     child = parent / "child"
     child.mkdir()
     conflicts = [
-        replace(config_for(workspace), extra_read_only_mounts=(BindMount(workspace, "/reference"),)),
         replace(
             config_for(workspace),
             extra_read_only_mounts=(BindMount(parent, "/data"),),
@@ -703,6 +702,151 @@ def test_aligned_nested_mount_keeps_the_narrower_permission(tmp_path: Path) -> N
     assert (readonly_child / "file.txt").read_text() == "safe"
     assert protected.write("/workspace/other.txt", "yes").error is None
     assert (workspace / "other.txt").read_text() == "yes"
+    assert protected.delete("/workspace/other.txt").error is None
+    assert not (workspace / "other.txt").exists()
+    assert (readonly_child / "file.txt").read_text() == "safe"
+
+
+def test_single_file_mount_cannot_be_deleted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "input.txt"
+    source.write_text("hello")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(BindMount(source, "/app/input.txt"),),
+    )
+    backend = select_backend(config, check=False).backend
+    before = source.stat()
+    assert backend.delete("/app/input.txt").error == "Permission denied: cannot delete a sandbox mount point"
+    assert source.read_text() == "hello"
+    assert source.stat().st_ino == before.st_ino
+    assert backend.read("/app/input.txt").file_data["content"] == "hello"
+    assert backend.write("/app/input.txt", "rewritten").error is None
+    assert source.read_text() == "rewritten"
+    assert source.stat().st_ino == before.st_ino
+    again = select_backend(config, check=False).backend
+    assert again.read("/app/input.txt").file_data["content"] == "rewritten"
+
+
+def test_directory_mount_roots_cannot_be_deleted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    (project / "keep.txt").write_text("keep")
+    (project / "gone.txt").write_text("gone")
+    (workspace / "note.txt").write_text("note")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+    )
+    backend = select_backend(config, check=False).backend
+    assert backend.delete("/app").error == "Permission denied: cannot delete a sandbox mount point"
+    assert backend.delete("/workspace").error == "Permission denied: cannot delete a sandbox mount point"
+    assert project.is_dir() and workspace.is_dir()
+    assert (project / "keep.txt").read_text() == "keep"
+    assert backend.delete("/app/gone.txt").error is None
+    assert not (project / "gone.txt").exists()
+    assert backend.delete("/workspace/note.txt").error is None
+    assert not (workspace / "note.txt").exists()
+    assert backend.write("/app/keep.txt", "still").error is None
+    assert (project / "keep.txt").read_text() == "still"
+
+
+def test_alias_and_parent_cannot_delete_a_mount_source(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    nested = workspace / "nested"
+    nested.mkdir(parents=True)
+    source = nested / "input.txt"
+    source.write_text("mounted")
+    (workspace / "other.txt").write_text("other")
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_write_mounts=(
+            BindMount(workspace, "/app"),
+            BindMount(source, "/opt/input.txt"),
+        ),
+    )
+    backend = select_backend(config, check=False).backend
+    for path in ("/workspace", "/app", "/opt/input.txt", "/workspace/nested/input.txt", "/app/nested/input.txt", "/workspace/nested", "/app/nested"):
+        assert backend.delete(path).error == "Permission denied: cannot delete a sandbox mount point"
+    assert source.read_text() == "mounted"
+    assert backend.delete("/workspace/other.txt").error is None
+    assert not (workspace / "other.txt").exists()
+    assert backend.write("/opt/input.txt", "edited").error is None
+    assert source.read_text() == "edited"
+
+
+def test_readonly_and_read_write_aliases_follow_the_virtual_path(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "shared.txt").write_text("original")
+    alias = replace(
+        config_for(project),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(project, "/reference"),),
+    )
+    backend = select_backend(alias, check=False).backend
+    assert backend.write("/reference/shared.txt", "no").error
+    assert backend.edit("/reference/shared.txt", "original", "no").error
+    assert backend.delete("/reference/shared.txt").error
+    assert project.joinpath("shared.txt").read_text() == "original"
+    assert backend.write("/workspace/shared.txt", "from-rw").error is None
+    assert backend.read("/reference/shared.txt").file_data["content"] == "from-rw"
+    assert backend.read("/workspace/shared.txt").file_data["content"] == "from-rw"
+
+    parent = tmp_path / "parent"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+    (child / "leaf.txt").write_text("leaf")
+    separate = tmp_path / "workspace"
+    separate.mkdir()
+    overlap = replace(
+        config_for(separate),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(child, "/ro"),),
+        extra_read_write_mounts=(BindMount(parent, "/rw"),),
+    )
+    mounted = select_backend(overlap, check=False).backend
+    assert mounted.write("/ro/leaf.txt", "no").error
+    assert (child / "leaf.txt").read_text() == "leaf"
+    assert mounted.write("/rw/sub/leaf.txt", "from-rw").error is None
+    assert mounted.read("/ro/leaf.txt").file_data["content"] == "from-rw"
+
+
+def test_symlink_delete_removes_the_link_not_its_target(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    reference = tmp_path / "reference"
+    workspace.mkdir()
+    reference.mkdir()
+    target = reference / "guide.txt"
+    target.write_text("guide")
+    link = workspace / "to-guide"
+    link.symlink_to(target)
+    readonly_link = reference / "inside"
+    readonly_link.symlink_to(target)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret")
+    escape = workspace / "escape"
+    escape.symlink_to(secret)
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        extra_read_only_mounts=(BindMount(reference, "/reference"),),
+    )
+    backend = select_backend(config, check=False).backend
+    assert backend.delete("/workspace/to-guide").error is None
+    assert not link.exists() and not link.is_symlink()
+    assert target.read_text() == "guide"
+    assert backend.delete("/reference/inside").error
+    assert readonly_link.is_symlink()
+    assert backend.delete("/workspace/escape").error is None
+    assert not escape.is_symlink()
+    assert secret.read_text() == "secret"
 
 
 def test_exact_file_mount_does_not_expose_its_directory(tmp_path: Path) -> None:
@@ -839,3 +983,142 @@ def test_bubblewrap_execute_and_file_tools_share_declared_mounts(tmp_path: Path)
             replacement.executor.pool.shutdown("replacement finished")
     finally:
         backend.executor.pool.shutdown("mount integration finished")
+
+
+def _bwrap_executable() -> str:
+    import shutil
+    import subprocess
+
+    executable = shutil.which("bwrap")
+    if not executable:
+        pytest.skip("UNSUPPORTED SANDBOX ENVIRONMENT: bubblewrap is not installed")
+    probe = subprocess.run(
+        [executable, "--unshare-all", "--ro-bind", "/", "/", "true"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT: {probe.stderr.strip()}")
+    return executable
+
+
+def test_bubblewrap_delete_and_aliases_match_execute(tmp_path: Path) -> None:
+    executable = _bwrap_executable()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "input.txt"
+    source.write_text("hello")
+    file_config = SandboxConfig(
+        workspace=workspace,
+        bwrap_path=executable,
+        extra_read_write_mounts=(BindMount(source, "/app/input.txt"),),
+    )
+    file_backend = select_backend(file_config).backend
+    try:
+        inode = source.stat().st_ino
+        assert "hello" in file_backend.execute("cat /app/input.txt").output
+        assert file_backend.delete("/app/input.txt").error == "Permission denied: cannot delete a sandbox mount point"
+        assert source.read_text() == "hello" and source.stat().st_ino == inode
+        assert file_backend.read("/app/input.txt").file_data["content"] == "hello"
+        assert "hello" in file_backend.execute("cat /app/input.txt").output
+    finally:
+        file_backend.executor.pool.shutdown("file mount delete")
+    restarted = select_backend(file_config).backend
+    try:
+        assert "hello" in restarted.execute("cat /app/input.txt").output
+        assert restarted.read("/app/input.txt").file_data["content"] == "hello"
+    finally:
+        restarted.executor.pool.shutdown("file mount restarted")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "keep.txt").write_text("keep")
+    directory_config = SandboxConfig(
+        workspace=workspace,
+        bwrap_path=executable,
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+    )
+    directory = select_backend(directory_config).backend
+    try:
+        assert directory.delete("/app").error == "Permission denied: cannot delete a sandbox mount point"
+        assert directory.delete("/workspace").error == "Permission denied: cannot delete a sandbox mount point"
+        assert project.is_dir() and workspace.is_dir()
+        created = directory.execute("printf from-exec > /app/new.txt")
+        assert created.exit_code == 0
+        assert (project / "new.txt").read_text() == "from-exec"
+        assert directory.read("/app/new.txt").file_data["content"] == "from-exec"
+        assert directory.execute("true").exit_code == 0
+    finally:
+        directory.executor.pool.shutdown("directory mount delete")
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "shared.txt").write_text("original")
+    alias_config = SandboxConfig(
+        workspace=shared,
+        bwrap_path=executable,
+        extra_read_only_mounts=(BindMount(shared, "/reference"),),
+    )
+    alias = select_backend(alias_config).backend
+    try:
+        assert alias.execute("printf nope > /reference/shared.txt").exit_code != 0
+        assert alias.write("/reference/shared.txt", "no").error
+        assert shared.joinpath("shared.txt").read_text() == "original"
+        assert alias.write("/workspace/shared.txt", "from-rw").error is None
+        visible = alias.execute("cat /reference/shared.txt")
+        assert visible.exit_code == 0 and "from-rw" in visible.output
+        assert alias.read("/reference/shared.txt").file_data["content"] == "from-rw"
+    finally:
+        alias.executor.pool.shutdown("alias permissions")
+
+    parent = tmp_path / "parent"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+    (child / "leaf.txt").write_text("leaf")
+    separate = tmp_path / "separate"
+    separate.mkdir()
+    overlap_config = SandboxConfig(
+        workspace=separate,
+        bwrap_path=executable,
+        extra_read_only_mounts=(BindMount(child, "/ro"),),
+        extra_read_write_mounts=(BindMount(parent, "/rw"),),
+    )
+    overlap = select_backend(overlap_config).backend
+    try:
+        assert overlap.execute("printf nope > /ro/leaf.txt").exit_code != 0
+        assert overlap.write("/ro/leaf.txt", "no").error
+        assert (child / "leaf.txt").read_text() == "leaf"
+        assert overlap.execute("printf from-exec > /rw/sub/from-exec.txt").exit_code == 0
+        assert overlap.write("/rw/sub/leaf.txt", "from-file").error is None
+        assert overlap.execute("cat /ro/leaf.txt").output.strip() == "from-file"
+        assert (child / "from-exec.txt").read_text() == "from-exec"
+    finally:
+        overlap.executor.pool.shutdown("non-nested overlap")
+
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    guide = reference / "guide.txt"
+    guide.write_text("guide")
+    link = project / "to-guide"
+    link.symlink_to(guide)
+    link_for_execute = project / "to-guide-exec"
+    link_for_execute.symlink_to(guide)
+    link_config = SandboxConfig(
+        workspace=workspace,
+        bwrap_path=executable,
+        extra_read_write_mounts=(BindMount(project, "/app"),),
+        extra_read_only_mounts=(BindMount(reference, "/reference"),),
+    )
+    links = select_backend(link_config).backend
+    try:
+        assert links.delete("/app/to-guide").error is None
+        assert not link.is_symlink()
+        assert guide.read_text() == "guide"
+        removed = links.execute("rm /app/to-guide-exec")
+        assert removed.exit_code == 0
+        assert not link_for_execute.is_symlink()
+        assert guide.read_text() == "guide"
+        assert "guide" in links.execute("cat /reference/guide.txt").output
+        assert links.write("/reference/guide.txt", "no").error
+        assert guide.read_text() == "guide"
+    finally:
+        links.executor.pool.shutdown("symlink delete")

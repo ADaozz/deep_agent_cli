@@ -172,7 +172,7 @@ sequenceDiagram
 - SANDBOXED 下，`sandbox.extra_read_write_mounts` 与 `extra_read_only_mounts` 的目标 → 对应宿主目录或单个文件。目录复用 `FilesystemBackend`；只读目录在写入前拒绝；单文件只匹配该路径。
 - 其他虚拟路径 → 拒绝访问。`ls('/')` 和无路径 `glob` 仍聚合已授权目录；明确越界返回 `Permission denied`。
 
-Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这张表。UNSANDBOXED 不把那些虚拟目标当成宿主权限。无法同时满足挂载顺序和只读/读写属性的配置在初始化时失败。
+Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这张表。UNSANDBOXED 不把那些虚拟目标当成宿主权限。重复目标、后挂载盖住先挂载或错位嵌套在初始化时失败。同一宿主目录的只读和读写别名按虚拟路径分别授权。文件工具不能删除挂载点，也不能顺着符号链接删掉链接背后的文件。
 
 `artifacts_root` 为 `/workspace/.deepagents`，用于压缩历史等上游产物。文件工具的访问边界来自 Backend 路径约束，不能描述为所有读写都在 Bubblewrap 内。`.git/`、`.env` 等文件若在授权工作区内，也在 Agent 可访问范围内。
 

@@ -99,6 +99,7 @@ class BackendSelection:
 
 
 _PATH_ESCAPE = "Permission denied: path escapes its authorized mount"
+_MOUNT_DELETE = "Permission denied: cannot delete a sandbox mount point"
 
 
 def _component_within(path: str, root: str) -> bool:
@@ -162,6 +163,32 @@ def _host_contains(root: Path, path: Path) -> bool:
     return path == root or path.is_relative_to(root)
 
 
+def _unfollowed_host_path(backend: BackendProtocol, key: str) -> tuple[Path, bool]:
+    """Return the host path of ``key`` without following its final symlink.
+
+    Intermediate components still go through the backend's virtual-mode
+    checks, so ``..`` and a symlink that leaves the mount are rejected.
+    """
+    resolve = backend._resolve_path
+    vpath = key if key.startswith("/") else f"/{key}"
+    if ".." in vpath.split("/") or "~" in vpath or "\x00" in vpath:
+        raise ValueError("Permission denied: invalid virtual path")
+    if vpath in {"/", ""}:
+        cwd = backend.cwd
+        return cwd, cwd.is_symlink()
+    parent_virtual, name = vpath.rsplit("/", 1)
+    if name in {"", ".", ".."}:
+        raise ValueError("Permission denied: invalid virtual path")
+    parent = resolve(parent_virtual or "/")
+    candidate = parent / name
+    return candidate, candidate.is_symlink()
+
+
+def _final_is_symlink(backend: BackendProtocol, key: str) -> bool:
+    _path, is_link = _unfollowed_host_path(backend, key)
+    return is_link
+
+
 def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_MountPoint, ...]:
     """Resolve the Bubblewrap mount stack and reject layouts file tools cannot honor.
 
@@ -169,9 +196,9 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
     workspace, then read-only extras, then read-write extras, then skills.
     A later mount hides an earlier mount at the same path or at a descendant.
     A nested mount is expressible only when its source is exactly the
-    corresponding path inside the parent mount. Overlapping sources with
-    different permissions are allowed only for that nested case; a read-write
-    alias of a read-only tree would make the read-only view writable.
+    corresponding path inside the parent mount. The same host directory may
+    also be mounted at several virtual paths with different permissions;
+    file tools then judge read-only versus read-write by the virtual path.
     """
     ordered: list[tuple[Path, str, bool]] = [(config.workspace, SANDBOX_ROOT, False)]
     ordered.extend((mount.source, mount.destination, True) for mount in config.extra_read_only_mounts)
@@ -214,25 +241,6 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
                     "refusing a file-tool route that would disagree with the sandbox mount"
                 )
         effective.append(point)
-
-    for index, left in enumerate(effective):
-        for right in effective[index + 1:]:
-            if left.read_only == right.read_only:
-                continue
-            if not (left.source == right.source or left.source.is_relative_to(right.source)
-                    or right.source.is_relative_to(left.source)):
-                continue
-            parent, child = (left, right) if right.destination.is_relative_to(left.destination) else (right, left)
-            nested = child.destination != parent.destination and child.destination.is_relative_to(parent.destination)
-            aligned = nested and not parent.is_file and child.source == (
-                parent.source / child.destination.relative_to(parent.destination)
-            ).resolve()
-            if aligned:
-                continue
-            raise ValueError(
-                f"mounts {left.destination} and {right.destination} overlap with different "
-                "read-only and read-write permissions"
-            )
     return tuple(effective)
 
 
@@ -388,11 +396,9 @@ class _ExactFileBackend(BackendProtocol):
         return self._files.edit(self._virtual, old_string, new_string, replace_all=replace_all)
 
     def delete(self, file_path: str) -> DeleteResult:
-        if self.denies_mutation:
-            return DeleteResult(error=self.mutation_error)
         if not self._exact(file_path):
             return DeleteResult(error=self._outside(file_path))
-        return self._files.delete(self._virtual)
+        return DeleteResult(error=_MOUNT_DELETE)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         responses: list[FileUploadResponse] = []
@@ -589,18 +595,43 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
         return await asyncio.to_thread(self.glob, pattern, path)
 
-    def _most_specific_mount(self, host_path: Path) -> _MountPoint | None:
-        ancestors = [point for point in self._mount_points if _host_contains(point.source, host_path)]
-        if not ancestors:
+    def _route_point(self, file_path: str) -> _MountPoint | None:
+        virtual = file_path if file_path.startswith("/") else f"/{file_path}"
+        matches = [point for point in self._mount_points if _component_within(virtual, point.virtual)]
+        if not matches:
             return None
-        return max(ancestors, key=lambda point: len(point.source.parts))
+        return max(matches, key=lambda point: len(point.destination.parts))
 
-    def _mutation_plan(self, file_path: str, *, cover: bool = False) -> tuple[BackendProtocol, str] | str:
-        """Choose the backend that may mutate ``file_path``, or an error string.
+    def _is_mount_virtual(self, file_path: str) -> bool:
+        virtual = file_path if file_path.startswith("/") else f"/{file_path}"
+        normalized = virtual.rstrip("/") or "/"
+        return any((point.virtual.rstrip("/") or "/") == normalized for point in self._mount_points)
 
-        Read-only mounts are rejected before any write. A symlink is judged by
-        its resolved host path: a link that stays inside a nested read-write
-        mount can be written, and a link into a read-only mount cannot.
+    def _more_specific_mount(self, route: _MountPoint, host_path: Path) -> _MountPoint | None:
+        """Return a nested mount under ``route`` that contains ``host_path``.
+
+        Aliases of the same host directory are not more specific: their
+        permission comes from the virtual path that was actually used.
+        """
+        nested = [
+            point for point in self._mount_points
+            if point.destination != route.destination
+            and point.destination.is_relative_to(route.destination)
+            and point.source != route.source
+            and point.source.is_relative_to(route.source)
+            and _host_contains(point.source, host_path)
+        ]
+        if not nested:
+            return None
+        return max(nested, key=lambda point: (len(point.source.parts), len(point.destination.parts)))
+
+    def _mutation_plan(self, file_path: str) -> tuple[BackendProtocol, str] | str:
+        """Choose the backend that may write ``file_path``, or an error string.
+
+        A path that is not a symlink keeps the permission of its virtual route,
+        so a read-only alias of a writable directory stays read-only. A symlink
+        is followed. It may land in a nested mount inside that route; a link
+        that leaves the route is rejected instead of being retargeted.
         """
         backend, stripped = self._get_backend_and_key(file_path)
         resolve = getattr(backend, "_resolve_path", None)
@@ -609,23 +640,43 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                 return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
             return backend, stripped
         try:
+            is_link = _final_is_symlink(backend, stripped)
+        except (ValueError, OSError):
+            return _PATH_ESCAPE
+        if not is_link:
+            if getattr(backend, "denies_mutation", False):
+                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
+            return backend, stripped
+        try:
             host_path = resolve(stripped)
         except (ValueError, OSError):
             return _PATH_ESCAPE
-        owner = self._most_specific_mount(host_path)
-        if owner is not None and owner.read_only:
-            owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
-            return getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only")
-        if cover and any(
-            point.read_only and point.source != host_path and point.source.is_relative_to(host_path)
-            for point in self._mount_points
-        ):
-            return "Permission denied: mount is read-only"
-        if owner is None:
+        route = self._route_point(file_path)
+        if route is None:
+            if getattr(backend, "denies_mutation", False):
+                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
+            return backend, stripped
+        owner = self._more_specific_mount(route, host_path)
+        if owner is None or owner.read_only:
+            if owner is not None and owner.read_only:
+                owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
+                return getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only")
+            if getattr(backend, "denies_mutation", False):
+                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
             return backend, stripped
         relative = host_path.relative_to(owner.source).as_posix()
-        virtual = owner.virtual if relative in ("", ".") else f"{owner.virtual}/{relative}"
+        virtual = owner.virtual if relative in {"", "."} else f"{owner.virtual}/{relative}"
         return self._get_backend_and_key(virtual)
+
+    def _deletion_removes_mount_source(self, host_path: Path) -> bool:
+        try:
+            real = host_path.resolve()
+        except OSError:
+            return True
+        return any(
+            point.source == real or point.source.is_relative_to(real)
+            for point in self._mount_points
+        )
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
         try:
@@ -669,10 +720,40 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         return await asyncio.to_thread(self.edit, file_path, old_string, new_string, replace_all)
 
     def delete(self, file_path: str) -> DeleteResult:
-        plan = self._mutation_plan(file_path, cover=True)
-        if isinstance(plan, str):
-            return DeleteResult(error=plan)
-        backend, stripped = plan
+        """Delete a file without removing a mount point or following a symlink.
+
+        Mount roots, single-file mounts, and any path whose removal would
+        unlink a mount source through an alias or a parent directory are
+        rejected. A symlink is unlinked itself; the directory that contains
+        the link decides whether that is allowed.
+        """
+        backend, stripped = self._get_backend_and_key(file_path)
+        resolve = getattr(backend, "_resolve_path", None)
+        if resolve is None:
+            if getattr(backend, "denies_mutation", False):
+                return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
+            try:
+                return backend.delete(stripped)
+            except ValueError:
+                return DeleteResult(error=_PATH_ESCAPE)
+        if self._is_mount_virtual(file_path) or stripped in {"/", ""}:
+            return DeleteResult(error=_MOUNT_DELETE)
+        try:
+            host_path, is_link = _unfollowed_host_path(backend, stripped)
+        except (ValueError, OSError):
+            return DeleteResult(error=_PATH_ESCAPE)
+        if is_link:
+            if getattr(backend, "denies_mutation", False):
+                return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
+            try:
+                host_path.unlink()
+            except OSError:
+                return DeleteResult(error=f"Error deleting '{file_path}'")
+            return DeleteResult(path=file_path)
+        if self._deletion_removes_mount_source(host_path):
+            return DeleteResult(error=_MOUNT_DELETE)
+        if getattr(backend, "denies_mutation", False):
+            return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
         try:
             result = backend.delete(stripped)
         except ValueError:
