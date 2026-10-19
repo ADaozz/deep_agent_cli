@@ -1216,8 +1216,39 @@ class CliApplication:
                 "options": [],
             }],
         )
-        self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
+        self._show_allow_confirm_status()
         self.application.invalidate()
+
+    def _allow_confirm_open(self) -> bool:
+        return self.interaction is not None and self.interaction.kind == "permission_confirm"
+
+    def _current_interrupt_or_none(self) -> Any:
+        try:
+            return self.runner.current_interrupt()
+        except UnknownInterruptError:
+            return None
+
+    def _show_allow_confirm_status(self) -> None:
+        status = "Type ALLOW to confirm · Esc cancel"
+        interrupt = self._current_interrupt_or_none()
+        kind = interrupt.kind if interrupt is not None else None
+        if kind is InterruptKind.WAITING_CONFIRMATION:
+            status += " · approval pending · F2"
+        elif kind is InterruptKind.WAITING_HUMAN:
+            status += " · question pending · F2"
+        elif kind is InterruptKind.PAUSED:
+            status += " · pause pending · F2"
+        self.set_status(status, transient=False)
+
+    def _note_interrupt_behind_allow_confirm(self, status: str) -> None:
+        if status == "waiting_confirmation":
+            notice = "Tool approval is waiting. This ALLOW prompt stays open; F2 opens the approval and Esc returns here."
+        elif status == "waiting_human":
+            notice = "A question is waiting. This ALLOW prompt stays open; F2 opens it and Esc returns here."
+        else:
+            notice = "A pause is waiting. This ALLOW prompt stays open; F2 opens it and Esc returns here."
+        self.state.add_system(notice)
+        self._show_allow_confirm_status()
 
     def cycle_model(self, *, delta: int = 1) -> None:
         if self.sessions.waiting:
@@ -1889,7 +1920,7 @@ class CliApplication:
 
         @bind("reopen_interaction")
         def reopen_interaction(event) -> None:  # type: ignore[no-untyped-def]
-            self._reopen_pending_interaction()
+            self._reopen_pending_interaction_preserving_allow()
 
         @bind("thinking_toggle")
         def thinking_toggle(event) -> None:  # type: ignore[no-untyped-def]
@@ -2222,6 +2253,8 @@ class CliApplication:
                 notice = self.state.status
                 self.state.status = previous_status
                 self.set_status(notice)
+            elif self._allow_confirm_open() and event.type == "interaction_requested":
+                self._show_allow_confirm_status()
             else:
                 self.set_status(self.state.status, transient=False)
         if event.type in {"run_started", "run_cancelling"} or not self.state.running:
@@ -2258,14 +2291,14 @@ class CliApplication:
             self.state.running = False
             self.state.add_system("Paused at a checkpoint. Submit /pause again is unnecessary; press Enter to resume.")
         if result.status in {"waiting_confirmation", "waiting_human", "paused"}:
-            if self.interaction is not None and self.interaction.kind == "permission_confirm":
-                self._deferred_config_interaction = self.interaction
-                self.interaction = None
-            self._reopen_pending_interaction()
+            if self._allow_confirm_open():
+                self._note_interrupt_behind_allow_confirm(result.status)
+            else:
+                self._reopen_pending_interaction()
         elif self._deferred_config_interaction is not None:
             self.interaction = self._deferred_config_interaction
             self._deferred_config_interaction = None
-            self.set_status("Type ALLOW to confirm · Esc cancel", transient=False)
+            self._show_allow_confirm_status()
         elif result.status == "completed":
             # Input can arrive after the worker's final queue check, while
             # the UI still considers that worker to be running.
@@ -2395,7 +2428,10 @@ class CliApplication:
         if interaction.kind == "permission_confirm":
             if cancelled:
                 self.interaction = None
-                self.set_status("ALLOW mode cancelled")
+                if self._reopen_pending_interaction(notify_missing=False):
+                    self.state.add_system("ALLOW mode cancelled")
+                else:
+                    self.set_status("ALLOW mode cancelled")
                 return
             typed = str(interaction.values.get("confirm") or "").strip()
             self.interaction = None
@@ -2404,13 +2440,14 @@ class CliApplication:
                     'ALLOW not enabled. Type ALLOW exactly to confirm, or use /permission ask.',
                     error=True,
                 )
-                self.set_status("Permission: ask")
+                if not self._reopen_pending_interaction(notify_missing=False):
+                    self.set_status("Permission: ask")
                 return
             try:
                 self._request_permission_mode(PermissionMode.ALLOW)
             except (RuntimeError, ValueError) as exc:
                 self.state.add_system(str(exc), error=True)
-                return
+            self._reopen_pending_interaction(notify_missing=False)
             return
         if cancelled and interaction.kind in {"pause", "approval", "human"}:
             self._dismiss_pending_interrupt(interaction.kind)
@@ -2458,8 +2495,29 @@ class CliApplication:
         self.interaction = None
         self._reviewing = False
         self.state.running = False
+        deferred = self._deferred_config_interaction
+        if deferred is not None:
+            self.interaction = deferred
+            self._deferred_config_interaction = None
+            if deferred.kind == "permission_confirm":
+                self._show_allow_confirm_status()
+            self.application.invalidate()
+            return
         label = {"approval": "Approval", "human": "Input", "pause": "Pause"}.get(kind, "Input")
         self.set_status(f"{label} still pending · F2 to decide", transient=False)
+
+    def _reopen_pending_interaction_preserving_allow(self) -> bool:
+        """F2: show the pending approval, and return to an open ALLOW prompt on Esc."""
+        confirm = self.interaction if self._allow_confirm_open() else None
+        if confirm is not None:
+            self._deferred_config_interaction = confirm
+            self.interaction = None
+        opened = self._reopen_pending_interaction()
+        if confirm is not None and not opened:
+            self._deferred_config_interaction = None
+            self.interaction = confirm
+            self._show_allow_confirm_status()
+        return opened
 
     def _reopen_pending_interaction(self, *, notify_missing: bool = True) -> bool:
         try:
