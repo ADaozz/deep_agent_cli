@@ -151,7 +151,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 
 ![TUI 进入共享的 AgentRunner 和 Deep Agents / LangGraph；普通文件工具在宿主进程访问授权路径，execute 经 SandboxPool 进入 Bubblewrap Worker。](assets/readme/runtime-map.svg)
 
-SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。完整分层与生命周期见 [架构文档](docs/architecture.md)。
+SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码搜索和文件发现通过 `execute` 运行宿主提供、只读挂载进沙箱的 `rg`；搜索的审批与网络和其他命令相同。完整分层与生命周期见 [架构文档](docs/architecture.md)。
 
 </details>
 

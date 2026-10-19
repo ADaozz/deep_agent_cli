@@ -1,6 +1,21 @@
 # 正则搜索
 
-`grep` 和 `glob` 不注册给模型。本文保留搜索实现的参数和限制，供阅读现有代码时对照。
+`grep` 和 `glob` 不在模型默认工具表中。代码搜索和文件发现通过 `execute` 调用沙箱里的 `rg`：
+
+```bash
+rg -n 'pattern' path
+rg --files -g 'pattern' path
+```
+
+`rg` 由宿主环境提供，优先使用当前 Python 环境里的可执行文件，其次使用系统 `PATH`。Bubblewrap 把它只读挂载到 `/run/deep-agent/rg`，并将 `/run/deep-agent` 放在沙箱 `PATH` 最前。模型直接执行 `rg`，不需要知道宿主安装路径。`ask` 的无网沙箱和 `allow` 的有网沙箱使用同一份二进制。Agent 不能自行安装或下载 `rg`。
+
+宿主没有 `rg` 时，`execute` 的工具说明会写明代码搜索不可用，沙箱启动日志也会给出同样的诊断，不能把搜索说成可用。
+
+搜索权限与 `execute` 一致：`ask` 下每次命令都要审批，`allow` 下免审批并默认使用有网沙箱。它不再享有以前独立 `grep` 工具的免审批规则。
+
+`rg` 保持自身默认行为：位于 Git 仓库内时遵守 `.gitignore`、`.ignore`、`.rgignore` 和 `.git/info/exclude`，并默认跳过隐藏文件、符号链接、二进制文件以及大于自身限制的文件。需要放宽时使用 `rg` 自己的参数，例如 `--hidden`、`--no-ignore` 或 `-L`。
+
+下文保留未注册搜索实现的参数和限制，供阅读现有代码时对照，不是模型当前可用的工具。
 
 ## ripgrep 安装与定位
 
@@ -77,7 +92,7 @@ command -v rg
 
 沙箱模式且找到 `rg` 时，搜索复用当前会话的持久沙箱：`ask` 使用无网实例，
 `allow` 使用有网实例。常驻的是沙箱和 Worker；每次搜索启动一个 rg，结束后退出。
-这段搜索实现不调用 `execute`。它当前不会作为 `grep` 工具注册给模型。
+这段搜索实现不调用 `execute`。它当前不会作为 `grep` 工具注册给模型。模型侧的搜索走上一节的 `execute` + `rg`。
 
 未找到 rg 或运行于 UNSANDBOXED 模式时，使用独立、可终止的宿主 Python `re`
 进程，并通过目录描述符约束文件访问。非本地自定义 Backend 保留自身的搜索接口。
@@ -105,8 +120,7 @@ grep(pattern="config.yaml", fixed_string=true)
 **行为变更**：旧版默认按字面量搜索；现在 `.`, `*`, `+`, `[` 等字符默认解释为正则语法。
 通过自定义非本地 Backend 注入的工具仍使用该 Backend 的原有搜索接口。
 
-`path` 默认 `/workspace`。SANDBOXED 下还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。建议先用 `grep` 定位，再用
-`read_file(offset, limit)` 查看上下文。
+`path` 默认 `/workspace`。SANDBOXED 下还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
 
 #### Glob 过滤
 

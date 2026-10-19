@@ -33,7 +33,7 @@ flowchart TB
     EXEC --> WORKER["持久 Worker · Shell / argv 子进程"]
 ```
 
-文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。模型工具表不包含 `grep` 和 `glob`。
+文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。模型工具表不包含 `grep` 和 `glob`。代码搜索和文件发现通过 `execute` 调用沙箱 `PATH` 上的 `rg`。
 
 | 层 | 实现 | 职责 |
 |---|---|---|
@@ -191,7 +191,7 @@ Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这�
 
 ## grep 搜索
 
-`grep` 和 `glob` 不在模型工具表中。代码里仍保留本地搜索实现，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。该实现没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
+`grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。代码里仍保留本地搜索实现，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。该实现没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
 
 ```text
 参数与 Glob 校验
@@ -206,7 +206,7 @@ Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这�
 
 `ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
 
-沙箱启动时将 rg 只读挂载到 `/run/deep-agent/rg`。工厂按权限选择 Pool：`ask` 使用无网实例，`allow` 使用有网实例；与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
+沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，并把 `/run/deep-agent` 放在沙箱 `PATH` 最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志中说明搜索不可用。上面保留的搜索实现仍通过 `start_argv` 调用 `/run/deep-agent/rg`，与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
 
 `start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
 

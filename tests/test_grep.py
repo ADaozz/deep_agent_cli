@@ -438,6 +438,41 @@ def test_grep_and_glob_are_not_registered(workspace, monkeypatch, permission):
     assert "write_todos" not in names
     assert set(names) == {"ls", "read_file", "write_file", "edit_file", "delete",
                           "execute", "request_human_input", "compact_conversation"}
+    from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE
+
+    execute = next(tool for tool in schemas[-1] if tool.name == "execute")
+    assert set(execute.args) == {"command", "timeout", "network"}
+    expected = _SEARCH_GUIDANCE if implementation.resolve_rg() else _SEARCH_UNAVAILABLE
+    assert expected in execute.description
+    assert "Prefer ls/" not in execute.description
+
+
+def test_execute_description_tracks_rg_availability(monkeypatch):
+    from deepagents.backends.protocol import ExecuteResponse
+    from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE, build_execute_tool
+
+    class Backend:
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            return ExecuteResponse(command, 0, False)
+
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: "/usr/bin/rg")
+    available = build_execute_tool(Backend())  # type: ignore[arg-type]
+    allowed = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
+    for tool in (available, allowed):
+        assert _SEARCH_GUIDANCE in tool.description
+        assert "do not install or download it" in tool.description
+        assert "Prefer ls/" not in tool.description
+        assert set(tool.args) == {"command", "timeout", "network"}
+    assert "every execute needs" in available.description
+    assert "without approval" in allowed.description
+
+    monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
+    missing = build_execute_tool(Backend())  # type: ignore[arg-type]
+    missing_allow = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
+    for tool in (missing, missing_allow):
+        assert _SEARCH_UNAVAILABLE in tool.description
+        assert "Use `rg -n" not in tool.description
+        assert set(tool.args) == {"command", "timeout", "network"}
 
 
 def test_custom_backend_does_not_register_grep_or_glob(fake_done):

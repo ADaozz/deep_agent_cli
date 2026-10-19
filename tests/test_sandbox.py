@@ -44,7 +44,7 @@ def test_sandbox_environment_is_allowlist_based(tmp_path: Path) -> None:
         "PATH": "/home/user/bin:/bin",
     }
     result = sandbox_environment(config, environ)
-    assert result["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert result["PATH"] == "/run/deep-agent:/usr/local/bin:/usr/bin:/bin"
     assert result["HOME"] == "/home/agent"
     assert result["PWD"] == "/workspace"
     assert result["TMPDIR"] == "/tmp"
@@ -473,13 +473,17 @@ def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
         assert ("--unshare-net" in args) is not network
 
 
-def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch):
+def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch, caplog):
+    import logging
     from agent.tools import grep
     from agent.sandbox import SEARCH_BINARY_PATH
 
     monkeypatch.setattr(grep, "resolve_rg", lambda: None)
     backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
-    assert SEARCH_BINARY_PATH not in backend.worker_args()
+    with caplog.at_level(logging.WARNING, logger="agent.sandbox"):
+        args = backend.worker_args()
+    assert SEARCH_BINARY_PATH not in args
+    assert any("code search is unavailable" in record.message for record in caplog.records)
 
 
 def test_sandbox_start_failure_is_reported_not_run_on_host(tmp_path: Path) -> None:
@@ -1226,3 +1230,90 @@ def test_intermediate_symlink_cannot_mutate_read_only_submount(tmp_path: Path) -
         assert "orig" in backend.execute("cat /workspace/secret/file.txt").output
     finally:
         backend.executor.pool.shutdown("intermediate symlink")
+
+
+def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import shutil
+    import subprocess
+
+    from agent.network import reset_execute_network, set_execute_network
+    from agent.tools.grep import resolve_rg
+
+    executable = _bwrap_executable()
+    host_rg = resolve_rg()
+    if not host_rg:
+        pytest.skip("rg is not installed on the host")
+    real = Path(host_rg).resolve()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "visible.py").write_text("TODO visible\n")
+    (workspace / ".hidden.py").write_text("TODO hidden\n")
+    gitignore_active = False
+    if shutil.which("git"):
+        init = subprocess.run(["git", "init"], cwd=workspace, capture_output=True, text=True)
+        if init.returncode == 0:
+            (workspace / ".gitignore").write_text("secret.py\n")
+            (workspace / "secret.py").write_text("TODO secret\n")
+            gitignore_active = True
+
+    sources = [str(real)]
+    system = Path("/usr/bin/rg")
+    if system.is_file() and os.access(system, os.X_OK) and system.resolve() != real:
+        sources.append(str(system))
+    copied = tmp_path / "usr-bin" / "rg"
+    copied.parent.mkdir()
+    shutil.copy2(real, copied)
+    copied.chmod(0o755)
+    sources.append(str(copied))
+    link = tmp_path / "venv-bin" / "rg"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    sources.append(str(link))
+
+    def check(source: str) -> None:
+        monkeypatch.setattr("agent.tools.grep.resolve_rg", lambda: source)
+        backend = select_backend(SandboxConfig(workspace=workspace, bwrap_path=executable)).backend
+        try:
+            assert backend.read("/workspace/visible.py").file_data["content"] == "TODO visible\n"
+            assert backend.write("/workspace/written.txt", "from-tool").error is None
+            written = backend.execute("cat /workspace/written.txt")
+            assert written.exit_code == 0 and written.output.strip() == "from-tool"
+            for network in (False, True):
+                token = set_execute_network(network)
+                try:
+                    located = backend.execute("command -v rg")
+                    version = backend.execute("rg --version")
+                    content = backend.execute("rg -n 'TODO' /workspace")
+                    defaults = backend.execute("rg --files /workspace")
+                    discovered = backend.execute("rg --files -g '*.py' /workspace")
+                    libraries = backend.execute(
+                        "if command -v ldd >/dev/null; then ldd /run/deep-agent/rg; else true; fi"
+                    )
+                    mutable = backend.execute("printf bad > /run/deep-agent/rg")
+                    linked = backend.execute("test -x /run/deep-agent/rg && test ! -L /run/deep-agent/rg")
+                finally:
+                    reset_execute_network(token)
+                assert located.exit_code == 0, located.output
+                assert located.output.strip() == "/run/deep-agent/rg"
+                assert version.exit_code == 0 and "ripgrep" in version.output
+                assert content.exit_code == 0, content.output
+                assert "visible.py" in content.output and "TODO visible" in content.output
+                assert ".hidden.py" not in content.output
+                if gitignore_active:
+                    assert "secret.py" not in content.output and "TODO secret" not in content.output
+                assert defaults.exit_code == 0, defaults.output
+                assert "visible.py" in defaults.output
+                assert ".hidden.py" not in defaults.output
+                if gitignore_active:
+                    assert "secret.py" not in defaults.output
+                assert discovered.exit_code == 0, discovered.output
+                assert "visible.py" in discovered.output
+                assert "not found" not in libraries.output
+                assert mutable.exit_code != 0
+                assert linked.exit_code == 0
+        finally:
+            backend.executor.pool.shutdown("rg path")
+
+    for source in sources:
+        check(source)
