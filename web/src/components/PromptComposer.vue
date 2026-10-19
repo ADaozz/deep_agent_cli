@@ -69,6 +69,7 @@ const supportsImages = computed(() => {
 
 const canSend = computed(() => !props.disabled && !props.running && !props.busy && !models.changing[modelSession.value] && (props.modelValue.trim().length > 0 || props.paths.length > 0 || props.skills.length > 0))
 const pill = computed(() => props.variant === 'pill')
+const menuAlign = computed(() => pill.value ? 'up' : 'down')
 
 function resize(): void {
   const el = area.value
@@ -135,7 +136,7 @@ function onRound(): void {
           <button class="round round-fill" type="button" title="添加上下文" @click="plusOpen = !plusOpen">
             <Icon name="plus" :size="12" />
           </button>
-          <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
+          <Popover v-if="plusOpen" :align="menuAlign" @close="plusOpen = false">
             <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
             <template v-else>
               <button class="pop-item" type="button" @click="pickPath()">
@@ -147,8 +148,8 @@ function onRound(): void {
           </Popover>
         </span>
 
-        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" />
-        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
+        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
+        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
 
         <span class="spacer" />
         <button
@@ -169,7 +170,7 @@ function onRound(): void {
         <button class="round round-fill" type="button" title="添加上下文" @click="plusOpen = !plusOpen">
           <Icon name="plus" :size="12" />
         </button>
-        <Popover v-if="plusOpen" align="up" @close="plusOpen = false">
+        <Popover v-if="plusOpen" :align="menuAlign" @close="plusOpen = false">
           <SkillsMenu v-if="skillsOpen" :project-id="modelProject" :disabled="disabled || running || busy" @back="skillsOpen = false" @selected="selectSkill" />
           <template v-else>
             <button class="pop-item" type="button" @click="pickPath()">
@@ -193,8 +194,8 @@ function onRound(): void {
       />
 
       <div class="right">
-        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" />
-        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :end="pill" />
+        <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
+        <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
         <button
           class="round round-send"
           type="button"

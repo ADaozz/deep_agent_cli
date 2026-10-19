@@ -5,7 +5,7 @@ import Popover from './Popover.vue'
 import { loadModels, models, selectModel } from '../store/models'
 import { ApiError } from '../api/client'
 
-const props = defineProps<{ projectId: string; sessionId?: string; disabled: boolean; end?: boolean }>()
+const props = defineProps<{ projectId: string; sessionId?: string; disabled: boolean; align?: 'up' | 'down' }>()
 const open = ref(false)
 const step = ref<'source' | 'model' | 'effort'>('source')
 const source = ref('')
@@ -57,7 +57,7 @@ async function choose(effort: string): Promise<void> {
       {{ current?.model || '选择模型' }}
       <Icon name="chevronDown" :size="11" />
     </button>
-    <Popover v-if="open" align="up" :end="end" @close="open = false">
+    <Popover v-if="open" :align="align ?? 'up'" @close="open = false">
       <div class="pop-head model-step">
         <button v-if="step !== 'source'" class="ico" type="button" aria-label="上一步" :disabled="saving" @click="back"><Icon name="chevronLeft" :size="12" /></button>
         {{ step === 'source' ? '选择组织' : step === 'model' ? '选择模型名称' : '选择思考强度' }}

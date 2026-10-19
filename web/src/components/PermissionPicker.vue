@@ -7,7 +7,7 @@ import { permissionDrafts } from '../store/capabilities'
 import { models } from '../store/models'
 import Popover from './Popover.vue'
 import Icon from './Icon.vue'
-const props = defineProps<{ projectId: string; sessionId: string; disabled: boolean }>()
+const props = defineProps<{ projectId: string; sessionId: string; disabled: boolean; align?: 'up' | 'down' }>()
 const open = ref(false)
 const catalog = ref<Capabilities>()
 const mode = ref<'ask' | 'allow'>('ask')
@@ -48,7 +48,7 @@ async function selectPermission(value: 'ask' | 'allow'): Promise<void> {
     <button class="model-pick" type="button" aria-label="切换权限" :disabled="blocked" @click="open = !open">
       {{ mode }}<Icon name="chevronDown" :size="10" />
     </button>
-    <Popover v-if="open" align="up" end @close="open = false">
+    <Popover v-if="open" :align="align ?? 'up'" @close="open = false">
       <div class="pop-head">权限</div>
       <button class="pop-item" type="button" :disabled="blocked || !catalog" @click="selectPermission('ask')"><span class="grow">ask · 逐次审批</span><Icon v-if="mode === 'ask'" name="check" :size="12" /></button>
       <button class="pop-item" type="button" :disabled="blocked || !catalog?.allow_available" @click="confirmOpen = true; confirmation = ''"><span class="grow">allow · 自动批准</span><Icon v-if="mode === 'allow'" name="check" :size="12" /></button>
@@ -60,7 +60,6 @@ async function selectPermission(value: 'ask' | 'allow'): Promise<void> {
         <form class="dialog" role="dialog" aria-modal="true" aria-labelledby="allow-title" @submit.prevent="selectPermission('allow')">
           <header class="dialog-head"><h2 id="allow-title">启用 ALLOW（高风险）</h2></header>
           <div class="dialog-body">
-            <p>{{ catalog?.allow_warning }}</p>
             <p>自动批准所有工具（包括写入和删除），并开放沙箱网络。切回 ask 只影响后续命令。</p>
             <label for="allow-confirm">输入 ALLOW 确认</label><input id="allow-confirm" v-model="confirmation" class="attachment-path-input" autocomplete="off" :disabled="busy" />
             <p v-if="error" role="alert">{{ error }}</p>
