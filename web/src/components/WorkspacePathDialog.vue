@@ -4,10 +4,11 @@ import { api, ApiError } from '../api/client'
 import type { DirectoryListing, Workspace } from '../api/types'
 import { apiConfig } from '../store/settings'
 import Icon from './Icon.vue'
+import { displayPath } from '../lib/paths'
 
 const props = defineProps<{ initialPath?: string }>()
 const emit = defineEmits<{ close: []; selected: [workspace: Workspace] }>()
-const path = ref(props.initialPath || '')
+const path = ref(displayPath(props.initialPath))
 const listing = ref<DirectoryListing>()
 const loading = ref(false)
 const saving = ref(false)
@@ -18,7 +19,7 @@ async function browse(value = path.value): Promise<void> {
   loading.value = true; error.value = ''
   try {
     const result = await api.directories(apiConfig(), value.trim() || undefined)
-    if (version === generation) { listing.value = result; path.value = result.path }
+    if (version === generation) { listing.value = result; path.value = displayPath(result.path) }
   } catch (e) { if (version === generation) error.value = e instanceof Error ? e.message : '无法读取目录' }
   finally { if (version === generation) loading.value = false }
 }
@@ -59,7 +60,7 @@ onBeforeUnmount(() => { generation++; document.removeEventListener('keydown', on
         <p v-if="error" role="alert" class="model-error">{{ error }}</p>
       </div>
       <footer class="dialog-foot">
-        <span class="grow">{{ listing?.path }}</span>
+        <span class="grow">{{ displayPath(listing?.path) }}</span>
         <button class="btn" :disabled="saving" @click="emit('close')">取消</button>
         <button class="btn is-primary" :disabled="loading || saving || !path.trim()" @click="select">{{ saving ? '正在选择…' : '选择此目录' }}</button>
       </footer>

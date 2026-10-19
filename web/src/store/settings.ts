@@ -2,7 +2,6 @@ import './browserStorage'
 import { reactive } from 'vue'
 
 export const DEFAULT_BASE_URL = '/api/agent'
-export const PROXY_BASE_URL = DEFAULT_BASE_URL
 
 export interface Settings {
   baseUrl: string

@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import CommitHistory from './CommitHistory.vue'
+import WorkspaceFiles from './WorkspaceFiles.vue'
 import Popover from './Popover.vue'
 import { api, ApiError } from '../api/client'
-import type { GitDiffLine, GitDiffScope, GitFileDiff, GitFileEntry, WorkspaceGit } from '../api/types'
+import type { GitDiffLine, GitFileDiff, GitFileEntry, WorkspaceGit } from '../api/types'
 import { shortPath } from '../lib/timeline'
 import { refreshGit } from '../store/git'
 import { apiConfig } from '../store/settings'
@@ -11,43 +13,31 @@ import { apiConfig } from '../store/settings'
 const props = defineProps<{
   git?: WorkspaceGit
   projectId?: string
-  title: string
-  subtitle: string
 }>()
 
 const emit = defineEmits<{ close: [] }>()
 
-const tab = ref<'changes' | 'desktop' | 'terminal' | 'files'>('changes')
-const sub = ref<'diff' | 'review' | 'commits'>('diff')
-const scope = ref<GitDiffScope>('all')
+const tab = ref<'changes' | 'files'>('changes')
+const sub = ref<'diff' | 'commits'>('diff')
 const maximized = ref(false)
 const menu = ref(false)
 const copied = ref(false)
 const refreshing = ref(false)
+const commitHistory = ref<InstanceType<typeof CommitHistory>>()
 const open = ref<string[]>([])
 const collapsed = reactive<Record<string, boolean>>({})
 const loading = reactive<Record<string, boolean>>({})
-const sawFull = reactive<Record<string, boolean>>({})
 const diffs = reactive<Record<string, GitFileDiff>>({})
 const generation = new Map<string, number>()
 
 const TABS: { key: typeof tab.value; label: string }[] = [
   { key: 'changes', label: '变更' },
-  { key: 'desktop', label: '桌面' },
-  { key: 'terminal', label: '终端' },
   { key: 'files', label: '文件' },
 ]
 
 const SUBS: { key: typeof sub.value; label: string }[] = [
   { key: 'diff', label: '差异' },
-  { key: 'review', label: '审阅' },
   { key: 'commits', label: '提交' },
-]
-
-const SCOPES: { key: GitDiffScope; label: string }[] = [
-  { key: 'all', label: '整体差异' },
-  { key: 'staged', label: '已暂存' },
-  { key: 'unstaged', label: '未暂存' },
 ]
 
 const STATUS: Record<string, string> = {
@@ -56,7 +46,6 @@ const STATUS: Record<string, string> = {
   added: '新增',
   renamed: '重命名',
   copied: '复制',
-  modified: '修改',
 }
 
 const files = computed(() => (props.git?.available ? props.git.files || [] : []))
@@ -65,32 +54,20 @@ function isUntracked(file: GitFileEntry): boolean {
   return file.untracked === true || file.status === 'untracked'
 }
 
-const tracked = computed(() => files.value.filter((file) => {
-  if (isUntracked(file)) return false
-  if (scope.value === 'staged') return file.staged === true
-  if (scope.value === 'unstaged') return file.unstaged === true
-  return true
-}))
-
-const untrackedFiles = computed(() => (scope.value === 'unstaged' ? files.value.filter(isUntracked) : []))
 const groups = computed(() => [
-  { label: '', files: tracked.value },
-  { label: '未跟踪', files: untrackedFiles.value },
-].filter((group) => group.files.length))
+  { label: '已跟踪', files: files.value.filter(file => !isUntracked(file)) },
+  { label: '未跟踪', files: files.value.filter(isUntracked) },
+])
 const shown = computed(() => groups.value.flatMap((group) => group.files))
 
 const emptyText = computed(() => {
-  const labels = { desktop: '桌面', terminal: '终端', files: '文件' } as const
-  if (tab.value !== 'changes') return `${labels[tab.value]}视图不由本控制台提供`
   if (!props.git?.available) return '工作区没有可用的 Git 仓库'
   if (sub.value !== 'diff') return '工作区没有 Git 变更'
-  if (scope.value === 'staged') return '没有已暂存的变更'
-  if (scope.value === 'unstaged') return '没有未暂存的变更'
   return '工作区没有 Git 变更'
 })
 
 function diffKey(path: string, full = false): string {
-  return `${scope.value}:${full ? '1' : '0'}:${path}`
+  return `${full ? 'full' : 'preview'}:${path}`
 }
 
 function currentDiff(path: string): GitFileDiff | undefined {
@@ -104,8 +81,7 @@ function isOpen(path: string): boolean {
 function countLabel(file: GitFileEntry): string {
   if (file.binary) return '二进制'
   if (file.untracked || file.added == null || file.removed == null) return '暂无行数统计'
-  if (scope.value !== 'all') return ''
-  return `+${file.added} / -${file.removed}`
+  return ''
 }
 
 function lineNo(line: GitDiffLine): string {
@@ -121,7 +97,7 @@ function mark(kind: GitDiffLine['kind']): string {
 }
 
 function hunkId(path: string, index: number): string {
-  return `${scope.value}:${path}:${index}`
+  return `${path}:${index}`
 }
 
 async function load(path: string, full: boolean): Promise<void> {
@@ -131,10 +107,9 @@ async function load(path: string, full: boolean): Promise<void> {
   loading[path] = true
   try {
     if (!props.projectId) throw new ApiError(422, '无法读取该文件的差异')
-    const result = await api.projectGitDiff(apiConfig(), props.projectId, path, scope.value, full)
+    const result = await api.projectGitDiff(apiConfig(), props.projectId, path, 'all', full)
     if (generation.get(key) !== mine) return
     diffs[key] = result.available ? result : { available: false, error: '无法读取该文件的差异' }
-    if (full) sawFull[`${scope.value}:${path}`] = true
   } catch (error) {
     if (generation.get(key) !== mine) return
     const detail = error instanceof ApiError && typeof error.detail === 'string' ? error.detail : '无法读取该文件的差异'
@@ -162,7 +137,6 @@ async function refreshWorkspace(): Promise<void> {
   if (!props.projectId || refreshing.value) return
   refreshing.value = true
   for (const key of Object.keys(diffs)) delete diffs[key]
-  for (const key of Object.keys(sawFull)) delete sawFull[key]
   generation.clear()
   try {
     await refreshGit(props.projectId)
@@ -174,20 +148,12 @@ async function refreshWorkspace(): Promise<void> {
   for (const path of open.value) void load(path, false)
 }
 
-watch(scope, () => {
-  for (const path of open.value) {
-    if (!currentDiff(path)) void load(path, false)
-  }
-})
-
 watch(() => props.projectId, () => {
   open.value = []
-  scope.value = 'all'
   generation.clear()
   for (const key of Object.keys(diffs)) delete diffs[key]
   for (const key of Object.keys(collapsed)) delete collapsed[key]
   for (const key of Object.keys(loading)) delete loading[key]
-  for (const key of Object.keys(sawFull)) delete sawFull[key]
 })
 
 async function copyPaths(): Promise<void> {
@@ -247,8 +213,8 @@ async function copyPaths(): Promise<void> {
       </span>
     </header>
 
-    <div class="panel-body">
-      <div class="panel-tabs" style="padding: 0; border: 0; margin-bottom: 8px">
+    <div class="panel-body" :class="{ 'is-file-browser': tab === 'files' }">
+      <div v-if="tab === 'changes'" class="panel-tabs" style="padding: 0; border: 0; margin-bottom: 8px">
         <button
           v-for="item in SUBS"
           :key="item.key"
@@ -259,32 +225,16 @@ async function copyPaths(): Promise<void> {
         >
           {{ item.label }}
         </button>
+        <button v-if="git?.available" class="ico" type="button" style="margin-left: auto" :title="sub === 'diff' ? '刷新工作区' : '刷新提交记录'" :disabled="sub === 'diff' ? refreshing : commitHistory?.loading" @click="sub === 'diff' ? refreshWorkspace() : commitHistory?.refresh()">
+          <Icon name="refresh" :size="13" />
+        </button>
       </div>
 
       <template v-if="tab === 'changes' && sub === 'diff' && git?.available">
-        <div class="diff-toolbar">
-          <div class="diff-scopes" role="tablist" aria-label="差异范围">
-            <button
-              v-for="item in SCOPES"
-              :key="item.key"
-              class="tab"
-              :class="{ 'is-active': scope === item.key }"
-              type="button"
-              role="tab"
-              :aria-selected="scope === item.key"
-              @click="scope = item.key"
-            >
-              {{ item.label }}
-            </button>
-          </div>
-          <button class="ico" type="button" title="刷新工作区" :disabled="refreshing" @click="refreshWorkspace">
-            <Icon name="refresh" :size="13" />
-          </button>
-        </div>
-
         <template v-if="shown.length">
           <div v-for="(group, groupIndex) in groups" :key="group.label || groupIndex" class="panel-group">
             <p v-if="group.label" class="panel-label">{{ group.label }}</p>
+            <p v-if="!group.files.length" class="panel-empty">{{ group.label === '已跟踪' ? '没有已跟踪文件的变更' : '没有未跟踪文件' }}</p>
             <article v-for="file in group.files" :key="file.path">
               <button
                 class="file-row"
@@ -295,8 +245,11 @@ async function copyPaths(): Promise<void> {
               >
                 <Icon :name="isOpen(file.path) ? 'chevronDown' : 'chevronRight'" :size="13" />
                 <span class="file-name">{{ shortPath(file.path, 60) }}</span>
-                <span class="hint">{{ STATUS[file.status] || '修改' }}</span>
-                <span class="diff-count">{{ countLabel(file) }}</span>
+                <span v-if="STATUS[file.status]" class="hint">{{ STATUS[file.status] }}</span>
+                <span class="diff-count">
+                  <template v-if="countLabel(file)">{{ countLabel(file) }}</template>
+                  <template v-else><span class="diff-added">+{{ file.added }}</span> / <span class="diff-removed">-{{ file.removed }}</span></template>
+                </span>
               </button>
               <div v-if="isOpen(file.path)" class="diff-view">
                 <p v-if="loading[file.path] && !currentDiff(file.path)" class="diff-note">正在读取差异…</p>
@@ -338,7 +291,7 @@ async function copyPaths(): Promise<void> {
                       </div>
                     </section>
                     <button
-                      v-if="currentDiff(file.path)?.truncated && !sawFull[`${scope}:${file.path}`]"
+                      v-if="currentDiff(file.path)?.truncated && !diffs[diffKey(file.path, true)]"
                       class="btn diff-full"
                       type="button"
                       @click="load(file.path, true)"
@@ -352,13 +305,12 @@ async function copyPaths(): Promise<void> {
               </div>
             </article>
           </div>
-          <p class="panel-empty">
-            来自 {{ title }} 工作区。整体差异比较工作区与 {{ git.head ? 'HEAD' : '空树' }}，已暂存比较索引，未暂存比较工作区与索引。未跟踪文件只在未暂存中列出。
-          </p>
         </template>
         <p v-else class="panel-empty">{{ emptyText }}</p>
       </template>
 
+      <CommitHistory v-else-if="tab === 'changes' && sub === 'commits' && git?.available" ref="commitHistory" :project-id="projectId || ''" :head="git.head" />
+      <WorkspaceFiles v-else-if="tab === 'files'" :project-id="projectId || ''" />
       <p v-else class="panel-empty">{{ emptyText }}</p>
     </div>
   </section>

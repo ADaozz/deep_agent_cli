@@ -224,19 +224,6 @@ class RunManager:
             self.settings_by_project[project_id] = settings
             return {"id": project_id, "path": str(candidate.projects[project_id])}
 
-    def switch_branch(self, project_id: str, branch: str) -> dict[str, Any]:
-        from agent.server.gitinfo import switch_branch
-        with self.lock:
-            self.require_project(project_id)
-            if self.closing:
-                raise ServiceError(503, "Service is shutting down")
-            if any(active.project_id == project_id for active in self.active.values()):
-                raise ServiceError(409, "请先结束当前 workspace 的任务或交互")
-            try:
-                return switch_branch(self.config.projects[project_id], branch)
-            except ValueError as exc:
-                raise ServiceError(409, str(exc)) from None
-
     def _model_settings(self, project_id: str) -> Settings:
         self.require_project(project_id)
         if project_id not in self.settings_by_project:

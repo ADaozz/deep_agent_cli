@@ -1,4 +1,4 @@
-import type { Capabilities, PermissionSelection } from './types'
+import type { Capabilities, PermissionSelection, GitCommits, WorkspaceDirectory, FilePreview } from './types'
 import type { ApprovalDecision, Project, Run, Session, SseMessage, PaginatedRuns, ActiveRunResponse, ModelCatalog, ModelSelection, WorkspaceGit, Workspace, DirectoryListing, GitFileDiff, GitDiffScope } from './types'
 
 export interface ApiConfig {
@@ -98,15 +98,20 @@ export async function getHealth(baseUrl: string): Promise<boolean> {
 }
 
 export const api = {
+  workspaceFiles: (config: ApiConfig, projectId: string, path = '', offset = 0) =>
+    request<WorkspaceDirectory>(config, `/v1/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}&offset=${offset}`),
+  previewFile: (config: ApiConfig, projectId: string, path: string) =>
+    request<FilePreview>(config, `/v1/projects/${encodeURIComponent(projectId)}/file-preview?path=${encodeURIComponent(path)}`),
   capabilities: (config: ApiConfig, projectId: string) => request<Capabilities>(config, `/v1/projects/${encodeURIComponent(projectId)}/capabilities`),
   permission: (config: ApiConfig, sessionId: string) => request<PermissionSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/permission`),
   selectPermission: (config: ApiConfig, sessionId: string, mode: 'ask' | 'allow', confirmation = '') => request<PermissionSelection>(config, `/v1/sessions/${encodeURIComponent(sessionId)}/permission`, { method: 'POST', body: { mode, confirmation } }),
-  workspaces: (config: ApiConfig) => request<{ workspaces: Workspace[] }>(config, '/v1/workspaces'),
+  workspaces: (config: ApiConfig) => request<{ workspaces: Workspace[]; home_path?: string }>(config, '/v1/workspaces'),
   selectWorkspace: (config: ApiConfig, path: string) => request<Workspace>(config, '/v1/workspaces', { method: 'POST', body: { path } }),
   directories: (config: ApiConfig, path?: string) => request<DirectoryListing>(config, '/v1/workspace-directories', { method: 'POST', body: path ? { path } : {} }),
-  switchBranch: (config: ApiConfig, projectId: string, branch: string) => request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/branch`, { method: 'POST', body: { branch } }),
   projectGit: (config: ApiConfig, projectId: string) =>
     request<WorkspaceGit>(config, `/v1/projects/${encodeURIComponent(projectId)}/git`),
+  projectCommits: (config: ApiConfig, projectId: string, cursor?: string) =>
+    request<GitCommits>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/commits?limit=20${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`),
   projectGitDiff: (config: ApiConfig, projectId: string, path: string, scope: GitDiffScope, full = false) =>
     request<GitFileDiff>(config, `/v1/projects/${encodeURIComponent(projectId)}/git/diff?path=${encodeURIComponent(path)}&scope=${scope}&full=${full ? '1' : '0'}`),
   models: (config: ApiConfig, projectId: string) =>

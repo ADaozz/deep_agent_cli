@@ -1,5 +1,8 @@
 import { imageModelRequiredMessage, notifyFileReference } from './fileReferences'
 import { clearDrafts } from './drafts'
+import { homePath } from '../lib/paths'
+import { refreshGit } from './git'
+import { invalidateWorkspaceFiles } from './files'
 import { readThreadLocation, writeThreadLocation } from './threadLocation'
 import { applyDraftPermission } from './capabilities'
 import { computed, reactive } from 'vue'
@@ -28,9 +31,7 @@ import {
   makeRunRecord,
   type RecordMap,
 } from './records'
-import { PROXY_BASE_URL, apiConfig, settings } from './settings'
-
-export type StreamPhase = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'closed'
+import { apiConfig } from './settings'
 
 /** Which of the two screens is visible: the new-chat home or an agent thread. */
 export type AppView = 'home' | 'thread'
@@ -42,13 +43,7 @@ export interface Banner {
   actions: { key: BannerAction; label: string }[]
 }
 
-export type BannerAction = 'open-settings' | 'use-proxy' | 'refresh' | 'dismiss'
-
-interface StreamState {
-  phase: StreamPhase
-  runId: string
-  note: string
-}
+export type BannerAction = 'open-settings' | 'refresh' | 'dismiss'
 
 export const app = reactive({
   projects: [] as Workspace[],
@@ -63,9 +58,7 @@ export const app = reactive({
   conn: { health: false, authorized: false, error: '', checkedAt: '' },
   banner: null as Banner | null,
   busy: { submit: false, resume: false, cancel: false, session: false },
-  stream: { phase: 'idle', runId: '', note: '' } as StreamState,
   settingsOpen: false,
-  settingsDirty: 0,
   history: {} as Record<string, { loading: boolean; cursor: string | null }>,
 })
 
@@ -89,21 +82,6 @@ export const currentInteraction = computed<InteractionModel | null>(() =>
 export const currentRunActive = computed<boolean>(() => {
   const latest = latestRecord.value
   return !!latest && !isTerminal(latest.run.status)
-})
-
-export const composerDisabledReason = computed<string>(() => {
-  if (!currentRecord.value) return '请先选择或新建一个 Agent'
-  const interaction = currentInteraction.value
-  if (interaction?.kind === 'approvals') return '请先处理下方的工具批准'
-  if (interaction?.kind === 'human') return '请先回答下方的 Agent 提问'
-  if (interaction?.kind === 'continue') return '运行已暂停——请继续或取消'
-  const latest = latestRecord.value
-  if (latest && latest.run.status === 'interrupted') {
-    return '会话已中断——恢复后才能继续'
-  }
-  if (latest && !isTerminal(latest.run.status)) return '运行仍在进行——请停止或等待'
-  if (app.busy.submit) return '发送中…'
-  return ''
 })
 
 /* ------------------------------------------------------- sidebar / list rows */
@@ -202,12 +180,6 @@ export function runBannerAction(action: BannerAction): void {
     case 'open-settings':
       app.settingsOpen = true
       break
-    case 'use-proxy':
-      settings.baseUrl = PROXY_BASE_URL
-      app.settingsDirty += 1
-      setBanner('info', '已切换到 /api/agent 代理——正在重连…')
-      void connect()
-      break
     case 'refresh':
       void connect()
       break
@@ -227,7 +199,7 @@ function explain(
       text: `${context}失败：无法连接服务。`,
       hint: '请检查本地 HTTP 服务与同源网关是否已启动。',
       actions: [
-        { key: 'use-proxy', label: '使用代理' },
+        { key: 'refresh', label: '重新连接' },
         { key: 'open-settings', label: '连接设置' },
         { key: 'dismiss', label: '关闭' },
       ],
@@ -329,6 +301,7 @@ async function connectOnce(): Promise<void> {
       throw new NetworkError('health check failed')
     }
     const result = await api.workspaces(apiConfig())
+    homePath.value = result.home_path || ''
     app.projects = result.workspaces ?? []
     const selected = app.projects.find(project => project.id === app.draftProjectId)
       || app.projects.find(project => project.path === recentWorkspacePaths[0]) || app.projects[0]
@@ -410,10 +383,6 @@ export function goHome(): void {
 export function openSession(sessionId: string): void {
   selectSession(sessionId)
   app.view = 'thread'
-}
-
-export function setDraftProject(projectId: string): void {
-  app.draftProjectId = projectId
 }
 
 /**
@@ -662,6 +631,15 @@ function canonicalRun(runRecord: RunRecord): RunRecord {
   return findRunRecord(runRecord.id) ?? runRecord
 }
 
+const gitRefreshedRuns = new Set<string>()
+
+function refreshGitAfterRun(run: Run): void {
+  if (!isTerminal(run.status) || gitRefreshedRuns.has(run.id)) return
+  gitRefreshedRuns.add(run.id)
+  invalidateWorkspaceFiles(run.project_id)
+  void refreshGit(run.project_id)
+}
+
 export function applyRunSnapshot(runRecord: RunRecord, snapshot: Run): void {
   const target = canonicalRun(runRecord)
   // Never let an older snapshot (e.g. a slow poll) roll the UI back.
@@ -669,12 +647,14 @@ export function applyRunSnapshot(runRecord: RunRecord, snapshot: Run): void {
     return
   }
   const previousInterruptId = target.run.interrupt_id
+  const wasActive = !isTerminal(target.run.status)
   target.run = snapshot
   if (snapshot.interrupt_id && snapshot.interrupt_id !== previousInterruptId) {
     target.view.submittedInterruptId = ''
     target.view.rejected = ''
   }
   if (isTerminal(snapshot.status)) finalizeRecord(target)
+  if (wasActive) refreshGitAfterRun(snapshot)
 }
 
 export async function syncRun(runRecord: RunRecord): Promise<void> {
@@ -799,19 +779,18 @@ export function streamRun(record: RunRecord): void {
 
 async function runStreamLoop(record: RunRecord, signal: AbortSignal): Promise<void> {
   const runRecord = canonicalRun(record)
+  const refreshOnCompletion = !isTerminal(runRecord.run.status)
   let attempt = 0
-  let note = ''
   while (!signal.aborted) {
-    app.stream = { phase: attempt === 0 ? 'connecting' : 'reconnecting', runId: runRecord.id, note }
     try {
       for await (const message of streamEvents(apiConfig(), runRecord.id, runRecord.cursor || '0', signal)) {
         if (signal.aborted) break
         if (message.id && compareCursor(message.id, runRecord.cursor) <= 0) continue
         applySseMessage(runRecord, message)
         runRecord.cursor = message.id
-        app.stream = { phase: 'live', runId: runRecord.id, note: '' }
         attempt = 0
         if (message.event === 'run_finished') {
+          if (refreshOnCompletion) refreshGitAfterRun(runRecord.run)
           break
         }
       }
@@ -822,26 +801,16 @@ async function runStreamLoop(record: RunRecord, signal: AbortSignal): Promise<vo
         runRecord.replayComplete = true
         break
       }
-      note = '事件流结束，将从上次游标继续'
-    } catch (error) {
+    } catch {
       if (signal.aborted) break
-      note =
-        error instanceof ApiError
-          ? `事件流错误（HTTP ${error.status}）：${describeDetail(error.detail)}`
-          : error instanceof Error
-            ? `事件流中断：${error.message}`
-            : 'Stream interrupted'
       // A failed connection must not mark terminal replay complete: missing logs
       // still need fetching even if a concurrent GET already saw completion.
       await syncRun(runRecord).catch(() => undefined)
     }
     attempt += 1
-    app.stream = { phase: 'reconnecting', runId: runRecord.id, note }
     await sleep(Math.min(700 * attempt, 5000), signal)
   }
-  if (!signal.aborted && app.stream.runId === runRecord.id) {
-    app.stream = { phase: 'closed', runId: runRecord.id, note: '' }
-  }
+
 }
 
 function compareCursor(a: string, b: string): number {

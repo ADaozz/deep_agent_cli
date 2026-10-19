@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import json
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -12,6 +13,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent.server.config import ServerConfig
+from agent.server.commits import commit_history
+from agent.server.files import FileRequestError, directory_files, preview_file
 from agent.server.gitinfo import GitRequestError, file_diff, workspace_git
 from agent.server.workspaces import directories
 from agent.server.runtime import RunManager, ServiceError, runner_factory
@@ -70,10 +73,6 @@ class DirectoryPath(Body):
     path: str | None = Field(default=None, max_length=4096)
 
 
-class BranchSelection(Body):
-    branch: str = Field(min_length=1, max_length=512)
-
-
 class PermissionSelection(Body):
     mode: Literal["ask", "allow"]
     confirmation: str = Field(default="", max_length=16)
@@ -125,7 +124,7 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
 
     @api.get("/workspaces")
     def workspaces(service: RunManager = Depends(manager)):
-        return service.workspaces()
+        return {**service.workspaces(), "home_path": str(Path.home())}
 
     @api.post("/workspaces")
     def select_workspace(body: WorkspacePath, service: RunManager = Depends(manager)):
@@ -138,9 +137,35 @@ def create_app(config: ServerConfig, *, factory=runner_factory) -> FastAPI:
         except (OSError, ValueError):
             raise HTTPException(422, "无法读取该目录，请检查路径和访问权限") from None
 
-    @api.post("/projects/{project_id}/git/branch")
-    def switch_branch(project_id: str, body: BranchSelection, service: RunManager = Depends(manager)):
-        return service.switch_branch(project_id, body.branch)
+    @api.get("/projects/{project_id}/files")
+    def project_files(project_id: str, path: str = Query(default='', max_length=4096),
+                      offset: int = Query(default=0, ge=0, le=100000),
+                      limit: int = Query(default=200, ge=1, le=500),
+                      service: RunManager = Depends(manager)):
+        service.require_project(project_id)
+        try:
+            return directory_files(config.projects[project_id], path, offset, limit)
+        except FileRequestError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+
+    @api.get("/projects/{project_id}/file-preview")
+    def project_file_preview(project_id: str, path: str = Query(min_length=1, max_length=4096),
+                             service: RunManager = Depends(manager)):
+        service.require_project(project_id)
+        try:
+            return preview_file(config.projects[project_id], path)
+        except FileRequestError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+
+    @api.get("/projects/{project_id}/git/commits")
+    def project_commits(project_id: str, limit: int = Query(default=20, ge=1, le=50),
+                        cursor: str | None = Query(default=None, max_length=80),
+                        service: RunManager = Depends(manager)):
+        service.require_project(project_id)
+        try:
+            return commit_history(config.projects[project_id], limit, cursor)
+        except GitRequestError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
 
     @api.get("/projects/{project_id}/git/diff")
     def project_git_diff(

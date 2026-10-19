@@ -10,6 +10,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { checkFileReferences } from '../store/fileReferences'
 import Icon from './Icon.vue'
+import { displayPath } from '../lib/paths'
 import AttachmentPathDialog from './AttachmentPathDialog.vue'
 import type { PathReference } from '../store/drafts'
 import Popover from './Popover.vue'
@@ -113,10 +114,10 @@ function onRound(): void {
       <div v-for="skill in skills" :key="skill.path" class="attachment-block" :title="skill.description">
         <span>Skill: {{ skill.name }}</span><button class="ico" type="button" :aria-label="'移除 Skill ' + skill.name" @click="emit('update:skills', skills.filter(s => s.path !== skill.path))"><Icon name="close" :size="12" /></button>
       </div>
-      <div v-for="item in paths" :key="item.path" class="attachment-block" :title="item.path">
+      <div v-for="item in paths" :key="item.path" class="attachment-block" :title="displayPath(item.path)">
         <Icon :name="item.kind === 'image' ? 'image' : 'file'" :size="16" />
-        <span>{{ item.path }}</span>
-        <button class="ico" type="button" :aria-label="'移除 ' + item.path" @click="emit('update:paths', paths.filter(p => p.path !== item.path))"><Icon name="close" :size="12" /></button>
+        <span>{{ displayPath(item.path) }}</span>
+        <button class="ico" type="button" :aria-label="'移除 ' + displayPath(item.path)" @click="emit('update:paths', paths.filter(p => p.path !== item.path))"><Icon name="close" :size="12" /></button>
       </div>
     </div>
     <template v-if="!pill">
@@ -153,14 +154,20 @@ function onRound(): void {
 
         <span class="spacer" />
         <button
-          class="round round-send"
-          type="button"
+          class="round composer-action"
+          :class="running ? 'is-stop' : 'is-send'"
+          :type="running ? 'button' : 'submit'"
+          :aria-label="running ? '停止运行' : '发送'"
           :disabled="busy || (!running && !canSend)"
           :title="running ? '停止运行' : disabled ? '请先连接服务' : '发送'"
-          @click="onRound"
+          @click.prevent="onRound"
         >
-          <Icon v-if="running" name="stop" :size="11" />
-          <Icon v-else name="waveform" :size="12" :stroke-width="1.2" />
+          <svg v-if="running" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-square" aria-hidden="true">
+            <rect width="18" height="18" x="3" y="3" rx="2" />
+          </svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up" aria-hidden="true">
+            <path d="m5 12 7-7 7 7" /><path d="M12 19V5" />
+          </svg>
         </button>
       </div>
     </template>
@@ -197,14 +204,20 @@ function onRound(): void {
         <PermissionPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
         <ModelPicker :project-id="modelProject" :session-id="modelSession" :disabled="disabled || running || busy" :align="menuAlign" />
         <button
-          class="round round-send"
-          type="button"
+          class="round composer-action"
+          :class="running ? 'is-stop' : 'is-send'"
+          :type="running ? 'button' : 'submit'"
+          :aria-label="running ? '停止运行' : '发送'"
           :disabled="busy || (!running && !canSend)"
           :title="running ? '停止运行' : disabled ? '请先连接服务' : '发送'"
-          @click="onRound"
+          @click.prevent="onRound"
         >
-          <Icon v-if="running" name="stop" :size="11" />
-          <Icon v-else name="waveform" :size="12" :stroke-width="1.2" />
+          <svg v-if="running" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-square" aria-hidden="true">
+            <rect width="18" height="18" x="3" y="3" rx="2" />
+          </svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up" aria-hidden="true">
+            <path d="m5 12 7-7 7 7" /><path d="M12 19V5" />
+          </svg>
         </button>
       </div>
     </div>

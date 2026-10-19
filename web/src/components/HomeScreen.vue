@@ -4,8 +4,9 @@
  * the "Recent agents" list. Everything is derived from `/v1/projects`,
  * `/v1/sessions` and the locally recorded runs.
  */
-import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch } from 'vue'
 import Icon from './Icon.vue'
+import { displayPath } from '../lib/paths'
 import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
 import { useDraft, readDraft, draftPrompt, clearSentDraft } from '../store/drafts'
@@ -15,25 +16,41 @@ import { refreshGit, workspaceGit } from '../store/git'
 import { models } from '../store/models'
 import WorkspacePathDialog from './WorkspacePathDialog.vue'
 import type { Workspace } from '../api/types'
-import { isTerminal } from '../api/types'
-import { api } from '../api/client'
 import { recentWorkspacePaths, rememberWorkspace } from '../store/workspaces'
-import { projectLabel, apiConfig } from '../store/settings'
+import { projectLabel } from '../store/settings'
 
 const draftKey = computed(() => 'home:' + (selectedWorkspace.value?.path || ''))
 const { text, paths, skills } = useDraft(draftKey)
 const draftOpen = ref(false)
 const branchOpen = ref(false)
 const pathOpen = ref(false)
-const branchBusy = ref(false)
-const branchError = ref('')
 
 const recent = computed(() => sessionRows.value.slice(0, 4))
 
 const selectedWorkspace = computed(() => app.projects.find(project => project.id === app.draftProjectId) || app.projects[0])
 const workspaceHistory = computed(() => recentWorkspacePaths.map(path => app.projects.find(project => project.path === path)).filter((project): project is Workspace => !!project).slice(0, 4))
 const git = computed(() => workspaceGit[selectedWorkspace.value?.id || ''])
-const workspaceBusy = computed(() => branchBusy.value || app.busy.submit || sessionRows.value.some(row => row.projectId === selectedWorkspace.value?.id && row.status && !isTerminal(row.status)))
+const branchRows = computed(() => {
+  const info = git.value
+  if (!info) return []
+  const upstreams = info.branch_upstreams || {}
+  const linked = new Set(Object.values(upstreams))
+  return [
+    ...(info.branches || []).filter(branch => !upstreams[branch]).map(branch => ({
+      key: 'local:' + branch,
+      label: branch,
+      current: branch === info.branch,
+    })),
+    ...(info.remote_branches || []).filter(branch => !linked.has(branch)).map(branch => ({
+      key: 'remote:' + branch, label: branch, current: false,
+    })),
+    ...(info.branches || []).filter(branch => upstreams[branch]).map(branch => ({
+      key: 'local:' + branch,
+      label: branch + ' → ' + upstreams[branch],
+      current: branch === info.branch,
+    })),
+  ]
+})
 
 function pickProject(projectId: string): void {
   const workspace = app.projects.find(project => project.id === projectId)
@@ -42,7 +59,6 @@ function pickProject(projectId: string): void {
   rememberWorkspace(workspace.path)
   draftOpen.value = false
   branchOpen.value = false
-  branchError.value = ''
   void refreshGit(projectId)
 }
 function selectedPath(workspace: Workspace): void {
@@ -50,15 +66,6 @@ function selectedPath(workspace: Workspace): void {
   pickProject(workspace.id)
   pathOpen.value = false
 }
-async function switchBranch(branch: string): Promise<void> {
-  if (!selectedWorkspace.value || workspaceBusy.value) return
-  const projectId = selectedWorkspace.value.id
-  branchBusy.value = true; branchError.value = ''
-  try { workspaceGit[projectId] = await api.switchBranch(apiConfig(), projectId, branch); branchOpen.value = false }
-  catch (e) { branchError.value = e instanceof Error ? e.message : '无法切换分支' }
-  finally { branchBusy.value = false }
-}
-
 async function submit(): Promise<void> {
   const key = draftKey.value
   const snapshot = JSON.stringify(readDraft(key))
@@ -72,9 +79,6 @@ function refreshProjects(): void {
   for (const project of app.projects) void refreshGit(project.id)
 }
 watch(() => app.projects.map(project => project.id).join(','), refreshProjects, { immediate: true })
-let timer: ReturnType<typeof setInterval> | undefined
-onMounted(() => { timer = setInterval(refreshProjects, 5000) })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
@@ -86,28 +90,28 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
       </div>
       <div class="home-controls">
         <span class="anchor">
-          <button class="pick workspace-pick" type="button" aria-label="选择 workspace" :title="selectedWorkspace?.path" :disabled="branchBusy" @click="draftOpen = !draftOpen; branchOpen = false">
-            <span class="workspace-label">{{ selectedWorkspace?.path || '选择 workspace' }}</span><Icon name="chevronDown" :size="11" />
+          <button class="pick workspace-pick" type="button" aria-label="选择 workspace" :title="displayPath(selectedWorkspace?.path)" @click="draftOpen = !draftOpen; branchOpen = false">
+            <span class="workspace-label">{{ displayPath(selectedWorkspace?.path) || '选择 workspace' }}</span><Icon name="chevronDown" :size="11" />
           </button>
           <Popover v-if="draftOpen" align="down" @close="draftOpen = false">
             <div class="pop-head">最近 workspace</div>
-            <button v-for="workspace in workspaceHistory" :key="workspace.id" class="pop-item" type="button" :title="workspace.path" @click="pickProject(workspace.id)">
-              <Icon name="folder" :size="13" /><span class="grow workspace-history-label"><span>{{ workspace.path.split('/').pop() || '/' }}</span><small class="workspace-history-path">{{ workspace.path }}</small></span><Icon v-if="selectedWorkspace?.id === workspace.id" name="check" :size="13" />
+            <button v-for="workspace in workspaceHistory" :key="workspace.id" class="pop-item" type="button" :title="displayPath(workspace.path)" @click="pickProject(workspace.id)">
+              <Icon name="folder" :size="13" /><span class="grow workspace-history-label"><span>{{ workspace.path.split('/').pop() || '/' }}</span><small class="workspace-history-path">{{ displayPath(workspace.path) }}</small></span><Icon v-if="selectedWorkspace?.id === workspace.id" name="check" :size="13" />
             </button>
             <div v-if="workspaceHistory.length" class="pop-sep" />
             <button class="pop-item" type="button" @click="draftOpen = false; pathOpen = true"><Icon name="folder" :size="13" /><span class="grow">选择路径…</span></button>
           </Popover>
         </span>
         <span v-if="git?.available" class="anchor">
-          <button class="pick" type="button" aria-label="选择 Git 分支" :disabled="workspaceBusy" @click="branchOpen = !branchOpen; draftOpen = false; branchError = ''; refreshGit(selectedWorkspace!.id)">
+          <button class="pick" type="button" aria-label="查看 Git 分支" :aria-expanded="branchOpen" @click="branchOpen = !branchOpen; draftOpen = false; refreshGit(selectedWorkspace!.id)">
             <Icon name="branch" :size="14" /><span>{{ git.branch }}</span><Icon name="chevronDown" :size="10" />
           </button>
           <Popover v-if="branchOpen" align="down" class="branch-menu" @close="branchOpen = false">
-            <div v-if="git.branches?.length" class="pop-head">本地分支</div>
-            <button v-for="branch in git.branches || []" :key="branch" class="pop-item" type="button" :disabled="workspaceBusy" @click="switchBranch(branch)"><span class="grow">{{ branch }}</span><Icon v-if="branch === git.branch" name="check" :size="13" /></button>
-            <div v-if="git.remote_branches?.length" class="pop-head">远程分支</div>
-            <button v-for="branch in git.remote_branches || []" :key="'refs/remotes/' + branch" class="pop-item" type="button" :disabled="workspaceBusy" @click="switchBranch('refs/remotes/' + branch)"><span class="grow">{{ branch }}</span></button>
-            <p v-if="branchError" class="pop-note model-error" role="alert">{{ branchError }}</p>
+            <div role="list" aria-label="全部 Git 分支">
+              <div v-for="branch in branchRows" :key="branch.key" role="listitem" class="branch-value" :aria-current="branch.current ? 'true' : undefined">
+                <span class="grow">{{ branch.label }}</span><Icon v-if="branch.current" name="check" :size="13" />
+              </div>
+            </div>
           </Popover>
         </span>
       </div>
@@ -121,7 +125,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
         placeholder="让 Deep Agent 构建、修 bug、探索"
         :running="false"
         :busy="app.busy.submit"
-        :disabled="!app.conn.authorized || branchBusy"
+        :disabled="!app.conn.authorized"
         @submit="submit"
       />
 

@@ -413,17 +413,3 @@ export function interactionOf(record: RunRecord | null | undefined): Interaction
       return null
   }
 }
-
-/** Labels used across the UI; keeps status wording in one place. */
-export const STATUS_LABELS: Record<Run['status'], string> = {
-  running: '运行中',
-  waiting_confirmation: '等待批准',
-  waiting_human: '等待输入',
-  paused: '已暂停',
-  runtime_config_boundary: '配置边界',
-  cancelling: '停止中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-  interrupted: '已中断',
-}

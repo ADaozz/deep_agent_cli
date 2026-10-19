@@ -16,8 +16,3 @@ export function makeRunRecord(run: Run, prompt: string, resume: boolean): RunRec
     view: emptyView(),
   }
 }
-
-export function latestRun(record: SessionRecord | null | undefined): RunRecord | null {
-  if (!record || record.runs.length === 0) return null
-  return record.runs[record.runs.length - 1]
-}

@@ -6,7 +6,7 @@
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-defineProps<{ align?: 'down' | 'up' | 'right'; end?: boolean }>()
+defineProps<{ align?: 'down' | 'up'; end?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 
 const root = ref<HTMLElement | null>(null)

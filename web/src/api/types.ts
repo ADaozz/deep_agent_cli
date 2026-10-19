@@ -18,13 +18,6 @@ export type RunStatus =
 
 export const TERMINAL_STATUSES: RunStatus[] = ['completed', 'failed', 'cancelled', 'interrupted']
 
-export const WAITING_STATUSES: RunStatus[] = [
-  'waiting_confirmation',
-  'waiting_human',
-  'paused',
-  'runtime_config_boundary',
-]
-
 export function isTerminal(status: RunStatus | undefined | null): boolean {
   return !!status && TERMINAL_STATUSES.includes(status)
 }
@@ -185,6 +178,8 @@ export interface WorkspaceGit {
   branch?: string
   branches?: string[]
   remote_branches?: string[]
+  branch_upstreams?: Record<string, string>
+  upstream?: string | null
   changed?: number
   head?: string | null
   base_branch?: string | null
@@ -224,6 +219,42 @@ export interface GitFileDiff {
 }
 
 export interface Workspace extends Project { path: string }
+export interface WorkspaceFile {
+  name: string
+  path: string
+  kind: 'directory' | 'file' | 'symlink' | 'other'
+}
+export interface WorkspaceDirectory {
+  path: string
+  entries: WorkspaceFile[]
+  next_offset: number | null
+}
+export interface FilePreview {
+  path: string
+  size: number
+  kind: 'text' | 'image' | 'binary' | 'symlink'
+  truncated: boolean
+  content?: string
+  data_url?: string
+  target?: string
+}
+export interface GitCommit {
+  sha: string
+  subject: string
+  message: string
+  author: string
+  authored_at: string
+  committed_at: string
+  added: number | null
+  removed: number | null
+  files: number | null
+  url: string | null
+}
+export interface GitCommits {
+  available: boolean
+  commits: GitCommit[]
+  next_cursor: string | null
+}
 export interface DirectoryListing {
   path: string
   parent: string | null

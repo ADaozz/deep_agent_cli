@@ -9,6 +9,23 @@ TOKEN = 'gateway-test-only-token'
 ORIGIN = 'http://127.0.0.1:8765'
 
 
+def test_gateway_exposes_only_read_only_git_routes():
+    seen = []
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={'available': True})
+    with TestClient(create_app(GatewayConfig(token=TOKEN), transport=httpx.MockTransport(upstream)), base_url=ORIGIN) as client:
+        for action in ('branch', 'checkout', 'commit', 'reset', 'restore', 'clean', 'stash', 'merge', 'rebase', 'fetch', 'pull', 'push', 'add'):
+            for method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+                response = client.request(method, '/api/agent/projects/app/git/' + action,
+                                          headers={'Origin': ORIGIN}, json={'branch': 'feature'})
+                assert response.status_code == 404
+        assert not seen
+        assert client.get('/api/agent/projects/app/git').status_code == 200
+        assert client.get('/api/agent/projects/app/git/diff', params={'path': 'file.txt'}).status_code == 200
+        assert all(request.method == 'GET' for request in seen)
+
+
 @pytest.mark.parametrize('upstream', ['http://example.com', 'http://127.0.0.1/a', 'http://user:pass@localhost', 'file:///tmp/x', 'http://127.0.0.1?url=evil'])
 def test_gateway_only_accepts_loopback_origins(upstream):
     with pytest.raises(ValueError):
@@ -197,6 +214,38 @@ def test_gateway_forwards_file_diff_and_rejects_unknown_query():
         assert seen[0].url.params['scope'] == 'staged'
         assert seen[0].url.params['full'] == '1'
         assert client.get('/api/agent/projects/app/git/diff', params={'path': 'a', 'extra': '1'}).status_code == 422
+
+
+def test_gateway_forwards_only_read_only_commit_history():
+    seen=[]
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200,json={'available':True,'commits':[],'next_cursor':None})
+    path='/api/agent/projects/app/git/commits'
+    with TestClient(create_app(GatewayConfig(token=TOKEN),transport=httpx.MockTransport(upstream)),base_url=ORIGIN) as client:
+        assert client.get(path,params={'limit':20,'cursor':'abc:20'}).status_code==200
+        assert seen[0].url.path=='/v1/projects/app/git/commits'
+        assert seen[0].url.params['cursor']=='abc:20'
+        assert client.get(path,params={'extra':'bad'}).status_code==422
+        assert client.post(path,headers={'Origin':ORIGIN},json={}).status_code in (404,405)
+        assert len(seen)==1
+
+
+def test_gateway_workspace_files_are_read_only_and_restrict_query_parameters():
+    seen=[]
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200,json={'path':'space 中文.txt'})
+    with TestClient(create_app(GatewayConfig(token=TOKEN),transport=httpx.MockTransport(upstream)),base_url=ORIGIN) as client:
+        for endpoint in ('files','file-preview'):
+            path=f'/api/agent/projects/app/{endpoint}'
+            assert client.get(path,params={'path':'space 中文.txt'}).status_code==200
+            assert seen[-1].url.path==f'/v1/projects/app/{endpoint}'
+            assert seen[-1].url.params['path']=='space 中文.txt'
+            assert client.get(path,params={'extra':'bad'}).status_code==422
+            for method in ('POST','PUT','PATCH','DELETE'):
+                assert client.request(method,path,headers={'Origin':ORIGIN},json={}).status_code in (404,405)
+        assert len(seen)==2
 
 
 def test_gateway_forwards_discard_of_empty_session():

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * Screen (B): a session thread. Borderless header, a centered ~720px column of
- * runs, a status chip and the sticky composer at the bottom, plus the optional
+ * runs and the sticky composer at the bottom, plus the optional
  * right-side Changes panel.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
 import PromptComposer from './PromptComposer.vue'
@@ -27,8 +27,6 @@ import {
   submitText,
 } from '../store/app'
 import { refreshGit, workspaceGit } from '../store/git'
-import { projectLabel } from '../store/settings'
-import { STATUS_UI } from '../lib/timeline'
 import type { RunStatus } from '../api/types'
 
 defineProps<{ panelOpen: boolean }>()
@@ -45,13 +43,9 @@ const runs = computed(() => currentRuns.value)
 const lastIndex = computed(() => runs.value.length - 1)
 
 const title = computed(() => currentRow.value?.title || '会话')
-const repo = computed(() =>
-  projectLabel(currentRecord.value?.session.project_id ?? app.draftProjectId),
-)
 
 const status = computed<RunStatus>(() => latestRecord.value?.run.status ?? 'completed')
 const active = computed(() => currentRunActive.value)
-const chip = computed(() => (active.value ? STATUS_UI[status.value] : null))
 const interrupted = computed(() => status.value === 'interrupted')
 
 const bannerKind = computed(() => {
@@ -59,34 +53,10 @@ const bannerKind = computed(() => {
   return app.banner.kind === 'error' ? 'is-bad' : app.banner.kind === 'warn' ? 'is-warn' : 'is-idle'
 })
 
-/* elapsed label for the running chip */
-const now = ref(Date.now())
-let timer: ReturnType<typeof setInterval> | null = null
-
-const elapsed = computed(() => {
-  const last = latestRecord.value
-  // Only a run that is actually working gets a ticking stopwatch; waiting for the
-  // user or a checkpoint is not elapsed work.
-  if (!active.value || !last || status.value !== 'running') return ''
-  const start = Date.parse(last.run.created_at)
-  if (Number.isNaN(start)) return ''
-  const seconds = Math.max(0, Math.floor((now.value - start) / 1000))
-  const minutes = Math.floor(seconds / 60)
-  return minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`
-})
-
-onMounted(() => {
-  timer = setInterval(() => {
-    now.value = Date.now()
-    if (Math.floor(now.value / 1000) % 5 === 0) void refreshGit(currentRecord.value?.session.project_id || '')
-  }, 1000)
-  void refreshGit(currentRecord.value?.session.project_id || '')
-  scrollToBottom(false)
-})
-
-onBeforeUnmount(() => {
-  if (timer) clearInterval(timer)
-})
+onMounted(() => scrollToBottom(false))
+watch(() => currentRecord.value?.session.project_id, projectId => {
+  void refreshGit(projectId || '')
+}, { immediate: true })
 
 function scrollToBottom(smooth = true): void {
   const el = body.value
@@ -102,7 +72,7 @@ watch(
     latestRecord.value?.view.blocks.length ?? 0,
     latestRecord.value?.view.finalized ?? false,
   ],
-  () => { void refreshGit(currentRecord.value?.session.project_id || ''); scrollToBottom() },
+  () => scrollToBottom(),
 )
 
 async function send(): Promise<void> {
@@ -148,10 +118,6 @@ async function copySession(): Promise<void> {
       <header class="thread-head">
         <div class="crumbs">
           <span class="title" :title="sessionId ?? undefined">{{ title }}</span>
-          <button class="repo-chip" type="button" :title="repo" @click="app.settingsOpen = true">
-            <Icon name="cloud" :size="13" />
-            <span class="chip-text">{{ repo }}</span>
-          </button>
         </div>
 
         <div class="head-actions">
@@ -231,23 +197,6 @@ async function copySession(): Promise<void> {
             </button>
           </div>
 
-          <div class="cloud-cta-row">
-            <button
-              class="cloud-cta"
-              type="button"
-              @click="app.settingsOpen = true"
-            >
-              <Icon name="cloud" :size="12" />
-              连接设置
-            </button>
-
-            <span v-if="chip" class="status-chip" :class="`is-${chip.tone}`">
-              <span class="dot" />
-              {{ chip.label }}
-              <span v-if="elapsed" class="soft">{{ elapsed }}</span>
-            </span>
-          </div>
-
           <PromptComposer
             v-model="text"
             v-model:paths="paths"
@@ -269,8 +218,6 @@ async function copySession(): Promise<void> {
       v-if="panelOpen"
       :git="workspaceGit[currentRecord?.session.project_id || '']"
       :project-id="currentRecord?.session.project_id || ''"
-      :title="repo"
-      :subtitle="sessionId ? sessionId.slice(0, 8) : ''"
       @close="emit('toggle-panel')"
     />
   </section>

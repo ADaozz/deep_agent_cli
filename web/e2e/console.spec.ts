@@ -201,7 +201,7 @@ test('plus menu contains files and Skills and home Git metadata is hidden for no
 })
 
 
-test('workspace picker remembers the last four paths and switches the actual workspace branch', async ({ page, request }) => {
+test('workspace picker remembers the last four paths and displays read-only workspace branches', async ({ page, request }) => {
   await page.goto('/')
   const list = await (await page.request.get('/api/agent/workspaces')).json()
   const paths = list.workspaces.map((item: {path: string}) => item.path)
@@ -232,12 +232,15 @@ test('workspace picker remembers the last four paths and switches the actual wor
   await expect(page.locator('.popover .pop-item')).toHaveCount(2)
   await page.keyboard.press('Escape')
   await choosePath(paths[0])
-  const branch = page.getByRole('button', {name:'选择 Git 分支',exact:true})
+  const branch = page.getByRole('button', {name:'查看 Git 分支',exact:true})
   await expect(branch).toHaveText('feature')
   await branch.click()
-  await page.getByRole('button', {name:'main',exact:true}).click()
-  await expect(branch).toHaveText('main')
-  expect((await (await page.request.get('/api/agent/projects/app/git')).json()).branch).toBe('main')
+  await expect(page.getByRole('list', {name:'全部 Git 分支'}).getByRole('listitem')).toHaveText(['feature', 'main'])
+  await expect(page.locator('.branch-menu button')).toHaveCount(0)
+  await page.getByRole('listitem').filter({hasText: /^main$/}).click()
+  await expect(branch).toHaveText('feature')
+  expect((await (await page.request.get('/api/agent/projects/app/git')).json()).branch).toBe('feature')
+  await page.keyboard.press('Escape')
   await send(page,'workspace branch test')
   await answer(page,'任务完成：workspace branch test')
   await page.getByRole('button', {name:'新对话',exact:true}).click()

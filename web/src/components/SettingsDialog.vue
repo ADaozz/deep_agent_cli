@@ -134,7 +134,7 @@ function clearRecords(): void {
             {{ testResult.text }}
           </p>
           <p class="help">
-            localStorage 仅保存未发送的输入框草稿，发送成功即删除。会话记录和显示设置仅在当前页面内存中；刷新后从服务恢复运行日志。
+            localStorage 保存未发送的草稿和深浅色偏好。草稿发送成功即删除；刷新后从服务恢复会话运行日志。
           </p>
         </div>
       </div>

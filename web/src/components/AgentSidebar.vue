@@ -2,22 +2,63 @@
 /**
  * Left rail with collapse/search, new chat, grouped sessions and connection settings.
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import Popover from './Popover.vue'
+import SessionHoverCard from './SessionHoverCard.vue'
+import { refreshGit, workspaceGit } from '../store/git'
 import { app, goHome, openSession, resetRecords, sessionRows } from '../store/app'
 import { shortAge } from '../lib/timeline'
 import { projectLabel, settings } from '../store/settings'
+import { appearance, setAppearance } from '../store/appearance'
 
 const emit = defineEmits<{ collapse: [] }>()
 
 const userMenu = ref(false)
+const appearanceMenu = ref(false)
+const collapsedGroups = ref<Record<string, boolean>>({})
+watch(userMenu, () => { appearanceMenu.value = false })
 const searchOpen = ref(false)
 const searchInput = ref<HTMLInputElement | null>(null)
 const query = ref('')
+const hovered = ref<{ id: string; projectId: string; left: number; top: number }>()
+let openTimer: ReturnType<typeof setTimeout> | undefined
+let closeTimer: ReturnType<typeof setTimeout> | undefined
+function cancelClose(): void { clearTimeout(closeTimer) }
+function hideHover(): void {
+  clearTimeout(openTimer); clearTimeout(closeTimer); hovered.value = undefined
+}
+function showHover(row: { id: string; projectId: string }, event: MouseEvent | FocusEvent): void {
+  clearTimeout(openTimer); cancelClose()
+  const element = event.currentTarget as HTMLElement
+  const rect = element.getBoundingClientRect()
+  openTimer = setTimeout(() => {
+    if (!element.isConnected) return
+    hovered.value = { id: row.id, projectId: row.projectId,
+      left: Math.max(8, Math.min(rect.right + 10, window.innerWidth - 228)),
+      top: Math.max(8, Math.min(rect.top, window.innerHeight - 100)) }
+    if (!workspaceGit[row.projectId]) void refreshGit(row.projectId)
+  }, 250)
+}
+function scheduleHide(): void {
+  clearTimeout(openTimer)
+  closeTimer = setTimeout(hideHover, 120)
+}
+function hoverKey(event: KeyboardEvent): void { if (event.key === 'Escape') hideHover() }
+onMounted(() => {
+  window.addEventListener('resize', hideHover)
+  document.addEventListener('scroll', hideHover, true)
+  document.addEventListener('keydown', hoverKey)
+})
+onBeforeUnmount(() => {
+  hideHover()
+  window.removeEventListener('resize', hideHover)
+  document.removeEventListener('scroll', hideHover, true)
+  document.removeEventListener('keydown', hoverKey)
+})
 const rows = computed(() => {
   const q = query.value.trim().toLowerCase()
-  const list = sessionRows.value
+  const list = [...sessionRows.value].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
   if (!q) return list
   return list.filter(
     (row) =>
@@ -27,11 +68,17 @@ const rows = computed(() => {
 })
 
 const groups = computed(() => {
-  const week = Date.now() - 7 * 24 * 3600 * 1000
-  const recent = rows.value.filter((row) => new Date(row.createdAt).getTime() >= week)
-  const earlier = rows.value.filter((row) => new Date(row.createdAt).getTime() < week)
-  const out: { label: string; rows: typeof recent }[] = []
-  if (recent.length) out.push({ label: '近 7 天', rows: recent })
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  const weekStart = new Date(todayStart)
+  weekStart.setDate(weekStart.getDate() - 7)
+  const time = (row: typeof rows.value[number]) => Date.parse(row.updatedAt || row.createdAt)
+  const today = rows.value.filter(row => time(row) >= todayStart.getTime())
+  const recent = rows.value.filter(row => time(row) < todayStart.getTime() && time(row) >= weekStart.getTime())
+  const earlier = rows.value.filter(row => time(row) < weekStart.getTime())
+  const out: { label: string; rows: typeof today }[] = []
+  if (today.length) out.push({ label: '今天', rows: today })
+  if (recent.length) out.push({ label: '最近七天', rows: recent })
   if (earlier.length) out.push({ label: '更早', rows: earlier })
   return out
 })
@@ -88,26 +135,23 @@ function clearLocal(): void {
 
     <div class="side-scroll">
       <template v-for="group in groups" :key="group.label">
-        <div class="side-group">
+        <button class="side-group" type="button" :aria-expanded="!collapsedGroups[group.label]" @click="hideHover(); collapsedGroups[group.label] = !collapsedGroups[group.label]">
+          <Icon :name="collapsedGroups[group.label] ? 'chevronRight' : 'chevronDown'" :size="12" />
           <span>{{ group.label }}</span>
-          <button
-            class="ico"
-            type="button"
-            title="筛选会话"
-            @click="toggleSearch"
-          >
-            <Icon name="filter" :size="13" />
-          </button>
-        </div>
-        <div class="side-list">
+        </button>
+        <div v-show="!collapsedGroups[group.label]" class="side-list">
           <button
             v-for="row in group.rows"
             :key="row.id"
             class="chat-row"
             :class="{ 'is-active': row.active && app.view === 'thread' }"
             type="button"
-            :title="row.title"
-            @click="openSession(row.id)"
+            :aria-describedby="hovered?.id === row.id ? 'session-hover-card' : undefined"
+            @mouseenter="showHover(row, $event)"
+            @mouseleave="scheduleHide"
+            @focus="showHover(row, $event)"
+            @blur="scheduleHide"
+            @click="hideHover(); openSession(row.id)"
           >
             <span class="chat-lead" :class="{ 'is-repo': !!row.projectId }">
               <Icon :name="'file'" :size="13" />
@@ -139,11 +183,14 @@ function clearLocal(): void {
           <div class="pop-head">
             {{ app.conn.authorized ? '已连接' : '未连接' }} · {{ settings.baseUrl }}
           </div>
-          <button class="pop-item" type="button" @click="app.settingsOpen = true; userMenu = false">
-            <Icon name="gear" :size="13" />
-            <span class="grow">连接设置…</span>
-          </button>
-          <div class="pop-sep" />
+          <div class="appearance-menu">
+            <button class="pop-item" type="button" aria-haspopup="menu" :aria-expanded="appearanceMenu" aria-controls="appearance-submenu" @click="appearanceMenu = !appearanceMenu" @keydown.right.prevent="appearanceMenu = true">
+              <Icon name="appearance" :size="14" /><span class="grow">外观</span><span class="appearance-current">{{ appearance === 'dark' ? '深色' : '浅色' }}</span><Icon name="chevronRight" :size="12" />
+            </button>
+            <div v-if="appearanceMenu" id="appearance-submenu" class="popover appearance-submenu" role="menu" aria-label="外观" @keydown.left.prevent="appearanceMenu = false">
+              <button v-for="mode in (['light', 'dark'] as const)" :key="mode" class="pop-item" type="button" role="menuitemradio" :aria-checked="appearance === mode" @click="setAppearance(mode); userMenu = false"><span class="grow">{{ mode === 'dark' ? '深色' : '浅色' }}</span><Icon v-if="appearance === mode" name="check" :size="12" /></button>
+            </div>
+          </div>
           <button class="pop-item" type="button" @click="clearLocal">
             <Icon name="archive" :size="13" />
             <span class="grow">清除本地记录</span>
@@ -151,5 +198,6 @@ function clearLocal(): void {
         </Popover>
       </span>
     </div>
+    <Teleport to="body"><SessionHoverCard v-if="hovered" :project-id="hovered.projectId" :left="hovered.left" :top="hovered.top" @mouseenter="cancelClose" @mouseleave="scheduleHide" /></Teleport>
   </aside>
 </template>

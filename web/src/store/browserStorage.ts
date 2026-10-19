@@ -1,4 +1,4 @@
-/** Retire old caches/preferences; localStorage is reserved for composer drafts. */
+/** Retire old caches/preferences; localStorage stores composer drafts and the current appearance preference. */
 const LEGACY_KEYS = [
   'deepagent.records.v1',
   'deepagent.last-session.v1',

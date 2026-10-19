@@ -860,12 +860,18 @@ const latest = await getRun(run.id);  // EOF/断线后的状态以 GET 为准
 
 响应在 `available:true` 时包含 `path`、`scope`、`status`、`old_path`、`binary`、`symlink`、`target`、`untracked`、`truncated` 和 `hunks`。每个 hunk 含 `header`、起止行数和 `lines`；行的 `kind` 为 `context`、`add`、`delete` 或 `meta`，并带 `old_no` 与 `new_no`。Git 不可用、超时或命令失败时返回 `{available:false}`。旧的轮次代码快照/回退接口已删除，返回 404。任务执行、审批、取消与清理沿用 main，前端不维护另一套修改/回退机制。
 
+`GET /v1/projects/{project_id}/git/commits?limit=20&cursor=...` 返回 `{available, commits, next_cursor}`，网关同名路径只接受 `limit` 和 `cursor`。每条提交包含 `sha/subject/message/author/authored_at/committed_at/added/removed/files/url`。统计比较第一父提交（根提交比较空树），二进制文件计入文件数但不伪造文本行数。`limit` 为 1–50，游标固定首屏 HEAD，避免新增提交使后续页重复。空仓库返回空列表，非仓库或 Git 读取失败返回 `available:false`。仅从本地 Git 读取，不 fetch、不修改仓库。
+
+### 只读工作区文件
+
+`GET /v1/projects/{project_id}/files?path=&offset=0&limit=200` 返回 `{path, entries, next_offset}`；目录优先排序，单页最多 500 项。每条记录包含工作区相对 `path`、`name` 和 `kind`（directory/file/symlink/other）。`GET /v1/projects/{project_id}/file-preview?path=...` 返回普通文件的只读预览：UTF-8 文本最多 256 KB，PNG/JPEG/GIF/WebP 图片最多 4 MB（data URL）；另返回字节大小和截断标志。符号链接仅返回目标字符串，二进制文件不返回内容。两个接口均要求原服务认证，网关只转发 GET，并限制查询参数。路径逐级通过目录 FD 打开，不跟随符号链接、不访问工作区以外路径，不提供写入、删除或编辑接口。
+
 ## Workspace 路径与分支选择
 
 - `GET /v1/workspaces` 返回 `{workspaces:[{id,path}]}`，同时包含配置目录和用户选择的目录；原 `/v1/projects` 的仅 ID 结构保持兼容。
 - `POST /v1/workspace-directories` 接受 `{path?:string}`，返回当前规范化路径、parent 和子目录列表。未指定时从服务进程工作目录开始；只列目录，不读取文件内容。目录过多时返回前 500 项及 `truncated`，可直接输入目标路径。
 - `POST /v1/workspaces` 接受 `{path:string}`，只选择实际存在的目录，不创建文件夹。已有目录复用 ID，新目录生成稳定 ID，保存于私有 `state_dir/workspaces.json`，重启后加载。继续使用 main 的 `ServerConfig` / `Settings` 校验：workspace 之间不重叠，服务配置、模型配置及状态目录不位于可写 workspace 中。
-- `POST /v1/projects/{project_id}/git/branch` 接受 `{branch:string}`，可选择该工作区已存在的本地分支或远程跟踪分支。本地分支名执行原生 `git switch -- branch`；远程分支传完整 `refs/remotes/<remote>/<branch>`，以分离 HEAD 切换到该引用的提交。不 force、不丢弃修改，也不自动 fetch。活动任务或 Git 拒绝切换时返回 409，成功后返回更新的 Git 元数据；GET Git 响应包含本地 `branches` 和远程 `remote_branches`，远程列表排除 `origin/HEAD` 等符号引用。
+- Git 仅开放 `GET /v1/projects/{project_id}/git`、`GET /v1/projects/{project_id}/git/diff` 和 `GET /v1/projects/{project_id}/git/commits` 只读查询。分支切换接口及其网关转发已移除，旧地址返回 404。Git 状态包含本地 `branches`、远程 `remote_branches`、本地到远程的 `branch_upstreams` 映射和当前 `upstream`；远程列表排除 `origin/HEAD` 等符号引用。
 
 以上均要求原服务认证，并由现有同源网关一对一映射。最近四个 workspace 路径与排序保存在浏览器 `deepagent.workspace-history.v1`，服务侧目录索引用于重启后继续访问会话；两者不创建另一套任务执行逻辑。
 

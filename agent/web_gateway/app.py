@@ -15,8 +15,10 @@ ROUTES = (
     ("GET", "/workspaces", "/v1/workspaces"),
     ("POST", "/workspaces", "/v1/workspaces"),
     ("POST", "/workspace-directories", "/v1/workspace-directories"),
-    ("POST", "/projects/{project_id}/git/branch", "/v1/projects/{project_id}/git/branch"),
     ("GET", "/projects/{project_id}/git/diff", "/v1/projects/{project_id}/git/diff"),
+    ("GET", "/projects/{project_id}/git/commits", "/v1/projects/{project_id}/git/commits"),
+    ("GET", "/projects/{project_id}/files", "/v1/projects/{project_id}/files"),
+    ("GET", "/projects/{project_id}/file-preview", "/v1/projects/{project_id}/file-preview"),
     ("GET", "/projects", "/v1/projects"),
     ("GET", "/projects/{project_id}/git", "/v1/projects/{project_id}/git"),
     ("GET", "/projects/{project_id}/capabilities", "/v1/projects/{project_id}/capabilities"),
@@ -38,6 +40,9 @@ ROUTES = (
        for action in ("approvals", "human-input", "continue", "cancel") ),
 )
 QUERY = {"/sessions": {"project_id"}, "/sessions/{session_id}/runs": {"limit", "cursor"},
+         "/projects/{project_id}/git/commits": {"limit", "cursor"},
+         "/projects/{project_id}/files": {"path", "offset", "limit"},
+         "/projects/{project_id}/file-preview": {"path"},
          "/runs/{run_id}/events": {"after"},
          "/projects/{project_id}/git/diff": {"path", "scope", "full"}}
 
