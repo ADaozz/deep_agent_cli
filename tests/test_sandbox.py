@@ -1122,3 +1122,109 @@ def test_bubblewrap_delete_and_aliases_match_execute(tmp_path: Path) -> None:
         assert guide.read_text() == "guide"
     finally:
         links.executor.pool.shutdown("symlink delete")
+
+
+def _secret_signature(root: Path) -> tuple[tuple[str, str, int], ...]:
+    import hashlib
+
+    rows: list[tuple[str, str, int]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            rows.append((relative, f"link:{path.readlink().as_posix()}", path.lstat().st_ino))
+        elif path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            rows.append((relative, digest, path.stat().st_ino))
+        else:
+            rows.append((relative, "dir", path.stat().st_ino))
+    return tuple(rows)
+
+
+def test_intermediate_symlink_cannot_mutate_read_only_submount(tmp_path: Path) -> None:
+    executable = _bwrap_executable()
+    project = tmp_path / "project"
+    secret = project / "secret"
+    nested = secret / "sub"
+    nested.mkdir(parents=True)
+    (secret / "file.txt").write_text("orig")
+    (nested / "file.txt").write_text("orig")
+    (secret / "inner_link").symlink_to("file.txt")
+    (project / "alias").symlink_to(Path("secret"))
+    (project / "alias2").symlink_to(Path("alias"))
+    (project / "alias_abs_host").symlink_to(secret)
+    (project / "alias_abs_virtual").symlink_to("/workspace/secret")
+    (project / "to-file").symlink_to(Path("secret") / "file.txt")
+    (project / "to-file-exec").symlink_to(Path("secret") / "file.txt")
+    (project / "note.txt").write_text("note")
+    config = SandboxConfig(
+        workspace=project,
+        bwrap_path=executable,
+        extra_read_only_mounts=(BindMount(secret, "/workspace/secret"),),
+    )
+    backend = select_backend(config).backend
+    try:
+        baseline = _secret_signature(secret)
+        direct = backend.write("/workspace/secret/file.txt", "pwn")
+        assert direct.error and "mount is read-only" in direct.error
+        executed = backend.execute("printf pwn > /workspace/secret/file.txt")
+        assert executed.exit_code != 0 and "Read-only file system" in executed.output
+        assert _secret_signature(secret) == baseline
+
+        prefixes = ("alias", "alias2", "alias_abs_host")
+        for prefix in prefixes:
+            file_path = f"/workspace/{prefix}/file.txt"
+            nested_path = f"/workspace/{prefix}/sub/file.txt"
+            created_path = f"/workspace/{prefix}/new.txt"
+            for denied in (
+                backend.write(file_path, "pwn"),
+                backend.write(nested_path, "pwn"),
+                backend.write(created_path, "pwn"),
+                backend.edit(file_path, "orig", "pwn"),
+                backend.edit(nested_path, "orig", "pwn"),
+            ):
+                assert denied.error and "Permission denied" in denied.error
+            for uploaded in (
+                backend.upload_files([(created_path, b"pwn")])[0],
+                backend.upload_files([(file_path, b"pwn")])[0],
+                backend.upload_files([(nested_path, b"pwn")])[0],
+            ):
+                assert uploaded.error and "Permission denied" in uploaded.error
+            for removed in (
+                backend.delete(file_path),
+                backend.delete(nested_path),
+                backend.delete(f"/workspace/{prefix}/sub"),
+                backend.delete(f"/workspace/{prefix}/inner_link"),
+            ):
+                assert removed.error and "Permission denied" in removed.error
+            command = backend.execute(f"printf pwn > /workspace/{prefix}/file.txt")
+            assert command.exit_code != 0
+            removed_by_exec = backend.execute(f"rm /workspace/{prefix}/file.txt")
+            assert removed_by_exec.exit_code != 0
+            assert _secret_signature(secret) == baseline
+            assert (secret / "file.txt").read_text() == "orig"
+            assert (nested / "file.txt").read_text() == "orig"
+            assert not (secret / "new.txt").exists()
+
+        assert "Read-only file system" in backend.execute("printf pwn > /workspace/alias/sub/file.txt").output
+        assert "Read-only file system" in backend.execute("rm /workspace/alias2/sub/file.txt").output
+        virtual = backend.write("/workspace/alias_abs_virtual/file.txt", "pwn")
+        assert virtual.error and "Permission denied" in virtual.error
+        assert backend.read("/workspace/alias/file.txt").file_data["content"] == "orig"
+        assert _secret_signature(secret) == baseline
+
+        assert backend.delete("/workspace/to-file").error is None
+        assert not (project / "to-file").is_symlink()
+        assert (secret / "file.txt").read_text() == "orig"
+        removed_link = backend.execute("rm /workspace/to-file-exec")
+        assert removed_link.exit_code == 0
+        assert not (project / "to-file-exec").is_symlink()
+        assert (secret / "file.txt").read_text() == "orig"
+        assert backend.delete("/workspace/alias").error is None
+        assert not (project / "alias").exists() and not (project / "alias").is_symlink()
+        assert (secret / "file.txt").read_text() == "orig"
+        assert (secret / "inner_link").is_symlink()
+        assert backend.write("/workspace/note.txt", "yes").error is None
+        assert (project / "note.txt").read_text() == "yes"
+        assert "orig" in backend.execute("cat /workspace/secret/file.txt").output
+    finally:
+        backend.executor.pool.shutdown("intermediate symlink")

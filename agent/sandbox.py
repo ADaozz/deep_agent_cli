@@ -163,11 +163,12 @@ def _host_contains(root: Path, path: Path) -> bool:
     return path == root or path.is_relative_to(root)
 
 
-def _unfollowed_host_path(backend: BackendProtocol, key: str) -> tuple[Path, bool]:
-    """Return the host path of ``key`` without following its final symlink.
+def _unfollowed_host_path(backend: BackendProtocol, key: str) -> tuple[Path, Path, bool]:
+    """Return the resolved parent, the final path, and whether that path is a symlink.
 
-    Intermediate components still go through the backend's virtual-mode
-    checks, so ``..`` and a symlink that leaves the mount are rejected.
+    The parent is fully resolved, including intermediate symlinks. The final
+    component is not followed. ``..`` and a symlink that leaves the mount are
+    rejected by the backend's virtual-mode checks.
     """
     resolve = backend._resolve_path
     vpath = key if key.startswith("/") else f"/{key}"
@@ -175,18 +176,13 @@ def _unfollowed_host_path(backend: BackendProtocol, key: str) -> tuple[Path, boo
         raise ValueError("Permission denied: invalid virtual path")
     if vpath in {"/", ""}:
         cwd = backend.cwd
-        return cwd, cwd.is_symlink()
+        return cwd, cwd, cwd.is_symlink()
     parent_virtual, name = vpath.rsplit("/", 1)
     if name in {"", ".", ".."}:
         raise ValueError("Permission denied: invalid virtual path")
     parent = resolve(parent_virtual or "/")
     candidate = parent / name
-    return candidate, candidate.is_symlink()
-
-
-def _final_is_symlink(backend: BackendProtocol, key: str) -> bool:
-    _path, is_link = _unfollowed_host_path(backend, key)
-    return is_link
+    return parent, candidate, candidate.is_symlink()
 
 
 def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_MountPoint, ...]:
@@ -628,9 +624,11 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     def _mutation_plan(self, file_path: str) -> tuple[BackendProtocol, str] | str:
         """Choose the backend that may write ``file_path``, or an error string.
 
-        A path that is not a symlink keeps the permission of its virtual route,
-        so a read-only alias of a writable directory stays read-only. A symlink
-        is followed. It may land in a nested mount inside that route; a link
+        The host path is always fully resolved, whether or not the final
+        component is a symlink. A result that lands in a more specific
+        read-only mount nested under the virtual route is rejected before any
+        write. A same-directory read-only alias is not such a mount: its
+        permission stays with the virtual path that was requested. A symlink
         that leaves the route is rejected instead of being retargeted.
         """
         backend, stripped = self._get_backend_and_key(file_path)
@@ -640,33 +638,21 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                 return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
             return backend, stripped
         try:
-            is_link = _final_is_symlink(backend, stripped)
-        except (ValueError, OSError):
-            return _PATH_ESCAPE
-        if not is_link:
-            if getattr(backend, "denies_mutation", False):
-                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
-            return backend, stripped
-        try:
             host_path = resolve(stripped)
         except (ValueError, OSError):
             return _PATH_ESCAPE
         route = self._route_point(file_path)
-        if route is None:
-            if getattr(backend, "denies_mutation", False):
-                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
-            return backend, stripped
-        owner = self._more_specific_mount(route, host_path)
-        if owner is None or owner.read_only:
-            if owner is not None and owner.read_only:
-                owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
-                return getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only")
-            if getattr(backend, "denies_mutation", False):
-                return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
-            return backend, stripped
-        relative = host_path.relative_to(owner.source).as_posix()
-        virtual = owner.virtual if relative in {"", "."} else f"{owner.virtual}/{relative}"
-        return self._get_backend_and_key(virtual)
+        owner = self._more_specific_mount(route, host_path) if route is not None else None
+        if owner is not None and owner.read_only:
+            owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
+            return getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only")
+        if owner is not None:
+            relative = host_path.relative_to(owner.source).as_posix()
+            virtual = owner.virtual if relative in {"", "."} else f"{owner.virtual}/{relative}"
+            return self._get_backend_and_key(virtual)
+        if getattr(backend, "denies_mutation", False):
+            return getattr(backend, "mutation_error", "Permission denied: mount is read-only")
+        return backend, stripped
 
     def _deletion_removes_mount_source(self, host_path: Path) -> bool:
         try:
@@ -724,8 +710,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
 
         Mount roots, single-file mounts, and any path whose removal would
         unlink a mount source through an alias or a parent directory are
-        rejected. A symlink is unlinked itself; the directory that contains
-        the link decides whether that is allowed.
+        rejected. The parent directory is resolved first. If that directory
+        lies in a read-only submount of the virtual route, nothing is removed.
+        A final symlink is unlinked itself and its target is left untouched.
         """
         backend, stripped = self._get_backend_and_key(file_path)
         resolve = getattr(backend, "_resolve_path", None)
@@ -739,9 +726,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         if self._is_mount_virtual(file_path) or stripped in {"/", ""}:
             return DeleteResult(error=_MOUNT_DELETE)
         try:
-            host_path, is_link = _unfollowed_host_path(backend, stripped)
+            parent, host_path, is_link = _unfollowed_host_path(backend, stripped)
         except (ValueError, OSError):
             return DeleteResult(error=_PATH_ESCAPE)
+        route = self._route_point(file_path)
+        owner = self._more_specific_mount(route, parent) if route is not None else None
+        if owner is not None and owner.read_only:
+            owner_backend, _owner_path = self._get_backend_and_key(owner.virtual)
+            return DeleteResult(error=getattr(owner_backend, "mutation_error", "Permission denied: mount is read-only"))
         if is_link:
             if getattr(backend, "denies_mutation", False):
                 return DeleteResult(error=getattr(backend, "mutation_error", "Permission denied: mount is read-only"))
