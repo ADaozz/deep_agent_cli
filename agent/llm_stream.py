@@ -21,6 +21,8 @@ import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Generic, Iterator, Protocol, TypeVar
 
+from tenacity import RetryCallState
+
 T = TypeVar("T")
 
 # Upper bound for waiting until a cancelled request has released its HTTP
@@ -299,3 +301,35 @@ class CancellableStreamBridge(Generic[T]):
                 except BaseException:  # noqa: BLE001
                     pass
             self._queue.put(outcome)
+
+
+class ModelStreamInterrupted(Exception):
+    """Retryable request or body failure within a streaming LLM call."""
+
+
+def stream_retry_state(error: Exception, attempt: int) -> RetryCallState:
+    state = RetryCallState(None, None, (), {})
+    state.attempt_number = attempt
+    state.set_exception((type(error), error, error.__traceback__))
+    return state
+
+
+def wait_for_stream_retry(attempt: int) -> None:
+    """Back off on the managed loop, keeping Esc effective between requests."""
+    async def wait() -> AsyncIterator[None]:
+        await asyncio.sleep(stream_retry_delay(attempt))
+        yield None
+
+    bridge = CancellableStreamBridge(wait)
+    owner = current_stream_owner()
+    if owner is not None and not owner.register_model_stream(bridge):
+        raise ModelStreamCancelled()
+    try:
+        list(bridge.iter_chunks())
+    finally:
+        if owner is not None:
+            owner.unregister_model_stream(bridge)
+
+
+def stream_retry_delay(attempt: int) -> float:
+    return min(0.5 * 2 ** min(attempt, 4), 8.0)

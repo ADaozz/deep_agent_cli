@@ -1,10 +1,16 @@
 """Two explicit OpenAI protocols with local, optional-field compatibility."""
 from __future__ import annotations
 
+import asyncio
 import base64
-from typing import Any, ClassVar, Iterator
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, ClassVar, Iterator
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+import httpx
+import openai
+
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
 from langchain_core.messages.content import create_image_block, create_text_block
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
@@ -16,9 +22,57 @@ from agent.config import ModelProfile
 from agent.llm_stream import (
     CancellableStreamBridge,
     ModelStreamCancelled,
+    ModelStreamInterrupted,
+    stream_retry_delay,
+    stream_retry_state,
+    wait_for_stream_retry,
     current_stream_owner,
     in_stream_loop_thread,
 )
+
+
+@dataclass
+class _StreamStatus:
+    done: bool = False
+
+
+_STREAM_STATUS: ContextVar[_StreamStatus | None] = ContextVar("deep_agent_stream_status", default=None)
+
+
+class _CompletionTrackingStream(httpx.AsyncByteStream):
+    """Observe Chat Completions' [DONE], which the SDK consumes internally."""
+
+    def __init__(self, target: httpx.AsyncByteStream, status: _StreamStatus) -> None:
+        self._target = target
+        self._status = status
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        tail = b""
+        async for data in self._target:
+            lines = (tail + data).split(b"\n")
+            tail = lines.pop()
+            for line in lines:
+                field, separator, value = line.partition(b":")
+                if separator and field == b"data" and value.strip() == b"[DONE]":
+                    self._status.done = True
+            yield data
+
+    async def aclose(self) -> None:
+        await self._target.aclose()
+
+
+async def _mark_stream_open(response: httpx.Response) -> None:
+    # Observe completion markers consumed by the SDK SSE decoder.
+    status = _STREAM_STATUS.get()
+    if status is not None and response.is_success:
+        if "text/event-stream" in response.headers.get("content-type", ""):
+            if response.is_stream_consumed:
+                status.done = any(
+                    line.partition(b":")[0] == b"data" and line.partition(b":")[2].strip() == b"[DONE]"
+                    for line in response.content.splitlines()
+                )
+            else:
+                response.stream = _CompletionTrackingStream(response.stream, status)
 
 
 _REASONING_EVENT_TYPES = {
@@ -239,8 +293,6 @@ class ProtocolChatOpenAI(ChatOpenAI):
             # content chunk, which the synchronous stream never did.
             values = {**values, "stream_chunk_timeout": None}
         if values.get("http_client") is None or values.get("http_async_client") is None:
-            import httpx
-
             values = dict(values)
             values.setdefault("http_socket_options", ())
             if values.get("http_client") is None:
@@ -263,7 +315,7 @@ class ProtocolChatOpenAI(ChatOpenAI):
             # Blocking the loop thread on its own queue would deadlock.
             yield from super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
             return
-        astream = super()._astream
+        astream = self._astream
         bridge: CancellableStreamBridge[ChatGenerationChunk] = CancellableStreamBridge(
             lambda: astream(messages, stop=stop, run_manager=None, **kwargs),
         )
@@ -288,6 +340,87 @@ class ProtocolChatOpenAI(ChatOpenAI):
         finally:
             if owner is not None:
                 owner.unregister_model_stream(bridge)
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+        # Disable SDK retries on a request-local client copy. The generation
+        # boundary owns one shared budget for opening AND reading the stream.
+        # Never mutate shared clients: concurrent calls and non-streaming calls
+        # must retain their own retry policy.
+        root = self.root_async_client
+        if isinstance(root, _ResponsesClient):
+            root = root._target
+        request_model = self
+        if isinstance(root, openai.AsyncOpenAI):
+            sdk = root.with_options(max_retries=0)
+            request_model = self.model_copy(update={
+                "root_async_client": _ResponsesClient(sdk) if isinstance(self.root_async_client, _ResponsesClient) else sdk,
+                "async_client": sdk.chat.completions,
+            })
+        client = getattr(request_model.root_async_client, "_client", None)
+        if isinstance(client, httpx.AsyncClient):
+            hooks = client.event_hooks["response"]
+            if _mark_stream_open not in hooks:
+                hooks.append(_mark_stream_open)
+        completed = False
+        status = _StreamStatus()
+        status_token = _STREAM_STATUS.set(status)
+        try:
+            async for chunk in super(ProtocolChatOpenAI, request_model)._astream(*args, **kwargs):
+                completed = completed or bool(
+                    (chunk.generation_info or {}).get("finish_reason")
+                    or chunk.message.chunk_position == "last"
+                )
+                yield chunk
+            if not completed and not status.done:
+                # HTTP EOF can look like successful SSE exhaustion to the SDK.
+                # Without a protocol terminal event, partial arguments are unsafe.
+                raise ModelStreamInterrupted("LLM stream ended before its completion event")
+        except (httpx.TransportError, openai.APIConnectionError) as exc:
+            raise ModelStreamInterrupted(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            if exc.status_code not in {408, 409, 429} and exc.status_code < 500:
+                raise
+            raise ModelStreamInterrupted(str(exc)) from exc
+        finally:
+            _STREAM_STATUS.reset(status_token)
+
+    def _generate_with_cache(
+        self, messages: list[BaseMessage], stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None, **kwargs: Any,
+    ) -> ChatResult:
+        # Restart LangChain's accumulator as well as the HTTP request. Retrying
+        # inside _stream would concatenate failed text and tool-call arguments.
+        for attempt in range((self.max_retries or 0) + 1):
+            try:
+                return super()._generate_with_cache(
+                    messages, stop=stop, run_manager=run_manager, **kwargs,
+                )
+            except ModelStreamInterrupted as exc:
+                if attempt >= (self.max_retries or 0):
+                    raise RuntimeError(
+                        f"LLM stream failed after {attempt + 1} attempts: {exc}"
+                    ) from exc
+                if run_manager is not None:
+                    run_manager.on_retry(stream_retry_state(exc, attempt + 1))
+                wait_for_stream_retry(attempt)
+
+    async def _agenerate_with_cache(
+        self, messages: list[BaseMessage], stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None, **kwargs: Any,
+    ) -> ChatResult:
+        for attempt in range((self.max_retries or 0) + 1):
+            try:
+                return await super()._agenerate_with_cache(
+                    messages, stop=stop, run_manager=run_manager, **kwargs,
+                )
+            except ModelStreamInterrupted as exc:
+                if attempt >= (self.max_retries or 0):
+                    raise RuntimeError(
+                        f"LLM stream failed after {attempt + 1} attempts: {exc}"
+                    ) from exc
+                if run_manager is not None:
+                    await run_manager.on_retry(stream_retry_state(exc, attempt + 1))
+                await asyncio.sleep(stream_retry_delay(attempt))
 
     def _get_request_payload(self, input_: Any, *, stop=None, **kwargs) -> dict[str, Any]:
         materialized = materialize_attachment_refs(input_, self._attachment_store)
@@ -390,8 +523,6 @@ def build_chat_model(
     """Build the template chat client from a ModelProfile."""
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
         raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
-    import httpx
-
     if profile.api == "responses":
         adapter = ResponsesChatOpenAI
         protocol_kwargs = {
@@ -408,7 +539,7 @@ def build_chat_model(
         raise ValueError(f"Unsupported model API: {profile.api}")
     model = adapter(
         model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
-        streaming=streaming, max_retries=2, timeout=600.0,
+        streaming=streaming, max_retries=profile.max_retries, timeout=600.0,
         http_socket_options=(), http_client=httpx.Client(trust_env=False),
         http_async_client=httpx.AsyncClient(trust_env=False), **protocol_kwargs,
     )

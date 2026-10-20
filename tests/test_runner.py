@@ -760,7 +760,7 @@ def test_model_stream_cancelled_without_cancel_request_is_a_failure() -> None:
 
 
 @pytest.mark.parametrize("api", ["chat_completions", "responses"])
-def test_http_errors_stay_failures_and_keep_sdk_retries(api) -> None:
+def test_http_errors_stay_failures_and_respect_retry_budget(api) -> None:
     from agent.config import ModelProfile
     from tests.model_stream_server import ScriptedSSEServer
 
@@ -773,5 +773,5 @@ def test_http_errors_stay_failures_and_keep_sdk_retries(api) -> None:
         finally:
             runner.close()
     assert result.status == "failed"
-    # max_retries=2: the original request plus two retries, as before the bridge.
-    assert len(server.errors) == 3
+    # One streaming budget: the original request plus five retries.
+    assert len(server.errors) == 6

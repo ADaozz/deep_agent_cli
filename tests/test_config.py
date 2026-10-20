@@ -636,3 +636,37 @@ def test_removed_fields_error_does_not_rewrite_config_file(tmp_path):
     with pytest.raises(ValueError, match="provider is unsupported"):
         Settings.load(path)
     assert path.read_text() == original
+
+
+@pytest.mark.parametrize("value", [-1, True, False, 1.5, "5"])
+def test_model_max_retries_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="max_retries"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"max_retries": value, "models": {"test": {}}},
+        }}})
+
+
+def test_model_retry_defaults_inheritance_and_override():
+    assert Settings().active_profile.max_retries == 5
+    settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
+        "local": {"max_retries": 3, "models": {"a": {}, "b": {"max_retries": 0}}},
+    }}})
+    assert settings.get_profile("local/a").max_retries == 3
+    profile = settings.get_profile("local/b")
+    assert profile.max_retries == 0
+    model = build_chat_model(profile)
+    assert model.max_retries == model.root_client.max_retries == model.root_async_client.max_retries == 0
+
+
+def test_hidden_tools_default_and_yaml_loading(tmp_path):
+    assert Settings().hidden_tools == ()
+    assert Settings.from_mapping({}).hidden_tools == ()
+    path = tmp_path / "config.yaml"
+    path.write_text(_MODEL_YAML + "tools:\n  hidden: [request_human_input, ls]\n")
+    assert Settings.load(path).hidden_tools == ("request_human_input", "ls")
+
+
+@pytest.mark.parametrize("value", [None, "request_human_input", [None], [1], [""], ["   "], {}])
+def test_hidden_tools_rejects_invalid_lists(value):
+    with pytest.raises(ValueError, match="tools.hidden"):
+        Settings.from_mapping({"tools": {"hidden": value}})

@@ -9,6 +9,11 @@ agent:
   #   优先使用中文回答。
   instructions: null
 
+tools:
+  # 启动时隐藏的工具名；默认不隐藏任何工具。
+  # hidden: [request_human_input]
+  hidden: []
+
 ui:
   # 每次回答结束后显示时间所使用的 IANA 时区。
   timezone: Asia/Shanghai
@@ -39,6 +44,8 @@ llm:
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
       api_key: ${TOKEN_PLAN_API_KEY}
       api: chat_completions
+      # 额外重试次数；0 表示禁用，可在模型项中覆盖。
+      max_retries: 5
       reasoning_efforts: [none, low, medium, xhigh]
       models:
         qwen3.8-flash:
