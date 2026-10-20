@@ -44,7 +44,7 @@ from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxPool,
 LOG = logging.getLogger(__name__)
 SANDBOX_ROOT = "/workspace"
 SKILLS_ROOT = "/skills"
-FIXED_PATH = "/usr/local/bin:/usr/bin:/bin"
+FIXED_PATH = "/run/deep-agent:/usr/local/bin:/usr/bin:/bin"
 RUNTIME_PATHS = ("/usr", "/bin", "/lib", "/lib64")
 RUNTIME_FILES = (
     "/etc/alternatives",
@@ -852,6 +852,11 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         rg = resolve_rg()
         if rg is not None:
             mount += ["--ro-bind", str(Path(rg).resolve()), SEARCH_BINARY_PATH]
+        else:
+            LOG.warning(
+                "ripgrep (rg) is not installed on the host; "
+                "the sandbox cannot provide /run/deep-agent/rg and code search is unavailable"
+            )
         return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
 
     def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:

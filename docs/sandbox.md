@@ -45,7 +45,7 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。自定义 `PATH` 会整段替换这个值；需要在沙箱里直接运行 `rg` 时，请把 `/run/deep-agent` 留在 `PATH` 中。
 - 不限制 CPU、内存、磁盘或进程数。
 
 ## 沙箱生命周期
@@ -85,7 +85,7 @@
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`glob`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
+`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
 
 | 路径 | 文件工具 |
 |---|---|
@@ -105,7 +105,7 @@ Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib
 
 UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录权限，文件工具仍只使用工作区和只读 Skills。CUSTOM backend 保留调用方自己的规则。
 
-`grep` 是免审批探索工具，不调用 `execute`。SANDBOXED 且有 rg 时，在现有 SandboxPool 中以 argv 运行 rg：`ask` 复用无网实例，`allow` 复用有网实例，不创建专用 grep 沙箱。rg 在 Worker 启动时只读挂载到 `/run/deep-agent/rg`。`path` 可以指向已经声明的挂载；未授权路径被拒绝。UNSANDBOXED 或缺少 rg 时使用可终止的宿主 Python 正则回退，两种实现对已授权路径的结果一致。参数、Glob 与结果限制见 [search.md](search.md)，进程路径见 [architecture.md](architecture.md#grep-搜索)。execute 的 `network` 参数、审批和网络规则不受 grep 选择影响。
+`grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同，不再使用以前独立 `grep` 工具的免审批规则。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。未注册的搜索实现仍留在代码里，不会作为工具交给模型。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 
@@ -152,7 +152,7 @@ sandbox:
   env_allowlist:
     - DISPLAY
   env_set:
-    PATH: /opt/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
+    PATH: /opt/npm-prefix/bin:/run/deep-agent:/usr/local/bin:/usr/bin:/bin
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
 ```
 

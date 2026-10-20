@@ -151,7 +151,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 
 ![TUI 进入共享的 AgentRunner 和 Deep Agents / LangGraph；普通文件工具在宿主进程访问授权路径，execute 经 SandboxPool 进入 Bubblewrap Worker。](assets/readme/runtime-map.svg)
 
-SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模式下有 rg 时复用沙箱池，否则使用宿主 Python 正则回退。完整分层与生命周期见 [架构文档](docs/architecture.md)。
+SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码搜索和文件发现通过 `execute` 运行宿主提供、只读挂载进沙箱的 `rg`；搜索的审批与网络和其他命令相同。完整分层与生命周期见 [架构文档](docs/architecture.md)。
 
 </details>
 
@@ -161,7 +161,7 @@ SQLite 保存会话状态。`grep` 免审批且独立于 `execute`；沙箱模�
 | 沙箱 + `allow` | 所有工具免审批 | 所有 execute 共享宿主网络 |
 | 宿主回退 + `ask` | 显式授权回退后，仍需审批 | 以宿主用户权限执行，无沙箱网络隔离 |
 
-只读文件工具与 `grep` 免审批；`allow` 仅限沙箱模式。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
+只读文件工具免审批；`allow` 仅限沙箱模式。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
 
 <details>
 <summary>更多边界与当前限制</summary>

@@ -34,7 +34,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert len(names) == 9
+    assert len(names) == 7
 
 
 def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> None:

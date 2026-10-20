@@ -20,14 +20,32 @@ _ASK_DESCRIPTION = (
     + "network=true and offline commands run in two separate sandboxes that share "
     "only /workspace, so use the same network value for commands that depend on "
     "each other's /tmp files or background processes. "
-    "Prefer ls/read_file/glob/grep/write_file for filesystem work."
 )
 _ALLOW_DESCRIPTION = (
     "Run a shell command inside the sandbox workspace (/workspace). "
     "Permission allow mode: commands run without approval and host network "
     "(internet, localhost, LAN) is enabled by default for every call. " + _PERSISTENCE
-    + "Prefer ls/read_file/glob/grep/write_file for filesystem work."
 )
+_SEARCH_GUIDANCE = (
+    "Use `rg -n 'pattern' path` to search file contents "
+    "and `rg --files -g 'pattern' path` to find files. "
+    "Narrow the search scope when possible. "
+    "Use read_file to inspect known files and "
+    "edit_file/write_file for file modifications. "
+    "rg is already on PATH inside the sandbox; do not install or download it."
+)
+_SEARCH_UNAVAILABLE = (
+    "ripgrep (rg) is not installed on the host, so the sandbox cannot provide rg. "
+    "Code search is unavailable. Do not claim that search works, and do not install or download rg."
+)
+
+
+def _execute_description(*, network_by_default: bool) -> str:
+    from agent.tools.grep import resolve_rg
+
+    base = _ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION
+    guidance = _SEARCH_GUIDANCE if resolve_rg() else _SEARCH_UNAVAILABLE
+    return f"{base}{guidance}"
 
 
 def build_execute_tool(
@@ -79,5 +97,5 @@ def build_execute_tool(
         func=execute,
         name="execute",
         response_format="content_and_artifact",
-        description=_ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION,
+        description=_execute_description(network_by_default=network_by_default),
     )
