@@ -112,6 +112,7 @@ class PreparedAgent:
     backend_selection: BackendSelection | None = None
     sandbox_pool: SandboxPool | None = None
     skill_sources: tuple[str, ...] = ()
+    model_tool_names: tuple[str, ...] = ()
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -202,6 +203,9 @@ def build_agent(
         spec=spec,
         interrupt_on=hitl,
         system_prompt=prompt,
+        model_tool_names=tuple(
+            name for name in graph.nodes["tools"].bound.tools_by_name if name not in spec.hidden_tools
+        ),
         exposed_tool_names=[tool.name for tool in tools if tool.name != "request_human_input"],
         filesystem_tools=[name for name in filesystem_tools if name not in spec.hidden_tools],
         execution_mode=execution_mode,

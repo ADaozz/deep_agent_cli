@@ -33,7 +33,6 @@ from agent.llm_stream import (
 
 @dataclass
 class _StreamStatus:
-    opened: bool = False
     done: bool = False
 
 
@@ -63,11 +62,9 @@ class _CompletionTrackingStream(httpx.AsyncByteStream):
 
 
 async def _mark_stream_open(response: httpx.Response) -> None:
-    # Both connection and first-body-read failures may use APIConnectionError.
-    # Observe successful headers to distinguish them without another retry loop.
+    # Observe completion markers consumed by the SDK SSE decoder.
     status = _STREAM_STATUS.get()
     if status is not None and response.is_success:
-        status.opened = True
         if "text/event-stream" in response.headers.get("content-type", ""):
             if response.is_stream_consumed:
                 status.done = any(
@@ -345,21 +342,30 @@ class ProtocolChatOpenAI(ChatOpenAI):
                 owner.unregister_model_stream(bridge)
 
     async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
-        # SDK retries cover opening the request, but not reading its body. Mark
-        # only body transport failures; an exhausted SDK request is not retried
-        # again here. Parsing, authentication and cancellation errors propagate.
-        client = getattr(self.root_async_client, "_client", None)
+        # Disable SDK retries on a request-local client copy. The generation
+        # boundary owns one shared budget for opening AND reading the stream.
+        # Never mutate shared clients: concurrent calls and non-streaming calls
+        # must retain their own retry policy.
+        root = self.root_async_client
+        if isinstance(root, _ResponsesClient):
+            root = root._target
+        request_model = self
+        if isinstance(root, openai.AsyncOpenAI):
+            sdk = root.with_options(max_retries=0)
+            request_model = self.model_copy(update={
+                "root_async_client": _ResponsesClient(sdk) if isinstance(self.root_async_client, _ResponsesClient) else sdk,
+                "async_client": sdk.chat.completions,
+            })
+        client = getattr(request_model.root_async_client, "_client", None)
         if isinstance(client, httpx.AsyncClient):
             hooks = client.event_hooks["response"]
             if _mark_stream_open not in hooks:
                 hooks.append(_mark_stream_open)
-        received = False
         completed = False
         status = _StreamStatus()
         status_token = _STREAM_STATUS.set(status)
         try:
-            async for chunk in super()._astream(*args, **kwargs):
-                received = True
+            async for chunk in super(ProtocolChatOpenAI, request_model)._astream(*args, **kwargs):
                 completed = completed or bool(
                     (chunk.generation_info or {}).get("finish_reason")
                     or chunk.message.chunk_position == "last"
@@ -370,7 +376,9 @@ class ProtocolChatOpenAI(ChatOpenAI):
                 # Without a protocol terminal event, partial arguments are unsafe.
                 raise ModelStreamInterrupted("LLM stream ended before its completion event")
         except (httpx.TransportError, openai.APIConnectionError) as exc:
-            if not received and not status.opened and isinstance(exc, openai.APIConnectionError):
+            raise ModelStreamInterrupted(str(exc)) from exc
+        except openai.APIStatusError as exc:
+            if exc.status_code not in {408, 409, 429} and exc.status_code < 500:
                 raise
             raise ModelStreamInterrupted(str(exc)) from exc
         finally:

@@ -857,7 +857,7 @@ class CliApplication:
     def show_status(self) -> None:
         prepared = self.runner.prepared
         mode = prepared.execution_mode.value
-        tool_count = len(prepared.exposed_tool_names) + len(prepared.filesystem_tools) + 3
+        tool_count = len(prepared.model_tool_names)
         model = self.runner.current_model()
         pending_model = self.runner.pending_model()
         model_line = (

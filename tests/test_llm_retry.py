@@ -44,7 +44,7 @@ def runner_factory(tmp_path):
 
 @pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize("status", [429, 500, 503])
-def test_sdk_retries_twice_then_agent_completes(api, status, runner_factory):
+def test_request_retries_twice_then_agent_completes(api, status, runner_factory):
     with ScriptedSSEServer(api, [Turn(status=status), Turn(status=status), Turn(text="done")]) as server:
         runner = runner_factory(server)
         result = runner.invoke("hello")
@@ -162,7 +162,8 @@ def test_nonretryable_request_errors_are_not_retried(api, status, runner_factory
 
 
 @pytest.mark.parametrize("api", APIS)
-@pytest.mark.parametrize("hidden", [(), ("request_human_input", "ls", "read_file", "compact_conversation")])
+@pytest.mark.parametrize("hidden", [(), ("request_human_input",), ("compact_conversation",),
+                                     ("request_human_input", "ls", "read_file", "compact_conversation")])
 @pytest.mark.parametrize("use_prepared", [False, True])
 def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, runner_factory):
     with ScriptedSSEServer(api, [Turn(text="done")]) as server:
@@ -173,10 +174,19 @@ def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, r
         names = {t.get("function", t)["name"] for t in body["tools"]}
         if hidden:
             assert not (set(hidden) & names)
-            assert "request_human_input" not in str(body.get("instructions", body.get("messages", body.get("input"))))
+            if "request_human_input" in hidden:
+                assert "request_human_input" not in str(body.get("instructions", body.get("messages", body.get("input"))))
         else:
             assert {"request_human_input", "ls", "read_file", "compact_conversation"} <= names
         assert "write_file" in names
+        assert set(runner.prepared.model_tool_names) == names
+        from agent.cli.app import CliApplication
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            app.show_status()
+            assert f"Tools: {len(names)}" in app.state.blocks[-1].content
         # Hiding is a schema choice; the ASK rules are unchanged.
         from agent.permission import PermissionMode, interrupt_on_for_mode
         assert runner.prepared.interrupt_on == interrupt_on_for_mode(PermissionMode.ASK)
@@ -233,3 +243,64 @@ def test_async_model_retry_resets_callback_and_accumulator(api):
         assert message.text == "done"
         assert ("assistant", "") in deltas and deltas[-1] == ("assistant", "done")
         assert len(server.connections) == 2
+
+
+@pytest.mark.parametrize("api", APIS)
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "http_failure", "stream_failure"])
+def test_mixed_failures_share_six_request_budget(api, asynchronous, outcome, runner_factory, monkeypatch):
+    import asyncio
+    import agent.llm as llm_module
+    import agent.llm_stream as stream_module
+
+    # Verify the request budget without spending time on exponential backoff.
+    monkeypatch.setattr(llm_module, "stream_retry_delay", lambda attempt: 0)
+    monkeypatch.setattr(stream_module, "stream_retry_delay", lambda attempt: 0)
+    broken = Turn(text="broken partial answer", mode="disconnect", chunks_before_hang=2)
+    final = {"success": Turn(text="done"), "http_failure": Turn(status=503),
+             "stream_failure": broken}[outcome]
+    # Attempt 2 fails in the transport before reaching the server. Keep a
+    # seventh success queued: it must never be consumed after budget exhaustion.
+    with ScriptedSSEServer(api, [Turn(status=503), broken, Turn(status=503), broken,
+                                 final, Turn(text="must not run")]) as server:
+        runner = runner_factory(server)
+        model = runner._chat_model
+        sdk = getattr(model.root_async_client, "_target", model.root_async_client)
+        requests = []
+        transport = httpx.AsyncHTTPTransport()
+        async def respond(request):
+            requests.append(request)
+            if len(requests) == 2:
+                raise httpx.ConnectTimeout("scripted connection timeout", request=request)
+            return await transport.handle_async_request(request)
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond), trust_env=False)
+        sdk._client = client
+        async def invoke():
+            try:
+                return await model.ainvoke([HumanMessage(content="hello")])
+            finally:
+                await client.aclose()
+                await transport.aclose()
+        try:
+            if asynchronous:
+                if outcome == "success":
+                    assert asyncio.run(invoke()).text == "done"
+                else:
+                    with pytest.raises(RuntimeError, match="after 6 attempts"):
+                        asyncio.run(invoke())
+            else:
+                result = runner.invoke("hello")
+                if outcome == "success":
+                    assert result.status == "completed" and result.output == "done"
+                else:
+                    assert result.status == "failed" and "after 6 attempts" in result.error
+            assert len(requests) == 6
+            assert len(server.connections) == 5
+            assert all(request.headers["x-stainless-retry-count"] == "0" for request in requests)
+            # The call-local override must not mutate shared SDK policy.
+            assert sdk.max_retries == model.root_client.max_retries == 5
+            assert live_stream_count() == 0
+        finally:
+            if not asynchronous:
+                asyncio.run(client.aclose())
+                asyncio.run(transport.aclose())

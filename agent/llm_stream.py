@@ -304,7 +304,7 @@ class CancellableStreamBridge(Generic[T]):
 
 
 class ModelStreamInterrupted(Exception):
-    """Retryable transport failure after the SDK has returned stream headers."""
+    """Retryable request or body failure within a streaming LLM call."""
 
 
 def stream_retry_state(error: Exception, attempt: int) -> RetryCallState:
