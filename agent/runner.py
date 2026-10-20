@@ -263,6 +263,7 @@ class AgentRunner:
         object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
             instructions=cfg.agent_instructions,
+            hidden_tools=cfg.hidden_tools,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
             web_search_api_key=os.environ.get("TAVILY_API_KEY") or cfg.tavily_api_key,
         )

@@ -1,4 +1,4 @@
-"""Local OpenAI-compatible SSE endpoint with scripted stalls for cancellation tests.
+"""Local OpenAI-compatible SSE endpoint with scripted faults and cancellation stalls.
 
 The server speaks both Chat Completions and Responses streaming over a real
 socket. Each request consumes one ``Turn``. A turn may stall before its first
@@ -29,8 +29,12 @@ class Turn:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     # "finish": send every chunk and end. "hang": send ``chunks_before_hang``
     # content chunks then stay silent. "forever": keep sending deltas.
+    # "disconnect" / "transport_disconnect": EOF / truncated HTTP body after
+    # chunks_before_hang SSE events. "disconnect_tool": EOF after partial args.
     mode: str = "finish"
     chunks_before_hang: int = 0
+    status: int = 200
+    retry_after: str = "0.001"
     interval: float = 0.0
     gap_before_text: float = 0.0
     usage: dict[str, int] | None = field(
@@ -153,8 +157,18 @@ class ScriptedSSEServer:
             handler.send_error(500, "Unexpected model request")
             connection.closed.set()
             return
+        if turn.status != 200:
+            handler.send_response(turn.status)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Retry-After", turn.retry_after)
+            handler.end_headers()
+            handler.wfile.write(b'{"error":{"message":"scripted request failure","type":"server_error"}}')
+            connection.closed.set()
+            return
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream")
+        if turn.mode == "transport_disconnect":
+            handler.send_header("Content-Length", "999999")
         handler.send_header("Cache-Control", "no-cache")
         handler.end_headers()
         handler.wfile.flush()
@@ -162,7 +176,12 @@ class ScriptedSSEServer:
         try:
             # Real endpoints return a new id per response; LangChain uses it as
             # the message id, and equal ids would replace earlier answers.
-            for event in self._events(turn, body.get("model", "local"), f"local-{number}"):
+            for index, event in enumerate(self._events(turn, body.get("model", "local"), f"local-{number}")):
+                if turn.mode in {"disconnect", "transport_disconnect"} and index >= turn.chunks_before_hang:
+                    # A clean TCP EOF without the required SSE completion event.
+                    handler.close_connection = True
+                    connection.closed.set()
+                    return
                 if event is _HANG:
                     connection.hanging.set()
                     self._watch_until_closed(sock, connection)
@@ -259,11 +278,14 @@ class ScriptedSSEServer:
             yield data(_chat_payload(model, delta, rid=rid))
         for index, call in enumerate(turn.tool_calls):
             delta = {"tool_calls": [{"index": index, "id": call["id"], "type": "function", "function": {
-                "name": call["name"], "arguments": json.dumps(call["args"])}}]}
+                "name": call["name"], "arguments": (json.dumps(call["args"])[:5]
+                    if turn.mode == "disconnect_tool" else json.dumps(call["args"]))}}]}
             if first:
                 delta["role"] = "assistant"
                 first = False
             yield data(_chat_payload(model, delta, rid=rid))
+            if turn.mode == "disconnect_tool":
+                return
         yield data(_chat_payload(model, {}, finish="tool_calls" if turn.tool_calls else "stop", rid=rid))
         if turn.usage is not None:
             yield data(_chat_payload(model, usage=turn.usage, rid=rid))
@@ -294,7 +316,10 @@ class ScriptedSSEServer:
                     "name": call["name"], "arguments": "", "status": "in_progress"}
             yield data({"type": "response.output_item.added", "output_index": index, "item": item})
             yield data({"type": "response.function_call_arguments.delta", "output_index": index,
-                        "item_id": item["id"], "delta": json.dumps(call["args"])})
+                        "item_id": item["id"], "delta": (json.dumps(call["args"])[:5]
+                            if turn.mode == "disconnect_tool" else json.dumps(call["args"]))})
+            if turn.mode == "disconnect_tool":
+                return
         yield data({"type": "response.completed", "response": _response_body("completed", turn.usage, rid)})
 
 

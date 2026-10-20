@@ -45,6 +45,10 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
         SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="a"),
         SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="b"),
         SimpleNamespace(type="response.output_text.delta", item_id="msg_1", output_index=1, content_index=0, delta="answer"),
+        SimpleNamespace(type="response.completed", response=openai.types.responses.Response(
+            id="r", created_at=0, model="test", object="response", status="completed",
+            output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+        )),
     ]
 
     class FakeResponse:
@@ -80,7 +84,7 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
         return [item async for item in llm._astream([HumanMessage(content="x")])]
 
     chunks = asyncio.run(collect())
-    blocks = [chunk.message.content[0] for chunk in chunks]
+    blocks = [chunk.message.content[0] for chunk in chunks if chunk.message.content]
     assert chunks[0].message.response_metadata["headers"]["x-test"] == "async"
     assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
     assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"
@@ -92,6 +96,10 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
         SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="a"),
         SimpleNamespace(type="response.reasoning_text.delta", item_id="rs_1", output_index=0, delta="b"),
         SimpleNamespace(type="response.output_text.delta", item_id="msg_1", output_index=1, content_index=0, delta="answer"),
+        SimpleNamespace(type="response.completed", response=openai.types.responses.Response(
+            id="r", created_at=0, model="test", object="response", status="completed",
+            output=[], parallel_tool_calls=True, tool_choice="auto", tools=[],
+        )),
     ]
 
     class FakeResponse:
@@ -145,7 +153,7 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
     # stream must produce the same chunks.
     for chunks in (list(llm._stream([HumanMessage(content="x")])),
                    list(super(ResponsesChatOpenAI, llm)._stream([HumanMessage(content="x")]))):
-        blocks = [chunk.message.content[0] for chunk in chunks]
+        blocks = [chunk.message.content[0] for chunk in chunks if chunk.message.content]
         assert chunks[0].message.response_metadata["headers"]["x-test"] == "sync"
         assert [block["type"] for block in blocks] == ["reasoning", "reasoning", "text"]
         assert "".join(block["summary"][0]["text"] for block in blocks[:2]) == "ab"

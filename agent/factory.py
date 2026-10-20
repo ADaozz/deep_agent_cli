@@ -17,6 +17,7 @@ from deepagents.middleware.summarization import (
     create_summarization_tool_middleware,
 )
 from deepagents._models import get_model_identifier, get_model_provider
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -47,14 +48,37 @@ from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
 from agent.tools.web_search import build_web_search_tool
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "write_file", "edit_file", "delete"]
-DEFAULT_SYSTEM_PROMPT = (
-    "你是使用 {model_name} 的 Coding Agent CLI。"
-    "完成用户请求后直接报告结果。"
+HUMAN_INPUT_PROMPT = (
     "如果继续执行需要用户提供信息或从多个选项中做决定，调用 request_human_input 暂停等待回答。"
     "如果你主动给用户列出多个后续操作供其选择，也必须调用 request_human_input，"
     "用 fields 的 single_select 或 multi_select 表达选项；不要只在普通回复中写编号菜单。"
     "每道选择题最多提供 3 个选项；Other 由系统自动添加，不计入这 3 个，不要自行提供。"
 )
+
+DEFAULT_SYSTEM_PROMPT = (
+    "你是使用 {model_name} 的 Coding Agent CLI。"
+    "完成用户请求后直接报告结果。"
+) + HUMAN_INPUT_PROMPT
+
+
+class HiddenToolsMiddleware(AgentMiddleware):
+    """Filter middleware-provided tools too, without changing approval rules."""
+
+    def __init__(self, hidden: tuple[str, ...]) -> None:
+        self.hidden = frozenset(hidden)
+
+    def _filter(self, request: Any) -> Any:
+        return request.override(tools=[
+            tool for tool in request.tools
+            if (tool.get("name") or tool.get("function", {}).get("name")
+                if isinstance(tool, dict) else tool.name) not in self.hidden
+        ])
+
+    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(self._filter(request))
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return await handler(self._filter(request))
 
 
 @dataclass(frozen=True)
@@ -65,6 +89,7 @@ class AgentSpec:
     backend: BackendProtocol | None = None
     sandbox: SandboxConfig | None = None
     web_search_api_key: str | None = field(default=None, repr=False)
+    hidden_tools: tuple[str, ...] = ()
 
 
 @dataclass
@@ -91,7 +116,10 @@ class PreparedAgent:
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
     model_name = str(getattr(model, "model_name", None) or get_model_identifier(model) or type(model).__name__)
-    sections = [DEFAULT_SYSTEM_PROMPT.format(model_name=model_name)]
+    base_prompt = DEFAULT_SYSTEM_PROMPT
+    if "request_human_input" in spec.hidden_tools:
+        base_prompt = base_prompt.removesuffix(HUMAN_INPUT_PROMPT)
+    sections = [base_prompt.format(model_name=model_name)]
     if spec.instructions and spec.instructions.strip():
         sections.append(f"# User Instructions\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
@@ -140,6 +168,7 @@ def build_agent(
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )
+    tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     saver = checkpointer if checkpointer is not None else InMemorySaver()
     compact_middleware = create_summarization_tool_middleware(model, fs_backend)
     graph = create_deep_agent(
@@ -158,6 +187,7 @@ def build_agent(
             AttachmentMaterializationMiddleware(),
             WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
             compact_middleware,
+            *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
         ],
         skills=skill_sources,
         backend=fs_backend,
@@ -173,7 +203,7 @@ def build_agent(
         interrupt_on=hitl,
         system_prompt=prompt,
         exposed_tool_names=[tool.name for tool in tools if tool.name != "request_human_input"],
-        filesystem_tools=filesystem_tools,
+        filesystem_tools=[name for name in filesystem_tools if name not in spec.hidden_tools],
         execution_mode=execution_mode,
         security_warning=security_warning,
         checkpointer=saver,
@@ -204,6 +234,7 @@ def create_agent(
     spec = AgentSpec(
         instructions=instructions if instructions is not None else cfg.agent_instructions,
         tools=tuple(extra_tools or ()),
+        hidden_tools=cfg.hidden_tools,
         skills=tuple(skills) if skills is not None else None,
         backend=backend,
         sandbox=sandbox_config or cfg.sandbox,

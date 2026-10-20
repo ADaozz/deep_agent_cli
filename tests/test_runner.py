@@ -773,5 +773,5 @@ def test_http_errors_stay_failures_and_keep_sdk_retries(api) -> None:
         finally:
             runner.close()
     assert result.status == "failed"
-    # max_retries=2: the original request plus two retries, as before the bridge.
-    assert len(server.errors) == 3
+    # The SDK makes the original request plus five retries; no outer retry.
+    assert len(server.errors) == 6

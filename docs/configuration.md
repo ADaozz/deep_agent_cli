@@ -16,6 +16,18 @@ CLI 按以下顺序查找主配置：
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
 - 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
+## 工具可见性（`tools.hidden`）
+
+```yaml
+tools:
+  hidden:
+    - request_human_input
+```
+
+默认 `hidden: []`，保留原有工具。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。隐藏 `request_human_input` 时，同时去除内置提示词中要求调用它的说明。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
+
+此设置只控制模型可见工具，不改变 ASK/ALLOW 审批规则，不提供 `/tool` 命令或运行时热切换。
+
 ## 模型（`llm`）
 
 模型按“来源”分组。来源是一组共用端点和密钥的模型：
@@ -44,6 +56,7 @@ llm:
 | `base_url` | `http://localhost:8000/v1` | OpenAI 兼容端点 |
 | `api_key` | `sk-local` | 字面值或 `${变量名}` |
 | `api` | `responses` | `responses` 使用 Responses API；`chat_completions` 使用 Chat Completions |
+| `max_retries` | `5` | 非负整数，额外重试次数；`0` 禁用。模型级覆盖来源级 |
 | `model` | 模型键 | 仅模型项可用，实际请求的模型名 |
 | `input` | `[text]` | 支持图片输入时写 `[text, image]`；必须包含 `text` |
 | `context_window` | `0` | 模型输入窗口，可写 `128000`、`128k`、`1m`。`0` 表示未知：底栏不显示占用百分比，压缩阈值使用 Deep Agents 的默认值 |
@@ -56,7 +69,9 @@ llm:
 - `chat_completions`：Chat Completions。会读取流式和非流式响应中的 `reasoning_content` 或 `reasoning` 字符串字段作为思考内容，并在后续请求中原样回传。
 - `responses`：Responses API。会把 Qwen 的 `response.reasoning_text.*` 事件转换成 LangChain 能识别的格式。
 
-两种 API 的客户端都设置了 `trust_env=False`，因此忽略 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。模型请求传输失败时由 OpenAI SDK 最多重试 2 次。
+两种 API 的客户端都设置了 `trust_env=False`，因此忽略 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。连接失败、请求超时、429、5xx 等请求故障使用 OpenAI SDK 原生重试，默认额外重试 5 次（共 6 次尝试），可通过来源级或模型级 `max_retries` 调整。
+
+流式响应读取中断（包括缺少结束事件就直接 EOF）时，Agent 会重新发起当前模型调用，默认最多重新发起 5 次。每次重新请求仍使用 SDK 的连接阶段重试；SDK 已耗尽的连接阶段故障会直接报错，不再被外层重试。失败尝试的临时文本、思考内容和工具参数会清除，已完成的工具不会重跑；Esc 在请求和退避等待期间均可取消。重试只覆盖模型请求，不覆盖工具执行。
 
 ### 已移除的配置字段
 

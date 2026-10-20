@@ -169,6 +169,25 @@ class StreamDeltaCallback(BaseCallbackHandler):
             if self._on_assistant:
                 self._on_assistant(visible)
 
+    def on_retry(self, retry_state: Any, **kwargs: Any) -> None:
+        from agent.llm_stream import ModelStreamInterrupted
+        if (retry_state.outcome is None
+                or not isinstance(retry_state.outcome.exception(), ModelStreamInterrupted)
+                or kwargs.get("run_id") in self._summary_runs):
+            return
+        self._message = None
+        self._raw_text = self._assistant = self._reasoning = ""
+        # Delta payloads are cumulative replacements. Clear the existing block
+        # without starting a second assistant block or touching completed tools.
+        self._on_delta("assistant", "")
+        self._on_delta("reasoning", "")
+        if self._on_assistant:
+            self._on_assistant("")
+        if self._on_reasoning:
+            self._on_reasoning("")
+        if self._on_usage:
+            self._on_usage({})
+
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
         if self._finish_summary(kwargs.get("run_id")):
             return

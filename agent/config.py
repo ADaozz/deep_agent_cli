@@ -52,6 +52,10 @@ class ModelProfile:
     context_window: int = 0
     source: str = ""
     reasoning_efforts: tuple[str, ...] = ()
+    max_retries: int = 5
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "max_retries", _model_max_retries(self.max_retries, field_name="max_retries"))
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -132,6 +136,7 @@ class Settings:
     agent_instructions: str | None = None
     ui_timezone: str = DEFAULT_UI_TIMEZONE
     ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
+    hidden_tools: tuple[str, ...] = ()
     tavily_api_key: str | None = field(default=None, repr=False)
 
     @property
@@ -204,6 +209,12 @@ class Settings:
         root = (base_dir or Path.cwd()).expanduser().resolve()
         llm = _section(raw, "llm")
         agent = _section(raw, "agent")
+        tools = _section(raw, "tools")
+        hidden_tools = tools.get("hidden", [])
+        if not isinstance(hidden_tools, list) or any(
+            not isinstance(name, str) or not name.strip() for name in hidden_tools
+        ):
+            raise ValueError("tools.hidden must be a list of non-empty tool names")
         ui = _section(raw, "ui")
         paths = _section(raw, "paths")
         sandbox_raw = dict(_section(raw, "sandbox"))
@@ -228,6 +239,7 @@ class Settings:
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"ui.timezone is invalid: {timezone_name}") from exc
         result = cls(
+            hidden_tools=tuple(dict.fromkeys(name.strip() for name in hidden_tools)),
             llm_profiles=profiles,
             llm_default=default_id,
             sandbox=_sandbox_from_mapping(sandbox_raw, base_dir=root),
@@ -404,7 +416,7 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
     _reject_removed_protocol_fields(llm, field_name="llm")
-    source_fields = {"model", "api_key", "base_url", "input", "api", "context_window", "source", "reasoning_efforts"}
+    source_fields = {"model", "api_key", "base_url", "input", "api", "context_window", "source", "reasoning_efforts", "max_retries"}
     unsupported = source_fields.intersection(llm)
     if unsupported:
         field = sorted(unsupported)[0]
@@ -426,6 +438,7 @@ def _grouped_llm_profiles(
         if not isinstance(group, Mapping) or not isinstance(group.get("models"), Mapping) or not group["models"]:
             raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
         group_api = _model_api(group, field_name=f"llm.models.{source}")
+        _model_max_retries(group.get("max_retries"), field_name=f"llm.models.{source}.max_retries")
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -451,6 +464,7 @@ def _grouped_llm_profiles(
                 api=_model_api(item, field_name=field, default=group_api),
                 context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
                 reasoning_efforts=_model_reasoning_efforts(inherited("reasoning_efforts"), field_name=f"{field}.reasoning_efforts"),
+                max_retries=_model_max_retries(inherited("max_retries"), field_name=f"{field}.max_retries"),
                 source=source,
             ))
     default = llm.get("default")
@@ -588,3 +602,11 @@ def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Sandbox
             base_dir=base_dir,
         ),
     )
+
+
+def _model_max_retries(value: Any, *, field_name: str) -> int:
+    if value is None:
+        return 5
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
