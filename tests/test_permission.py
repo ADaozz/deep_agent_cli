@@ -31,7 +31,7 @@ from agent.permission import (
     parse_permission_mode,
     permission_mode_label,
 )
-from agent.runner import AgentRunner
+from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableError, select_backend
 from tests.conftest import scripted_model
 
@@ -169,6 +169,80 @@ def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() 
     assert runner.pending_permission_mode() is None
     assert [event.type for event in events].count("runtime_config_applied") == 1
     assert [event.tool_call_id for event in events if event.type == "tool_completed"] == ["old-write", "new-write"]
+
+
+def test_cli_allow_confirm_stays_when_approval_arrives() -> None:
+    async def scenario() -> None:
+        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+            runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("new-execute"))))
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                await app.select_permission("allow")
+                confirm = app.interaction
+                assert confirm is not None and confirm.kind == "permission_confirm"
+                waiting = runner.invoke("run")
+                assert waiting.status == "waiting_confirmation"
+                app._apply_event(RunEvent(type="interaction_requested", result=waiting))
+                app._handle_result(waiting)
+                assert app.interaction is confirm
+                assert app._deferred_config_interaction is None
+                assert app.state.status == "Type ALLOW to confirm · Esc cancel · approval pending · F2"
+                assert any(
+                    "This ALLOW prompt stays open" in getattr(block, "content", "")
+                    for block in app.state.blocks
+                )
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.pending_permission_mode() is None
+
+                assert app._reopen_pending_interaction_preserving_allow()
+                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert app._deferred_config_interaction is confirm
+                app._finish_interaction(cancelled=True)
+                assert app.interaction is confirm
+                assert app._deferred_config_interaction is None
+                assert "approval pending" in app.state.status
+
+                assert confirm.accept("ALLOW")
+                app._finish_interaction()
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.pending_permission_mode() is PermissionMode.ALLOW
+                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "new-execute"
+
+    asyncio.run(scenario())
+
+
+def test_cli_allow_confirm_cancel_and_wrong_token_reopen_approval() -> None:
+    async def scenario() -> None:
+        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+            runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("cancel-execute"))))
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                await app.select_permission("allow")
+                waiting = runner.invoke("run")
+                app._handle_result(waiting)
+                app._finish_interaction(cancelled=True)
+                assert runner.pending_permission_mode() is None
+                assert any("ALLOW mode cancelled" in getattr(block, "content", "") for block in app.state.blocks)
+                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "cancel-execute"
+
+            runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("wrong-execute"))))
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, input=pipe, output=DummyOutput())
+                await app.select_permission("allow")
+                confirm = app.interaction
+                assert confirm is not None
+                waiting = runner.invoke("run")
+                app._handle_result(waiting)
+                assert confirm.accept("yes")
+                app._finish_interaction()
+                assert runner.permission_mode() is PermissionMode.ASK
+                assert runner.pending_permission_mode() is None
+                assert any("ALLOW not enabled" in getattr(block, "content", "") for block in app.state.blocks)
+                assert app.interaction is not None and app.interaction.kind == "approval"
+
+    asyncio.run(scenario())
 
 
 def test_cli_allow_queue_prompt_preserves_old_approval() -> None:
