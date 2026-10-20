@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-WORKDIR = "/workspace"
+WORKDIR = os.getcwd()
 CHUNK_BYTES = 65536
 POST_EXIT_DRAIN_SECONDS = 0.1
 

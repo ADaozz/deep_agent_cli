@@ -69,7 +69,7 @@ def engine(request):
 @pytest.fixture
 def workspace(request, tmp_path):
     engine = request.getfixturevalue("engine") if "engine" in request.fixturenames else "python"
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("def run():\nfoo foo\nconfig.yaml\n中文 café\n", encoding="utf-8")
     (work / "b.py").write_text("def execute():\nbar\nconfigXyaml\n", encoding="utf-8")
@@ -194,7 +194,7 @@ def test_binary_files_are_skipped(engine, workspace):
 
 def test_engine_common_regex_parity(tmp_path):
     usable_bwrap()
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("def run():\nfoo foo\nconfig.yaml\n中文 café\n", encoding="utf-8")
     (work / "b.py").write_text("def execute():\nbar\nconfigXyaml\n", encoding="utf-8")
@@ -314,7 +314,7 @@ def _wait_for(predicate, timeout=5.0):
 
 
 def test_cancel_reaps_rg_and_keeps_sandbox(tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("cancel-marker-1\n")
     backend = make_backend("rg", work, None)
@@ -353,7 +353,7 @@ def test_cancel_reaps_rg_and_keeps_sandbox(tmp_path, monkeypatch):
     ("files_with_matches", None),
 ])
 def test_rg_timeout_keeps_sandbox_and_partial_results(tmp_path, monkeypatch, mode, line):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("timeout-marker-1\n")
     backend = make_backend("rg", work, None)
@@ -395,7 +395,7 @@ def test_python_cancel_during_backtracking(workspace):
 
 
 def test_rg_engine_starts_exactly_one_process(tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     for index in range(300):
         directory = work / f"d{index % 7}"
         directory.mkdir(parents=True, exist_ok=True)
@@ -490,7 +490,7 @@ def test_python_unsupported_syntax_and_literal_escape(workspace):
 
 
 def test_sandboxed_backend_without_rg_uses_python_engine(tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("foo\n")
     backend = WorkspaceCompositeBackend(BubblewrapBackend(SandboxConfig(workspace=work), executable="/bin/true"),
@@ -581,7 +581,7 @@ def _paths(root: Path, backend, **kwargs) -> set[str]:
     ("!/repo/", None),
 ])
 def test_negated_and_combined_globs(engine, tmp_path, glob, expected):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     _filter_tree(work)
     backend = make_backend(engine, work, None)
     found = _paths(work, backend, glob=glob)
@@ -625,7 +625,7 @@ def test_negated_and_combined_globs(engine, tmp_path, glob, expected):
     ("/workspace/src", "/*.py", "/workspace/src/b.py\n/workspace/src/b.test.py"),
 ])
 def test_globs_apply_to_files_and_directories(engine, tmp_path, path, glob, expected):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     _filter_tree(work)
     backend = make_backend(engine, work, None)
     assert implementation.search(backend, "needle", path, glob, "files_with_matches", None, False) == expected
@@ -633,7 +633,7 @@ def test_globs_apply_to_files_and_directories(engine, tmp_path, path, glob, expe
 
 def test_glob_rules_match_across_engines(tmp_path):
     usable_bwrap()
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     _filter_tree(work)
     sandboxed = make_backend("rg", work, None)
     fallback = make_backend("python", work, None)
@@ -675,7 +675,7 @@ def test_too_many_globs_are_rejected(engine, workspace):
 
 
 def test_globs_are_separate_rg_arguments(tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("needle\n")
     backend = make_backend("rg", work, None)
@@ -691,7 +691,7 @@ def test_globs_are_separate_rg_arguments(tmp_path, monkeypatch):
 def test_gitignore_hidden_and_override_rules(tmp_path, monkeypatch):
     """rg honors ignore files; the Python engine skips .git and hidden names only."""
     usable_bwrap()
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     _write(work, ".gitignore", "*.log\nbuild/\nnode_modules/\n")
     _write(work, ".ignore", "secret.txt\n")
     _write(work, ".rgignore", "rgonly.txt\n")
@@ -737,7 +737,7 @@ def test_gitignore_hidden_and_override_rules(tmp_path, monkeypatch):
 
 
 def test_explicit_git_directory_is_searchable_and_default_search_skips_it(engine, tmp_path):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     _write(work, ".git/HEAD", "ref needle\n")
     _write(work, "a.py", "needle\n")
     backend = make_backend(engine, work, None)
@@ -747,7 +747,7 @@ def test_explicit_git_directory_is_searchable_and_default_search_skips_it(engine
 
 
 def test_newline_in_filename_stays_one_result(engine, tmp_path):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     name = "strange\nname.py"
     (work / name).write_text("needle\nneedle\n")
@@ -807,7 +807,7 @@ def test_dynamic_system_rg_runs_in_the_search_sandbox(tmp_path, monkeypatch):
 
     if not operating_system.path.isfile("/usr/bin/rg"):
         pytest.skip("dynamically linked system rg is not installed")
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("dynneedle\n")
     backend = make_backend("rg", work, None)
@@ -818,7 +818,7 @@ def test_dynamic_system_rg_runs_in_the_search_sandbox(tmp_path, monkeypatch):
 
 def test_mount_fd_does_not_follow_a_swapped_root(engine, tmp_path, monkeypatch):
     """Replacing the workspace directory after it is opened must not retarget the search."""
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("safe-marker\n")
     outside = tmp_path / "outside"
@@ -849,7 +849,7 @@ def test_mount_fd_does_not_follow_a_swapped_root(engine, tmp_path, monkeypatch):
 
 
 def test_symlink_swap_after_resolve_cannot_escape(engine, tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     sub = work / "sub"
     sub.mkdir(parents=True)
     (sub / "a.py").write_text("safe-marker\n")
@@ -878,7 +878,7 @@ def test_symlink_swap_after_resolve_cannot_escape(engine, tmp_path, monkeypatch)
 
 
 def test_live_directory_symlink_race_stays_inside_the_mount(engine, tmp_path):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     sub = work / "sub"
     sub.mkdir(parents=True)
     (sub / "a.py").write_text("safe-marker\n")
@@ -917,7 +917,7 @@ def test_live_directory_symlink_race_stays_inside_the_mount(engine, tmp_path):
 
 def test_fast_directory_search_starts_one_sandbox_process(tmp_path, monkeypatch):
     """Smoke guard for the single-rg architecture. G01-G04 live in examples/grep_benchmark.py."""
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     for index in range(1200):
         directory = work / f"p{index // 100:02d}"
         directory.mkdir(parents=True, exist_ok=True)
@@ -932,7 +932,7 @@ def test_fast_directory_search_starts_one_sandbox_process(tmp_path, monkeypatch)
 
 
 def test_grep_deadline_includes_waiting_for_pool(tmp_path, monkeypatch):
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     (work / "a.py").write_text("needle\n")
     backend = make_backend("rg", work, None)
@@ -955,7 +955,7 @@ def test_grep_deadline_includes_waiting_for_pool(tmp_path, monkeypatch):
 def test_grep_worker_loss_is_not_retried_and_next_search_recovers(tmp_path, monkeypatch):
     import signal
 
-    work = tmp_path / "work"
+    work = tmp_path / "workspace"
     work.mkdir()
     marker = "lost-worker-grep-marker"
     (work / "a.py").write_text(marker + "\n")

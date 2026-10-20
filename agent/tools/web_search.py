@@ -33,7 +33,7 @@ def build_web_search_tool(api_key: str) -> BaseTool:
         - you are uncertain about a factual claim or need authoritative sources;
         - the answer depends on information outside the local workspace.
 
-        Do not use web_search for local files or code. Use read_file, grep, or glob instead.
+        Do not use web_search for local files or code. Use read_file to read files or execute with rg to search instead.
 
         Prefer specific queries. Use include_domains when an official or particular
         source is required. Use topic="news" and a time range for recent events.

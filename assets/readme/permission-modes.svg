@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
   <title id="title">deep-agent：审批与隔离独立</title>
-  <desc id="desc">默认沙箱 ask：文件变更、命令和网页搜索需审批，execute 默认隔离直接 IP 网络。沙箱 allow：全部工具免审批，所有 execute 共享宿主网络。宿主回退：显式授权，仅支持 ask，命令以宿主用户权限执行。只读文件工具和 grep 免审批；命令网络策略不约束宿主的模型和 Tavily 请求。</desc>
+  <desc id="desc">默认沙箱 ask：文件变更、命令和网页搜索需审批，execute 默认隔离直接 IP 网络。沙箱 allow：全部工具免审批，所有 execute 共享宿主网络。宿主回退：显式授权，仅支持 ask，命令以宿主用户权限执行。只读文件工具免审批，搜索遵循 execute 权限；命令网络策略不约束宿主的模型和 Tavily 请求。</desc>
   <rect width="1200" height="650" rx="16" fill="#0c0c0c"/>
   <g font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, sans-serif">
     <text x="48" y="64" fill="#61d6d6" font-size="22" font-family="ui-monospace, monospace">deep-agent / permissions</text>
@@ -27,6 +27,6 @@
       <text x="372" y="505" fill="#f0f2f3" font-size="30">保留审批</text>
       <text x="372" y="546" fill="#e8adad" font-size="28">宿主用户权限 · 无沙箱网络隔离</text>
     </g>
-    <text x="48" y="618" fill="#acb6bc" font-size="24">只读文件工具与 grep 免审批。模型 / Tavily 使用宿主网络。</text>
+    <text x="48" y="618" fill="#acb6bc" font-size="24">只读文件工具免审批；搜索遵循 execute 权限。模型 / Tavily 使用宿主网络。</text>
   </g>
 </svg>

@@ -16,7 +16,7 @@ runner = AgentRunner(
     on_delta=lambda kind, text: print(text, end=""),
     on_event=print,
 )
-result = runner.invoke("列出 /workspace 下的文件")
+result = runner.invoke("列出项目工作区下的文件")
 print(result.status, result.output)
 runner.close()
 ```
@@ -24,6 +24,7 @@ runner.close()
 注意：
 
 - `create_agent()` 不会自动读取配置文件。不传 `settings` 时使用代码内默认值（`http://localhost:8000/v1`，模型 `qwen3.5-plus`）。需要与 CLI 一致时显式传入 `Settings.load()`。
+- 默认模板中的工具挂载来自配置文件；直接构造 `Settings()` 或 `SandboxConfig()` 不会自动添加这些条目，也不做工具链发现。NVM 版本、Cargo / Rustup、浏览器缓存及 PATH 由调用方配置，见 [默认工具挂载](configuration.md#默认工具挂载)。
 - 不传 `backend` 时与 CLI 一样做沙箱预检，失败时抛出 `SandboxUnavailableError`，除非 `settings.sandbox.allow_unsandboxed` 为真。
 - 不传 `session_store` 时，会话只保存在内存中。持久化可参考 `agent/cli/main.py` 中的 `create_runner()`。
 - `AgentRunner` 同一时间只允许一个操作；并发调用会抛出 `RuntimeError`。

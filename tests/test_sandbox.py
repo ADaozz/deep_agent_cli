@@ -46,7 +46,7 @@ def test_sandbox_environment_is_allowlist_based(tmp_path: Path) -> None:
     result = sandbox_environment(config, environ)
     assert result["PATH"] == "/run/deep-agent:/usr/local/bin:/usr/bin:/bin"
     assert result["HOME"] == "/home/agent"
-    assert result["PWD"] == "/workspace"
+    assert result["PWD"] == f"/{tmp_path.name}"
     assert result["TMPDIR"] == "/tmp"
     assert result["LANG"] == "zh_CN.UTF-8"
     assert result["LC_TIME"] == "C"
@@ -74,7 +74,7 @@ def test_bubblewrap_command_has_isolation_mounts_and_no_user_remap(tmp_path: Pat
     assert "--unshare-net" in args
     assert "--unshare-pid" in args
     assert "--unshare-user" not in args
-    assert f"--bind {workspace.resolve()} /workspace" in joined
+    assert f"--bind {workspace.resolve()} /work" in joined
     assert f"--ro-bind {skills.resolve()} /skills" in joined
     assert f"--ro-bind {skills.resolve()} /opt/skills" in joined
     assert "--tmpfs /home --dir /home/agent" in joined
@@ -124,7 +124,7 @@ def test_unsandboxed_fallback_reports_mode_and_limits_execution(tmp_path: Path) 
     assert truncated.truncated is True
     assert truncated.output.startswith("3456")
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in truncated.output
-    assert "Agent path: /workspace/.deep-agent/logs/exec/" in truncated.output
+    assert f"Agent path: /{tmp_path.name}/.deep-agent/logs/exec/" in truncated.output
     timed_out = prepared.backend.execute("sleep 5", timeout=1)
     assert timed_out.exit_code == 124
 
@@ -141,7 +141,7 @@ def test_missing_required_mount_is_rejected(tmp_path: Path) -> None:
 def test_config_errors_do_not_trigger_unsafe_fallback(tmp_path: Path) -> None:
     config = replace(
         config_for(tmp_path, allow_unsandboxed=True),
-        extra_read_write_mounts=(BindMount(tmp_path, "/workspace"),),
+        extra_read_write_mounts=(BindMount(tmp_path, f"/{tmp_path.name}"),),
     )
     with pytest.raises(ValueError, match="protected destination"):
         select_backend(config)
@@ -197,7 +197,7 @@ def test_user_skills_are_read_only_for_file_backend(tmp_path: Path, monkeypatch:
     assert selected.backend.upload_files([("/skills/new", b"bad")])[0].error
     assert not (skills / "new").exists()
     outside = selected.backend.write("/outside.txt", "bad")
-    assert outside.error and "under /workspace" in outside.error
+    assert outside.error and "under /work" in outside.error
     assert not (workspace / "outside.txt").exists()
 
 
@@ -240,13 +240,13 @@ def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
     backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/true"), check=False).backend
     middleware = WriteOperationMiddleware(backend)
     request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": "/workspace/report.md", "content": "text"},
+        "name": "write_file", "args": {"file_path": f"/{tmp_path.name}/report.md", "content": "text"},
     })
 
     def write(_request: object) -> ToolMessage:
-        result = backend.write("/workspace/report.md", "text")
+        result = backend.write(f"/{tmp_path.name}/report.md", "text")
         assert result.error is None
-        return ToolMessage(content="Updated file /workspace/report.md", tool_call_id="write-1", name="write_file")
+        return ToolMessage(content=f"Updated file /{tmp_path.name}/report.md", tool_call_id="write-1", name="write_file")
 
     created = middleware.wrap_tool_call(request, write)
     overwritten = middleware.wrap_tool_call(request, write)
@@ -254,13 +254,13 @@ def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
     assert overwritten.artifact == {"operation": "overwrite"}
 
     empty_request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": "/workspace/empty.md", "content": ""},
+        "name": "write_file", "args": {"file_path": f"/{tmp_path.name}/empty.md", "content": ""},
     })
 
     def write_empty(_request: object) -> ToolMessage:
-        result = backend.write("/workspace/empty.md", "")
+        result = backend.write(f"/{tmp_path.name}/empty.md", "")
         assert result.error is None
-        return ToolMessage(content="Updated file /workspace/empty.md", tool_call_id="write-empty", name="write_file")
+        return ToolMessage(content=f"Updated file /{tmp_path.name}/empty.md", tool_call_id="write-empty", name="write_file")
 
     assert middleware.wrap_tool_call(empty_request, write_empty).artifact == {"operation": "create"}
 
@@ -270,12 +270,12 @@ def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
     assert middleware.wrap_tool_call(request, fail).artifact is None
 
     async def async_write(_request: object) -> ToolMessage:
-        result = backend.write("/workspace/async.md", "text")
+        result = backend.write(f"/{tmp_path.name}/async.md", "text")
         assert result.error is None
-        return ToolMessage(content="Updated file /workspace/async.md", tool_call_id="write-3", name="write_file")
+        return ToolMessage(content=f"Updated file /{tmp_path.name}/async.md", tool_call_id="write-3", name="write_file")
 
     async_request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": "/workspace/async.md", "content": "text"},
+        "name": "write_file", "args": {"file_path": f"/{tmp_path.name}/async.md", "content": "text"},
     })
     async def check_async() -> None:
         first = await middleware.awrap_tool_call(async_request, async_write)
@@ -288,7 +288,7 @@ def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
 
 def test_write_operation_reaches_tool_completion_artifact(tmp_path: Path) -> None:
     backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/true"), check=False).backend
-    path = "/workspace/report.md"
+    path = f"/{tmp_path.name}/report.md"
     model = scripted_model([
         AIMessage(content="", tool_calls=[{
             "id": "write-new", "name": "write_file",
@@ -398,7 +398,7 @@ def test_real_bubblewrap_workspace_isolation_when_available(
             pytest.fail(str(exc))
         pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}")
     result = selected.backend.execute(
-        "test \"$(pwd)\" = /workspace && "
+        "test \"$(pwd)\" = /work && "
         "test \"$(id -u)\" = \"$(( $(stat -c %u .) ))\" && "
         "printf ok > proof.txt && cat proof.txt && "
         "test \"$(cat /skills/SKILL.md)\" = protected && "
@@ -797,9 +797,9 @@ def test_readonly_and_read_write_aliases_follow_the_virtual_path(tmp_path: Path)
     assert backend.edit("/reference/shared.txt", "original", "no").error
     assert backend.delete("/reference/shared.txt").error
     assert project.joinpath("shared.txt").read_text() == "original"
-    assert backend.write("/workspace/shared.txt", "from-rw").error is None
+    assert backend.write("/project/shared.txt", "from-rw").error is None
     assert backend.read("/reference/shared.txt").file_data["content"] == "from-rw"
-    assert backend.read("/workspace/shared.txt").file_data["content"] == "from-rw"
+    assert backend.read("/project/shared.txt").file_data["content"] == "from-rw"
 
     parent = tmp_path / "parent"
     child = parent / "sub"
@@ -1065,7 +1065,7 @@ def test_bubblewrap_delete_and_aliases_match_execute(tmp_path: Path) -> None:
         assert alias.execute("printf nope > /reference/shared.txt").exit_code != 0
         assert alias.write("/reference/shared.txt", "no").error
         assert shared.joinpath("shared.txt").read_text() == "original"
-        assert alias.write("/workspace/shared.txt", "from-rw").error is None
+        assert alias.write("/shared/shared.txt", "from-rw").error is None
         visible = alias.execute("cat /reference/shared.txt")
         assert visible.exit_code == 0 and "from-rw" in visible.output
         assert alias.read("/reference/shared.txt").file_data["content"] == "from-rw"
@@ -1154,29 +1154,29 @@ def test_intermediate_symlink_cannot_mutate_read_only_submount(tmp_path: Path) -
     (project / "alias").symlink_to(Path("secret"))
     (project / "alias2").symlink_to(Path("alias"))
     (project / "alias_abs_host").symlink_to(secret)
-    (project / "alias_abs_virtual").symlink_to("/workspace/secret")
+    (project / "alias_abs_virtual").symlink_to("/project/secret")
     (project / "to-file").symlink_to(Path("secret") / "file.txt")
     (project / "to-file-exec").symlink_to(Path("secret") / "file.txt")
     (project / "note.txt").write_text("note")
     config = SandboxConfig(
         workspace=project,
         bwrap_path=executable,
-        extra_read_only_mounts=(BindMount(secret, "/workspace/secret"),),
+        extra_read_only_mounts=(BindMount(secret, "/project/secret"),),
     )
     backend = select_backend(config).backend
     try:
         baseline = _secret_signature(secret)
-        direct = backend.write("/workspace/secret/file.txt", "pwn")
+        direct = backend.write("/project/secret/file.txt", "pwn")
         assert direct.error and "mount is read-only" in direct.error
-        executed = backend.execute("printf pwn > /workspace/secret/file.txt")
+        executed = backend.execute("printf pwn > /project/secret/file.txt")
         assert executed.exit_code != 0 and "Read-only file system" in executed.output
         assert _secret_signature(secret) == baseline
 
         prefixes = ("alias", "alias2", "alias_abs_host")
         for prefix in prefixes:
-            file_path = f"/workspace/{prefix}/file.txt"
-            nested_path = f"/workspace/{prefix}/sub/file.txt"
-            created_path = f"/workspace/{prefix}/new.txt"
+            file_path = f"/project/{prefix}/file.txt"
+            nested_path = f"/project/{prefix}/sub/file.txt"
+            created_path = f"/project/{prefix}/new.txt"
             for denied in (
                 backend.write(file_path, "pwn"),
                 backend.write(nested_path, "pwn"),
@@ -1194,45 +1194,46 @@ def test_intermediate_symlink_cannot_mutate_read_only_submount(tmp_path: Path) -
             for removed in (
                 backend.delete(file_path),
                 backend.delete(nested_path),
-                backend.delete(f"/workspace/{prefix}/sub"),
-                backend.delete(f"/workspace/{prefix}/inner_link"),
+                backend.delete(f"/project/{prefix}/sub"),
+                backend.delete(f"/project/{prefix}/inner_link"),
             ):
                 assert removed.error and "Permission denied" in removed.error
-            command = backend.execute(f"printf pwn > /workspace/{prefix}/file.txt")
+            command = backend.execute(f"printf pwn > /project/{prefix}/file.txt")
             assert command.exit_code != 0
-            removed_by_exec = backend.execute(f"rm /workspace/{prefix}/file.txt")
+            removed_by_exec = backend.execute(f"rm /project/{prefix}/file.txt")
             assert removed_by_exec.exit_code != 0
             assert _secret_signature(secret) == baseline
             assert (secret / "file.txt").read_text() == "orig"
             assert (nested / "file.txt").read_text() == "orig"
             assert not (secret / "new.txt").exists()
 
-        assert "Read-only file system" in backend.execute("printf pwn > /workspace/alias/sub/file.txt").output
-        assert "Read-only file system" in backend.execute("rm /workspace/alias2/sub/file.txt").output
-        virtual = backend.write("/workspace/alias_abs_virtual/file.txt", "pwn")
+        assert "Read-only file system" in backend.execute("printf pwn > /project/alias/sub/file.txt").output
+        assert "Read-only file system" in backend.execute("rm /project/alias2/sub/file.txt").output
+        virtual = backend.write("/project/alias_abs_virtual/file.txt", "pwn")
         assert virtual.error and "Permission denied" in virtual.error
-        assert backend.read("/workspace/alias/file.txt").file_data["content"] == "orig"
+        assert backend.read("/project/alias/file.txt").file_data["content"] == "orig"
         assert _secret_signature(secret) == baseline
 
-        assert backend.delete("/workspace/to-file").error is None
+        assert backend.delete("/project/to-file").error is None
         assert not (project / "to-file").is_symlink()
         assert (secret / "file.txt").read_text() == "orig"
-        removed_link = backend.execute("rm /workspace/to-file-exec")
+        removed_link = backend.execute("rm /project/to-file-exec")
         assert removed_link.exit_code == 0
         assert not (project / "to-file-exec").is_symlink()
         assert (secret / "file.txt").read_text() == "orig"
-        assert backend.delete("/workspace/alias").error is None
+        assert backend.delete("/project/alias").error is None
         assert not (project / "alias").exists() and not (project / "alias").is_symlink()
         assert (secret / "file.txt").read_text() == "orig"
         assert (secret / "inner_link").is_symlink()
-        assert backend.write("/workspace/note.txt", "yes").error is None
+        assert backend.write("/project/note.txt", "yes").error is None
         assert (project / "note.txt").read_text() == "yes"
-        assert "orig" in backend.execute("cat /workspace/secret/file.txt").output
+        assert "orig" in backend.execute("cat /project/secret/file.txt").output
     finally:
         backend.executor.pool.shutdown("intermediate symlink")
 
 
-def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("custom_path", [False, True])
+def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_path) -> None:
     import os
     import shutil
     import subprocess
@@ -1273,7 +1274,8 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
 
     def check(source: str) -> None:
         monkeypatch.setattr("agent.tools.grep.resolve_rg", lambda: source)
-        backend = select_backend(SandboxConfig(workspace=workspace, bwrap_path=executable)).backend
+        env_set = {"PATH": "/opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin"} if custom_path else {}
+        backend = select_backend(SandboxConfig(workspace=workspace, bwrap_path=executable, env_set=env_set)).backend
         try:
             assert backend.read("/workspace/visible.py").file_data["content"] == "TODO visible\n"
             assert backend.write("/workspace/written.txt", "from-tool").error is None
@@ -1317,3 +1319,105 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
 
     for source in sources:
         check(source)
+
+
+@pytest.mark.parametrize("name,root", [
+    ("deep-agent", "/deep-agent"),
+    ("another project", "/another project"),
+    ("中文项目", "/中文项目"),
+    ("usr", "/workspace/usr"),
+    ("skills", "/workspace/skills"),
+])
+def test_project_name_is_used_consistently_for_sandbox_paths(tmp_path, monkeypatch, name, root):
+    from agent.tools.execute import build_execute_tool
+
+    monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+    project = tmp_path / name
+    project.mkdir()
+    (project / "note.txt").write_text("project contents")
+    config = SandboxConfig(workspace=project, max_output_bytes=4)
+    executor = BubblewrapBackend(config, executable="/bin/true")
+    backend = WorkspaceCompositeBackend(executor, skills_dir=None)
+    args = executor.command_args("pwd")
+    assert args[args.index("--bind") + 1:args.index("--bind") + 3] == [str(project), root]
+    assert args[args.index("--chdir") + 1] == root
+    assert sandbox_environment(config, {})["PWD"] == root
+    assert root in build_execute_tool(backend).description
+    assert "{workspace_root}" not in build_execute_tool(backend).description
+    assert backend.read(f"{root}/note.txt").file_data["content"] == "project contents"
+    assert backend.write(f"{root}/created.txt", "new").error is None
+    assert backend.read("/workspace/note.txt").error
+    assert backend.read(f"{root}2/note.txt").error
+    assert backend.delete(root).error == "Permission denied: cannot delete a sandbox mount point"
+    assert backend.regex_search_location(None)[2] == root
+    assert backend.artifacts_root == f"{root}/.deepagents"
+    with pytest.raises(ValueError, match="protected destination"):
+        BubblewrapBackend(replace(config, extra_read_write_mounts=(BindMount(project, root),)), executable="/bin/true")
+    # Truncated execute output must point back to a path readable by file tools.
+    host = UnsandboxedShellBackend(config)
+    output = host.execute("printf 123456")
+    assert output.agent_log_path.startswith(f"{root}/.deep-agent/logs/exec/")
+    assert backend.read(output.agent_log_path).file_data["content"] == "123456"
+
+
+@pytest.mark.parametrize("source", ["env_set", "allowlist"])
+@pytest.mark.parametrize("path", [
+    "/opt/node/bin:/opt/cargo/bin:/usr/bin:/bin",
+    "/opt/tools:/run/deep-agent:/usr/bin:/run/deep-agent",
+])
+def test_custom_path_keeps_builtin_tools_first(tmp_path, source, path):
+    config = SandboxConfig(
+        workspace=tmp_path,
+        env_set={"PATH": path} if source == "env_set" else {},
+        env_allowlist=("PATH",) if source == "allowlist" else (),
+    )
+    environment = sandbox_environment(config, {"PATH": path})
+    assert environment["PATH"].split(":") == [
+        "/run/deep-agent", *[part for part in path.split(":") if part != "/run/deep-agent"],
+    ]
+
+
+@pytest.mark.parametrize("network", [False, True])
+def test_one_shot_sandbox_has_builtin_rg_with_custom_path(tmp_path, network):
+    import subprocess
+
+    executable = _bwrap_executable()
+    backend = BubblewrapBackend(SandboxConfig(
+        workspace=tmp_path,
+        env_set={"PATH": "/opt/node/bin:/usr/bin:/bin"},
+    ), executable=executable)
+    result = subprocess.run(
+        backend.command_args("command -v rg && rg --version", network=network),
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0] == "/run/deep-agent/rg"
+    assert "ripgrep" in result.stdout
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_host_fallback_tools_and_description_match_real_environment(tmp_path, wrapped):
+    from agent.tools.execute import build_execute_tool
+    from agent.tools.grep import resolve_rg
+
+    rg = resolve_rg()
+    assert rg is not None
+    host = UnsandboxedShellBackend(SandboxConfig(
+        workspace=tmp_path, env_set={"PATH": "/missing-tools"},
+    ))
+    backend = WorkspaceCompositeBackend(host, skills_dir=None) if wrapped else host
+    result = backend.execute("command -v rg && rg --version")
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[0] == rg
+    assert "ripgrep" in result.output
+    description = build_execute_tool(backend).description
+    assert "directly on the host" in description
+    assert str(tmp_path) in description
+    assert "network=false does not disable networking" in description
+    assert "temporary directories created for each call" in description
+    assert "inside the sandbox" not in description
+    assert "survive between calls" not in description
+    first = backend.execute('printf marker > "$HOME/marker"; printf "%s" "$HOME"')
+    assert first.exit_code == 0
+    assert not Path(first.output).exists()
+    assert backend.execute('test ! -e "$HOME/marker"').exit_code == 0

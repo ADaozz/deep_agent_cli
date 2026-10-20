@@ -140,7 +140,7 @@ def _mutation_path(name: str, args: dict[str, Any]) -> str:
     if not path:
         return "file"
     label = str(PurePosixPath(str(path)))
-    if name == "write_file" and label.startswith("/workspace/"):
+    if name == "write_file" and label.startswith("/"):
         label = label.lstrip("/")
     return label
 

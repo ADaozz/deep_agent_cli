@@ -32,7 +32,7 @@
     <g id="authorized-files">
       <rect x="48" y="722" width="520" height="148" rx="12" fill="#172125" stroke="#65747d" stroke-width="2"/>
       <text x="80" y="769" fill="#f0f2f3" font-size="32" font-weight="600">授权文件</text>
-      <text x="80" y="809" fill="#f0f2f3" font-size="28">/workspace · 可写</text>
+      <text x="80" y="809" fill="#f0f2f3" font-size="28">项目工作区 · 可写</text>
       <text x="80" y="848" fill="#acb6bc" font-size="28">/skills · 只读</text>
     </g>
     <g id="bubblewrap-boundary">

@@ -7,7 +7,7 @@ rg -n 'pattern' path
 rg --files -g 'pattern' path
 ```
 
-`rg` 由宿主环境提供，优先使用当前 Python 环境里的可执行文件，其次使用系统 `PATH`。Bubblewrap 把它只读挂载到 `/run/deep-agent/rg`，并将 `/run/deep-agent` 放在沙箱 `PATH` 最前。模型直接执行 `rg`，不需要知道宿主安装路径。`ask` 的无网沙箱和 `allow` 的有网沙箱使用同一份二进制。Agent 不能自行安装或下载 `rg`。
+`rg` 由宿主环境提供，优先使用当前 Python 环境里的可执行文件，其次使用系统 `PATH`。Bubblewrap 把它只读挂载到 `/run/deep-agent/rg`，并将 `/run/deep-agent` 放在沙箱 `PATH` 最前（自定义 `env_set.PATH` 或继承宿主 `PATH` 时也会保留）。持久 Worker 和一次性命令入口使用相同的 `rg` 挂载。模型直接执行 `rg`，不需要知道宿主安装路径。`ask` 的无网沙箱和 `allow` 的有网沙箱使用同一份二进制。Agent 不能自行安装或下载 `rg`。
 
 宿主没有 `rg` 时，`execute` 的工具说明会写明代码搜索不可用，沙箱启动日志也会给出同样的诊断，不能把搜索说成可用。
 
@@ -29,7 +29,7 @@ rg --files -g 'pattern' path
 2. 系统 `PATH` 中的 `rg`。
 3. 两处均不可用时，使用独立进程中的 Python `re` 回退。
 
-程序只定位已安装的可执行文件，不自动下载二进制，也不修改 `PATH`。
+`rg` 定位函数只检查已安装的可执行文件，不自动下载二进制，也不修改宿主用户的 `PATH`。执行后端单独构造命令 PATH：沙箱保留 `/run/deep-agent` 前缀，宿主回退加入 `rg` 的实际安装目录。这项内置工具处理不涉及 Node、Cargo 或浏览器的自动发现；其他工具仍按 [挂载配置](sandbox.md#工具目录与环境变量) 使用。
 pipx 环境中的依赖命令可能不会直接暴露到用户的 `PATH`，但 Agent 仍可找到环境内的 `rg`。
 
 以下系统安装方式可作为备选：
@@ -120,7 +120,7 @@ grep(pattern="config.yaml", fixed_string=true)
 **行为变更**：旧版默认按字面量搜索；现在 `.`, `*`, `+`, `[` 等字符默认解释为正则语法。
 通过自定义非本地 Backend 注入的工具仍使用该 Backend 的原有搜索接口。
 
-`path` 默认 `/workspace`。SANDBOXED 下还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
+`path` 默认 `/my-project`。SANDBOXED 下还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
 
 #### Glob 过滤
 
@@ -190,7 +190,7 @@ Python 回退引擎（UNSANDBOXED 或未找到 `rg`）实现相同的 Glob、隐
   引擎遍历中的大文件被跳过（`rg` 遍历时静默跳过大文件）。
 
 结果按路径排序；被截断时 `rg` 并行搜索得到的部分结果集合不保证每次相同。
-搜索只读，不触发命令执行审批。超时或取消会终止本次 rg 或 Python Worker 及其子进程；
+上述未注册搜索实现只读，直接调用时不经过 `execute`。模型当前通过 `execute` 使用 `rg`，在 `ask` 模式下仍须审批。超时或取消会终止本次 rg 或 Python Worker 及其子进程；
 正常情况下保留持久沙箱，无法确认命令终止或 Worker 失效时才清理对应实例。
 两种引擎均按单行搜索，不支持多行 pattern。
 

@@ -1,5 +1,7 @@
 # 沙箱与权限
 
+工作区的沙箱路径根据项目目录名生成：例如宿主目录 `/home/user/my-project` 对应 `/my-project`，`pwd`、文件工具和工具描述使用同一个路径。每次命令调用都从该目录开始，上次调用的 `cd` 不会延续。本文以 `/my-project` 为例。项目名与沙箱运行目录冲突时（如 `usr`、`tmp`、`skills`），使用 `/workspace/<项目名>`；宿主工作区为 `/` 时使用 `/workspace`。
+
 本项目有两层相互独立的控制：
 
 - **沙箱**（Bubblewrap）决定 `execute` 运行的命令能访问什么。
@@ -15,7 +17,7 @@
 | `UNSANDBOXED` | 预检失败，且配置了 `sandbox.allow_unsandboxed: true` 或在启动提示中输入 `UNSANDBOXED` | 宿主机，当前用户权限 |
 | `CUSTOM` | 作为库使用时显式传入 `backend` | 由该 backend 决定 |
 
-预检失败且没有上述授权时，CLI 拒绝启动。非交互环境下不会出现 `UNSANDBOXED` 提示，直接失败。`/status` 显示当前模式。
+预检失败且没有上述授权时，CLI 拒绝启动。非交互环境下不会出现 `UNSANDBOXED` 提示，直接失败。`/status` 显示当前模式和两个持久沙箱的运行状态。启动预检只验证沙箱可用性，不逐项检查 Node、Cargo 或浏览器能否运行。
 
 ## 沙箱内可见的内容
 
@@ -23,16 +25,18 @@
 
 | 路径 | 内容 |
 |---|---|
-| `/workspace` | 工作区，读写 |
+| `/my-project` | 工作区，读写 |
 | `/skills` | `~/.deep-agent/skills/`，只读（目录存在时） |
 | `/usr`、`/bin`、`/lib`、`/lib64` | 宿主机对应目录，只读 |
 | `/etc` | 只有 `passwd`、`group`、`nsswitch.conf`、`ld.so.cache`、`localtime`、`alternatives`；开放网络时另加 `hosts`、`resolv.conf`、`ssl` |
 | `/tmp`、`/home` | 空的 tmpfs；`HOME=/home/agent` |
 | `/proc`、`/dev` | 沙箱自己的实例 |
 
-其他宿主路径（家目录其余部分、`/opt`、`/var` 等）不可见。安装在 `~/.local`、`~/.nvm`、`~/.cargo`、`/opt` 等位置的工具链在沙箱中找不到，需要通过 `sandbox.extra_read_only_mounts` 挂载，并在 `env_set` 中调整 `PATH`。
+表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。默认模板已包含若干可选工具目录挂载，完整清单见 [默认工具挂载](configuration.md#默认工具挂载)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
 
-额外挂载的限制：`destination` 必须是沙箱内的绝对路径，不能是 `/workspace`、`/tmp`、`/home/agent`，也不能与 `/skills` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选挂载的源目录不存在时会被跳过。
+额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/my-project`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
+
+挂载用于控制文件系统可见范围。用户可以选择较宽的只读目录，也可以只暴露所需版本或文件，均通过现有挂载列表表达，审批规则仍由 `ask` / `allow` 独立决定。只读只能禁止写入，不能阻止读取其中的密钥、凭据等敏感文件。
 
 文件工具使用同一份启动配置。能安全表达的挂载才会同时进入 Bubblewrap 和文件工具路由：
 
@@ -45,8 +49,19 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。自定义 `PATH` 会整段替换这个值；需要在沙箱里直接运行 `rg` 时，请把 `/run/deep-agent` 留在 `PATH` 中。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。自定义 `PATH` 替换默认工具目录，程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。生成模板另含 Cargo 和浏览器相关环境设置，见下节。
 - 不限制 CPU、内存、磁盘或进程数。
+
+## 工具目录与环境变量
+
+程序不自动发现 Node、Cargo、Chrome 等工具的安装位置，也不自动选择版本。默认模板采用常见目录；能加载配置或启动沙箱，不代表所有可选工具都已安装并可运行。
+
+- **Node / npm / npx**：`~/.nvm/versions/node` 整体只读挂载到 `/opt/node`。在沙箱中查看该目录，再由用户将 `/opt/node/<实际版本>/bin` 加入 `env_set.PATH`，保留已有 Cargo 和系统路径。PATH 不支持版本通配符。若把源目录缩小到单个版本并仍挂载为 `/opt/node`，PATH 相应改为 `/opt/node/bin`。系统 Node 可使用已有系统路径。
+- **Cargo / Rustup**：模板将 `~/.cargo` 挂载为 `/opt/cargo`，将 `~/.rustup` 挂载为 `/opt/rustup`，并设置 `RUSTUP_HOME=/opt/rustup`。自定义安装位置需要同步调整源目录和环境变量。模板没有将 `CARGO_HOME` 指向只读宿主目录；Cargo 默认缓存写入沙箱 HOME。`~/.cargo` 挂载范围仍包含其中的配置和凭据，需要更小可见范围时可将源缩小为 `~/.cargo/bin`，目标改为 `/opt/cargo/bin`。
+- **Chrome 与缓存**：`/opt/google` 的程序目录只读，Playwright 浏览器缓存 `/opt/ms-playwright` 单独读写挂载。宿主使用 `XDG_CACHE_HOME` 或自定义缓存位置时，将缓存 `source` 改为实际目录，并保持沙箱目标和 `PLAYWRIGHT_BROWSERS_PATH` 一致。
+- **X11**：模板将已有的 `/tmp/.X11-unix` 只读挂载到同一沙箱路径。WSLg 若使用 `/mnt/wslg/.X11-unix`，修改原条目的 `source` 即可；不要再添加一个相同目标。显示环境及认证说明见 [Playwright 与有头 X11](#playwright-与有头-x11)。
+
+这些挂载均为可选项；缺失会跳过，也不会自动安装工具。升级不会覆盖 `~/.deep-agent/config.yaml`，现有用户需对照模板手动合并。YAML 中的列表会整体替换对应配置，不会自动追加条目；编辑示例时应保留仍需使用的挂载和环境变量。修改后重启 CLI，新建的沙箱才使用更新配置。
 
 ## 沙箱生命周期
 
@@ -58,7 +73,7 @@
 | 有网沙箱 | `network=true` 或 `allow` 模式下的 `execute` | 共享宿主网络 |
 
 - 每次 `execute` 都启动一个新的 `/bin/sh -lc`：`cd`、shell 变量等状态不保留；保留的是沙箱环境本身——`/tmp`、`/home` 中的文件和后台进程（例如 `nohup cmd > log 2>&1 &`）在后续调用中仍然存在。
-- 两个沙箱只共享 `/workspace` 和启动时声明的额外挂载；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
+- 两个沙箱只共享 `/my-project` 和启动时声明的额外挂载；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
 - 沙箱的主进程是一个常驻 Worker，宿主只通过它继承的管道下发命令。这个控制通道不出现在文件系统或网络中，Worker 本身设为不可 dump，沙箱内的进程不能通过 `/proc` 接管它；无网沙箱看不到有网沙箱的进程、`/tmp` 中的 socket，也连不上它的抽象 Unix socket（抽象 socket 随网络命名空间隔离）。
 - 取消和超时只杀掉当前命令的进程组（包括它启动的后台进程），沙箱继续可用。
 - Worker 异常退出时，正在执行的命令返回 `sandbox_lost` 错误，不会自动重试；下一次 `execute` 启动新的沙箱。
@@ -72,7 +87,7 @@
 - 模型在调用 `execute` 时传 `network=true`，该条命令在有网沙箱中运行，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。
 - `allow` 模式下，每条 `execute` 都在有网沙箱中运行，单次调用无法关闭。
 
-`network=false` 隔离的是**直接 IP 网络访问**，不保证完全没有间接网络通信。例如：有网沙箱中的后台服务在共享 `/workspace` 下创建文件系统 Unix Socket；无网命令连接这个 Socket 发出请求；有网后台服务代为访问互联网，并把响应返回无网命令。共享文件或 FIFO 也可能构成类似通信路径。抽象 Unix Socket 与这里的工作区文件系统 Socket 不同，前者仍受网络命名空间隔离。
+`network=false` 隔离的是**直接 IP 网络访问**，不保证完全没有间接网络通信。例如：有网沙箱中的后台服务在共享 `/my-project` 下创建文件系统 Unix Socket；无网命令连接这个 Socket 发出请求；有网后台服务代为访问互联网，并把响应返回无网命令。共享文件或 FIFO 也可能构成类似通信路径。抽象 Unix Socket 与这里的工作区文件系统 Socket 不同，前者仍受网络命名空间隔离。
 
 经其他有网进程实现的间接联网属于 **KNOWN LIMITATION**，不是沙箱逃逸。本轮不增加 Unix Socket 防护、Seccomp 或 IPC 配置开关，不改变共享工作区或双持久沙箱设计。
 
@@ -83,13 +98,15 @@
 - 已经在跑的后台进程不受模式切换影响。需要停掉它们时，让 Agent 结束进程，或新建 / 关闭会话。
 - `web_search` 在宿主进程中运行，与沙箱网络无关；`ask` 模式下每次搜索均需审批。
 
+UNSANDBOXED 回退模式的命令直接使用宿主路径，并始终可以访问宿主网络；`network=false` 不提供网络隔离。其 `HOME`、`TMPDIR` 每次调用单独创建并在调用后清理，不能跨调用保存缓存。文件工具仍使用项目的虚拟路径。`rg` 从当前 Python 环境或宿主 PATH 定位，其实际安装目录会加入命令的 PATH；工具说明按实际执行模式生成。
+
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。SANDBOXED 模式下，`/workspace`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
+`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。SANDBOXED 模式下，`/my-project`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
 
 | 路径 | 文件工具 |
 |---|---|
-| `/workspace` | 工作区，读写 |
+| `/my-project` | 工作区，读写 |
 | `/skills` | Skills 目录，只读（目录存在时） |
 | `extra_read_write_mounts` 的目标 | 对应宿主路径，读写 |
 | `extra_read_only_mounts` 的目标 | 对应宿主路径，只读 |
@@ -99,9 +116,9 @@
 
 写入、编辑和上传会解析完整的宿主路径。路径落在当前虚拟路由下更具体的只读子挂载时直接拒绝，相对路径、链式和多级符号链接都不能绕过。指向同一宿主目录的只读别名和读写别名仍按各自的虚拟路径授权。
 
-`delete` 不能删除挂载点本身，包括 `/workspace`、其他目录挂载的根，以及单文件挂载。通过别名或父目录把挂载源删掉也同样拒绝，避免持久沙箱仍绑定已经消失的 inode。挂载内部的普通文件可以删除。删除时先解析父目录的真实路径，父目录落在只读子挂载里则拒绝。最后一级如果是符号链接，只删除链接本身，不跟随目标；链接所在的真实目录是只读的时候，链接也不能删。
+`delete` 不能删除挂载点本身，包括 `/my-project`、其他目录挂载的根，以及单文件挂载。通过别名或父目录把挂载源删掉也同样拒绝，避免持久沙箱仍绑定已经消失的 inode。挂载内部的普通文件可以删除。删除时先解析父目录的真实路径，父目录落在只读子挂载里则拒绝。最后一级如果是符号链接，只删除链接本身，不跟随目标；链接所在的真实目录是只读的时候，链接也不能删。
 
-Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib64` 以及少量 `/etc` 文件不会自动成为文件工具的授权路径。`ls('/')` 和无路径 `glob` 聚合已经授权的虚拟目录；明确访问未授权路径返回 `Permission denied`。空的已授权目录返回空结果，而不是权限错误。`/workspace2` 不会被当成 `/workspace`。`..` 和指向授权根之外的符号链接都不能逃逸。单个文件的搜索上限仍是 10 MiB。
+Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib64` 以及少量 `/etc` 文件不会自动成为文件工具的授权路径。`ls('/')` 和无路径 `glob` 聚合已经授权的虚拟目录；明确访问未授权路径返回 `Permission denied`。空的已授权目录返回空结果，而不是权限错误。`/my-project2` 不会被当成 `/my-project`。`..` 和指向授权根之外的符号链接都不能逃逸。单个文件的搜索上限仍是 10 MiB。
 
 UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录权限，文件工具仍只使用工作区和只读 Skills。CUSTOM backend 保留调用方自己的规则。
 
@@ -124,7 +141,7 @@ UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录�
 ## 命令输出与日志
 
 - 输出实时显示在对应的工具块中。
-- 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果同时给出宿主路径和 Agent 可读的 `/workspace/.deep-agent/logs/exec/...` 路径。
+- 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果同时给出宿主路径和 Agent 可读的 `/my-project/.deep-agent/logs/exec/...` 路径。
 - 默认没有超时。设置 `sandbox.timeout_seconds` 后作为上限；超时返回退出码 124，取消返回 130。
 - 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或固定 100 毫秒排空窗口结束为止，窗口不会因新输出而延长；之后的输出不进入本次结果，后台进程再写这些管道会收到 `SIGPIPE`。需要长期运行的后台进程应把输出重定向到文件。
 
@@ -147,12 +164,14 @@ Node 可以来自 `/usr/bin/node`，CLI 则可以在自定义 npm prefix 下。�
 ```yaml
 sandbox:
   extra_read_only_mounts:
+    # 将此项追加到已有列表，保留仍需使用的 Node、Cargo / Rustup、Chrome 和 X11 挂载。
     - source: ~/.local  # 替换为 npm config get prefix 的实际结果
       destination: /opt/npm-prefix
   env_allowlist:
     - DISPLAY
   env_set:
-    PATH: /opt/npm-prefix/bin:/run/deep-agent:/usr/local/bin:/usr/bin:/bin
+    PATH: /opt/npm-prefix/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    RUSTUP_HOME: /opt/rustup
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
 ```
 
@@ -160,7 +179,7 @@ sandbox:
 
 合并进现有配置，不覆盖其他挂载和允许的变量；上述源目录必须存在。系统 Chrome 还需要 `/opt/google` 的只读挂载；位于系统目录外的 Node 本体需要独立挂载并加入 PATH。不要把个人机器的 Node 目录当成通用要求。
 
-有头模式需要允许传入 `DISPLAY`，并确保相应 X Server 可访问。默认模板已允许 `DISPLAY`，并可选只读挂载 WSLg 的 `/mnt/wslg/.X11-unix` 到沙箱 `/tmp/.X11-unix`；启动 CLI 的终端需已有正确的 `DISPLAY`（WSLg 通常为 `:0`）。现有配置需手动合并这些项目，退出并重新启动 CLI 后生效。WSLg 已提供显示服务，无需另外安装 Xvfb。
+有头模式需要允许传入 `DISPLAY`，并确保相应 X Server 可访问。默认模板已允许 `DISPLAY`，并可选只读挂载宿主 `/tmp/.X11-unix` 到同一沙箱路径；WSLg 若使用 `/mnt/wslg/.X11-unix`，修改现有条目的源路径即可。启动 CLI 的终端需已有正确的 `DISPLAY`。现有配置需手动合并这些项目，退出并重新启动 CLI 后生效。WSLg 已提供显示服务，无需另外安装 Xvfb。
 
 已实测挂载 WSLg 的 X11 文件 socket 后，`network=false` 下 `playwright-cli open about:blank --headed` 可以启动、截图并关闭。普通 Linux X11 桌面可使用宿主 `/tmp/.X11-unix` 作为挂载源。若仅依赖 X11 抽象 socket，无网沙箱的网络命名空间仍无法连接宿主 X Server，需要 `network=true`；访问互联网页面也需要网络，ask 模式需审批。挂载显示 socket 允许连接宿主显示服务，不改变 IP 网络或 IPC 隔离。Xauthority 认证可能需要传入 `XAUTHORITY` 并挂载认证文件，目前未验证；WSLg 此处使用 X11，原生 Wayland 未覆盖。
 

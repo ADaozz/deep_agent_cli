@@ -172,10 +172,10 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     assert result.truncated
     assert result.output.startswith("efgh1234")
     assert result.output.count("[Output truncated: showing") == 1
-    match = re.search(r"Agent path: (/workspace/\.deep-agent/logs/exec/[^\]\n]+)", result.output)
+    match = re.search(rf"Agent path: (/{re.escape(tmp_path.name)}/\.deep-agent/logs/exec/[^\]\n]+)", result.output)
     assert match is not None
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    log_path = tmp_path / match.group(1).removeprefix("/workspace/")
+    log_path = tmp_path / match.group(1).removeprefix(f"/{tmp_path.name}/")
     assert log_path.read_bytes() == b"ABCDefgh1234"
     routed = WorkspaceCompositeBackend(backend, skills_dir=None).read(match.group(1))
     assert routed.file_data and routed.file_data["content"] == "ABCDefgh1234"
@@ -194,7 +194,7 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     assert "[output truncated]" not in tool_result
     assert artifact["truncated"] is True
     assert artifact["host_log_path"] and str(tmp_path) in artifact["host_log_path"]
-    assert artifact["agent_log_path"].startswith("/workspace/.deep-agent/logs/exec/")
+    assert artifact["agent_log_path"].startswith(f"/{tmp_path.name}/.deep-agent/logs/exec/")
 
 
 def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ def test_truncated_timeout_keeps_tail_and_captured_log(tmp_path: Path) -> None:
     assert "efgh1234" in result.output
     assert "timed out" in result.output
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    assert "Agent path: /workspace/.deep-agent/logs/exec/" in result.output
+    assert f"Agent path: /{tmp_path.name}/.deep-agent/logs/exec/" in result.output
 
 
 def test_cancel_drains_already_produced_pipe_output(tmp_path: Path, monkeypatch) -> None:
@@ -333,7 +333,7 @@ def test_truncated_cancel_keeps_tail_and_captured_log(tmp_path: Path) -> None:
     assert "efgh1234" in result.output
     assert "Cancelled by user" in result.output
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    assert "Agent path: /workspace/.deep-agent/logs/exec/" in result.output
+    assert f"Agent path: /{tmp_path.name}/.deep-agent/logs/exec/" in result.output
 
 
 def test_log_symlink_is_rejected_without_losing_tail(tmp_path: Path) -> None:

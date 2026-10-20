@@ -287,7 +287,7 @@ def test_execute_artifact_reaches_runner_event_after_approval(tmp_path) -> None:
     completed = [event for event in events if event.type == "tool_completed" and event.name == "execute"]
     assert len(completed) == 1
     assert completed[0].artifact["truncated"] is True
-    assert completed[0].artifact["agent_log_path"].startswith("/workspace/.deep-agent/logs/exec/")
+    assert completed[0].artifact["agent_log_path"].startswith(f"/{tmp_path.name}/.deep-agent/logs/exec/")
     assert completed[0].artifact["exit_code"] == 0
 
 

@@ -191,7 +191,7 @@ def cancel_probe(workspace: Path) -> dict:
     if hasattr(backend.executor, "pool"):
         backend.executor.pool.shutdown("benchmark cancel probe finished")
     return {"return_ms": round((time.perf_counter() - start) * 1000, 1), "result": result[0] if result else None,
-            "leftover_processes": leftovers, "next_search_ok": after.startswith("/workspace/")}
+            "leftover_processes": leftovers, "next_search_ok": after.startswith(backend.workspace_root + "/")}
 
 
 def _cmdline(path: Path) -> bytes:

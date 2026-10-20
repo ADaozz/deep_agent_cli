@@ -16,7 +16,7 @@
     <text x="360" y="470" fill="#8d8d8d" font-size="18">模型回答或工具调用</text>
     <rect x="56" y="540" width="500" height="100" fill="#141414" stroke="#13a10e" stroke-width="2"/>
     <text x="76" y="578" fill="#13a10e" font-size="24" font-weight="700">文件工具 · 宿主进程</text>
-    <text x="76" y="612" fill="#eceae6" font-size="20">/workspace 可写 · /skills 只读</text>
+    <text x="76" y="612" fill="#eceae6" font-size="20">项目工作区 可写 · /skills 只读</text>
     <rect x="644" y="540" width="500" height="100" fill="#141414" stroke="#61d6d6" stroke-width="2"/>
     <text x="664" y="578" fill="#61d6d6" font-size="24" font-weight="700">execute · Bubblewrap</text>
     <text x="664" y="612" fill="#eceae6" font-size="20">默认无网 · 有网需单独声明</text>

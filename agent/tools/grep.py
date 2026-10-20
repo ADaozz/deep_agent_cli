@@ -594,7 +594,7 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend, *, network: bool =
         - Set fixed_string=true for literal text searches.
         - Uses ripgrep when available.
         - Falls back to Python regex search when ripgrep is unavailable.
-        - Searches /workspace by default. /skills and declared sandbox mounts can be searched by path.
+        - Searches the project workspace by default. /skills and declared sandbox mounts can be searched by path.
         - Like ripgrep, skips hidden files, .gitignore/.ignore/.rgignore matches,
           symlinks, binary files and files over 10 MiB. .git is always skipped.
 

@@ -112,9 +112,20 @@ def _component_within(path: str, root: str) -> bool:
     return normalized == base or normalized.startswith(base + "/")
 
 
+def sandbox_workspace_root(workspace: Path) -> str:
+    """Name the virtual workspace after the project without hiding sandbox runtimes."""
+    name = workspace.expanduser().resolve().name
+    reserved = {"usr", "bin", "lib", "lib64", "etc", "proc", "dev", "tmp", "home", "run", "skills"}
+    if not name:
+        return SANDBOX_ROOT
+    if name in reserved:
+        return f"{SANDBOX_ROOT}/{name}"
+    return f"/{name}"
+
+
 def _permission_denied(directories: tuple[str, ...], files: tuple[str, ...] = ()) -> str:
     roots: list[str] = []
-    for root in (SANDBOX_ROOT, *sorted({*directories, *files} - {SANDBOX_ROOT})):
+    for root in (*directories, *sorted(set(files) - set(directories))):
         if root not in roots:
             roots.append(root)
     if not roots:
@@ -196,7 +207,7 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
     also be mounted at several virtual paths with different permissions;
     file tools then judge read-only versus read-write by the virtual path.
     """
-    ordered: list[tuple[Path, str, bool]] = [(config.workspace, SANDBOX_ROOT, False)]
+    ordered: list[tuple[Path, str, bool]] = [(config.workspace, sandbox_workspace_root(config.workspace), False)]
     ordered.extend((mount.source, mount.destination, True) for mount in config.extra_read_only_mounts)
     ordered.extend((mount.source, mount.destination, False) for mount in config.extra_read_write_mounts)
     if skills_dir is not None:
@@ -422,7 +433,7 @@ class _ExactFileBackend(BackendProtocol):
 
 def _directory_backend(point: _MountPoint, executor: SandboxBackendProtocol) -> BackendProtocol:
     destination = point.virtual
-    if destination == SANDBOX_ROOT:
+    if destination == sandbox_workspace_root(executor.config.workspace):
         return executor
     if point.read_only:
         reason = "skills are read-only" if destination == SKILLS_ROOT else "mount is read-only"
@@ -435,6 +446,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
 
     def __init__(self, executor: SandboxBackendProtocol, *, skills_dir: Path | None) -> None:
         config = getattr(executor, "config", None)
+        self.workspace_root = (
+            sandbox_workspace_root(config.workspace) if isinstance(config, SandboxConfig) else SANDBOX_ROOT
+        )
         points = _mount_points(config, skills_dir) if isinstance(config, SandboxConfig) else ()
         # 额外挂载的虚拟目标只存在于 Bubblewrap 中。UNSANDBOXED 不把它们当成宿主权限。
         expose_mounts = isinstance(executor, BubblewrapBackend)
@@ -450,8 +464,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                 directories.append(point.virtual)
                 routes[point.virtual + "/"] = _directory_backend(point, executor)
         else:
-            routes[f"{SANDBOX_ROOT}/"] = executor
-            directories.append(SANDBOX_ROOT)
+            routes[f"{self.workspace_root}/"] = executor
+            directories.append(self.workspace_root)
             if skills_dir is not None:
                 routes[f"{SKILLS_ROOT}/"] = _ReadOnlyFilesystemBackend(skills_dir, reason="skills are read-only")
                 directories.append(SKILLS_ROOT)
@@ -459,12 +473,12 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         super().__init__(
             default=outside,
             routes=routes,
-            artifacts_root=f"{SANDBOX_ROOT}/.deepagents",
+            artifacts_root=f"{self.workspace_root}/.deepagents",
         )
         self.executor = executor
         self.skills_dir = skills_dir
         self._mount_points = points if expose_mounts else tuple(
-            point for point in points if point.virtual in {SANDBOX_ROOT, SKILLS_ROOT}
+            point for point in points if point.virtual in {self.workspace_root, SKILLS_ROOT}
         )
         self._file_mounts = files
         self._directory_roots = tuple(directories)
@@ -483,7 +497,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         """
         if not self.supports_regex_search:
             raise ValueError("Backend does not support local regex search")
-        virtual = path or SANDBOX_ROOT
+        virtual = path or self.workspace_root
         if not virtual.startswith("/") or ".." in virtual.split("/") or "~" in virtual or "\x00" in virtual:
             raise ValueError("Permission denied: invalid virtual search path")
         for mount, backend in sorted(self.routes.items(), key=lambda item: len(item[0]), reverse=True):
@@ -799,7 +813,7 @@ def sandbox_environment(config: SandboxConfig, environ: dict[str, str] | None = 
     result = {
         "PATH": FIXED_PATH,
         "HOME": "/home/agent",
-        "PWD": SANDBOX_ROOT,
+        "PWD": sandbox_workspace_root(config.workspace),
         "TMPDIR": "/tmp",
     }
     for name in SAFE_INHERITED_ENV:
@@ -812,6 +826,10 @@ def sandbox_environment(config: SandboxConfig, environ: dict[str, str] | None = 
         if name in source:
             result[name] = source[name]
     result.update(config.env_set)
+    # Keep built-in executables available even when configuration replaces PATH.
+    tools_path = str(PurePosixPath(SEARCH_BINARY_PATH).parent)
+    configured_paths = [part for part in result["PATH"].split(":") if part != tools_path]
+    result["PATH"] = ":".join([tools_path, *configured_paths])
     return result
 
 
@@ -822,6 +840,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         workspace = _validate_config(config)
         super().__init__(root_dir=workspace, virtual_mode=True, max_file_size_mb=10)
         self.config = replace(config, workspace=workspace)
+        self.workspace_root = sandbox_workspace_root(workspace)
         self.skills_dir = _validated_skills_dir(workspace)
         self.executable = executable
         self._env = sandbox_environment(config)
@@ -846,17 +865,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
                 "python3 is required inside the sandbox for the persistent command worker, "
                 f"but none was found under {FIXED_PATH} resolving into {', '.join(RUNTIME_PATHS)}"
             )
-        from agent.tools.grep import resolve_rg
-
         mount = ["--ro-bind", str(WORKER_SOURCE_PATH), WORKER_SANDBOX_PATH]
-        rg = resolve_rg()
-        if rg is not None:
-            mount += ["--ro-bind", str(Path(rg).resolve()), SEARCH_BINARY_PATH]
-        else:
-            LOG.warning(
-                "ripgrep (rg) is not installed on the host; "
-                "the sandbox cannot provide /run/deep-agent/rg and code search is unavailable"
-            )
         return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
 
     def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:
@@ -877,7 +886,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
             "--tmpfs", "/home",
             "--dir", "/home/agent",
             "--dir", "/etc",
-            "--bind", str(self.config.workspace), SANDBOX_ROOT,
+            "--bind", str(self.config.workspace), self.workspace_root,
         ]
         for path in (*RUNTIME_PATHS, *RUNTIME_FILES):
             if Path(path).exists():
@@ -887,15 +896,26 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
                 if Path(path).exists():
                     args += ["--ro-bind", path, path]
         for mount in self.config.extra_read_only_mounts:
-            args += _mount_args("--ro-bind", mount)
+            args += _mount_args("--ro-bind", mount, workspace_root=self.workspace_root)
         for mount in self.config.extra_read_write_mounts:
-            args += _mount_args("--bind", mount)
+            args += _mount_args("--bind", mount, workspace_root=self.workspace_root)
         if self.skills_dir is not None:
             args += ["--ro-bind", str(self.skills_dir), SKILLS_ROOT]
+        # Shared by persistent workers and one-shot shell commands.
+        from agent.tools.grep import resolve_rg
+
+        rg = resolve_rg()
+        if rg is not None:
+            args += ["--ro-bind", str(Path(rg).resolve()), SEARCH_BINARY_PATH]
+        else:
+            LOG.warning(
+                "ripgrep (rg) is not installed on the host; "
+                "the sandbox cannot provide /run/deep-agent/rg and code search is unavailable"
+            )
         args += [*(extra or ()), "--clearenv"]
         for name, value in sorted(self._env.items()):
             args += ["--setenv", name, value]
-        args += ["--chdir", SANDBOX_ROOT, "--"]
+        args += ["--chdir", self.workspace_root, "--"]
         return args
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -932,7 +952,17 @@ class UnsandboxedShellBackend(LocalShellBackend):
             inherit_env=False,
         )
         self.config = replace(config, workspace=workspace)
+        self.workspace_root = sandbox_workspace_root(workspace)
         self._base_env = sandbox_environment(config)
+        from agent.tools.grep import resolve_rg
+
+        rg = resolve_rg()
+        tools_path = str(PurePosixPath(SEARCH_BINARY_PATH).parent)
+        host_paths = [part for part in self._base_env["PATH"].split(":") if part != tools_path]
+        if rg is not None:
+            rg_directory = str(Path(rg).parent)
+            host_paths = [rg_directory, *[part for part in host_paths if part != rg_directory]]
+        self._base_env["PATH"] = ":".join(host_paths)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         if not command or not isinstance(command, str):
@@ -1054,9 +1084,9 @@ def _validate_config(config: SandboxConfig) -> Path:
         raise ValueError(f"max_output_bytes must be positive, got {config.max_output_bytes}")
     skills = _validated_skills_dir(workspace)
     for mount in config.extra_read_only_mounts:
-        _mount_args("--ro-bind", mount)
+        _mount_args("--ro-bind", mount, workspace_root=sandbox_workspace_root(workspace))
     for mount in config.extra_read_write_mounts:
-        _mount_args("--bind", mount)
+        _mount_args("--bind", mount, workspace_root=sandbox_workspace_root(workspace))
     _mount_points(replace(config, workspace=workspace), skills)
     for name in (*config.env_allowlist, *config.env_set):
         if not ENV_NAME.fullmatch(name):
@@ -1085,14 +1115,14 @@ def _resolve_executable(value: str) -> str | None:
     return shutil.which(value)
 
 
-def _mount_args(flag: str, mount: BindMount) -> list[str]:
+def _mount_args(flag: str, mount: BindMount, *, workspace_root: str = SANDBOX_ROOT) -> list[str]:
     source = mount.source.expanduser().resolve()
     destination = PurePosixPath(mount.destination)
     if not source.exists():
         raise ValueError(f"mount source does not exist: {source}")
     if not destination.is_absolute() or ".." in destination.parts:
         raise ValueError(f"mount destination must be an absolute sandbox path: {mount.destination!r}")
-    protected = {PurePosixPath(SANDBOX_ROOT), PurePosixPath("/tmp"), PurePosixPath("/home/agent")}
+    protected = {PurePosixPath(workspace_root), PurePosixPath("/tmp"), PurePosixPath("/home/agent")}
     if destination in protected:
         raise ValueError(f"extra mount cannot replace protected destination: {destination}")
     worker_dir = PurePosixPath(WORKER_SANDBOX_PATH).parent
@@ -1269,7 +1299,7 @@ class _OutputCollector:
             elif self.log_name is not None:
                 relative_log_path = Path(".deep-agent/logs/exec") / self.log_name
                 host_log_path = str(self.workspace_root / relative_log_path)
-                agent_log_path = f"{SANDBOX_ROOT}/{relative_log_path.as_posix()}"
+                agent_log_path = f"{sandbox_workspace_root(self.workspace_root)}/{relative_log_path.as_posix()}"
                 detail += f"\nFull output saved to: {host_log_path}"
                 detail += f"\nAgent path: {agent_log_path}"
             output = f"{output}\n\n[{detail}]"

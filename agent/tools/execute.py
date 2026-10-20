@@ -12,19 +12,28 @@ _PERSISTENCE = (
     "survive between calls. "
 )
 _ASK_DESCRIPTION = (
-    "Run a shell command inside the sandbox workspace (/workspace). "
+    "Run a shell command in the current working directory ({workspace_root}) inside the sandbox. "
     "Defaults to no network. Under permission ask every execute needs "
     "approval. network=true runs the command in the networked sandbox with host "
     "network access, including localhost and LAN addresses; background processes "
     "it starts keep that access between calls. " + _PERSISTENCE
     + "network=true and offline commands run in two separate sandboxes that share "
-    "only /workspace, so use the same network value for commands that depend on "
+    "the workspace ({workspace_root}) and declared extra mounts. Use the same network value for commands that depend on "
     "each other's /tmp files or background processes. "
 )
 _ALLOW_DESCRIPTION = (
-    "Run a shell command inside the sandbox workspace (/workspace). "
+    "Run a shell command in the current working directory ({workspace_root}) inside the sandbox. "
     "Permission allow mode: commands run without approval and host network "
     "(internet, localhost, LAN) is enabled by default for every call. " + _PERSISTENCE
+)
+_HOST_DESCRIPTION = (
+    "Run a shell command directly on the host in the current working directory ({workspace_root}). "
+    "Commands use the current user's host permissions and host network access; "
+    "network=false does not disable networking. Every execute requires approval. "
+    "Each call starts a fresh shell; directory changes and shell variables do not carry over. "
+    "HOME and TMPDIR are temporary directories created for each call and removed afterwards. "
+    "Do not rely on files in these directories persisting across calls. "
+    "File tools use a separate virtual project path; shell commands use host paths. "
 )
 _SEARCH_GUIDANCE = (
     "Use `rg -n 'pattern' path` to search file contents "
@@ -35,17 +44,21 @@ _SEARCH_GUIDANCE = (
     "rg is already on PATH inside the sandbox; do not install or download it."
 )
 _SEARCH_UNAVAILABLE = (
-    "ripgrep (rg) is not installed on the host, so the sandbox cannot provide rg. "
-    "Code search is unavailable. Do not claim that search works, and do not install or download rg."
+    "ripgrep (rg) is not installed on the host. "
+    "Search with rg is unavailable. Do not claim that search works, and do not install or download rg."
 )
 
 
-def _execute_description(*, network_by_default: bool) -> str:
+def _execute_description(
+    *, network_by_default: bool, workspace_root: str = "/workspace", unsandboxed: bool = False,
+) -> str:
     from agent.tools.grep import resolve_rg
 
-    base = _ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION
+    base = _HOST_DESCRIPTION if unsandboxed else (_ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION)
     guidance = _SEARCH_GUIDANCE if resolve_rg() else _SEARCH_UNAVAILABLE
-    return f"{base}{guidance}"
+    if unsandboxed:
+        guidance = guidance.replace("inside the sandbox", "on the host")
+    return base.replace("{workspace_root}", workspace_root) + guidance
 
 
 def build_execute_tool(
@@ -93,9 +106,18 @@ def build_execute_tool(
         }
         return output, artifact
 
+    from agent.sandbox import UnsandboxedShellBackend
+
+    executor = getattr(backend, "executor", backend)
+    unsandboxed = isinstance(executor, UnsandboxedShellBackend)
+    working_directory = str(executor.config.workspace) if unsandboxed else getattr(backend, "workspace_root", "/workspace")
     return StructuredTool.from_function(
         func=execute,
         name="execute",
         response_format="content_and_artifact",
-        description=_execute_description(network_by_default=network_by_default),
+        description=_execute_description(
+            network_by_default=network_by_default,
+            workspace_root=working_directory,
+            unsandboxed=unsandboxed,
+        ),
     )

@@ -12,6 +12,8 @@ pip install -e ".[dev]"
 
 用 pipx 安装过本项目时，修改源码后运行 `pipx install --force .` 并重启 CLI。
 
+修改 `agent/config.example.yaml` 只会影响首次生成的用户配置。已有配置不会被升级或重装覆盖，验证新模板时使用临时 HOME 或独立测试配置。Node、Rustup、X11 等默认工具挂载的说明见 [配置参考](configuration.md#默认工具挂载)。
+
 ## 测试
 
 ```bash
@@ -22,6 +24,8 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 
 - `integration` 测试启动一个本地模拟的 OpenAI Chat Completions 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。
 - `sandbox` 标记的测试需要真实可用的 Bubblewrap；不可用时默认跳过。跳过不代表当前环境兼容。
+
+默认挂载模板的验证分为两个目标：配置在可选目录缺失、HOME 不同的机器上仍可加载；指定 PATH 后，已挂载的工具能在真实沙箱中运行。修改模板时运行 `pytest tests/test_config.py tests/test_bootstrap.py -q`，并用临时安装目录验证多版本 Node 的手动选择、Rustup 路径、只读工具目录与读写缓存。启动时的 `true` 预检只验证沙箱本身，不替代工具运行验证。
 
 ## 真实模型冒烟
 

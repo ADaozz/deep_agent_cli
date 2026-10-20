@@ -34,13 +34,13 @@ from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
 from agent.session import SessionStore  # noqa: E402
 
 
-CODING_PROMPT = """在 /workspace 创建 hello_lib.py：函数 greet(name) 返回 "Hello, {name}!"。
+CODING_PROMPT = """在项目工作区创建 hello_lib.py：函数 greet(name) 返回 "Hello, {name}!"。
 再创建 test_hello_lib.py（使用 stdlib unittest）。
 用 execute 运行（不要设置 network）：python3 -m unittest test_hello_lib.py -v
 不要联网。完成后用一句话说明测试是否通过。"""
 
 WRITE_PROMPT = (
-    "只用 write_file 工具在 /workspace/e2e_ask_write.txt 写入一行文本 exactly: e2e-ask-ok。"
+    "只用 write_file 工具在项目工作区的 e2e_ask_write.txt 写入一行文本 exactly: e2e-ask-ok。"
     "不要调用其它工具。写完后用一句话确认。"
 )
 

@@ -4525,3 +4525,95 @@ def test_web_search_preview_does_not_parse_output_for_missing_artifact() -> None
         output="Web search results for: example\n5 results",
     ))
     assert preview.detail == ""
+
+
+@pytest.mark.parametrize("decision", ["dismiss", "approve", "reject"])
+def test_arriving_approval_keeps_typing_and_restores_draft_after_f2(decision) -> None:
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "id": "draft-write", "name": "write_file",
+                "args": {"file_path": "/draft.txt", "content": "hello"},
+            }]),
+            AIMessage(content="done"),
+        ]), backend=StateBackend())
+        waiting = runner.invoke("write")
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            task = asyncio.create_task(app.run_async())
+
+            async def wait_until(predicate) -> None:
+                for _ in range(300):
+                    if predicate():
+                        return
+                    await asyncio.sleep(0.01)
+                raise TimeoutError("approval input did not update")
+
+            try:
+                await wait_until(lambda: app.application.is_running)
+                pipe.send_text("draft")
+                await wait_until(lambda: app.buffer.text == "draft")
+                app._handle_result(waiting)
+                assert app.interaction is None
+                assert "F2" in app.state.status
+                pipe.send_text(" 中文\x1b[D")
+                await wait_until(lambda: app.buffer.text == "draft 中文" and app.buffer.cursor_position == 7)
+                document = app.buffer.document
+                pipe.send_text("\x1bOQ")
+                await wait_until(lambda: app.interaction is not None)
+                assert app.interaction.kind == "approval"
+                assert app.buffer.text == ""
+                if decision == "dismiss":
+                    pipe.send_text("\x03")
+                    await wait_until(lambda: app.interaction is None)
+                    assert runner.current_interrupt() is not None
+                else:
+                    if decision == "approve":
+                        pipe.send_text("\x1b[B")
+                        await wait_until(lambda: app.interaction.option_index == 1)
+                    pipe.send_text("\r")
+                    await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                    assert runner.current_interrupt() is None
+                assert app.buffer.document == document
+                assert app._approval_draft is None
+            finally:
+                app.exit()
+                await asyncio.wait_for(task, timeout=3)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+def test_approval_preserves_pasted_content_and_queues_new_input() -> None:
+    async def scenario() -> None:
+        runner = AgentRunner(model=scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "id": "paste-write", "name": "write_file",
+                "args": {"file_path": "/paste.txt", "content": "hello"},
+            }]), AIMessage(content="done"),
+        ]), backend=StateBackend())
+        waiting = runner.invoke("write")
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            try:
+                payload = "long pasted content\n" * 100
+                app._handle_pasted_text(payload)
+                displayed = app.buffer.text
+                assert app._pasted_content.has_blocks
+                app._handle_result(waiting)
+                assert app.interaction is None
+                app._reopen_pending_interaction()
+                app._finish_interaction(cancelled=True)
+                assert app.buffer.text == displayed
+                assert app._pasted_content.expand(displayed) == payload
+                app._submit_buffer("steer")
+                assert runner.control.pending_message_texts() == [payload]
+                assert app.buffer.text == ""
+                assert app._run_task is None
+                assert runner.current_interrupt() is not None
+                assert "F2" in app.state.status
+            finally:
+                app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())

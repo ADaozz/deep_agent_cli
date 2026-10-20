@@ -11,7 +11,7 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
     """Keep the separately registered execute tool visible to the model.
 
     Deep Agents checks only a CompositeBackend's default route for shell
-    support. Our default route denies file access outside /workspace, while
+    support. Our default route denies file access outside the project mount, while
     WorkspaceCompositeBackend.execute delegates to the sandbox executor.
     """
 
@@ -30,8 +30,8 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
             # Upstream builds its "virtual mounts vs. shell paths" prompt from
             # the returned backend, judging reachability by the composite's
             # default route. Our execute shell runs on the executor's
-            # filesystem, where /workspace is the shell root, so returning the
-            # composite would inject a bogus "/workspace is not accessible
+            # filesystem, where the project mount is the shell root, so returning the
+            # composite would inject a bogus "workspace is not accessible
             # from the shell" notice. The executor is not a CompositeBackend,
             # which makes that prompt empty.
             backend = self.backend.executor

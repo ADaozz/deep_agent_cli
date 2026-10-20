@@ -440,6 +440,7 @@ class CliApplication:
         )
         self._pasted_content = PastedContentDraft()
         self._skill_draft = SkillDraft()
+        self._approval_draft: tuple[Document, PastedContentDraft, SkillDraft] | None = None
         self._skill_picker_draft: tuple[str, int] | None = None
         self.transcript_control = _TranscriptControl(
             document=self._transcript_document,
@@ -2013,7 +2014,8 @@ class CliApplication:
             self.buffer.reset(append_to_history=True)
             asyncio.create_task(self._dispatch_command(text))
             return
-        if self.state.running or self.runner.control.pending_message_texts():
+        pending_interrupt = self.runner.current_interrupt() if not self.state.running else None
+        if self.state.running or self.runner.control.pending_message_texts() or pending_interrupt is not None:
             if self.state.attachments:
                 self.set_status("Wait for the active run before sending images")
                 return
@@ -2024,6 +2026,8 @@ class CliApplication:
             else:
                 self.runner.steer(text)
                 self.set_status("Steering queued")
+            if pending_interrupt is not None:
+                self.set_status(f"{self.state.status} · F2 pending", transient=False)
             if not self.state.running and (self._run_task is None or self._run_task.done()):
                 self._start_queued_run()
             self.application.invalidate()
@@ -2293,6 +2297,12 @@ class CliApplication:
         if result.status in {"waiting_confirmation", "waiting_human", "paused"}:
             if self._allow_confirm_open():
                 self._note_interrupt_behind_allow_confirm(result.status)
+            elif result.status == "waiting_confirmation" and (
+                self.buffer.text or self.state.attachments or self.interaction is not None
+            ):
+                # An asynchronous approval must not take over an editor or picker.
+                self.state.running = False
+                self.set_status("Approval still pending · F2 to decide", transient=False)
             else:
                 self._reopen_pending_interaction()
         elif self._deferred_config_interaction is not None:
@@ -2310,6 +2320,8 @@ class CliApplication:
         if interaction is None:
             return
         self._reviewing = False
+        if interaction.kind == "approval":
+            self._restore_approval_draft()
         if interaction.kind == "skill":
             self.interaction = None
             draft, cursor = self._skill_picker_draft or ("", 0)
@@ -2491,6 +2503,15 @@ class CliApplication:
             self.runner.submit_human_input, values, on_event=self._on_event_thread,
         ))
 
+    def _restore_approval_draft(self) -> None:
+        if self._approval_draft is None:
+            return
+        document, pasted, skill = self._approval_draft
+        self._approval_draft = None
+        self._pasted_content = pasted
+        self._skill_draft = skill
+        self.buffer.set_document(document)
+
     def _dismiss_pending_interrupt(self, kind: str) -> None:
         self.interaction = None
         self._reviewing = False
@@ -2538,6 +2559,11 @@ class CliApplication:
             ))
             return True
         if interrupt.kind is InterruptKind.WAITING_CONFIRMATION:
+            if self.interaction is None and self._deferred_config_interaction is None and self._approval_draft is None:
+                self._approval_draft = (self.buffer.document, self._pasted_content, self._skill_draft)
+                self._pasted_content = PastedContentDraft()
+                self._skill_draft = SkillDraft()
+                self.buffer.reset()
             self.interaction = InteractionController.approval(list(interrupt.pending_tools))
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:

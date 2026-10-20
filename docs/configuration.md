@@ -142,7 +142,7 @@ web_search:
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `workspace` | `.` | 映射为 `/workspace` 的宿主目录；`.` 表示启动时的当前目录 |
+| `workspace` | `.` | 宿主项目目录，沙箱路径按目录名生成（如 `/my-project`）；`.` 表示启动时的当前目录 |
 | `bwrap_path` | `bwrap` | Bubblewrap 可执行文件名或路径 |
 | `allow_unsandboxed` | `false` | 沙箱不可用时是否允许直接在宿主机执行命令 |
 | `timeout_seconds` | `null` | 单条命令的超时上限（秒）；`null` 表示不限制。模型可为单次调用请求更短的超时 |
@@ -152,9 +152,37 @@ web_search:
 | `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。SANDBOXED 下文件工具按只读使用同一目标 |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
-首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 会写入一组可选工具链挂载（Node.js、Cargo、系统 Chrome、Playwright 浏览器缓存）和对应的 `PATH`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖。
+表中的默认值是代码内默认值；首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 另含下列可选工具挂载。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。
 
 `sandbox.protected_workspace_paths` 已移除，配置中出现时启动报错。
+
+### 默认工具挂载
+
+| 用途 | 宿主 `source` | 沙箱 `destination` | 权限 |
+|---|---|---|---|
+| NVM 全部已安装版本 | `~/.nvm/versions/node` | `/opt/node` | 只读 |
+| Cargo 可执行文件及目录 | `~/.cargo` | `/opt/cargo` | 只读 |
+| Rustup 工具链及目录 | `~/.rustup` | `/opt/rustup` | 只读 |
+| Chrome 程序目录 | `/opt/google` | `/opt/google` | 只读 |
+| X11 文件 Socket | `/tmp/.X11-unix` | `/tmp/.X11-unix` | 只读 |
+| Playwright 浏览器缓存 | `~/.cache/ms-playwright` | `/opt/ms-playwright` | 读写 |
+
+以上项目均为 `optional: true`。路径不存在就跳过，不寻找替代路径，也不表示对应工具已通过运行检查。系统目录内的工具沿用基础挂载；其他安装位置由用户修改配置。
+
+模板的环境设置为：
+
+```yaml
+env_set:
+  PATH: /opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+  RUSTUP_HOME: /opt/rustup
+  PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+```
+
+程序会将内置工具目录 `/run/deep-agent` 自动放到 PATH 最前。NVM 用户需自行在 PATH 中加入 `/opt/node/<实际版本>/bin`，将 `<实际版本>` 换成已安装的目录名。PATH 不展开通配符，也不会自动选择 Node 版本；系统 Node.js 可沿用 `/usr/bin` 等系统路径。
+
+`source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
+
+用户可以缩小到单个版本或所需子目录，也可以显式扩大可见范围；挂载调整不改变 `ask` / `allow` 的审批规则。只读挂载禁止写入，仍会暴露目录中的敏感文件。缓存自定义目录、WSLg 源路径和配置合并示例见 [沙箱与权限](sandbox.md#工具目录与环境变量)。
 
 ## 路径（`paths`）
 

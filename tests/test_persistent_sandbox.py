@@ -47,7 +47,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    path = tmp_path / "work"
+    path = tmp_path / "workspace"
     path.mkdir()
     return path
 
@@ -737,3 +737,29 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
         runner.close()
     assert not offline.alive and not online.alive
     assert pool.sandbox(False) is None and pool.sandbox(True) is None
+
+
+@pytest.mark.parametrize("name", ["deep-agent", "another project", "usr"])
+def test_named_workspace_pwd_matches_file_tools(workspace, name):
+    import shlex
+    from agent.sandbox import sandbox_workspace_root
+
+    project = workspace / name
+    project.mkdir()
+    try:
+        backend = select_backend(_bwrap_config(project)).backend
+    except SandboxUnavailableError as exc:
+        if os.environ.get("REQUIRE_BWRAP_TEST"):
+            pytest.fail(str(exc))
+        pytest.skip(f"UNSUPPORTED SANDBOX ENVIRONMENT [{exc.kind}]: {exc}")
+    root = sandbox_workspace_root(project)
+    try:
+        assert backend.write(f"{root}/note.txt", "hello").error is None
+        result = run(backend, 'pwd; printf "%s\\n" "$PWD"; cat note.txt')
+        assert result.exit_code == 0
+        assert result.output.splitlines() == [root, root, "hello"]
+        assert run(backend, "cd /tmp; pwd").output.strip() == "/tmp"
+        assert run(backend, "pwd").output.strip() == root
+        assert run(backend, f"cat {shlex.quote(root + '/note.txt')}").output == "hello"
+    finally:
+        backend.executor.pool.shutdown("named workspace test finished")
