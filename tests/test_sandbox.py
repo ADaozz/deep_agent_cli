@@ -1317,3 +1317,37 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
 
     for source in sources:
         check(source)
+
+
+def test_example_config_path_resolves_rg_to_readonly_mount(tmp_path: Path) -> None:
+    from importlib.resources import files
+
+    import yaml
+    from agent.config import _sandbox_from_mapping
+    from agent.sandbox import SEARCH_BINARY_PATH
+
+    executable = _bwrap_executable()
+    loaded = yaml.safe_load(files("agent").joinpath("config.example.yaml").read_text(encoding="utf-8"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    section = dict(loaded["sandbox"])
+    section["workspace"] = str(workspace)
+    section["extra_read_only_mounts"] = []
+    section["extra_read_write_mounts"] = []
+    config = replace(
+        _sandbox_from_mapping(section, base_dir=workspace),
+        bwrap_path=executable,
+        workspace=workspace,
+    )
+    backend = select_backend(config).backend
+    try:
+        located = backend.execute("command -v rg")
+        named = backend.execute("rg --version")
+        mounted = backend.execute(f"{SEARCH_BINARY_PATH} --version")
+        assert located.exit_code == 0, located.output
+        assert located.output.strip() == SEARCH_BINARY_PATH
+        assert named.exit_code == 0, named.output
+        assert mounted.exit_code == 0, mounted.output
+        assert named.output.splitlines()[0] == mounted.output.splitlines()[0]
+    finally:
+        backend.executor.pool.shutdown("example rg path")

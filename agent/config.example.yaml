@@ -109,13 +109,14 @@ sandbox:
   # 有头浏览器复用宿主 X11 显示；宿主未设置 DISPLAY 时不传入。
   env_allowlist:
     - DISPLAY
-  # 注入沙箱的固定环境变量。PATH 会覆盖默认值，请保留系统目录。
+  # 注入沙箱的固定环境变量。PATH 会整段覆盖默认值。
+  # 保留 /run/deep-agent，并放在 /usr/local/bin、/usr/bin 之前，这样 rg 使用只读挂载的版本。
   # playwright-cli open 使用 /opt/google/chrome/chrome。不要在沙箱中执行
   # `npx playwright install chrome` 安装 Chrome，该命令需要 sudo apt-get。
   # 安装与命令行工具匹配的 Chromium：先在宿主机执行 `playwright-cli install-browser chromium`，再执行
   # `playwright-cli open --browser=chromium`。浏览器路径由 PLAYWRIGHT_BROWSERS_PATH 指定。
   env_set:
-    PATH: /opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    PATH: /opt/node/bin:/opt/cargo/bin:/run/deep-agent:/usr/local/bin:/usr/bin:/bin
     PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
   # optional: true 表示源目录不存在时跳过该挂载。
   # 请将 Node.js 版本替换为 ~/.nvm/versions/node/ 下实际存在的目录。

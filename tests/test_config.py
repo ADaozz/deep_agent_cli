@@ -12,6 +12,17 @@ from agent.llm import ResponsesChatOpenAI, build_chat_model
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
 
 
+def test_example_config_path_keeps_mounted_rg_ahead_of_system_dirs() -> None:
+    from importlib.resources import files
+
+    import yaml
+
+    loaded = yaml.safe_load(files("agent").joinpath("config.example.yaml").read_text(encoding="utf-8"))
+    path = loaded["sandbox"]["env_set"]["PATH"].split(":")
+    assert path.index("/run/deep-agent") < path.index("/usr/local/bin")
+    assert path.index("/run/deep-agent") < path.index("/usr/bin")
+
+
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)

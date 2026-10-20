@@ -152,7 +152,7 @@ web_search:
 | `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。SANDBOXED 下文件工具按只读使用同一目标 |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
-首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 会写入一组可选工具链挂载（Node.js、Cargo、系统 Chrome、Playwright 浏览器缓存）和对应的 `PATH`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖。
+首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 会写入一组可选工具链挂载（Node.js、Cargo、系统 Chrome、Playwright 浏览器缓存）和对应的 `PATH`。这条 `PATH` 把 `/run/deep-agent` 放在 `/usr/local/bin` 和 `/usr/bin` 之前，沙箱里的 `rg` 才会用到只读挂载的版本。已有的 `~/.deep-agent/config.yaml` 不会被覆盖；如果里面的 `PATH` 没有 `/run/deep-agent`，需要自行补上。
 
 `sandbox.protected_workspace_paths` 已移除，配置中出现时启动报错。
 
