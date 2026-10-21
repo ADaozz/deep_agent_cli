@@ -98,7 +98,6 @@ def image_tui(tmp_path, monkeypatch, model_endpoint, request):
           input: [text, image]
 sandbox:
   workspace: {tmp_path / 'workspace'}
-  allow_unsandboxed: false
 ''')
     monkeypatch.setenv('DEEP_AGENT_CONFIG', str(config))
     code = pty_probe._PROBE.replace('from agent.config import SandboxConfig', 'from agent.config import SandboxConfig, Settings')

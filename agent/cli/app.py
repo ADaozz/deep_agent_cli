@@ -69,7 +69,10 @@ from agent.cli.rendering import (
 from agent.cli.session_controller import SessionController
 from agent.cli.state import CliState, ToolBlock
 from agent.cli.working_messages import WorkingMessageRotation, load_working_messages
-from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, ModelProfile, require_keybindings_outside_workspace
+from agent.config import (
+    DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, ModelProfile, parse_sandbox_mode,
+    require_keybindings_outside_workspace,
+)
 from agent.permission import (
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -145,10 +148,12 @@ class SlashCompleter(Completer):
         *,
         model_profiles: Callable[[], list[ModelProfile]] | None = None,
         permission_modes: Callable[[], list[str]] | None = None,
+        sandbox_modes: Callable[[], list[str]] | None = None,
     ) -> None:
         self.commands = commands
         self.model_profiles = model_profiles or (lambda: [])
         self.permission_modes = permission_modes or (lambda: [])
+        self.sandbox_modes = sandbox_modes or (lambda: [])
         self.accepted_text: str | None = None
 
     @staticmethod
@@ -196,6 +201,12 @@ class SlashCompleter(Completer):
         elif name == "permission":
             descriptions = {"ask": "Require approval for tools", "allow": "Auto-approve tools (SANDBOXED, HIGH RISK)"}
             candidates.extend((mode, descriptions[mode]) for mode in self.permission_modes())
+        elif name == "sandbox":
+            descriptions = {
+                "restricted": "Workspace, skills, and declared mounts; system directories stay read-only",
+                "full-access": "Write the real filesystem except the agent install and configuration (HIGH RISK)",
+            }
+            candidates.extend((mode, descriptions[mode]) for mode in self.sandbox_modes())
         ranked = []
         for index, (value, description) in enumerate(candidates):
             rank = self._rank(value.lower(), arg.lower())
@@ -431,6 +442,7 @@ class CliApplication:
             self.commands,
             model_profiles=self.runner.list_models,
             permission_modes=lambda: ["ask", "allow"] if self._allow_available() else ["ask"],
+            sandbox_modes=lambda: ["restricted", "full-access"],
         )
         self.buffer = Buffer(
             multiline=True,
@@ -838,6 +850,32 @@ class CliApplication:
         self.state.add_system(notice)
         self.set_status(notice)
 
+    def _request_sandbox_mode(self, mode: str) -> None:
+        before = self.runner.sandbox_mode()
+        try:
+            self.runner.request_sandbox_mode(mode)
+        except ValueError as exc:
+            self.state.add_system(str(exc), error=True)
+            return
+        interrupt = self.runner.current_interrupt()
+        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
+            events: list[RunEvent] = []
+            try:
+                self.runner._apply_pending_runtime_config(events.append)
+            finally:
+                self.runner._operation_lock.release()
+            for event in events:
+                self._apply_event(event, announce=False)
+            if any(event.type == "runtime_config_failed" for event in events):
+                self.set_status(f"Sandbox switch failed; filesystem mode remains {self.runner.sandbox_mode()}.")
+                return
+        if self.runner.pending_sandbox_mode() is None:
+            notice = f"Sandbox filesystem: {self.runner.sandbox_mode()}."
+        else:
+            notice = f"Sandbox switch queued: {before} → {mode}. Current work uses {before}."
+        self.state.add_system(notice)
+        self.set_status(notice)
+
     def show_help(self) -> None:
         commands = "\n".join(
             f"/{item.name:<9} {item.description}"
@@ -878,6 +916,9 @@ class CliApplication:
             f"{model_line}"
             f"Permission: {perm}\n"
             f"Thread: {self.runner.thread_id}\nSandbox: {mode}\n"
+            f"Filesystem: {self.runner.sandbox_mode()}"
+            + (f" → {self.runner.pending_sandbox_mode()} (pending)" if self.runner.pending_sandbox_mode() else "")
+            + "\n"
             f"{self._sandbox_status_lines()}"
             f"Tools: {tool_count}"
         )
@@ -1182,6 +1223,56 @@ class CliApplication:
         )
         self.interaction.option_index = 0 if current is PermissionMode.ASK else 1
         self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
+        self.application.invalidate()
+
+    async def select_sandbox(self, arg: str = "") -> None:
+        if self.sessions.waiting:
+            self.set_status(self.sessions.wait_status(), transient=False)
+            return
+        if self.interaction is not None:
+            self.set_status("Finish the current interaction before changing sandbox mode")
+            return
+        raw = arg.strip()
+        if raw:
+            mode = parse_sandbox_mode(raw)
+            if mode is None:
+                self.state.add_system(
+                    "Unknown sandbox mode. Use /sandbox restricted or /sandbox full-access",
+                    error=True,
+                )
+                return
+            self._request_sandbox_mode(mode)
+            return
+        if self.state.running:
+            self.set_status("Use /sandbox restricted|full-access while a run is active")
+            return
+        current = self.runner.sandbox_mode()
+        options = [
+            {
+                "value": "restricted",
+                "label": "restricted · workspace, skills, and declared mounts; system directories stay read-only"
+                + (" · current" if current == "restricted" else ""),
+            },
+            {
+                "value": "full-access",
+                "label": "full-access · write the real filesystem except the agent install and configuration (HIGH RISK)"
+                + (" · current" if current == "full-access" else ""),
+            },
+        ]
+        self.interaction = InteractionController(
+            kind="sandbox",
+            title="Sandbox filesystem",
+            question="Choose which files execute and file tools can change. ask/allow is unchanged.",
+            fields=[{
+                "id": "mode",
+                "type": "single_select",
+                "label": "Mode",
+                "required": True,
+                "options": options,
+            }],
+        )
+        self.interaction.option_index = 0 if current == "restricted" else 1
+        self.set_status("Select sandbox mode · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
     def _allow_available(self) -> bool:
@@ -1667,7 +1758,11 @@ class CliApplication:
         # Row 2: sandbox/permission on the left, context on the right.
         # The left side always truncates before the right side.
         git = self._git_summary.label() or "⎇ no git"
-        status = f" {mode} · perm:{perm}"
+        filesystem = self.runner.sandbox_mode()
+        pending_filesystem = self.runner.pending_sandbox_mode()
+        if pending_filesystem is not None:
+            filesystem += f"→{pending_filesystem}(pending)"
+        status = f" {mode}:{filesystem} · perm:{perm}"
         git_fit = _truncate_cells(git, width)
         available = max(1, width - get_cwidth(git_fit) - 1)
         fragments: list[tuple[str, str]] = []
@@ -2274,11 +2369,15 @@ class CliApplication:
                 changes.append(f"Model: {model_display_name(model) if model else event.result['model_id']} · {event.result['reasoning_effort']}")
             if event.result.get("permission_changed"):
                 changes.append(f"permission: {event.result['permission_mode']}")
+            if event.result.get("sandbox_changed"):
+                changes.append(f"sandbox: {event.result['sandbox_mode']}")
             if announce:
                 if event.result.get("model_changed") or event.result.get("reasoning_changed"):
                     self.set_status("; ".join(changes))
                 if event.result.get("permission_changed"):
                     self.state.add_system(f"permission: {event.result['permission_mode']}")
+                if event.result.get("sandbox_changed"):
+                    self.state.add_system(f"sandbox: {event.result['sandbox_mode']}")
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
         self.application.invalidate()
@@ -2436,6 +2535,19 @@ class CliApplication:
             except (RuntimeError, ValueError) as exc:
                 self.state.add_system(str(exc), error=True)
                 return
+            return
+        if interaction.kind == "sandbox":
+            if cancelled:
+                self.interaction = None
+                self.set_status("Sandbox change cancelled")
+                return
+            mode_raw = str(interaction.values.get("mode") or "")
+            self.interaction = None
+            mode = parse_sandbox_mode(mode_raw)
+            if mode is None:
+                self.state.add_system("No sandbox mode selected", error=True)
+                return
+            self._request_sandbox_mode(mode)
             return
         if interaction.kind == "permission_confirm":
             if cancelled:

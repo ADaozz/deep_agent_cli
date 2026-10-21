@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     report = {"platform": platform.platform(), "python": platform.python_version(), "supported": False}
     with tempfile.TemporaryDirectory(prefix="deep-agent-probe-") as root:
         try:
-            selected = select_backend(SandboxConfig(workspace=Path(root), allow_unsandboxed=False))
+            selected = select_backend(SandboxConfig(workspace=Path(root)))
             result = selected.backend.execute(f"test \"$(pwd)\" = {shlex.quote(selected.backend.workspace_root)} && printf isolated")
             supported = result.exit_code == 0 and result.output == "isolated"
             report.update(supported=supported, category="supported" if supported else "execution_failed", detail=result.output)

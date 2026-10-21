@@ -36,7 +36,7 @@ with tempfile.TemporaryDirectory(prefix='deep-agent-live-image-') as folder:
  task=Path(folder);cfg=yaml.safe_load(Path('/tmp/deep-agent-live.yaml').read_text())
  cfg['llm']['models']['token-plan']['base_url']=f'http://127.0.0.1:{server.server_port}/v1'
  cfg['llm']['models']['token-plan']['models']['auto']={'input':['text','image']}
- cfg['sandbox']={'workspace':str(task/'workspace'),'allow_unsandboxed':False}
+ cfg['sandbox']={'workspace':str(task/'workspace')}
  config=task/'config.yaml';config.write_text(yaml.safe_dump(cfg))
  os.environ.update({'DEEP_AGENT_CONFIG':str(config),'TOKEN_PLAN_API_KEY':key,'TERM':'xterm-256color'})
  tui=probe.Tui(task)

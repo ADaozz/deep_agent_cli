@@ -199,7 +199,6 @@ def model_yaml(base_url: str, api: str, workspace: Path, state: Path | None, con
         stream: {{}}
 sandbox:
   workspace: {workspace}
-  allow_unsandboxed: false
 {paths}"""
 
 

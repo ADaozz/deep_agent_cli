@@ -1,9 +1,9 @@
-"""Bounded regex search for the local workspace and read-only skills mounts.
+"""Bounded regex search for the local workspace and skills mounts.
 
-SANDBOXED: one ripgrep process in the existing permission-mode SandboxPool.
+Bubblewrap with rg: one ripgrep process in the existing permission-mode SandboxPool.
 rg walks the tree itself (ignore files, hidden files, binary and size filtering).
-UNSANDBOXED, or rg unavailable: one Python worker that opens every component
-relative to a directory descriptor with O_NOFOLLOW.
+Without rg, or for a non-Bubblewrap executor: one Python worker that opens every
+component relative to a directory descriptor with O_NOFOLLOW.
 """
 from __future__ import annotations
 

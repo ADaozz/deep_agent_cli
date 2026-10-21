@@ -162,7 +162,7 @@ def test_reuse_same_sandbox(backend) -> None:
     result = run(backend, 'cat /tmp/marker; pwd; echo "foo=${FOO:-unset}"')
     assert result.exit_code == 0, result.output
     # Sandbox state survives; shell state (cwd, variables) does not.
-    assert result.output.splitlines() == ["state", "/workspace", "foo=unset"]
+    assert result.output.splitlines() == ["state", backend.workspace_root, "foo=unset"]
     second = _pool(backend).sandbox(False)
     assert second is first
     assert second.host_pid == first.host_pid
@@ -171,18 +171,17 @@ def test_reuse_same_sandbox(backend) -> None:
 def test_dual_sandbox_isolation(backend) -> None:
     pool = _pool(backend)
     assert run(backend, "echo offline > /tmp/side; echo offline > /home/agent/side").exit_code == 0
-    online = run(
-        backend,
-        "test ! -e /tmp/side && test ! -e /home/agent/side && "
-        "echo online > /tmp/side && echo online > /home/agent/side",
-        network=True,
-    )
+    online = run(backend, "cat /tmp/side /home/agent/side", network=True)
     assert online.exit_code == 0, online.output
+    assert online.output.split() == ["offline", "offline"]
+    assert run(
+        backend, "echo online > /tmp/side && echo online > /home/agent/side", network=True,
+    ).exit_code == 0
     offline_box, online_box = pool.sandbox(False), pool.sandbox(True)
     assert offline_box is not None and online_box is not None
     assert offline_box.host_pid != online_box.host_pid
 
-    assert run(backend, "cat /tmp/side /home/agent/side").output.split() == ["offline", "offline"]
+    assert run(backend, "cat /tmp/side /home/agent/side").output.split() == ["online", "online"]
     assert run(backend, "cat /tmp/side /home/agent/side", network=True).output.split() == ["online", "online"]
     # Separate PID namespaces: each sees only its own processes.
     offline_ps = run(backend, "ls /proc | grep -c '^[0-9]'").output
@@ -194,7 +193,7 @@ def test_dual_sandbox_isolation(backend) -> None:
 def test_workspace_persistence(backend, workspace: Path) -> None:
     assert run(backend, "echo from-offline > shared.txt").exit_code == 0
     assert run(backend, "cat shared.txt && echo from-online >> shared.txt", network=True).output == "from-offline\n"
-    assert run(backend, "cat /workspace/shared.txt").output.split() == ["from-offline", "from-online"]
+    assert run(backend, f"cat {backend.workspace_root}/shared.txt").output.split() == ["from-offline", "from-online"]
     assert (workspace / "shared.txt").read_text().split() == ["from-offline", "from-online"]
 
 
@@ -273,14 +272,15 @@ def test_cross_sandbox_ipc_isolation(backend) -> None:
 
     offline = run(backend, connect.replace("range(100)", "range(3)"))
     assert offline.exit_code == 1 and offline.output.startswith("unreachable"), offline.output
-    assert run(backend, f"test ! -e /tmp/{name}.sock").exit_code == 0
-    # The offline sandbox can neither see the networked worker or listener...
+    # /tmp is the shared persistent directory, so the filesystem socket is visible.
+    # The abstract socket and the other sandbox's processes stay isolated.
+    assert run(backend, f"test -e /tmp/{name}.sock").exit_code == 0
     own = run(backend, "cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' ' '").output
     assert name not in own
     online_box = pool.sandbox(True)
     assert online_box is not None and str(online_box.host_pid) not in run(backend, "ls /proc").output.split()
     # ...nor find a control channel in the shared workspace...
-    assert run(backend, "find /workspace \\( -type s -o -type p \\) -print").output == "<no output>"
+    assert run(backend, f"find {backend.workspace_root} \\( -type s -o -type p \\) -print").output == "<no output>"
     # ...nor hijack its own worker's control pipes through /proc.
     hijack = run(backend, "ls /proc/2/fd")
     assert hijack.exit_code != 0 and "Permission denied" in hijack.output
@@ -356,7 +356,7 @@ def test_worker_crash_recovery(backend, workspace: Path) -> None:
     assert result.exit_code not in (0, None)
     assert "not retried" in result.output
 
-    recovered = run(backend, "test ! -e /tmp/before && cat count.txt")
+    recovered = run(backend, "test -e /tmp/before && cat count.txt")
     assert recovered.exit_code == 0, recovered.output
     # The lost command was not replayed in the new sandbox.
     assert recovered.output == "run\n"
@@ -614,7 +614,7 @@ def test_shared_workspace_unix_socket_can_relay_host_network(backend, workspace)
     port = server.server_address[1]
     relay = (
         "import socket,urllib.request\n"
-        "s=socket.socket(socket.AF_UNIX); s.bind('/workspace/relay.sock'); s.listen()\n"
+        f"s=socket.socket(socket.AF_UNIX); s.bind('{backend.workspace_root}/relay.sock'); s.listen()\n"
         "c,_=s.accept()\n"
         f"c.sendall(urllib.request.urlopen('http://127.0.0.1:{port}/').read())\n"
         "c.close(); s.close()\n"
@@ -629,7 +629,7 @@ def test_shared_workspace_unix_socket_can_relay_host_network(backend, workspace)
         assert direct.exit_code != 0
         indirect = run(backend, "python3 -c " + shlex.quote(
             "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(3); "
-            "s.connect('/workspace/relay.sock'); print(s.recv(4096).decode())"))
+            f"s.connect('{backend.workspace_root}/relay.sock'); print(s.recv(4096).decode())"))
         assert indirect.exit_code == 0, indirect.output
         assert indirect.output.strip() == "host-network-response"
         assert requests == ["/"]
@@ -661,7 +661,7 @@ def test_worker_argv_and_shell_share_ids_and_keep_streams_separate(backend, work
     literal = "$(touch INJECTED); `touch INJECTED`; 中文\n'\""
     argv = sandbox.start_argv([
         "python3", "-c", "import sys; print(sys.argv[1]); print('error', file=sys.stderr)", literal,
-    ], "/workspace")
+    ], backend.workspace_root)
     assert argv.request_id == shell.request_id + 1
     direct = _command_events(argv)
     assert b"".join(data for kind, data in direct if kind == "out").decode() == literal + "\n"
@@ -677,7 +677,7 @@ def test_persistent_rg_mount_is_read_only(backend):
     from agent.sandbox import SEARCH_BINARY_PATH
 
     sandbox = _pool(backend).run(False, lambda current: current)
-    result = _command_events(sandbox.start_argv([SEARCH_BINARY_PATH, "--version"], "/workspace"))
+    result = _command_events(sandbox.start_argv([SEARCH_BINARY_PATH, "--version"], backend.workspace_root))
     assert b"ripgrep " in b"".join(data for kind, data in result if kind == "out")
     assert run(backend, f"test -x {SEARCH_BINARY_PATH} && ! (printf bad > {SEARCH_BINARY_PATH}) 2>/dev/null").exit_code == 0
 
@@ -689,7 +689,7 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
     (workspace / "a.py").write_text("needle\n")
     def call(identifier, name, args):
         return AIMessage(content="", tool_calls=[{"id": identifier, "name": name, "args": args}])
-    list_args = {"path": "/workspace"}
+    list_args = {"path": workspace.resolve().as_posix()}
     runner = _sandbox_runner(workspace, [
         call("g1", "ls", list_args),
         call("off", "execute", {"command": "printf offline", "network": False}),

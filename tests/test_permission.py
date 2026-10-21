@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,7 +55,6 @@ def test_interrupt_on_for_modes() -> None:
 
 def test_allow_only_for_sandboxed() -> None:
     assert allow_mode_available(ExecutionMode.SANDBOXED)
-    assert not allow_mode_available(ExecutionMode.UNSANDBOXED)
     assert not allow_mode_available(ExecutionMode.CUSTOM)
 
 
@@ -325,29 +323,21 @@ def _execute_messages(call_id: str, *, network: bool = False, final: str = "done
 
 
 def _custom_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
-    config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap", allow_unsandboxed=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        selected = select_backend(config)
+    from tests.host_command import HostCommandBackend
+
+    config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap")
     return AgentRunner(
         model=scripted_model(messages),
-        backend=selected.backend,
+        backend=HostCommandBackend(tmp_path),
         sandbox_config=config,
         thread_id=thread_id,
     )
 
 
-def _unsandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
-    config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap", allow_unsandboxed=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        runner = AgentRunner(
-            model=scripted_model(messages),
-            sandbox_config=config,
-            thread_id=thread_id,
-        )
-    assert runner.prepared.execution_mode is ExecutionMode.UNSANDBOXED
-    return runner
+def test_missing_bwrap_does_not_fall_back(tmp_path: Path) -> None:
+    config = SandboxConfig(workspace=tmp_path, bwrap_path="/missing/bwrap")
+    with pytest.raises(SandboxUnavailableError, match="Sandboxing is required"):
+        select_backend(config)
 
 
 def _sandboxed_runner(tmp_path: Path, messages: list, *, thread_id: str) -> AgentRunner:
@@ -451,34 +441,6 @@ def test_allow_mode_opens_network_without_per_call_declaration() -> None:
         resumed = runner.approve_tool("ex-ask-closed")
         assert resumed.status == "completed"
         assert backend.network_calls == [True, False]
-
-
-def test_unsandboxed_ask_execute_without_network_interrupts(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(tmp_path, _execute_messages("ex-un-ask"), thread_id="un-ask-off")
-    waiting = runner.invoke("run")
-    assert waiting.status == "waiting_confirmation"
-    assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.approve_tool("ex-un-ask")
-    assert resumed.status == "completed"
-
-
-def test_unsandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(
-        tmp_path, _execute_messages("ex-un-net", network=True, final="online"), thread_id="un-ask-net",
-    )
-    waiting = runner.invoke("need net")
-    assert waiting.status == "waiting_confirmation"
-    assert waiting.pending_tool_calls[0]["name"] == "execute"
-    resumed = runner.approve_tool("ex-un-net")
-    assert resumed.status == "completed"
-    assert resumed.output == "online"
-
-
-def test_unsandboxed_rejects_allow(tmp_path: Path) -> None:
-    runner = _unsandboxed_runner(tmp_path, [AIMessage(content="ok")], thread_id="un-allow")
-    with pytest.raises(ValueError, match="SANDBOXED"):
-        runner.set_permission_mode(PermissionMode.ALLOW)
-    assert runner.permission_mode() is PermissionMode.ASK
 
 
 def test_custom_ask_execute_without_network_interrupts(tmp_path: Path) -> None:

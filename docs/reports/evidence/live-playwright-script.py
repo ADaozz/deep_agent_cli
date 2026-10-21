@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='deep-agent-live-pw-') as folder:
  report['official_skill_copy_identical']=all(digest(p)==digest(target/p.relative_to(source)) for p in source.rglob('*') if p.is_file())
  cfg=yaml.safe_load(Path('/tmp/deep-agent-live.yaml').read_text())
  cfg['llm']['models']['token-plan']['base_url']=f'http://127.0.0.1:{relay.server_port}/v1'
- cfg['sandbox']={'workspace':str(task/'workspace'),'allow_unsandboxed':False,'extra_read_only_mounts':[
+ cfg['sandbox']={'workspace':str(task/'workspace'),'extra_read_only_mounts':[
   {'source':'/tmp/deep-agent-npm','destination':'/opt/npm-prefix'},
   {'source':str(Path(shutil.which('node')).resolve().parent.parent),'destination':'/opt/node'},
   {'source':'/etc/fonts','destination':'/etc/fonts'}],

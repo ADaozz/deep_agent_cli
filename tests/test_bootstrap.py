@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -210,7 +211,7 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "initialize_user_files", lambda: None)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
-    settings = Settings(sandbox=cli.replace(Settings().sandbox, workspace=tmp_path), config_dir=tmp_path.parent / "config")
+    settings = Settings(sandbox=replace(Settings().sandbox, workspace=tmp_path), config_dir=tmp_path.parent / "config")
     monkeypatch.setattr(cli.Settings, "load", lambda: settings)
     runner = SimpleNamespace(prepared=SimpleNamespace(execution_mode=ExecutionMode.SANDBOXED), close=lambda: calls.append("closed"))
     monkeypatch.setattr(cli, "create_runner", lambda _: runner)

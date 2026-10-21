@@ -5,8 +5,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
 from agent.factory import create_agent
-from agent.config import SandboxConfig, Settings
-from agent.sandbox import UnsandboxedShellBackend
+from agent.config import Settings
+from tests.host_command import HostCommandBackend
 from agent.tools.examples import build_example_tools
 from agent.permission import ASK_INTERRUPT_ON
 from agent.runner import (
@@ -267,9 +267,7 @@ def test_context_window_comes_from_the_active_profile() -> None:
 
 
 def test_execute_artifact_reaches_runner_event_after_approval(tmp_path) -> None:
-    backend = UnsandboxedShellBackend(SandboxConfig(
-        workspace=tmp_path, allow_unsandboxed=True, max_output_bytes=8,
-    ))
+    backend = HostCommandBackend(tmp_path, max_output_bytes=8)
     prepared = create_agent(
         model=scripted_model([
             AIMessage(content="", tool_calls=[{
@@ -287,7 +285,7 @@ def test_execute_artifact_reaches_runner_event_after_approval(tmp_path) -> None:
     completed = [event for event in events if event.type == "tool_completed" and event.name == "execute"]
     assert len(completed) == 1
     assert completed[0].artifact["truncated"] is True
-    assert completed[0].artifact["agent_log_path"].startswith(f"/{tmp_path.name}/.deep-agent/logs/exec/")
+    assert completed[0].artifact["agent_log_path"].startswith(f"{tmp_path.resolve().as_posix()}/.deep-agent/logs/exec/")
     assert completed[0].artifact["exit_code"] == 0
 
 
@@ -716,7 +714,7 @@ def test_runner_cancels_running_execute_tool(tmp_path) -> None:
     import time
 
     marker = tmp_path / "started"
-    backend = UnsandboxedShellBackend(SandboxConfig(workspace=tmp_path, allow_unsandboxed=True))
+    backend = HostCommandBackend(tmp_path)
     prepared = create_agent(model=scripted_model([
         AIMessage(content="", tool_calls=[{"id": "long-exec", "name": "execute",
                                            "args": {"command": f"touch {marker}; sleep 60"}}]),

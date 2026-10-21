@@ -90,11 +90,11 @@ command -v rg
 
 ### 执行环境
 
-沙箱模式且找到 `rg` 时，搜索复用当前会话的持久沙箱：`ask` 使用无网实例，
+找到 `rg` 且执行器是 Bubblewrap 时，搜索复用当前会话的持久沙箱：`ask` 使用无网实例，
 `allow` 使用有网实例。常驻的是沙箱和 Worker；每次搜索启动一个 rg，结束后退出。
 这段搜索实现不调用 `execute`。它当前不会作为 `grep` 工具注册给模型。模型侧的搜索走上一节的 `execute` + `rg`。
 
-未找到 rg 或运行于 UNSANDBOXED 模式时，使用独立、可终止的宿主 Python `re`
+未找到 rg，或执行器不是 Bubblewrap 时，使用独立、可终止的宿主 Python `re`
 进程，并通过目录描述符约束文件访问。非本地自定义 Backend 保留自身的搜索接口。
 路径检查与进程生命周期见 [架构](architecture.md#grep-搜索)，隔离范围见
 [沙箱与权限](sandbox.md)。
@@ -120,7 +120,7 @@ grep(pattern="config.yaml", fixed_string=true)
 **行为变更**：旧版默认按字面量搜索；现在 `.`, `*`, `+`, `[` 等字符默认解释为正则语法。
 通过自定义非本地 Backend 注入的工具仍使用该 Backend 的原有搜索接口。
 
-`path` 默认 `/my-project`。SANDBOXED 下还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
+`path` 默认是工作区的真实绝对路径。还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
 
 #### Glob 过滤
 
@@ -158,7 +158,7 @@ grep(pattern="TODO", glob=["!**/node_modules/**", "!**/.venv/**"])  # 只排除�
 `glob="*.log"` 会搜索 `.gitignore` 中忽略的 `*.log` 文件；被忽略或隐藏的**目录**
 不会因 `*.py` 这类文件规则而被遍历。
 
-Python 回退引擎（UNSANDBOXED 或未找到 `rg`）实现相同的 Glob、隐藏文件、`.git`、
+Python 回退引擎（未找到 `rg`，或执行器不是 Bubblewrap）实现相同的 Glob、隐藏文件、`.git`、
 符号链接和二进制规则，但**不读取 `.gitignore`/`.ignore`/`.rgignore`**，因此可能比
 `rg` 多返回被忽略的文件；需要时请用排除 Glob（如 `!**/node_modules/**`）。
 

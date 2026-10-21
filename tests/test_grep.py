@@ -1,7 +1,7 @@
 """Real subprocess tests for both engines, registration, and workspace boundaries.
 
 The ``rg`` engine runs inside the existing persistent Bubblewrap sandbox; the
-``python`` engine is the descriptor-confined worker used for UNSANDBOXED.
+``python`` engine is the descriptor-confined worker used when ``rg`` is not.
 """
 from __future__ import annotations
 
@@ -21,10 +21,39 @@ from agent.config import SandboxConfig
 from agent.factory import AgentSpec, build_agent, create_agent
 from agent.control import RunController
 from agent.permission import PermissionMode
-from agent.sandbox import BackendSelection, ExecutionMode, BubblewrapBackend, UnsandboxedShellBackend, WorkspaceCompositeBackend
+from agent.sandbox import BackendSelection, ExecutionMode, BubblewrapBackend, WorkspaceCompositeBackend
+from tests.host_command import HostCommandBackend
 from agent.tools import grep as implementation
 from tests.conftest import graph_tool_names, scripted_model
 from agent.sandbox_pool import PersistentSandbox, _POOLS
+
+
+def _legacy_workspace_path(path: str | None, root: str) -> str | None:
+    """Map the historical ``/workspace`` fixture prefix onto the real directory."""
+    if path == "/workspace" or (isinstance(path, str) and path.startswith("/workspace/")):
+        return root + path[len("/workspace"):]
+    return path
+
+
+def _show_legacy_workspace_path(result: str, root: str) -> str:
+    if result.startswith("Error:") or not root or root not in result:
+        return result
+    return result.replace(root, "/workspace")
+
+
+_search = implementation.search
+
+
+def _search_with_real_workspace(backend, pattern, path, glob, output_mode, max_count, fixed_string, *, network=False):
+    root = getattr(backend, "workspace_root", "")
+    mapped = _legacy_workspace_path(path, root) if isinstance(root, str) else path
+    result = _search(
+        backend, pattern, mapped, glob, output_mode, max_count, fixed_string, network=network,
+    )
+    return _show_legacy_workspace_path(result, root) if isinstance(result, str) else result
+
+
+implementation.search = _search_with_real_workspace
 
 
 def usable_bwrap() -> str:
@@ -46,7 +75,7 @@ def make_backend(engine: str, work: Path, skills: Path | None) -> WorkspaceCompo
         executor = BubblewrapBackend(SandboxConfig(workspace=work), executable=usable_bwrap())
         executor.skills_dir = skills  # Mirror the production workspace/skills mounts.
     else:
-        executor = UnsandboxedShellBackend(SandboxConfig(workspace=work))
+        executor = HostCommandBackend(work)
     return WorkspaceCompositeBackend(executor, skills_dir=skills)
 
 
@@ -861,7 +890,7 @@ def test_symlink_swap_after_resolve_cannot_escape(engine, tmp_path, monkeypatch)
 
     def swap_after_resolve(path):
         found = original(path)
-        if path == "/workspace/sub" and not sub.is_symlink():
+        if path in {"/workspace/sub", f"{backend.workspace_root}/sub"} and not sub.is_symlink():
             os.rename(sub, work / "sub.real")
             os.symlink(outside, sub)
         return found
@@ -1018,7 +1047,7 @@ def test_grep_searches_declared_mounts_and_rejects_the_rest(engine_name, tmp_pat
     for path in ("/etc", "/workspace2", "/opt", "/opt/neighbor.py"):
         result = found(path, "hit")
         assert result.startswith("Error:")
-        assert str(tmp_path) not in result
+        assert str(secret) not in result
     assert "secret-hit" not in found("/app", "secret-hit")
     assert found("/app/escape.py", "secret-hit").startswith("Error:")
     assert secret.read_text() == "secret-hit\n"

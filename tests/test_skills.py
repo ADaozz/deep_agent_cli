@@ -195,13 +195,14 @@ def test_native_middleware_and_read_file_work_together(tmp_path):
     assert any(message.type == "tool" and "执行技能时输出特定内容" in message.content for message in result["messages"])
 
 
-def test_catalog_through_read_only_skills_route(tmp_path):
+def test_catalog_through_writable_skills_route(tmp_path):
     write_skill(tmp_path, "alpha")
     executor = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
     backend = WorkspaceCompositeBackend(executor, skills_dir=tmp_path / "skills")
     prepared = create_agent(model=scripted_model([AIMessage(content="done")]), backend=backend, skills=["/skills/"])
     assert load_skill_catalog(prepared)["skills_metadata"][0]["name"] == "alpha"
-    assert "read-only" in backend.write("/skills/alpha/SKILL.md", "修改").error
+    assert backend.write("/skills/alpha/installed.txt", "修改").error is None
+    assert (tmp_path / "skills" / "alpha" / "installed.txt").read_text() == "修改"
 
 
 def test_keyboard_enter_opens_picker_and_ctrl_c_clears_block(tmp_path):

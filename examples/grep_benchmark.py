@@ -10,7 +10,7 @@ the rare marker, forcing a full traversal; every tenth file holds "needle".
 
 Engines: ``new`` (cold persistent sandbox + one rg), ``new-hot``
 (reuse an already-running sandbox + one rg), ``new-python``
-(this checkout, UNSANDBOXED descriptor-confined Python engine), ``baseline``
+(this checkout, descriptor-confined Python engine), ``baseline``
 (another checkout, e.g. a worktree of the previous PR #5 commit), ``rg``
 (direct host rg) and ``main`` (Deep Agents FilesystemBackend.grep, the backend
 used on main). Every measurement is the median of ``--repeat`` runs.
@@ -72,11 +72,14 @@ def generate(root: Path) -> None:
 
 
 def _backend(kind: str, workspace: Path):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     from agent.config import SandboxConfig
-    from agent.sandbox import BubblewrapBackend, UnsandboxedShellBackend, WorkspaceCompositeBackend
+    from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend
+    from tests.host_command import HostCommandBackend
 
     if kind == "python":
-        executor = UnsandboxedShellBackend(SandboxConfig(workspace=workspace))
+        executor = HostCommandBackend(workspace)
     else:
         executor = BubblewrapBackend(SandboxConfig(workspace=workspace), executable=shutil.which("bwrap"))
     return WorkspaceCompositeBackend(executor, skills_dir=None)

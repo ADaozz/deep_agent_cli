@@ -19,18 +19,19 @@ deep-agent --version
 
 ## 命令
 
-输入 `/` 显示候选，按连续子串匹配（例如 `/elp` 匹配 `/help`），完整匹配和前缀匹配优先。方向键选择，`Tab` 或 `Enter` 填入，退格后重新显示符合当前输入的候选。`/model ` 和 `/permission ` 后面的参数也按连续子串补全。
+输入 `/` 显示候选，按连续子串匹配（例如 `/elp` 匹配 `/help`），完整匹配和前缀匹配优先。方向键选择，`Tab` 或 `Enter` 填入，退格后重新显示符合当前输入的候选。`/model `、`/permission ` 和 `/sandbox ` 后面的参数也按连续子串补全。
 
 | 命令 | 作用 |
 |---|---|
 | `/help` | 命令和快捷键列表 |
-| `/status` | 运行状态、模型与推理强度、权限、会话 id、执行模式、有网与无网沙箱状态、工具数 |
+| `/status` | 运行状态、模型与推理强度、权限、文件系统模式、会话 id、执行模式、有网与无网沙箱状态、工具数 |
 | `/session` | 当前会话信息与数据库路径 |
 | `/new` | 新建会话（首次发送消息后才保存） |
 | `/resume` | 列出有内容的会话并选择；`/resume <id前缀>` 直接切换 |
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
+| `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
 | `/attachments cleanup` | 删除不再被任何会话引用的图片文件 |
@@ -89,7 +90,7 @@ deep-agent --version
 
 `/skill` 只在空闲且没有待处理交互时可用，不接受参数。选择后在输入框插入 `[Skill: 名称]` 块，可在其后追加任务说明。提交时还原为“使用技能 …，先读取 /skills/…/SKILL.md 并遵循其说明。”；编辑该标记后需还原或删除才能提交。
 
-缺少有效 `name` / `description` 的技能目录不进入列表。Skills 目录以只读方式映射到 `/skills`。Skill 提供操作说明，不负责安装执行工具。工具目录和版本由用户通过挂载及 PATH 配置；默认模板不自动选择 NVM 版本，`/status` 也不执行工具链预检。挂载与环境变量见 [sandbox.md](sandbox.md#工具目录与环境变量)，浏览器设置见 [Playwright 与有头 X11](sandbox.md#playwright-与有头-x11)。
+缺少有效 `name` / `description` 的技能目录不进入列表。Skills 目录以读写方式映射到 `/skills`，Agent 可以在这里安装 skill，并持久化到宿主的 skills 目录。Skill 提供操作说明，不负责安装执行工具。工具目录和版本由用户通过挂载及 PATH 配置；默认模板不自动选择 NVM 版本，`/status` 也不执行工具链预检。挂载与环境变量见 [sandbox.md](sandbox.md#工具目录与环境变量)，浏览器设置见 [Playwright 与有头 X11](sandbox.md#playwright-与有头-x11)。
 
 ## 图片
 

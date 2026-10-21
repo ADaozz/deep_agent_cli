@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from functools import wraps
 from pathlib import Path
@@ -31,9 +31,10 @@ from agent.attachments import (
     ImageAttachmentRef,
     refs_to_dicts,
 )
-from agent.config import InputKind, ModelProfile, SandboxConfig, Settings
+from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, parse_sandbox_mode
 from agent.control import RunController
 from agent.factory import AgentSpec, PreparedAgent, build_agent
+from agent.sandbox import WorkspaceCompositeBackend
 from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
 from agent.llm_stream import ModelStreamCancelled, reset_stream_owner, set_stream_owner
@@ -226,6 +227,10 @@ class AgentRunner:
         self._pending_reasoning_effort: str | None = None
         self._pending_model_id: str | None = None
         self._pending_permission_mode: PermissionMode | None = None
+        configured_mode = self._sandbox_config.mode if self._sandbox_config is not None else "restricted"
+        self._configured_sandbox_mode = configured_mode
+        self._sandbox_mode = configured_mode
+        self._pending_sandbox_mode: str | None = None
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._closed = False
@@ -359,10 +364,28 @@ class AgentRunner:
         with self._pending_config_lock:
             return self._pending_permission_mode
 
+    def sandbox_mode(self) -> str:
+        return self._sandbox_mode
+
+    def pending_sandbox_mode(self) -> str | None:
+        with self._pending_config_lock:
+            return self._pending_sandbox_mode
+
+    def request_sandbox_mode(self, mode: str) -> str:
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        self._require_active_session()
+        parsed = parse_sandbox_mode(mode)
+        if parsed is None:
+            raise ValueError("sandbox mode must be restricted or full-access")
+        with self._pending_config_lock:
+            self._pending_sandbox_mode = None if parsed == self._sandbox_mode else parsed
+        return parsed
+
     def _has_pending_runtime_config(self) -> bool:
         with self._pending_config_lock:
             return (self._pending_model_id is not None or self._pending_permission_mode is not None
-                    or self._pending_reasoning_effort is not None)
+                    or self._pending_reasoning_effort is not None or self._pending_sandbox_mode is not None)
 
     def _save_pending_config(self) -> None:
         if self.session_store is not None:
@@ -419,11 +442,13 @@ class AgentRunner:
 
     def _apply_pending_runtime_config(self, handler: RunEventHandler | None = None) -> None:
         failures: list[str] = []
+        applied_sandbox = None
         with self._pending_config_lock:
             model_id = self._pending_model_id
             mode = self._pending_permission_mode
             effort = self._pending_reasoning_effort
-            if model_id is None and mode is None and effort is None:
+            sandbox_mode = self._pending_sandbox_mode
+            if model_id is None and mode is None and effort is None and sandbox_mode is None:
                 return
             profile = self.current_model()
             if model_id is not None:
@@ -476,19 +501,40 @@ class AgentRunner:
                 self._permission_mode = mode
             if effort is not None:
                 self._reasoning_effort = effort
+            applied_sandbox = None
+            if sandbox_mode is not None:
+                try:
+                    self._apply_sandbox_mode(sandbox_mode)
+                    applied_sandbox = sandbox_mode
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(str(exc))
             self._pending_model_id = None
             self._pending_permission_mode = None
             self._pending_reasoning_effort = None
+            self._pending_sandbox_mode = None
+            if applied_sandbox is not None:
+                self._sandbox_mode = applied_sandbox
             self._save_pending_config()
         for failure in failures:
             _emit(handler or self.on_event, RunEvent(type="runtime_config_failed", content=failure, is_error=True))
-        if model_id is not None or mode is not None or effort is not None:
+        if model_id is not None or mode is not None or effort is not None or applied_sandbox is not None:
             _emit(handler or self.on_event, RunEvent(
                 type="runtime_config_applied",
                 result={"model_id": self._current_model_id, "permission_mode": self._permission_mode.value,
                         "reasoning_effort": self._reasoning_effort, "reasoning_changed": effort is not None,
-                        "model_changed": model_id is not None, "permission_changed": mode is not None},
+                        "model_changed": model_id is not None, "permission_changed": mode is not None,
+                        "sandbox_mode": self._sandbox_mode, "sandbox_changed": applied_sandbox is not None},
             ))
+
+    def _apply_sandbox_mode(self, mode: str) -> None:
+        backend = self.prepared.backend
+        if not isinstance(backend, WorkspaceCompositeBackend):
+            raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
+        backend.apply_sandbox_mode(mode)  # type: ignore[arg-type]
+        if self._sandbox_config is not None:
+            self._sandbox_config = replace(self._sandbox_config, mode=mode)  # type: ignore[arg-type]
+        if self._spec.sandbox is not None:
+            self._spec = replace(self._spec, sandbox=replace(self._spec.sandbox, mode=mode))  # type: ignore[arg-type]
 
     def supports_input(self, kind: InputKind) -> bool:
         profile = self.current_model()
@@ -869,7 +915,18 @@ class AgentRunner:
         self.control.set_defer_steering(bool(snapshot.interrupt_kind))
         snapshot.notices.extend(plan.notices)
         self._resume_context = recovery
+        self._restore_configured_sandbox_mode()
         return snapshot
+
+    def _restore_configured_sandbox_mode(self) -> None:
+        """Resume and new sessions use the configured filesystem mode, not a prior /sandbox choice."""
+        self._pending_sandbox_mode = None
+        if self._sandbox_mode == self._configured_sandbox_mode:
+            return
+        backend = self.prepared.backend
+        if isinstance(backend, WorkspaceCompositeBackend):
+            backend.apply_sandbox_mode(self._configured_sandbox_mode)  # type: ignore[arg-type]
+        self._sandbox_mode = self._configured_sandbox_mode
 
     def _apply_restore_plan(self, plan: RestorePlan) -> None:
         if self.settings is not None and plan.model_id and (
@@ -904,6 +961,7 @@ class AgentRunner:
         self._pending_reasoning_effort = None
         self._pending_model_id = None
         self._pending_permission_mode = None
+        self._restore_configured_sandbox_mode()
         self._end_sandbox_session("new session started")
         return self._runtime.create_new(
             title=title, model_id=self._current_model_id,

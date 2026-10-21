@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 import re
 from pathlib import Path
@@ -65,19 +65,38 @@ InputKind = Literal["text", "image"]
 _INPUT_KINDS = frozenset({"text", "image"})
 
 
+SandboxMode = Literal["restricted", "full-access"]
+_SANDBOX_MODES = frozenset({"restricted", "full-access"})
+
+
+def parse_sandbox_mode(value: str) -> SandboxMode | None:
+    key = value.strip().lower()
+    if key in _SANDBOX_MODES:
+        return key  # type: ignore[return-value]
+    return None
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Bubblewrap policy. Defaults expose only the workspace and read-only runtimes."""
+    """Bubblewrap policy. ``restricted`` is the default filesystem boundary."""
 
     workspace: Path = field(default_factory=Path.cwd)
     bwrap_path: str = "bwrap"
-    allow_unsandboxed: bool = False
+    mode: SandboxMode = "restricted"
     timeout_seconds: int | None = None
     max_output_bytes: int = 100_000
     env_allowlist: tuple[str, ...] = ()
     env_set: dict[str, str] = field(default_factory=dict)
     extra_read_only_mounts: tuple[BindMount, ...] = ()
     extra_read_write_mounts: tuple[BindMount, ...] = ()
+    protected_config_dir: Path | None = None
+    protected_files: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.mode not in _SANDBOX_MODES:
+            raise ValueError(
+                f"sandbox.mode must be restricted or full-access, got {self.mode!r}"
+            )
 
 
 def _default_profiles() -> tuple[ModelProfile, ...]:
@@ -226,6 +245,10 @@ class Settings:
                 "sandbox.protected_workspace_paths was removed; move skills to "
                 "~/.deep-agent/skills and use explicit read-only mounts for other resources"
             )
+        if "allow_unsandboxed" in sandbox_raw:
+            raise ValueError(
+                "sandbox.allow_unsandboxed was removed; Bubblewrap is required"
+            )
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
@@ -257,7 +280,18 @@ class Settings:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
         if result.config_dir is not None:
             require_keybindings_outside_workspace(result.config_dir, result.sandbox.workspace)
-        return result
+        config_dir = (result.config_dir or (Path.home() / ".deep-agent")).expanduser().resolve()
+        protected: list[Path] = []
+        for candidate in (result.source_path, result.state_path):
+            if candidate is None:
+                continue
+            resolved = candidate.expanduser().resolve()
+            if resolved != config_dir and not resolved.is_relative_to(config_dir):
+                protected.append(resolved)
+        return replace(
+            result,
+            sandbox=replace(result.sandbox, protected_config_dir=config_dir, protected_files=tuple(protected)),
+        )
 
 
 def resolve_config_path(
@@ -574,14 +608,20 @@ def _model_context_window(value: Any, *, field_name: str) -> int:
     return tokens
 
 
+def _sandbox_mode(value: Any) -> SandboxMode:
+    if value is None:
+        return "restricted"
+    if not isinstance(value, str) or value.strip().lower() not in _SANDBOX_MODES:
+        raise ValueError("sandbox.mode must be restricted or full-access")
+    return value.strip().lower()  # type: ignore[return-value]
+
+
 def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> SandboxConfig:
     workspace = _workspace_path(data.get("workspace"), base_dir=base_dir)
     return SandboxConfig(
         workspace=workspace,
         bwrap_path=str(data.get("bwrap_path") or "bwrap"),
-        allow_unsandboxed=_as_bool(
-            data.get("allow_unsandboxed", False), field_name="sandbox.allow_unsandboxed",
-        ),
+        mode=_sandbox_mode(data.get("mode")),
         timeout_seconds=(
             _as_positive_int(data["timeout_seconds"], field_name="sandbox.timeout_seconds", default=0)
             if data.get("timeout_seconds") is not None else None

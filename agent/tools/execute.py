@@ -9,7 +9,10 @@ _PERSISTENCE = (
     "Each call starts a fresh shell (cd and shell variables do not carry over), "
     "but the sandbox environment is reused for the session: files under /tmp "
     "and /home and background processes (for example `nohup cmd > log 2>&1 &`) "
-    "survive between calls. "
+    "survive between calls and across sandbox restarts. "
+    "restricted mode keeps system directories read-only. "
+    "full-access mode can write the real filesystem except the agent installation "
+    "and configuration directory. "
 )
 _ASK_DESCRIPTION = (
     "Run a shell command in the current working directory ({workspace_root}) inside the sandbox. "
@@ -26,15 +29,6 @@ _ALLOW_DESCRIPTION = (
     "Permission allow mode: commands run without approval and host network "
     "(internet, localhost, LAN) is enabled by default for every call. " + _PERSISTENCE
 )
-_HOST_DESCRIPTION = (
-    "Run a shell command directly on the host in the current working directory ({workspace_root}). "
-    "Commands use the current user's host permissions and host network access; "
-    "network=false does not disable networking. Every execute requires approval. "
-    "Each call starts a fresh shell; directory changes and shell variables do not carry over. "
-    "HOME and TMPDIR are temporary directories created for each call and removed afterwards. "
-    "Do not rely on files in these directories persisting across calls. "
-    "File tools use a separate virtual project path; shell commands use host paths. "
-)
 _SEARCH_GUIDANCE = (
     "Use `rg -n 'pattern' path` to search file contents "
     "and `rg --files -g 'pattern' path` to find files. "
@@ -50,14 +44,12 @@ _SEARCH_UNAVAILABLE = (
 
 
 def _execute_description(
-    *, network_by_default: bool, workspace_root: str = "/workspace", unsandboxed: bool = False,
+    *, network_by_default: bool, workspace_root: str = "/workspace",
 ) -> str:
     from agent.tools.grep import resolve_rg
 
-    base = _HOST_DESCRIPTION if unsandboxed else (_ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION)
+    base = _ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION
     guidance = _SEARCH_GUIDANCE if resolve_rg() else _SEARCH_UNAVAILABLE
-    if unsandboxed:
-        guidance = guidance.replace("inside the sandbox", "on the host")
     return base.replace("{workspace_root}", workspace_root) + guidance
 
 
@@ -106,18 +98,12 @@ def build_execute_tool(
         }
         return output, artifact
 
-    from agent.sandbox import UnsandboxedShellBackend
-
-    executor = getattr(backend, "executor", backend)
-    unsandboxed = isinstance(executor, UnsandboxedShellBackend)
-    working_directory = str(executor.config.workspace) if unsandboxed else getattr(backend, "workspace_root", "/workspace")
     return StructuredTool.from_function(
         func=execute,
         name="execute",
         response_format="content_and_artifact",
         description=_execute_description(
             network_by_default=network_by_default,
-            workspace_root=working_directory,
-            unsandboxed=unsandboxed,
+            workspace_root=getattr(backend, "workspace_root", "/workspace"),
         ),
     )

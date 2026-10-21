@@ -45,7 +45,7 @@ def test_live_workspace_and_model_are_configurable_and_resources_closed(tmp_path
     assert workspace != settings.sandbox.workspace
     assert not workspace.exists()
     assert not seen[0].state_path.exists()
-    assert not seen[0].sandbox.allow_unsandboxed
+    assert seen[0].sandbox.mode == "restricted"
 
 
 def test_live_refuses_nonempty_workspace(tmp_path, monkeypatch):

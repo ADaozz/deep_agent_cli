@@ -11,16 +11,15 @@ import pytest
 from agent.cancel import ToolCancelContext, set_cancel_context, set_output_emitter
 from agent.cli.rendering import render_transcript
 from agent.cli.state import CliState
-from agent.config import SandboxConfig
 from agent.control import RunController
-from agent.sandbox import UnsandboxedShellBackend, WorkspaceCompositeBackend, _run_process
+from agent.sandbox import WorkspaceCompositeBackend, _run_process
+from tests.host_command import HostCommandBackend
 from agent.runner import RunEvent
 from agent.tools.execute import build_execute_tool
 
 
-def _unsandboxed(tmp_path: Path, **kwargs) -> UnsandboxedShellBackend:
-    config = SandboxConfig(workspace=tmp_path, allow_unsandboxed=True, bwrap_path="/missing", **kwargs)
-    return UnsandboxedShellBackend(config)
+def _host(tmp_path: Path, **kwargs) -> HostCommandBackend:
+    return HostCommandBackend(tmp_path, **kwargs)
 
 
 def test_execute_streams_chunks_before_exit(tmp_path: Path) -> None:
@@ -29,7 +28,7 @@ def test_execute_streams_chunks_before_exit(tmp_path: Path) -> None:
     ctx = ToolCancelContext(tool_name="execute", tool_call_id="t1", cancel_event=threading.Event())
     set_cancel_context(ctx)
     try:
-        backend = _unsandboxed(tmp_path, max_output_bytes=100000)
+        backend = _host(tmp_path, max_output_bytes=100000)
         result = backend.execute("printf 'one\\n'; sleep 0.05; printf 'two\\n'")
     finally:
         set_cancel_context(None)
@@ -44,7 +43,7 @@ def test_execute_cancel_kills_process_group(tmp_path: Path) -> None:
     controller = RunController()
     controller.begin_run()
     ctx = controller.open_tool_context(tool_name="execute", tool_call_id="kill-me")
-    backend = _unsandboxed(tmp_path)
+    backend = _host(tmp_path)
 
     def cancel_soon() -> None:
         time.sleep(0.1)
@@ -63,13 +62,13 @@ def test_execute_cancel_kills_process_group(tmp_path: Path) -> None:
 
 
 def test_execute_timeout_returns_124(tmp_path: Path) -> None:
-    backend = _unsandboxed(tmp_path)
+    backend = _host(tmp_path)
     result = backend.execute("sleep 5", timeout=1)
     assert result.exit_code == 124
 
 
 def test_timeout_when_child_keeps_output_pipe_open(tmp_path: Path) -> None:
-    backend = _unsandboxed(tmp_path)
+    backend = _host(tmp_path)
     started = time.monotonic()
     result = backend.execute("sleep 4 &", timeout=1)
     elapsed = time.monotonic() - started
@@ -78,7 +77,7 @@ def test_timeout_when_child_keeps_output_pipe_open(tmp_path: Path) -> None:
 
 
 def test_post_exit_output_resets_idle_grace(tmp_path: Path) -> None:
-    backend = _unsandboxed(tmp_path)
+    backend = _host(tmp_path)
     result = backend.execute("(sleep 0.04; printf a; sleep 0.04; printf b; sleep 0.04; printf c) &")
     assert result.exit_code == 0
     assert result.output == "abc"
@@ -114,7 +113,7 @@ def test_truncated_rolling_tail_never_splits_utf8_characters(tmp_path: Path) -> 
     # lands mid-character at the head, and pipe chunk boundaries split them.
     script = "import sys; sys.stdout.buffer.write(b'\\xe4\\xb8\\xad' * 1600)"
     try:
-        result = _unsandboxed(tmp_path, max_output_bytes=50).execute(f'python3 -c "{script}"')
+        result = _host(tmp_path, max_output_bytes=50).execute(f'python3 -c "{script}"')
     finally:
         set_output_emitter(None)
     assert result.truncated
@@ -128,7 +127,7 @@ def test_truncated_rolling_tail_never_splits_utf8_characters(tmp_path: Path) -> 
 
 
 def test_truncation_keeps_draining(tmp_path: Path) -> None:
-    backend = _unsandboxed(tmp_path, max_output_bytes=8)
+    backend = _host(tmp_path, max_output_bytes=8)
     result = backend.execute("printf 'abcdefghijklmnop'")
     assert result.truncated is True
     assert "truncated" in result.output.lower()
@@ -138,7 +137,7 @@ def test_truncation_also_caps_streamed_output(tmp_path: Path) -> None:
     chunks: list[tuple[str, str]] = []
     set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
     try:
-        result = _unsandboxed(tmp_path, max_output_bytes=16).execute("printf '%020000d' 0")
+        result = _host(tmp_path, max_output_bytes=16).execute("printf '%020000d' 0")
     finally:
         set_output_emitter(None)
     streamed = "".join(text for stream, text in chunks if stream == "merged")
@@ -153,7 +152,7 @@ def test_truncation_also_caps_streamed_output(tmp_path: Path) -> None:
 
 
 def test_short_and_exact_limit_output_do_not_create_log(tmp_path: Path) -> None:
-    backend = _unsandboxed(tmp_path, max_output_bytes=8)
+    backend = _host(tmp_path, max_output_bytes=8)
     for command, expected in (("printf short", "short"), ("printf 12345678", "12345678")):
         result = backend.execute(command)
         assert result.output == expected
@@ -165,17 +164,18 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     chunks: list[tuple[str, str]] = []
     set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
     try:
-        backend = _unsandboxed(tmp_path, max_output_bytes=8)
+        backend = _host(tmp_path, max_output_bytes=8)
         result = backend.execute("printf ABCD; sleep 0.05; printf efgh >&2; sleep 0.05; printf 1234")
     finally:
         set_output_emitter(None)
     assert result.truncated
     assert result.output.startswith("efgh1234")
     assert result.output.count("[Output truncated: showing") == 1
-    match = re.search(rf"Agent path: (/{re.escape(tmp_path.name)}/\.deep-agent/logs/exec/[^\]\n]+)", result.output)
+    root = tmp_path.resolve().as_posix()
+    match = re.search(rf"Agent path: ({re.escape(root)}/\.deep-agent/logs/exec/[^\]\n]+)", result.output)
     assert match is not None
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    log_path = tmp_path / match.group(1).removeprefix(f"/{tmp_path.name}/")
+    log_path = Path(match.group(1))
     assert log_path.read_bytes() == b"ABCDefgh1234"
     routed = WorkspaceCompositeBackend(backend, skills_dir=None).read(match.group(1))
     assert routed.file_data and routed.file_data["content"] == "ABCDefgh1234"
@@ -194,7 +194,7 @@ def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) ->
     assert "[output truncated]" not in tool_result
     assert artifact["truncated"] is True
     assert artifact["host_log_path"] and str(tmp_path) in artifact["host_log_path"]
-    assert artifact["agent_log_path"].startswith(f"/{tmp_path.name}/.deep-agent/logs/exec/")
+    assert artifact["agent_log_path"].startswith(f"{tmp_path.resolve().as_posix()}/.deep-agent/logs/exec/")
 
 
 def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> None:
@@ -217,7 +217,7 @@ def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> No
     ctx = ToolCancelContext(tool_name="execute", tool_call_id="live", cancel_event=threading.Event())
     set_cancel_context(ctx)
     try:
-        result = _unsandboxed(tmp_path, max_output_bytes=24).execute(
+        result = _host(tmp_path, max_output_bytes=24).execute(
             "for i in 1 2 3 4 5 6; do printf 'line %02d\\n' \"$i\"; sleep 0.05; done"
         )
     finally:
@@ -246,14 +246,14 @@ def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> No
 
 
 def test_truncated_timeout_keeps_tail_and_captured_log(tmp_path: Path) -> None:
-    result = _unsandboxed(tmp_path, max_output_bytes=8).execute(
+    result = _host(tmp_path, max_output_bytes=8).execute(
         "printf ABCDefgh1234; sleep 5", timeout=1,
     )
     assert result.exit_code == 124
     assert "efgh1234" in result.output
     assert "timed out" in result.output
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    assert f"Agent path: /{tmp_path.name}/.deep-agent/logs/exec/" in result.output
+    assert f"Agent path: {tmp_path.resolve().as_posix()}/.deep-agent/logs/exec/" in result.output
 
 
 def test_cancel_drains_already_produced_pipe_output(tmp_path: Path, monkeypatch) -> None:
@@ -304,7 +304,7 @@ def test_cancel_drains_already_produced_pipe_output(tmp_path: Path, monkeypatch)
     set_cancel_context(ctx)
     set_output_emitter(emit)
     try:
-        result = _unsandboxed(tmp_path, max_output_bytes=200_000).execute(f"python3 {script}")
+        result = _host(tmp_path, max_output_bytes=200_000).execute(f"python3 {script}")
     finally:
         controller.close_tool_context(ctx)
         set_cancel_context(None)
@@ -324,7 +324,7 @@ def test_truncated_cancel_keeps_tail_and_captured_log(tmp_path: Path) -> None:
     thread = threading.Thread(target=lambda: (time.sleep(0.1), controller.cancel()), daemon=True)
     thread.start()
     try:
-        result = _unsandboxed(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234; sleep 5")
+        result = _host(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234; sleep 5")
     finally:
         thread.join(2)
         controller.close_tool_context(ctx)
@@ -333,14 +333,14 @@ def test_truncated_cancel_keeps_tail_and_captured_log(tmp_path: Path) -> None:
     assert "efgh1234" in result.output
     assert "Cancelled by user" in result.output
     assert f"Full output saved to: {tmp_path}/.deep-agent/logs/exec/" in result.output
-    assert f"Agent path: /{tmp_path.name}/.deep-agent/logs/exec/" in result.output
+    assert f"Agent path: {tmp_path.resolve().as_posix()}/.deep-agent/logs/exec/" in result.output
 
 
 def test_log_symlink_is_rejected_without_losing_tail(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     (tmp_path / ".deep-agent").symlink_to(outside, target_is_directory=True)
-    result = _unsandboxed(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234")
+    result = _host(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234")
     assert result.truncated
     assert result.output.startswith("efgh1234")
     assert "Full output could not be saved" in result.output
@@ -355,7 +355,7 @@ def test_log_creation_failure_reports_missing_log(tmp_path: Path, monkeypatch: p
         raise PermissionError("log directory is not writable")
 
     monkeypatch.setattr(sandbox, "_create_exec_log", cannot_create)
-    result = _unsandboxed(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234")
+    result = _host(tmp_path, max_output_bytes=8).execute("printf ABCDefgh1234")
     assert result.truncated
     assert result.output.startswith("efgh1234")
     assert "Full output could not be saved" in result.output

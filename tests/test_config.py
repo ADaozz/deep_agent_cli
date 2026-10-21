@@ -17,7 +17,7 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
     settings = Settings.load(base_dir=tmp_path)
     assert settings.llm_model == "qwen3.5-plus"
-    assert settings.sandbox.allow_unsandboxed is False
+    assert settings.sandbox.mode == "restricted"
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
     assert settings.ui_timezone == "Asia/Shanghai"
@@ -200,7 +200,7 @@ llm:
           model: demo-model
 sandbox:
   workspace: work
-  allow_unsandboxed: true
+  mode: full-access
   timeout_seconds: 30
   max_output_bytes: 2048
   env_allowlist:
@@ -229,7 +229,7 @@ paths:
     assert settings.active_profile.id == "local/demo"
     assert settings.active_profile.input == ("text",)
     assert settings.sandbox.workspace == (tmp_path / "work").resolve()
-    assert settings.sandbox.allow_unsandboxed is True
+    assert settings.sandbox.mode == "full-access"
     assert settings.sandbox.timeout_seconds == 30
     assert settings.sandbox.max_output_bytes == 2048
     assert settings.sandbox.env_allowlist == ("JAVA_HOME",)
@@ -548,10 +548,17 @@ llm:
         Settings.load(path)
 
 
-def test_invalid_bool_raises(tmp_path: Path) -> None:
+def test_invalid_sandbox_mode_raises(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text(_MODEL_YAML + "sandbox:\n  allow_unsandboxed: maybe\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="allow_unsandboxed"):
+    path.write_text(_MODEL_YAML + "sandbox:\n  mode: maybe\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="sandbox.mode"):
+        Settings.load(path)
+
+
+def test_removed_allow_unsandboxed_raises(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_MODEL_YAML + "sandbox:\n  allow_unsandboxed: true\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="allow_unsandboxed was removed"):
         Settings.load(path)
 
 

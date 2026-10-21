@@ -1,10 +1,18 @@
 # 沙箱与权限
 
-工作区的沙箱路径根据项目目录名生成：例如宿主目录 `/home/user/my-project` 对应 `/my-project`，`pwd`、文件工具和工具描述使用同一个路径。每次命令调用都从该目录开始，上次调用的 `cd` 不会延续。本文以 `/my-project` 为例。项目名与沙箱运行目录冲突时（如 `usr`、`tmp`、`skills`），使用 `/workspace/<项目名>`；宿主工作区为 `/` 时使用 `/workspace`。
+工作区在沙箱里的路径就是它的真实绝对路径。例如 Workspace 为 `/mnt/d/test` 时，`restricted` 和 `full-access` 的工作区路径、`pwd` 和文件工具都使用 `/mnt/d/test`。切换模式不改变这条路径。每次命令调用都从该目录开始，上次调用的 `cd` 不会延续。
 
-本项目有两层相互独立的控制：
+| 项目 | `restricted` | `full-access` |
+|---|---|---|
+| Workspace 路径 | `/mnt/d/test` | `/mnt/d/test` |
+| 当前工作目录 | `/mnt/d/test` | `/mnt/d/test` |
+| Workspace 写入 | 允许 | 允许 |
+| Workspace 外写入 | 按沙箱挂载规则限制 | 按操作系统权限 |
 
-- **沙箱**（Bubblewrap）决定 `execute` 运行的命令能访问什么。
+本项目有三层相互独立的控制：
+
+- **沙箱**（Bubblewrap）决定 `execute` 运行的命令能访问什么。找不到可用的 `bwrap` 时启动失败，不会改在宿主机上执行。
+- **文件系统模式**（`restricted` / `full-access`）决定沙箱里能看见和写入哪些路径。它不提权，也不取消审批。
 - **权限模式**（`ask` / `allow`）决定工具调用前是否需要你确认。
 
 ## 执行模式
@@ -14,27 +22,47 @@
 | 模式 | 条件 | 命令在哪里运行 |
 |---|---|---|
 | `SANDBOXED` | 找到 `bwrap` 且预检成功 | Bubblewrap 沙箱 |
-| `UNSANDBOXED` | 预检失败，且配置了 `sandbox.allow_unsandboxed: true` 或在启动提示中输入 `UNSANDBOXED` | 宿主机，当前用户权限 |
 | `CUSTOM` | 作为库使用时显式传入 `backend` | 由该 backend 决定 |
 
-预检失败且没有上述授权时，CLI 拒绝启动。非交互环境下不会出现 `UNSANDBOXED` 提示，直接失败。`/status` 显示当前模式和两个持久沙箱的运行状态。启动预检只验证沙箱可用性，不逐项检查 Node、Cargo 或浏览器能否运行。
+预检失败时 CLI 拒绝启动。`/status` 显示当前执行模式、文件系统模式和两个持久沙箱的运行状态。启动预检只验证沙箱可用性，不逐项检查 Node、Cargo 或浏览器能否运行。
+
+## 文件系统模式
+
+`sandbox.mode` 缺省为 `restricted`。运行中用 `/sandbox` 切换；切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `allow`。
+
+| 模式 | 可见范围 |
+|---|---|
+| `restricted` | 工作区真实路径、`/skills`、声明的额外挂载，以及持久的 `/tmp`、`/home`。系统目录只读，不映射整个宿主文件系统 |
+| `full-access` | 看到当前环境的真实文件系统。工作区就是它的真实绝对路径，不再另建虚拟目录。写入直接落在当前环境：容器内就是容器，本机就是本机。Agent 安装目录只读，配置目录不可见 |
+
+两种模式都使用工作区的真实绝对路径、额外挂载，以及 `/run/deep-agent` 上的 worker 和 `rg`。`/home` 与 `/tmp` 都不是 tmpfs，沙箱进程结束不会丢掉其中的文件。`restricted` 仍把持久的 home 和 tmp 挂到 `/home` 与 `/tmp`；工作区若位于这两个目录之下，会在该挂载之后按真实路径重新挂上，因此路径不变且可以写入。
+
+- `restricted`：`~/.deep-agent/sandbox/home` 挂到 `/home`，`~/.deep-agent/sandbox/tmp` 挂到 `/tmp`（目录不存在就创建）。`HOME=/home/agent`。切回 `restricted` 后仍看到这两个专用目录。
+- `full-access`：`HOME` 是真实家目录，`TMPDIR=/tmp`。`/usr` 等运行时目录保持宿主持有的权限，不再铺一层空的 `/etc`。工作区路径与宿主目录是同一条绝对路径。
+
+`full-access` 在用户挂载之后盖上自保护，额外挂载不能揭开或改写它们：
+
+- 安装文件只读：`agent` 包目录和已安装的 `deep-agent` 入口脚本。不保护整个 `site-packages`。可编辑安装时只有 `agent/` 只读。
+- 配置目录不可见：`paths.config_dir`，未设置时为 `~/.deep-agent`。配置目录上是空的、权限为 `000` 的 tmpfs；若 `source_path` 或 `state_path` 落在该目录之外，再单独遮住那一个文件。`/skills` 仍是 skills 的可写入口。
+
+自保护路径不能是 `/`，也不能包含工作区。工作区若位于安装目录内部，`full-access` 启动失败。tmpfs 的属主仍可 `chmod` 这个空挂载，但看到的只是空目录，读不到宿主配置文件。
 
 ## 沙箱内可见的内容
 
-`execute` 命令运行在当前 Agent 会话的持久 Bubblewrap 沙箱中（见下文“沙箱生命周期”）：
+`execute` 命令运行在当前 Agent 会话的持久 Bubblewrap 沙箱中（见下文“沙箱生命周期”）。`restricted` 的默认视图：
 
 | 路径 | 内容 |
 |---|---|
-| `/my-project` | 工作区，读写 |
-| `/skills` | `~/.deep-agent/skills/`，只读（目录存在时） |
+| `/mnt/d/test` | 工作区，读写 |
+| `/skills` | `~/.deep-agent/skills/`，读写（目录不存在时创建） |
 | `/usr`、`/bin`、`/lib`、`/lib64` | 宿主机对应目录，只读 |
 | `/etc` | 只有 `passwd`、`group`、`nsswitch.conf`、`ld.so.cache`、`localtime`、`alternatives`；开放网络时另加 `hosts`、`resolv.conf`、`ssl` |
-| `/tmp`、`/home` | 空的 tmpfs；`HOME=/home/agent` |
+| `/tmp`、`/home` | 持久目录 `~/.deep-agent/sandbox/tmp` 与 `~/.deep-agent/sandbox/home`；`HOME=/home/agent` |
 | `/proc`、`/dev` | 沙箱自己的实例 |
 
-表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。默认模板已包含若干可选工具目录挂载，完整清单见 [默认工具挂载](configuration.md#默认工具挂载)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
+表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。`full-access` 改为映射当前文件系统，并在最后盖上安装只读和配置目录遮罩。默认模板已包含若干可选工具目录挂载，完整清单见 [默认工具挂载](configuration.md#默认工具挂载)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
 
-额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/my-project`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
+额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/mnt/d/test`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
 
 挂载用于控制文件系统可见范围。用户可以选择较宽的只读目录，也可以只暴露所需版本或文件，均通过现有挂载列表表达，审批规则仍由 `ask` / `allow` 独立决定。只读只能禁止写入，不能阻止读取其中的密钥、凭据等敏感文件。
 
@@ -72,14 +100,14 @@
 | 无网沙箱 | `network=false` 的 `execute` | `--unshare-net`，只有自己的 `lo` |
 | 有网沙箱 | `network=true` 或 `allow` 模式下的 `execute` | 共享宿主网络 |
 
-- 每次 `execute` 都启动一个新的 `/bin/sh -lc`：`cd`、shell 变量等状态不保留；保留的是沙箱环境本身——`/tmp`、`/home` 中的文件和后台进程（例如 `nohup cmd > log 2>&1 &`）在后续调用中仍然存在。
-- 两个沙箱只共享 `/my-project` 和启动时声明的额外挂载；`/tmp`、`/home`、PID 命名空间互相独立，交替使用不会销毁对方。
-- 沙箱的主进程是一个常驻 Worker，宿主只通过它继承的管道下发命令。这个控制通道不出现在文件系统或网络中，Worker 本身设为不可 dump，沙箱内的进程不能通过 `/proc` 接管它；无网沙箱看不到有网沙箱的进程、`/tmp` 中的 socket，也连不上它的抽象 Unix socket（抽象 socket 随网络命名空间隔离）。
+- 每次 `execute` 都启动一个新的 `/bin/sh -lc`：`cd`、shell 变量等状态不保留；保留的是沙箱环境本身——`/tmp`、`/home` 中的文件和后台进程（例如 `nohup cmd > log 2>&1 &`）在后续调用中仍然存在。这两个目录在有网沙箱和无网沙箱之间也是同一份：`restricted` 用专用持久目录，`full-access` 用当前环境的真实目录。PID 命名空间仍然分开。
+- 两个沙箱共享工作区真实路径、`/skills`、`/tmp`、`/home` 和启动时声明的额外挂载。
+- 沙箱的主进程是一个常驻 Worker，宿主只通过它继承的管道下发命令。这个控制通道不出现在文件系统或网络中，Worker 本身设为不可 dump，沙箱内的进程不能通过 `/proc` 接管它；无网沙箱看不到有网沙箱的进程，也连不上它的抽象 Unix socket（抽象 socket 随网络命名空间隔离）。
 - 取消和超时只杀掉当前命令的进程组（包括它启动的后台进程），沙箱继续可用。
 - Worker 异常退出时，正在执行的命令返回 `sandbox_lost` 错误，不会自动重试；下一次 `execute` 启动新的沙箱。
 - 沙箱无法启动时，`execute` 返回错误，不会改在宿主机上运行。
-- 切换会话（`/resume`、`/new`）、关闭会话或退出 CLI 时，两个沙箱及其中所有进程都被销毁。切换模型或权限模式不会重建沙箱。
-- `/status` 显示两个沙箱是否在运行。
+- 切换会话（`/resume`、`/new`）、关闭会话或退出 CLI 时，两个沙箱及其中所有进程都被销毁。`/tmp` 与 `/home` 里的文件保留。切换模型或权限模式不会重建沙箱。`/sandbox` 会关闭当前会话的两个沙箱，下一次 `execute` 按新挂载启动。
+- `/status` 显示两个沙箱是否在运行，以及当前文件系统模式。
 
 ## 网络
 
@@ -87,40 +115,41 @@
 - 模型在调用 `execute` 时传 `network=true`，该条命令在有网沙箱中运行，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。
 - `allow` 模式下，每条 `execute` 都在有网沙箱中运行，单次调用无法关闭。
 
-`network=false` 隔离的是**直接 IP 网络访问**，不保证完全没有间接网络通信。例如：有网沙箱中的后台服务在共享 `/my-project` 下创建文件系统 Unix Socket；无网命令连接这个 Socket 发出请求；有网后台服务代为访问互联网，并把响应返回无网命令。共享文件或 FIFO 也可能构成类似通信路径。抽象 Unix Socket 与这里的工作区文件系统 Socket 不同，前者仍受网络命名空间隔离。
+`network=false` 隔离的是**直接 IP 网络访问**，不保证完全没有间接网络通信。例如：有网沙箱中的后台服务在共享工作区下创建文件系统 Unix Socket；无网命令连接这个 Socket 发出请求；有网后台服务代为访问互联网，并把响应返回无网命令。共享文件或 FIFO 也可能构成类似通信路径。抽象 Unix Socket 与这里的工作区文件系统 Socket 不同，前者仍受网络命名空间隔离。
 
 经其他有网进程实现的间接联网属于 **KNOWN LIMITATION**，不是沙箱逃逸。本轮不增加 Unix Socket 防护、Seccomp 或 IPC 配置开关，不改变共享工作区或双持久沙箱设计。
 
-两个沙箱都按需启动、会话内复用；权限模式只决定下一条命令要不要审批，不决定沙箱是否销毁。
+两个沙箱都按需启动、会话内复用；权限模式只决定下一条命令要不要审批，不决定沙箱是否销毁。文件系统模式只决定下一次启动时的挂载。
 
 - `ask`：每条 `execute` 都要审批；`network=true` 走有网沙箱，`network=false` 走无网沙箱。
 - `allow`：自动批准，且每条 `execute` 都走有网沙箱。
-- 已经在跑的后台进程不受模式切换影响。需要停掉它们时，让 Agent 结束进程，或新建 / 关闭会话。
+- 已经在跑的后台进程不受模式切换影响。需要停掉它们时，让 Agent 结束进程，或新建 / 关闭会话。`/sandbox` 会结束当前沙箱进程，因此也会结束其中的后台进程；两种模式各自目录里的文件都保留。
 - `web_search` 在宿主进程中运行，与沙箱网络无关；`ask` 模式下每次搜索均需审批。
-
-UNSANDBOXED 回退模式的命令直接使用宿主路径，并始终可以访问宿主网络；`network=false` 不提供网络隔离。其 `HOME`、`TMPDIR` 每次调用单独创建并在调用后清理，不能跨调用保存缓存。文件工具仍使用项目的虚拟路径。`rg` 从当前 Python 环境或宿主 PATH 定位，其实际安装目录会加入命令的 PATH；工具说明按实际执行模式生成。
 
 ## 文件工具
 
-`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。SANDBOXED 模式下，`/my-project`、`/skills` 和启动时声明的额外挂载走同一张固定路由：
+`ls`、`read_file`、`write_file`、`edit_file`、`delete` 不经过 Bubblewrap，由 `deep-agent` 进程直接读写宿主文件，因此路径检查不能省略。`grep` 和 `glob` 不注册给模型。文件工具与当前文件系统模式的挂载一致：
 
-| 路径 | 文件工具 |
-|---|---|
-| `/my-project` | 工作区，读写 |
-| `/skills` | Skills 目录，只读（目录存在时） |
-| `extra_read_write_mounts` 的目标 | 对应宿主路径，读写 |
-| `extra_read_only_mounts` 的目标 | 对应宿主路径，只读 |
-| 其他虚拟路径 | `Permission denied` |
+| 路径 | `restricted` | `full-access` |
+|---|---|---|
+| `/mnt/d/test` | 工作区，读写 | 同一份工作区，读写 |
+| `/skills` | Skills 目录，读写 | Skills 目录，读写 |
+| 声明的额外挂载 | 按各自只读或读写 | 按各自只读或读写；不能揭开配置目录或把安装路径改成可写 |
+| 安装目录 | 不可见 | 只读 |
+| 配置目录及目录外的配置文件、会话库 | 不可见 | `Permission denied`，不列出真实内容 |
+| 其他路径 | `Permission denied`。`/home` 与 `/tmp` 只通过 `execute` 访问 | 以 `/` 为根的真实文件系统 |
+
+读取和写入都解析最终宿主路径。符号链接进入配置目录则拒绝，进入安装目录则只读。`ls /` 在 `full-access` 下列出真实根目录子项，并补上沙箱里才有的顶层挂载（如 `/skills`）。
 
 目录挂载授权整个目标目录。单文件挂载只授权那个文件，不开放它所在目录里的其他文件，也不为了挂载文件而授权父目录。只读目标上的 `write_file`、`edit_file`、`delete` 和上传在接触宿主文件之前被拒绝；列举、读取、搜索和下载仍然允许。只读拒绝不依赖宿主目录本身的权限位，也不因为同一份数据另有读写别名而放行。
 
 写入、编辑和上传会解析完整的宿主路径。路径落在当前虚拟路由下更具体的只读子挂载时直接拒绝，相对路径、链式和多级符号链接都不能绕过。指向同一宿主目录的只读别名和读写别名仍按各自的虚拟路径授权。
 
-`delete` 不能删除挂载点本身，包括 `/my-project`、其他目录挂载的根，以及单文件挂载。通过别名或父目录把挂载源删掉也同样拒绝，避免持久沙箱仍绑定已经消失的 inode。挂载内部的普通文件可以删除。删除时先解析父目录的真实路径，父目录落在只读子挂载里则拒绝。最后一级如果是符号链接，只删除链接本身，不跟随目标；链接所在的真实目录是只读的时候，链接也不能删。
+`delete` 不能删除挂载点本身，包括工作区根、其他目录挂载的根，以及单文件挂载。通过别名或父目录把挂载源删掉也同样拒绝，避免持久沙箱仍绑定已经消失的 inode。挂载内部的普通文件可以删除。删除时先解析父目录的真实路径，父目录落在只读子挂载里则拒绝。最后一级如果是符号链接，只删除链接本身，不跟随目标；链接所在的真实目录是只读的时候，链接也不能删。
 
-Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib64` 以及少量 `/etc` 文件不会自动成为文件工具的授权路径。`ls('/')` 和无路径 `glob` 聚合已经授权的虚拟目录；明确访问未授权路径返回 `Permission denied`。空的已授权目录返回空结果，而不是权限错误。`/my-project2` 不会被当成 `/my-project`。`..` 和指向授权根之外的符号链接都不能逃逸。单个文件的搜索上限仍是 10 MiB。
+Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib64` 以及少量 `/etc` 文件，在 `restricted` 下不会自动成为文件工具的授权路径。`ls('/')` 和无路径 `glob` 聚合已经授权的目录；明确访问未授权路径返回 `Permission denied`。空的已授权目录返回空结果，而不是权限错误。工作区路径按完整绝对路径匹配，不会把相邻目录当成工作区。`..` 和指向授权根之外的符号链接都不能逃逸。单个文件的搜索上限仍是 10 MiB。
 
-UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录权限，文件工具仍只使用工作区和只读 Skills。CUSTOM backend 保留调用方自己的规则。
+CUSTOM backend 保留调用方自己的规则。
 
 `grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同，不再使用以前独立 `grep` 工具的免审批规则。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。未注册的搜索实现仍留在代码里，不会作为工具交给模型。
 
@@ -134,6 +163,7 @@ UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录�
 | `allow` | 无；所有工具自动批准，所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
+- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，也不写入会话目录。
 - 正在输入 `ALLOW` 时，新的工具审批、提问或暂停不会替换确认栏。提交或取消确认后才打开该面板；`F2` 可先查看，`Esc` 回到确认栏。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。
@@ -141,7 +171,7 @@ UNSANDBOXED 不把只存在于 Bubblewrap 中的虚拟目标当作宿主目录�
 ## 命令输出与日志
 
 - 输出实时显示在对应的工具块中。
-- 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果同时给出宿主路径和 Agent 可读的 `/my-project/.deep-agent/logs/exec/...` 路径。
+- 超过 `sandbox.max_output_bytes`（默认 100000 字节）时，返回给模型的结果只保留末尾部分，完整输出写入 `<工作区>/.deep-agent/logs/exec/<时间>-<id>.log`。工具结果给出这条真实路径，文件工具可以直接读取。
 - 默认没有超时。设置 `sandbox.timeout_seconds` 后作为上限；超时返回退出码 124，取消返回 130。
 - 父 shell 退出后，若后台进程仍持有输出管道，会继续读取到管道关闭或固定 100 毫秒排空窗口结束为止，窗口不会因新输出而延长；之后的输出不进入本次结果，后台进程再写这些管道会收到 `SIGPIPE`。需要长期运行的后台进程应把输出重定向到文件。
 

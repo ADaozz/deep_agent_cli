@@ -104,11 +104,12 @@ web_search:
   tavily_api_key: null
 
 sandbox:
-  # 宿主机项目目录，沙箱路径按目录名生成（如 /my-project）；“.” 表示启动终端界面时的当前目录。
+  # 宿主机项目目录。沙箱内的路径和当前目录都使用它的真实绝对路径；“.” 表示启动终端界面时的当前目录。
   workspace: .
   bwrap_path: bwrap
-  # 是否允许在 bubblewrap 不可用时直接在宿主机执行命令，此方式具有风险。
-  allow_unsandboxed: false
+  # restricted：工作区、skills 和声明的挂载可写，系统目录只读。
+  # full-access：当前文件系统可写，仅保护 Agent 安装文件和配置目录。未设置时为 restricted。
+  mode: restricted
   # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
   timeout_seconds: null
   max_output_bytes: 100000

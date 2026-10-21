@@ -349,7 +349,7 @@ async def async_main(args: argparse.Namespace) -> int:
         else:
             workspace = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="deep-agent-live-work-")))
         state_root = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="deep-agent-live-state-")))
-        settings = replace(settings, sandbox=replace(settings.sandbox, workspace=workspace, allow_unsandboxed=False),
+        settings = replace(settings, sandbox=replace(settings.sandbox, workspace=workspace),
                            state_path=state_root / "sessions.sqlite3")
         config_dir = settings.config_dir or default_config_dir()
         require_keybindings_outside_workspace(config_dir, workspace)

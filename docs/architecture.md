@@ -42,7 +42,7 @@ flowchart TB
 | 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
 | 工具 | `agent/tools/`、上游文件工具 | Schema、参数校验、结果与 artifact |
-| 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 虚拟路径、命名空间、持久进程、超时与清理 |
+| 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 工作区真实路径、命名空间、持久进程、超时与清理 |
 | 会话状态 | `agent/session.py`、`session_runtime.py`、`session_lock.py` | Checkpoint、元数据、附件、独占租约与恢复 |
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
@@ -155,41 +155,43 @@ sequenceDiagram
 | 概念 | 决定什么 | 实现位置 |
 |---|---|---|
 | `ask` / `allow` | 工具调用前是否审批 | `agent/permission.py`、Deep Agents HITL |
-| `SANDBOXED` / `UNSANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
+| `SANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
+| `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
 
 `ask` 默认审批文件修改、每次 `execute` 和每次 `web_search`。`ls`、`read_file` 等只读文件工具免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
 
-`UNSANDBOXED` 需显式授权回退，只允许 `ask`，命令以宿主当前用户权限执行。`CUSTOM` 由调用方注入的 Backend 决定资源边界。
+找不到 `bwrap` 时启动失败，没有宿主机执行回退。`CUSTOM` 由调用方注入的 Backend 决定资源边界。`restricted` 与 `full-access` 只改变文件系统挂载，不改变审批，也不提权。`/sandbox` 在下一次模型调用前更换挂载并关闭当前会话的两个沙箱；模式不写入会话库，恢复会话时回到配置文件中的 `sandbox.mode`。
 
 ## Backend 与路径
 
-`WorkspaceCompositeBackend` 将模型看到的虚拟路径路由到授权根。路由在 Backend 初始化时固定，运行中不能新增挂载：
+`WorkspaceCompositeBackend` 将模型看到的路径路由到授权根。工作区路径是宿主目录的真实绝对路径。路由在 Backend 初始化时固定，运行中不能新增挂载：
 
-以下以项目目录名 `my-project` 为例。
+以下以工作区 `/mnt/d/test` 为例。两种模式使用同一条真实路径。
 
-- `/my-project` → 工作区的 `BubblewrapBackend` 或 `UnsandboxedShellBackend`。普通文件操作由其 `FilesystemBackend` 能力在宿主执行；命令经执行 Backend 启动。
-- `/skills` → 只读 Skills Backend，目录存在时使用 `~/.deep-agent/skills/`。
-- SANDBOXED 下，`sandbox.extra_read_write_mounts` 与 `extra_read_only_mounts` 的目标 → 对应宿主目录或单个文件。目录复用 `FilesystemBackend`；只读目录在写入前拒绝；单文件只匹配该路径。
-- 其他虚拟路径 → 拒绝访问。`ls('/')` 和无路径 `glob` 仍聚合已授权目录；明确越界返回 `Permission denied`。
+- `/mnt/d/test` → 工作区。普通文件操作由其 `FilesystemBackend` 能力在宿主执行；命令经 `BubblewrapBackend` 启动。
+- `/skills` → 可写 Skills Backend，使用 `~/.deep-agent/skills/`（目录不存在时创建）。
+- `sandbox.extra_read_write_mounts` 与 `extra_read_only_mounts` 的目标 → 对应宿主目录或单个文件。目录复用 `FilesystemBackend`；只读目录在写入前拒绝；单文件只匹配该路径。
+- `restricted` 下，工作区、`/skills` 和声明挂载之外的路径 → 拒绝访问。`/home` 与 `/tmp` 不作为文件工具路径，命令通过沙箱挂载访问那两个持久目录。
+- `full-access` 下，未命中更具体路由的路径走以 `/` 为根的文件系统。安装路径只读，配置目录及目录外的配置文件返回 Permission denied。`ls('/')` 列出真实根目录子项，并补上 `/skills` 这类沙箱顶层挂载。
 
-Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这张表。UNSANDBOXED 不把那些虚拟目标当成宿主权限。重复目标、后挂载盖住先挂载或错位嵌套在初始化时失败。同一宿主目录的只读和读写别名按虚拟路径分别授权。文件工具不能删除挂载点，也不能顺着符号链接删掉链接背后的文件。
+Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 等）不进入文件工具路由。重复目标、后挂载盖住先挂载或错位嵌套在初始化时失败。同一宿主目录的只读和读写别名按各自路径分别授权。文件工具不能删除挂载点，也不能顺着符号链接删掉链接背后的文件，或绕过配置目录与安装目录保护。`/sandbox` 会按新模式刷新这张路由，工作区路径保持不变。
 
 工具挂载由配置直接声明，没有工具链自动发现或版本选择层。默认模板将 NVM 的整个版本目录挂到 `/opt/node`，版本由用户在 PATH 中指定；Cargo 和 Rustup 分别挂载为 `/opt/cargo`、`/opt/rustup`；Chrome 程序只读，浏览器缓存单独可写。可选源不存在时在配置加载阶段跳过。模板的具体路径及环境变量见 [默认工具挂载](configuration.md#默认工具挂载)。用户扩大或缩小挂载范围不改变审批策略；只读挂载仍允许读取其中的敏感内容。
 
-`artifacts_root` 为 `/my-project/.deepagents`，用于压缩历史等上游产物。文件工具的访问边界来自 Backend 路径约束，不能描述为所有读写都在 Bubblewrap 内。`.git/`、`.env` 等文件若在授权工作区内，也在 Agent 可访问范围内。
+`artifacts_root` 为 `<工作区真实路径>/.deepagents`，用于压缩历史等上游产物。文件工具的访问边界来自 Backend 路径约束，不能描述为所有读写都在 Bubblewrap 内。`.git/`、`.env` 等文件若在授权工作区内，也在 Agent 可访问范围内。
 
 ### 双持久沙箱
 
 一个会话按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。`SandboxPool` 负责懒启动、复用、失效替换与会话清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。
 
-每次 `execute` 启动新的 `/bin/sh -lc`，Shell 变量和 `cd` 不跨调用保留；实例内 `/tmp`、`/home` 文件以及仍存活的后台进程可以保留。两个实例的进程、临时目录独立，通过 `/my-project` 等共享授权挂载交换文件。切换回 `ask` 不会停止此前有网实例中的后台进程。
+每次 `execute` 启动新的 `/bin/sh -lc`，Shell 变量和 `cd` 不跨调用保留；实例内 `/tmp`、`/home` 文件以及仍存活的后台进程可以保留。有网和无网实例绑定同一组 `/tmp` 与 `/home`：`restricted` 是专用持久目录，`full-access` 是当前环境的真实目录。切换回 `ask` 不会停止此前有网实例中的后台进程。`/sandbox` 会关闭两个实例。
 
 模型或权限切换复用当前 Pool。新建、切换、关闭会话会清理原 Pool，不能把旧会话的后台状态带入新会话。Worker 丢失时当前调用明确失败、不自动重放，下一次调用可以创建替代实例。
 
 ### 隔离边界
 
-默认 `/my-project` 可写，系统运行时目录和 Skills 只读；沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
+默认工作区和 `/skills` 可写。`restricted` 下系统运行时目录只读，`/tmp` 与 `/home` 是 `~/.deep-agent/sandbox/` 下的持久目录；工作区仍通过它的真实绝对路径挂载。`full-access` 映射当前文件系统，并把 Agent 安装目录重新挂成只读、用权限 `000` 的 tmpfs 遮住配置目录。沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
 
 无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网；共享工作区中的 Unix socket、FIFO 或普通文件可能成为通信通道。当前也没有资源硬配额。部署边界以 [sandbox.md](sandbox.md#网络) 为准，不能靠提示词补足。
 
@@ -199,18 +201,18 @@ Bubblewrap 内置的系统运行时挂载（`/usr`、`/lib` 等）不进入这�
 
 ```text
 参数与 Glob 校验
-  → WorkspaceCompositeBackend.regex_search_location() 按固定挂载表路由虚拟路径
+  → WorkspaceCompositeBackend.regex_search_location() 按固定挂载表路由路径
   → 宿主以 O_NOFOLLOW 和文件描述符校验挂载根、目标与文件限制
-  ├─ SANDBOXED 且有 rg
+  ├─ Bubblewrap 且有 rg
   │    → SandboxPool → start_argv → 原 Worker → 单个 rg
-  └─ UNSANDBOXED 或无 rg
+  └─ 无 rg，或执行器不是 Bubblewrap
        → 独立宿主 Python Worker → 目录描述符遍历与 re 匹配
   → 流式解析、计数、去重、截断 → 工具结果
 ```
 
 `ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
 
-沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志中说明 `rg` 不可用。宿主回退模式将实际 `rg` 安装目录加入命令 PATH，工具说明使用宿主工作目录和每次调用清理的临时目录语义。上面保留的搜索实现仍通过 `start_argv` 调用 `/run/deep-agent/rg`，与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
+沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志中说明 `rg` 不可用。上面保留的搜索实现在没有 `rg` 或执行器不是 Bubblewrap 时使用宿主 Python worker；有 `rg` 时仍通过 `start_argv` 调用 `/run/deep-agent/rg`，与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
 
 `start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
 
@@ -237,7 +239,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时约在窗口 85% 触发，保留最近约 10% 上下文；没有该 profile 信息时，约 170,000 tokens 触发，保留最近 6 条消息。具体阈值取决于上游版本。
 
-`/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `/my-project/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
+`/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
 ## 会话存储
 
@@ -258,7 +260,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 观察与验证
 
-诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `/my-project/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。
+诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。
 
 | 行为契约 | 相关测试 |
 |---|---|

@@ -36,6 +36,11 @@ def command_table() -> tuple[Command, ...]:
             "Tool approval: ask (every execute) or allow (SANDBOXED auto-approve + sandbox network open, HIGH RISK)",
             _permission,
         ),
+        Command(
+            "sandbox",
+            "Filesystem mode: restricted (default) or full-access (writes the real filesystem, HIGH RISK)",
+            _sandbox,
+        ),
         Command("quit", "Exit DeepAgent", _quit),
         Command("exit", "Exit DeepAgent", _quit),
     )
@@ -94,6 +99,10 @@ async def _attachments(app: "CliApplication", arg: str) -> None:
 
 async def _permission(app: "CliApplication", arg: str) -> None:
     await app.select_permission(arg)
+
+
+async def _sandbox(app: "CliApplication", arg: str) -> None:
+    await app.select_sandbox(arg)
 
 
 async def _quit(app: "CliApplication", _arg: str) -> None:
