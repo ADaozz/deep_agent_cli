@@ -2366,7 +2366,7 @@ def test_tui_pipe_input_quits_and_restores_application() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             task = asyncio.create_task(app.run_async())
             await asyncio.sleep(0.02)
-            pipe.send_text("/quit\r")
+            pipe.send_text("/exit\r")
             await asyncio.wait_for(task, timeout=2)
 
     asyncio.run(scenario())

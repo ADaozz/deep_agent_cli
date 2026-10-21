@@ -41,8 +41,7 @@ def command_table() -> tuple[Command, ...]:
             "Filesystem mode: restricted (default) or full-access (writes the real filesystem, HIGH RISK)",
             _sandbox,
         ),
-        Command("quit", "Exit DeepAgent", _quit),
-        Command("exit", "Exit DeepAgent", _quit),
+        Command("exit", "Exit DeepAgent", _exit),
     )
 
 
@@ -105,5 +104,5 @@ async def _sandbox(app: "CliApplication", arg: str) -> None:
     await app.select_sandbox(arg)
 
 
-async def _quit(app: "CliApplication", _arg: str) -> None:
+async def _exit(app: "CliApplication", _arg: str) -> None:
     app.exit()

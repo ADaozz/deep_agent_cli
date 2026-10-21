@@ -159,6 +159,11 @@ sandbox:
     - source: /tmp/.X11-unix
       destination: /tmp/.X11-unix
       optional: true
+    # 内置系统文件里没有的路径在这里补。源路径不存在时跳过。
+    # CentOS / RHEL 的证书在 /etc/pki；Ubuntu、Debian、Arch 通常没有这个目录。
+    - source: /etc/pki
+      destination: /etc/pki
+      optional: true
   # 可写的浏览器缓存；沙箱内的创建、修改和删除操作会同步到宿主机目录。
   # 若宿主使用 XDG_CACHE_HOME 或自定义 Playwright 缓存位置，请将 source 改为实际目录。
   extra_read_write_mounts:

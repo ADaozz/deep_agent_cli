@@ -37,7 +37,7 @@ deep-agent --version
 | `/attachments cleanup` | 删除不再被任何会话引用的图片文件 |
 | `/pause` | 在下一个模型安全点暂停 |
 | `/clear` | 清空屏幕上的转录内容，不影响 Agent 上下文 |
-| `/quit`、`/exit` | 退出 |
+| `/exit` | 退出 |
 
 ## 快捷键
 

@@ -140,7 +140,7 @@ agent:
     优先使用中文回答。
 ```
 
-system prompt 按顺序由三部分组成：内置身份说明、`agent.instructions`、工作区根目录的 `AGENTS.md`（若存在）。切换模型或权限模式时会重新读取 `AGENTS.md`。
+system prompt 按顺序由三部分组成：内置身份说明、`agent.instructions`、工作区根目录的 `AGENTS.md`（若存在）。切换模型或权限模式时会重新读取 `AGENTS.md`。它在构图时确定，不包含环境快照。环境快照由中间件在每次模型调用时附到系统提示后面，不写入 checkpoint。它不是配置项。沙箱模式、工作区、HOME 或额外挂载变化后重新采集；恢复会话时按当前沙箱重新检查；切换模型不会因此重新探测。已给出的字段不要再查。
 
 ## Web 搜索（`web_search`）
 
@@ -166,7 +166,7 @@ web_search:
 | `max_output_bytes` | `100000` | 单条命令保留的输出上限，超出部分写入日志文件 |
 | `env_allowlist` | `[]` | 允许传入沙箱的宿主环境变量名 |
 | `env_set` | `{}` | 固定注入沙箱的环境变量 |
-| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。SANDBOXED 下文件工具按只读使用同一目标 |
+| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。固定系统文件列表里没有的路径也写在这里，例如 CentOS 的 `/etc/pki` 挂到同名路径。SANDBOXED 下文件工具按只读使用同一目标 |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
 表中的默认值是代码内默认值；首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 另含下列可选工具挂载。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。

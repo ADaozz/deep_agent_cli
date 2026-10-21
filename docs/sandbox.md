@@ -77,7 +77,7 @@
 | `/mnt/d/test` | 工作区，读写 |
 | `/skills` | `~/.deep-agent/skills/`，读写（目录不存在时创建） |
 | `/usr`、`/bin`、`/lib`、`/lib64` | 宿主机对应目录，只读 |
-| `/etc` | 只有 `passwd`、`group`、`nsswitch.conf`、`ld.so.cache`、`localtime`、`alternatives`；开放网络时另加 `hosts`、`resolv.conf`、`ssl` |
+| `/etc` | 只有 `passwd`、`group`、`nsswitch.conf`、`os-release`、`ld.so.cache`、`localtime`、`alternatives`；开放网络时另加 `hosts`、`resolv.conf`、`ssl`。这份列表写在代码里。还需要别的路径时，在 `extra_read_only_mounts` 里按相同路径补上，并设 `optional: true`；源路径不存在就跳过。示例配置里的 `/etc/pki` 就是这样补上的 |
 | `/tmp`、`/home` | 持久目录 `~/.deep-agent/sandbox/tmp` 与 `~/.deep-agent/sandbox/home`；`HOME=/home/agent` |
 | `/proc`、`/dev` | 沙箱自己的实例 |
 

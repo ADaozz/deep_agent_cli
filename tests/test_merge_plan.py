@@ -401,8 +401,8 @@ def test_slash_candidates_match_substrings_and_accept_without_submit(tmp_path: P
     names = [item.text for item in completer.get_completions(Document("/sum"), CompleteEvent())]
     assert "/resume" in names
     assert list(completer.get_completions(Document("/rsm"), CompleteEvent())) == []
-    exact = [item.text for item in completer.get_completions(Document("/quit"), CompleteEvent())]
-    assert exact[0] == "/quit"
+    exact = [item.text for item in completer.get_completions(Document("/exit"), CompleteEvent())]
+    assert exact[0] == "/exit"
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(),
                          thread_id="completion")
     with create_pipe_input() as pipe:

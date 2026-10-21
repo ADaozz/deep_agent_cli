@@ -33,6 +33,9 @@ from agent.attachments import (
 )
 from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, parse_sandbox_mode
 from agent.control import RunController
+from agent.environment import (
+    EnvironmentCache, bubblewrap_backend, probe_sandbox, reset_environment_cache, set_environment_cache,
+)
 from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.sandbox import WorkspaceCompositeBackend
 from agent.sandbox_pool import SandboxPool
@@ -233,6 +236,7 @@ class AgentRunner:
         self._pending_sandbox_mode: str | None = None
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
+        self._environment = EnvironmentCache()
         self._closed = False
         self._close_completed = False
         self._runtime: SessionRuntime | None = None
@@ -915,6 +919,7 @@ class AgentRunner:
         self.control.set_defer_steering(bool(snapshot.interrupt_kind))
         snapshot.notices.extend(plan.notices)
         self._resume_context = recovery
+        self._environment.invalidate(snapshot.info.id)
         self._restore_configured_sandbox_mode()
         return snapshot
 
@@ -1323,6 +1328,7 @@ class AgentRunner:
         set_output_emitter(self._emit_tool_output)
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
+        environment_token = set_environment_cache(self._environment)
         stream_owner_token = set_stream_owner(self.control)
         self._busy = True
         self._context_usage_invalidated = True
@@ -1379,11 +1385,27 @@ class AgentRunner:
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)
+            reset_environment_cache(environment_token)
             if (result is not None and result.status == "completed") or (
                 self._resume_context is not None and self._resume_context.text is None
             ):
                 self._resume_context = None
             self._event_handler = None
+
+    def _refresh_environment_snapshot(self) -> None:
+        """Reuse a matching sandbox fingerprint. Probe again only when it changed."""
+        try:
+            if self._runtime is None or self._runtime.thread_id is None:
+                return
+            backend = bubblewrap_backend(self.prepared.backend)
+            if backend is None:
+                self._environment.snapshot = None
+                return
+            self._environment.ensure(
+                self._runtime.thread_id, backend.config, self._permission_mode, probe=lambda: probe_sandbox(backend),
+            )
+        except Exception:  # noqa: BLE001
+            self._environment.snapshot = None
 
     def _stream_once(
         self,
@@ -1392,6 +1414,7 @@ class AgentRunner:
         run_control: Any,
         event_handler: RunEventHandler | None,
     ) -> RunResult:
+        self._refresh_environment_snapshot()
         interrupted = ""
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}

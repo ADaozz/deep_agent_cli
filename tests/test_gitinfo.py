@@ -87,7 +87,7 @@ def test_cli_exit_waits_for_git_cleanup():
                 app._git = SlowGit()
                 task = asyncio.create_task(app.run_async())
                 await asyncio.wait_for(entered.wait(), timeout=2)
-                pipe.send_text('/quit\r')
+                pipe.send_text('/exit\r')
                 await asyncio.wait_for(task, timeout=2)
                 assert cleaned.is_set()
                 assert app._git_task is None

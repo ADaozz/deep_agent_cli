@@ -24,6 +24,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.config import SandboxConfig, Settings
 from agent.control import RunController
+from agent.environment import EnvironmentContextMiddleware
 from agent.llm import build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
@@ -180,6 +181,7 @@ def build_agent(
             RuntimeConfigGateMiddleware(run_controller.has_pending_config),
             PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
             RecoveryContextMiddleware(),
+            EnvironmentContextMiddleware(),
             UsageIdentityMiddleware(),
             SteeringMiddleware(run_controller),
             ToolCancelMiddleware(run_controller),

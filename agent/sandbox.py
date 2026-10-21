@@ -51,6 +51,7 @@ RUNTIME_FILES = (
     "/etc/ld.so.cache",
     "/etc/localtime",
     "/etc/nsswitch.conf",
+    "/etc/os-release",
     "/etc/passwd",
 )
 NETWORK_FILES = ("/etc/hosts", "/etc/resolv.conf", "/etc/ssl")
