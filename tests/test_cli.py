@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 import pytest
+from rich.cells import cell_len
 from collections.abc import Callable
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -678,6 +679,70 @@ def test_failed_tool_wraps_long_command_and_output_before_terminal_edge() -> Non
         assert all(len(line) < 80 for line in rendered.splitlines())
         assert rendered.count("a") >= 180
         assert rendered.count("b") >= 180
+
+
+def _assert_card_indentation(rendered: str, width: int, output: str) -> None:
+    lines = [line.rstrip() for line in _plain(rendered).splitlines() if line.strip()]
+    divider = lines.index("  └ output")
+    assert divider > 1
+    assert all(line.startswith("  ") and not line.startswith("   ") for line in lines[1:divider])
+    assert len(lines[divider + 1:]) > 1
+    assert all(line.startswith("    ") for line in lines[divider + 1:])
+    assert "".join(line[4:] for line in lines[divider + 1:]).replace(" ", "") == output.replace(" ", "")
+    assert all(cell_len(line) < width for line in lines)
+
+
+@pytest.mark.parametrize("width", [20, 40, 80])
+@pytest.mark.parametrize("expanded", [False, True])
+@pytest.mark.parametrize(("status", "reason", "exit_code"), [
+    ("running", None, None),
+    ("completed", None, 0),
+    ("error", None, 3),
+    ("error", "timeout", 1),
+    ("error", "cancelled", 1),
+    ("error", "spawn_error", 1),
+])
+def test_command_card_preserves_wrapped_indentation(width, expanded, status, reason, exit_code) -> None:
+    command = "python3 -m pytest " + "a" * 180
+    output = "测试输出" * 50
+    block = ToolBlock(
+        "wrap", "execute", {"command": command}, output=output,
+        status=status, is_error=status == "error", exit_code=exit_code,
+        artifact={"exit_code": exit_code, "termination_reason": reason},
+    )
+    rendered = _capture(_tool(block, expanded, width), width)
+    _assert_card_indentation(rendered, width, output)
+    title = _plain(rendered).split("  └ output")[0]
+    assert "a" * 180 in "".join(line.strip() for line in title.splitlines())
+
+
+@pytest.mark.parametrize("width", [20, 40, 80])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_running_stream_preserves_wrapped_indentation(width, expanded) -> None:
+    state = CliState()
+    state.tools_expanded = expanded
+    state.apply(RunEvent(
+        type="tool_started", tool_call_id="wrap", name="execute",
+        arguments={"command": "python3 -m pytest " + "a" * 180},
+    ))
+    output = ""
+    for delta in ("b" * 90, "c" * 90):
+        state.apply(RunEvent(type="tool_output_delta", tool_call_id="wrap", content=delta))
+        output += delta
+        lines = _plain(render_transcript(state, width)).splitlines()
+        start = next(index for index, line in enumerate(lines) if "Running" in line)
+        _assert_card_indentation("\n".join(lines[start:]), width, output)
+
+
+@pytest.mark.parametrize("width", [20, 40, 80])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_non_command_failure_preserves_wrapped_indentation(width, expanded) -> None:
+    output = "Error: " + "b" * 180
+    block = ToolBlock(
+        "wrap", "read_file", {"file_path": "a" * 180},
+        output=output, status="error", is_error=True,
+    )
+    _assert_card_indentation(_capture(_tool(block, expanded, width), width), width, output)
 
 
 def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:

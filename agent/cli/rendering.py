@@ -744,7 +744,7 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     if lines:
         body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
     for line in lines:
-        body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width))
+        body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width, indent=4))
 
     if preview.truncated:
         if preview.log_error:
@@ -791,7 +791,7 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     if lines:
         body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
         for line in lines:
-            body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width))
+            body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width, indent=4))
     return Group(*body)
 
 
@@ -799,9 +799,16 @@ def _failure_code(block: ToolBlock) -> int:
     return block.exit_code if isinstance(block.exit_code, int) and not isinstance(block.exit_code, bool) else 1
 
 
-def _wrap_failure_line(line: Text, console: Console, width: int) -> list[Text]:
-    """Leave a spare terminal column while preserving long commands and output."""
-    return list(line.wrap(console, max(1, width - 2), overflow="fold"))
+def _wrap_failure_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:
+    """Keep the first prefix and indent continuations within the terminal margin."""
+    available = max(1, width - 2)
+    indent = min(indent, available - 1)
+    prefix, content = line[:indent], line[indent:]
+    wrapped = list(content.wrap(console, available - indent, overflow="fold"))
+    return [
+        Text.assemble(prefix if index == 0 else Text(" " * indent, style=line.style), part)
+        for index, part in enumerate(wrapped)
+    ]
 
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
