@@ -35,15 +35,12 @@ _PROBE = "\n".join([
     "gid=1000",
     "root=false",
     "shell=/bin/sh",
-    "git_available=false",
-    "git_version=unknown",
 ])
 
 
 def test_partial_probe_marks_missing_fields_unknown() -> None:
-    parsed = parse_probe("os=Ubuntu 24.04\ngit_available=false\nroot=maybe\nuid=nope\n")
+    parsed = parse_probe("os=Ubuntu 24.04\nroot=maybe\nuid=nope\n")
     assert parsed["os"] == "Ubuntu 24.04"
-    assert parsed["git_available"] == "false"
     assert parsed["kernel"] == "unknown"
     assert parsed["root"] == "unknown"
     assert parsed["uid"] == "unknown"
@@ -57,7 +54,6 @@ def test_failed_probe_does_not_raise_and_keeps_mount_facts(tmp_path: Path) -> No
         runtime="Linux",
     )
     assert snapshot.os_name == "unknown"
-    assert snapshot.git_available == "unknown"
     assert snapshot.home == "/home/agent"
     assert snapshot.home_storage == "persistent"
     assert snapshot.fs_system == "read-only"
@@ -74,22 +70,6 @@ def test_failed_probe_does_not_raise_and_keeps_mount_facts(tmp_path: Path) -> No
         assert word not in lowered
 
 
-def test_git_availability_comes_from_the_sandbox_probe(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "agent.environment.shutil.which",
-        lambda name: "/usr/bin/git" if name == "git" else None,
-    )
-    snapshot = collect_environment(
-        SandboxConfig(workspace=tmp_path),
-        PermissionMode.ASK,
-        probe_output=_PROBE,
-        runtime="WSL2",
-    )
-    assert snapshot.git_available == "false"
-    assert snapshot.git_version == "unknown"
-    assert "git=false" in render_environment_context(snapshot)
-
-
 def test_filesystem_view_follows_the_active_mode(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     restricted = collect_environment(
@@ -103,9 +83,9 @@ def test_filesystem_view_follows_the_active_mode(tmp_path: Path) -> None:
         runtime="WSL2",
     )
     assert restricted.git_repository == "true"
-    assert restricted.extra_mounts == "configured"
-    assert restricted.disk_free.endswith(" GiB")
+    assert restricted.extra_mounts == "/opt/node:ro"
     text = render_environment_context(restricted)
+    assert "disk_free=" not in text
     assert "system=read-only" in text
     assert "agent_config=not-mounted" in text
     assert "agent_install=" not in text
@@ -125,6 +105,31 @@ def test_filesystem_view_follows_the_active_mode(tmp_path: Path) -> None:
     full = render_environment_context(opened)
     assert "agent_install=read-only" in full
     assert "permission=allow" in full
+
+
+def test_extra_mounts_list_sandbox_destinations_and_access(tmp_path: Path) -> None:
+    shown = collect_environment(
+        SandboxConfig(
+            workspace=tmp_path,
+            extra_read_only_mounts=(BindMount(source=tmp_path, destination="/opt/node"),),
+            extra_read_write_mounts=(BindMount(source=tmp_path, destination="/opt/cache"),),
+        ),
+        PermissionMode.ASK,
+        probe_output=_PROBE,
+        runtime="Linux",
+    )
+    assert shown.extra_mounts == "/opt/node:ro,/opt/cache:rw"
+    assert str(tmp_path) not in shown.extra_mounts
+
+    many = tuple(BindMount(source=tmp_path, destination=f"/opt/m{index}") for index in range(9))
+    truncated = collect_environment(
+        SandboxConfig(workspace=tmp_path, extra_read_only_mounts=many),
+        PermissionMode.ASK,
+        probe_output=_PROBE,
+        runtime="Linux",
+    )
+    assert truncated.extra_mounts.endswith(",+1")
+    assert truncated.extra_mounts.count(":ro") == 8
 
 
 def test_permission_switch_does_not_probe_again(tmp_path: Path) -> None:
@@ -184,7 +189,7 @@ def test_probe_uses_offline_command_and_survives_a_missing_executable() -> None:
         def command_args(self, command: str, *, network: bool = False) -> list[str]:
             seen.append(network)
             assert "os-release" in command
-            assert "command -v git" in command
+            assert "git" not in command
             return ["definitely-missing-bwrap-probe"]
 
     assert probe_sandbox(Fake()) is None

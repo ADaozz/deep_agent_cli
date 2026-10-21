@@ -13,7 +13,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from typing import Any, Callable, Mapping
 
@@ -32,7 +31,7 @@ _OS_NAME = re.compile(r"^[\w .()+/-]{1,80}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9._+-]{1,64}$")
 _USER = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _NUMBER = re.compile(r"^[0-9]{1,12}$")
-_VERSION = re.compile(r"^[0-9][0-9A-Za-z.+_-]{0,63}$")
+_MAX_LISTED_MOUNTS = 8
 
 PROBE_SCRIPT = r"""
 os_name=unknown
@@ -70,17 +69,6 @@ if [ -x /bin/sh ]; then
 else
   shell=unknown
 fi
-if command -v git >/dev/null 2>&1; then
-  git_available=true
-  line=$(git --version 2>/dev/null) || line=
-  git_version=${line#git version }
-  if [ -z "$git_version" ] || [ "$git_version" = "$line" ]; then
-    git_version=unknown
-  fi
-else
-  git_available=false
-  git_version=unknown
-fi
 printf '%s\n' \
   "os=$os_name" \
   "kernel=$kernel" \
@@ -89,9 +77,7 @@ printf '%s\n' \
   "uid=$uid" \
   "gid=$gid" \
   "root=$root" \
-  "shell=$shell" \
-  "git_available=$git_available" \
-  "git_version=$git_version"
+  "shell=$shell"
 """
 
 
@@ -155,9 +141,6 @@ class EnvironmentSnapshot:
     root: str
     workspace: str
     git_repository: str
-    disk_free: str
-    git_available: str
-    git_version: str
     sandbox_mode: str
     home: str
     home_storage: str
@@ -241,15 +224,12 @@ def collect_environment(
         root=probed["root"],
         workspace=sandbox_workspace_root(config.workspace),
         git_repository=workspace_git_repository(config.workspace),
-        disk_free=workspace_disk_free(config.workspace),
-        git_available=probed["git_available"],
-        git_version=probed["git_version"],
         sandbox_mode=config.mode,
         home=home,
         home_storage=home_storage_for(config, home),
         tmp=env.get("TMPDIR", "/tmp"),
         fs_system="read-only" if restricted else "host-permissions",
-        extra_mounts="configured" if config.extra_read_only_mounts or config.extra_read_write_mounts else "none",
+        extra_mounts=extra_mounts_summary(config),
         agent_config="not-mounted" if restricted else "hidden",
         agent_install="" if restricted else "read-only",
         shell=probed["shell"],
@@ -260,7 +240,6 @@ def collect_environment(
 
 def render_environment_context(snapshot: EnvironmentSnapshot) -> str:
     """Short execute-view text. File tools do not share this view."""
-    git = snapshot.git_version if snapshot.git_available == "true" else snapshot.git_available
     install = f" agent_install={_field(snapshot.agent_install)}" if snapshot.agent_install else ""
     return "\n".join([
         "Environment",
@@ -273,7 +252,7 @@ def render_environment_context(snapshot: EnvironmentSnapshot) -> str:
         ),
         (
             f"workspace={_field(snapshot.workspace)} git_repo={_field(snapshot.git_repository)} "
-            f"disk_free={_field(snapshot.disk_free)} git={_field(git)} shell={_field(snapshot.shell)}"
+            f"shell={_field(snapshot.shell)}"
         ),
         (
             f"sandbox={_field(snapshot.sandbox_mode)} home={_field(snapshot.home)} "
@@ -302,8 +281,6 @@ def parse_probe(output: str | None) -> dict[str, str]:
         "gid": _match(_NUMBER, found.get("gid", "")),
         "root": _choice(found.get("root", ""), {"true", "false"}),
         "shell": "/bin/sh" if found.get("shell") == "/bin/sh" else _UNKNOWN,
-        "git_available": _choice(found.get("git_available", ""), {"true", "false"}),
-        "git_version": _match(_VERSION, found.get("git_version", "")),
     }
 
 
@@ -333,22 +310,33 @@ def bubblewrap_backend(backend: object) -> BubblewrapBackend | None:
     return None
 
 
+def extra_mounts_summary(config: SandboxConfig) -> str:
+    """Sandbox destinations and access. Host source paths stay out of the prompt."""
+    labels = [
+        _mount_label(mount.destination, "ro") for mount in config.extra_read_only_mounts
+    ] + [
+        _mount_label(mount.destination, "rw") for mount in config.extra_read_write_mounts
+    ]
+    if not labels:
+        return "none"
+    shown = labels[:_MAX_LISTED_MOUNTS]
+    hidden = len(labels) - len(shown)
+    text = ",".join(shown)
+    if hidden:
+        text = f"{text},+{hidden}"
+    return text
+
+
+def _mount_label(destination: str, access: str) -> str:
+    dest = "".join(destination.split()).replace(",", "")
+    return f"{dest}:{access}" if dest else _UNKNOWN
+
+
 def workspace_git_repository(workspace: Path) -> str:
     try:
         return "true" if (workspace.expanduser().resolve() / ".git").exists() else "false"
     except OSError:
         return _UNKNOWN
-
-
-def workspace_disk_free(workspace: Path) -> str:
-    try:
-        free = shutil.disk_usage(workspace.expanduser().resolve()).free
-    except OSError:
-        return _UNKNOWN
-    gib = free / (1024 ** 3)
-    if gib >= 10:
-        return f"{round(gib)} GiB"
-    return f"{gib:.1f} GiB"
 
 
 def home_storage_for(config: SandboxConfig, home: str) -> str:
