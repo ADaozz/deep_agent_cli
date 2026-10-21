@@ -895,7 +895,9 @@ class CliApplication:
     def show_status(self) -> None:
         prepared = self.runner.prepared
         mode = prepared.execution_mode.value
+        tool_names = ", ".join(prepared.model_tool_names)
         tool_count = len(prepared.model_tool_names)
+        tool_line = f"Tools: {tool_count}" + (f" · {tool_names}" if tool_names else "")
         model = self.runner.current_model()
         pending_model = self.runner.pending_model()
         model_line = (
@@ -920,7 +922,7 @@ class CliApplication:
             + (f" → {self.runner.pending_sandbox_mode()} (pending)" if self.runner.pending_sandbox_mode() else "")
             + "\n"
             f"{self._sandbox_status_lines()}"
-            f"Tools: {tool_count}"
+            f"{tool_line}"
         )
 
     def _sandbox_status_lines(self) -> str:

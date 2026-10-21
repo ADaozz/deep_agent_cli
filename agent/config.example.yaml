@@ -10,9 +10,9 @@ agent:
   instructions: null
 
 tools:
-  # 启动时隐藏的工具名；默认不隐藏任何工具。
-  # hidden: [request_human_input]
-  hidden: []
+  # 启动时从模型请求中隐藏的工具名。这里隐藏上下文压缩工具；/compact 仍可使用。
+  hidden:
+    - compact_conversation
 
 ui:
   # 每次回答结束后显示时间所使用的 IANA 时区。
@@ -104,6 +104,8 @@ web_search:
   tavily_api_key: null
 
 sandbox:
+  # 本段是最小基线，只覆盖常见本机布局。请按实际部署以及需要保护的目录调整挂载、PATH 和环境变量。
+  # 可选挂载在源路径不存在时跳过，不表示对应工具已经可用。
   # 宿主机项目目录。沙箱内的路径和当前目录都使用它的真实绝对路径；“.” 表示启动终端界面时的当前目录。
   workspace: .
   bwrap_path: bwrap

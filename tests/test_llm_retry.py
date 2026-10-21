@@ -186,7 +186,8 @@ def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, r
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.show_status()
-            assert f"Tools: {len(names)}" in app.state.blocks[-1].content
+            listed = ", ".join(runner.prepared.model_tool_names)
+            assert f"Tools: {len(names)} · {listed}" in app.state.blocks[-1].content
         # Hiding is a schema choice; the ASK rules are unchanged.
         from agent.permission import PermissionMode, interrupt_on_for_mode
         assert runner.prepared.interrupt_on == interrupt_on_for_mode(PermissionMode.ASK)

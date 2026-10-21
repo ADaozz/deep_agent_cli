@@ -24,7 +24,7 @@ tools:
     - request_human_input
 ```
 
-默认 `hidden: []`，保留原有工具。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。隐藏 `request_human_input` 时，同时去除内置提示词中要求调用它的说明。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
+未写 `hidden` 时不隐藏任何工具。示例配置 [`config.example.yaml`](../agent/config.example.yaml) 里写了 `compact_conversation`，首次生成的配置会按该列表隐藏；已有配置不会被覆盖。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。隐藏 `request_human_input` 时，同时去除内置提示词中要求调用它的说明。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
 
 此设置只控制模型可见工具，不改变 ASK/ALLOW 审批规则，不提供 `/tool` 命令或运行时热切换。
 
@@ -155,13 +155,13 @@ web_search:
 
 ## 沙箱（`sandbox`）
 
-沙箱行为的说明见 [sandbox.md](sandbox.md)。
+沙箱行为的说明见 [sandbox.md](sandbox.md)。代码默认值和示例模板都是最小基线，只覆盖常见本机布局；须按实际部署以及需要保护的目录调整挂载和环境变量，见 [文件系统模式](sandbox.md#文件系统模式)。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `workspace` | `.` | 宿主项目目录。沙箱路径和当前目录都是它的真实绝对路径（如 `/mnt/d/test`）；`.` 表示启动时的当前目录 |
 | `bwrap_path` | `bwrap` | Bubblewrap 可执行文件名或路径 |
-| `mode` | `restricted` | 文件系统模式：`restricted` 或 `full-access`。其他值启动失败。`full-access` 写入当前真实环境，仍在 Bubblewrap 中执行，不取消审批。运行中可用 `/sandbox` 切换，不写回本文件 |
+| `mode` | `restricted` | 文件系统模式：`restricted` 或 `full-access`。其他值启动失败。`full-access` 写入当前真实环境，仍在 Bubblewrap 中执行，不取消审批。运行中可用 `/sandbox` 切换，不写回本文件。`restricted` 使用独立持久 HOME（`~/.deep-agent/sandbox/home`），`full-access` 使用真实用户 HOME。切换模式不迁移用户级安装，也不删除另一模式已有的数据。行为见 [HOME 隔离与持久化](sandbox.md#home-隔离与持久化) |
 | `timeout_seconds` | `null` | 单条命令的超时上限（秒）；`null` 表示不限制。模型可为单次调用请求更短的超时 |
 | `max_output_bytes` | `100000` | 单条命令保留的输出上限，超出部分写入日志文件 |
 | `env_allowlist` | `[]` | 允许传入沙箱的宿主环境变量名 |
