@@ -1,4 +1,4 @@
-"""按网络能力懒启动、会话内复用的 Bubblewrap 沙箱。"""
+"""按网络能力懒启动、Runner 内跨会话复用的 Bubblewrap 沙箱。"""
 from __future__ import annotations
 
 import atexit
@@ -303,9 +303,9 @@ class PersistentSandbox:
 
 
 class SandboxPool:
-    """每个 Agent 会话最多一个无网沙箱、一个有网沙箱。
+    """每个 Runner 最多一个无网沙箱、一个有网沙箱。
 
-    都在首次使用时创建，并在会话内复用。权限模式只决定之后的命令要不要审批，
+    都在首次使用时创建，并在 Runner 内跨会话复用。权限模式只决定之后的命令要不要审批，
     不销毁沙箱。
     """
 
@@ -345,7 +345,7 @@ class SandboxPool:
             sandbox.stop(reason)
 
     def shutdown(self, reason: str = "agent session ended") -> None:
-        """销毁本会话的全部沙箱。"""
+        """销毁本 Pool 的全部沙箱。"""
         with self._lock:
             sandboxes = list(self._sandboxes.values())
             self._sandboxes.clear()

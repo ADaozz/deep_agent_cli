@@ -686,7 +686,7 @@ class AgentRunner:
 
     @property
     def sandbox_pool(self) -> SandboxPool | None:
-        """本 Runner 的 Agent 会话所持有的持久沙箱。"""
+        """本 Runner 跨会话复用的持久沙箱。"""
         return self.prepared.sandbox_pool
 
     def _end_sandbox_session(self, reason: str) -> None:
@@ -843,7 +843,6 @@ class AgentRunner:
                 return SessionSwitchResult(status="busy", target_id=info.id)
             # The old thread must accept no further operations while waiting.
             self._runtime.detach_for_wait(info.id)
-            self._end_sandbox_session("session switched")
             return SessionSwitchResult(status="busy", target_id=info.id)
         snapshot = self._load_and_commit_switch(info, lease)
         return SessionSwitchResult(status="switched", target_id=info.id, snapshot=snapshot)
@@ -894,8 +893,6 @@ class AgentRunner:
             raise
         if refreshed is not None:
             snapshot.info = refreshed
-        if snapshot.info.id != self._runtime.thread_id or lease is not None:
-            self._end_sandbox_session("session switched")
         if lease is not None:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
@@ -967,7 +964,6 @@ class AgentRunner:
         self._pending_model_id = None
         self._pending_permission_mode = None
         self._restore_configured_sandbox_mode()
-        self._end_sandbox_session("new session started")
         return self._runtime.create_new(
             title=title, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,

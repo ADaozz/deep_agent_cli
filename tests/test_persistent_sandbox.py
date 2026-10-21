@@ -418,7 +418,7 @@ def _sandbox_trees(pool: SandboxPool) -> set[int]:
     return pids
 
 
-def test_session_cleanup(workspace: Path, tmp_path: Path) -> None:
+def test_session_switch_preserves_sandboxes_until_close(workspace: Path, tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions.sqlite3")
     runner = _sandbox_runner(workspace, [AIMessage(content="done")], session_store=store)
     pool = runner.sandbox_pool
@@ -426,30 +426,101 @@ def test_session_cleanup(workspace: Path, tmp_path: Path) -> None:
     backend = runner.prepared.backend
     first_thread = runner.thread_id
 
-    def populate() -> tuple[set[int], list[str]]:
+    try:
         markers = [_start_background_sleep(backend), _start_background_sleep(backend, network=True)]
         pids = _sandbox_trees(pool)
         assert len(pids) >= 4
-        return pids, markers
+        sandboxes = [pool.sandbox(network) for network in (False, True)]
+        for network in (False, True):
+            assert run(backend, "echo kept > /tmp/session-kept", network=network).exit_code == 0
 
-    def assert_all_gone(pids: set[int], markers: list[str]) -> None:
+        def assert_preserved() -> None:
+            assert [pool.sandbox(network) for network in (False, True)] == sandboxes
+            assert all(_host_pids_with_arg(marker) for marker in markers)
+            for network in (False, True):
+                assert run(backend, "cat /tmp/session-kept", network=network).output == "kept\n"
+
+        second = runner.new_session()
+        assert runner.thread_id == second.id != first_thread
+        assert_preserved()
+
+        runner.switch_session(first_thread)
+        assert runner.thread_id == first_thread
+        assert_preserved()
+
+        runner.close()
         assert _wait_gone(pids) == []
         assert all(not _host_pids_with_arg(marker) for marker in markers)
         assert pool.sandbox(False) is None and pool.sandbox(True) is None
+    finally:
+        runner.close()
+        store.close()
 
-    pids, markers = populate()
-    second = runner.new_session()
-    assert_all_gone(pids, markers)
 
-    pids, markers = populate()
-    runner.switch_session(first_thread)
-    assert runner.thread_id == first_thread != second.id
-    assert_all_gone(pids, markers)
+@pytest.mark.parametrize("new_session", [False, True], ids=["resume", "new-after-wait"])
+def test_busy_session_wait_preserves_sandbox(workspace: Path, tmp_path: Path, new_session: bool) -> None:
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    holder = _sandbox_runner(workspace, [AIMessage(content="done")], session_store=store)
+    waiter = _sandbox_runner(workspace, [AIMessage(content="done")], session_store=store)
+    try:
+        backend = waiter.prepared.backend
+        marker = _start_background_sleep(backend)
+        pool = waiter.sandbox_pool
+        assert pool is not None
+        sandbox = pool.sandbox(False)
+        assert sandbox is not None
+        assert run(backend, "echo kept > /tmp/wait-kept").exit_code == 0
+        target = holder.thread_id
 
-    pids, markers = populate()
-    runner.close()
-    assert_all_gone(pids, markers)
-    store.close()
+        assert waiter.begin_session_switch(target).busy
+        assert pool.sandbox(False) is sandbox
+        assert _host_pids_with_arg(marker)
+        if new_session:
+            waiter.new_session()
+        else:
+            holder.new_session()
+            snapshot = waiter.complete_session_switch(target)
+            assert snapshot is not None and snapshot.info.id == target
+        assert pool.sandbox(False) is sandbox
+        assert _host_pids_with_arg(marker)
+        assert run(backend, "cat /tmp/wait-kept").output == "kept\n"
+        waiter.close()
+        assert _wait_gone({sandbox.host_pid}) == []
+        assert not _host_pids_with_arg(marker)
+    finally:
+        waiter.close()
+        holder.close()
+        store.close()
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["new", "resume"])
+def test_session_switch_still_resets_changed_filesystem_mode(workspace: Path, tmp_path: Path, resume: bool) -> None:
+    store = SessionStore(tmp_path / "sessions.sqlite3")
+    runner = _sandbox_runner(workspace, [AIMessage(content="done")], session_store=store)
+    try:
+        target = runner.thread_id
+        if resume:
+            runner.new_session()
+        runner.request_sandbox_mode("full-access")
+        runner._apply_pending_runtime_config()
+        assert runner.sandbox_mode() == "full-access"
+        marker = _start_background_sleep(runner.prepared.backend)
+        pool = runner.sandbox_pool
+        assert pool is not None
+        pids = _sandbox_trees(pool)
+
+        if resume:
+            runner.switch_session(target)
+        else:
+            runner.new_session()
+        assert runner.sandbox_mode() == "restricted"
+        assert pool.sandbox(False) is None
+        assert _wait_gone(pids) == []
+        assert not _host_pids_with_arg(marker)
+        assert run(runner.prepared.backend, "echo reset").output == "reset\n"
+    finally:
+        runner.close()
+        store.close()
 
 
 def test_model_rebuild_keeps_sandbox(workspace: Path) -> None:
