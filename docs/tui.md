@@ -133,12 +133,15 @@ deep-agent --version
 
 ### `/status` 性能统计口径
 
+- **Token 来源**为服务端返回的 usage：Chat Completions 使用 `completion_tokens`，Responses 使用 `output_tokens`，经 LangChain 统一为 `output_tokens`。不按字符数或 chunk 数估算，也不包含输入 token。Thinking 已计入完整输出，不能再次相加；推理明细分别来自 `completion_tokens_details.reasoning_tokens` 和 `output_tokens_details.reasoning_tokens`，Answer token 数为完整输出减推理 token 数。
+- **时间来源**为客户端 `on_llm_new_token()` 回调中的 `monotonic()`。同步路径先经过 `CancellableStreamBridge` 队列，再由消费者处理回调，因此记录的是内容被回调处理的时间，可能包含队列等待、线程调度和本地回调处理延迟，不是网络刚收到 chunk 的时间或服务端生成时间。
 - **Total Output TPS** = 服务端完整输出 token 数 / 首个到最后一个有效生成 chunk 的时间。输出 token 已包含 Thinking，不再次相加；分母排除 TTFT、末尾 usage/完成事件、工具执行及失败重试的输出片段。
 - **Reasoning / Answer TPS** 分别使用推理 token 与非推理 token（总输出减推理）除以各自首末 chunk 的时间。非推理输出包含生成的工具参数，不包含工具执行。阶段之间的空隙不计入阶段耗时，但仍包含在总输出跨度内。
 - **TTFT** 为模型调用开始到首个有效生成 chunk 的时间；如果调用中发生重试，包含先前失败和退避等待。计时使用客户端单调时钟，网络、缓冲和 chunk 粒度会影响精度。
-- 两种 API 均通过通用 usage 明细适配：Chat Completions 的 `completion_tokens_details.reasoning_tokens`、Responses 的 `output_tokens_details.reasoning_tokens`。不按厂商或模型名猜测计数；明细缺失时不计算拆分 token 与 TPS，完整输出计数仍保存在数据库中。
-- 如果模型隐藏推理过程，或只返回推理摘要，无法从流中测出完整生成时间，不计算 Total Output / Reasoning TPS，该请求不计入汇总样本；有足够正文时间样本时内部仍可计算 Answer TPS。Qwen 的完整 `reasoning_text` 与标准 Responses 的推理摘要分开识别。非流式、单 chunk 或零时间跨度同样不编造 TPS。
+- 不按厂商或模型名猜测计数；usage 明细缺失时不计算拆分 token 与 TPS，完整输出计数仍保存在数据库中。
+- 如果模型隐藏推理过程，或只返回推理摘要，无法从流中测出完整生成时间，不计算 Total Output / Reasoning TPS，该请求不计入汇总样本；有足够正文时间样本时内部仍可计算 Answer TPS。实际采用的 `additional_kwargs.reasoning_summary`、内容块 summary 和 Responses 摘要事件都视为摘要；Qwen 的完整 `reasoning_text` 仍按完整推理流识别。非流式、单 chunk 或零时间跨度同样不编造 TPS。
 - **5% low / 5% top / Average TPS** 基于当前会话内同一模型与推理强度的有效 Total Output TPS 样本，前两者分别取最慢 / 最快 5% 样本的算术平均（样本数向上取整），Average 为全部有效样本的算术平均。工具执行、等待、失败或取消不清空统计；上下文压缩不参与。每次成功调用结束后将原始计数、计时和指标写入会话 SQLite 数据库；重启、恢复或切回会话时加载记录并重算各组统计，模型和强度之间不混算。`/clear` 仅清空显示，保留性能记录；新会话从空记录开始。更新前未采集的历史耗时无法补算。
+- **TPS 仅供参考**，不等同于服务端解码 TPS。网络延迟、服务端缓冲、chunk 粒度及本地消费者延迟均可能影响结果，短请求尤其容易波动。Average 是逐次请求 TPS 的算术平均，不是总 token 数除以总耗时；不同 API 或测试环境的结果需核对口径后再比较。本次摘要识别修复不追溯修改已有历史样本。
 
 ## 会话
 

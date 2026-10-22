@@ -185,7 +185,17 @@ class StreamDeltaCallback(BaseCallbackHandler):
                 summary = any(isinstance(block, dict) and block.get("summary") for block in (
                     message.content if isinstance(message.content, list) else []
                 ))
-                if kind.get("summary") or (summary and not kind.get("full")):
+                extra = self._message.additional_kwargs
+                # Match reasoning_text's precedence on the accumulated message.
+                uses_summary = (
+                    isinstance(extra.get("reasoning_summary"), str)
+                    and bool(extra["reasoning_summary"])
+                    and not any(
+                        isinstance(extra.get(key), str) and extra[key]
+                        for key in ("reasoning_content", "reasoning", "thinking")
+                    )
+                )
+                if uses_summary or kind.get("summary") or (summary and not kind.get("full")):
                     self._timing.summarized_reasoning = True
             self._timing.mark(
                 monotonic(), reasoning=bool(reasoning) and reasoning != self._reasoning,

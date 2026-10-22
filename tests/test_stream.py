@@ -1,3 +1,5 @@
+import pytest
+
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 
@@ -225,3 +227,64 @@ def test_metrics_capture_reasoning_effort_for_both_protocols():
         callback.on_llm_end(None)
         assert reports[0]["reasoning_effort"] in {"low", "high"}
         assert reports[0]["model"] == params["model"]
+
+
+@pytest.mark.parametrize("kind", [{}, {"full": True}])
+def test_reasoning_summary_kwargs_exclude_full_output_throughput(monkeypatch, kind):
+    from agent.performance import model_metric_groups
+
+    now = [0.0]
+    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    reports = []
+    callback = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    callback.on_llm_start({})
+    now[0] = 1
+    callback.on_llm_new_token("", chunk=AIMessageChunk(
+        content="", additional_kwargs={"reasoning_summary": "brief summary"},
+        response_metadata={"deep_agent_reasoning_kind": kind},
+    ))
+    now[0] = 2
+    callback.on_llm_new_token("", chunk=AIMessageChunk(
+        content="", additional_kwargs={"reasoning_summary": " continued"},
+    ))
+    now[0] = 3
+    callback.on_llm_new_token("answer", chunk=AIMessageChunk(content="answer"))
+    now[0] = 5
+    callback.on_llm_new_token(" more", chunk=AIMessageChunk(content=" more", usage_metadata={
+        "input_tokens": 10, "output_tokens": 30, "total_tokens": 40,
+        "output_token_details": {"reasoning": 20},
+    }))
+    callback.on_llm_end(None)
+    report = reports[0]
+    assert report["output_tokens"] == 30 and report["reasoning_tokens"] == 20
+    assert report["tps"] is report["reasoning_tps"] is report["output_duration"] is None
+    assert report["answer_tps"] == 5 and report["answer_duration"] == 2
+    assert model_metric_groups(reports)[0]["sample_count"] == 0
+
+
+@pytest.mark.parametrize("extra", [
+    {"reasoning_summary": value} for value in ("", None, 42, {}, [])
+] + [
+    {key: "full reasoning", "reasoning_summary": "brief summary"}
+    for key in ("reasoning_content", "reasoning", "thinking")
+])
+def test_summary_detection_follows_reasoning_text_precedence(monkeypatch, extra):
+    now = [0.0]
+    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    reports = []
+    callback = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    callback.on_llm_start({})
+    for timestamp in (1, 2):
+        now[0] = timestamp
+        callback.on_llm_new_token("", chunk=AIMessageChunk(
+            content=[{"type": "reasoning", "text": "full reasoning"}],
+            additional_kwargs=extra,
+        ))
+    now[0] = 3
+    callback.on_llm_new_token("answer", chunk=AIMessageChunk(content="answer", usage_metadata={
+        "input_tokens": 10, "output_tokens": 30, "total_tokens": 40,
+        "output_token_details": {"reasoning": 20},
+    }))
+    callback.on_llm_end(None)
+    report = reports[0]
+    assert report["tps"] == 15 and report["reasoning_tps"] == 20
