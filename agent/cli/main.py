@@ -15,6 +15,7 @@ from agent.runner import AgentRunner
 from agent.sandbox import SandboxUnavailableError
 from agent.session import SessionStore
 from agent.version import package_version
+from agent.mcp.manager import MCPManager
 
 
 def create_runner(settings: Settings) -> AgentRunner:
@@ -22,6 +23,9 @@ def create_runner(settings: Settings) -> AgentRunner:
         settings.sandbox.workspace,
         override=settings.state_path,
     )
+    config_dir = settings.sandbox.protected_config_dir or settings.config_dir or default_config_dir()
+    mcp_manager = MCPManager(config_dir / "mcp.json")
+    mcp_manager.load()
     try:
         return AgentRunner(
             settings=settings,
@@ -30,6 +34,7 @@ def create_runner(settings: Settings) -> AgentRunner:
             enable_sessions=True,
             persist_on_first_message=True,
             workspace=settings.sandbox.workspace,
+            mcp_manager=mcp_manager,
         )
     except SandboxUnavailableError as exc:
         raise SystemExit(str(exc)) from exc

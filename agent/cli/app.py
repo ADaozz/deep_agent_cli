@@ -207,6 +207,13 @@ class SlashCompleter(Completer):
                 "full-access": "Write the real filesystem except the agent install and configuration (HIGH RISK)",
             }
             candidates.extend((mode, descriptions[mode]) for mode in self.sandbox_modes())
+        elif name == "mcp":
+            candidates.extend((
+                ("add", "Add a host MCP server"),
+                ("remove", "Remove a configured server"),
+                ("test", "Connect and list tools"),
+                ("tools", "Show one server's tools"),
+            ))
         ranked = []
         for index, (value, description) in enumerate(candidates):
             rank = self._rank(value.lower(), arg.lower())
@@ -2427,6 +2434,11 @@ class CliApplication:
         if interaction is None:
             return
         self._reviewing = False
+        if interaction.kind.startswith("mcp_"):
+            from agent.cli.mcp_ui import finish_mcp_interaction
+
+            finish_mcp_interaction(self, interaction, cancelled=cancelled)
+            return
         if interaction.kind == "approval":
             self._restore_approval_draft()
         if interaction.kind == "skill":

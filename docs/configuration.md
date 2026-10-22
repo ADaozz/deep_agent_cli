@@ -16,6 +16,32 @@ CLI 按以下顺序查找主配置：
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
 - 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
+## MCP（`mcp.json`）
+
+MCP 目录与模型配置分开，默认是 `~/.deep-agent/mcp.json`。CLI 把它放在沙箱隐藏的配置目录里。这个文件是项目自己的目录，不会原样交给 LangChain `MCPAdapter`。
+
+MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不受沙箱的文件系统或网络限制。`allow` 不会把它们当成可信工具。stdio 的命令直接在宿主运行。Bearer token 只记录环境变量名，文件里不写明文。OAuth 由 FastMCP 打开浏览器，Agent 不能代替用户确认。
+
+```json
+{
+  "servers": {
+    "deepwiki": {
+      "transport": "streamable_http",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "enabled": true
+    },
+    "internal": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "auth": {"type": "bearer", "token_env": "INTERNAL_MCP_TOKEN"},
+      "enabled": true
+    }
+  }
+}
+```
+
+MCP HTTP 请求不使用环境变量里的代理，和模型、Tavily 客户端一致，避免把 token 交给代理。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；这两项都要用户确认。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+
 ## 工具可见性（`tools.hidden`）
 
 ```yaml

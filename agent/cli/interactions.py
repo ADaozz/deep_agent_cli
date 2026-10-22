@@ -86,6 +86,29 @@ class InteractionController:
                 details.append(f"Target: {_approval_summary(target, kind='target')}")
             elif name == "web_search":
                 details.append("Network: public web search via Tavily")
+            elif name == "mcp_add":
+                transport = str(args.get("transport") or "")
+                details.append(f"Transport: {transport or '<not supplied>'}")
+                if transport == "stdio":
+                    command = str(args.get("command") or "")
+                    argv = args.get("argv") if isinstance(args.get("argv"), list) else args.get("args")
+                    argv = argv if isinstance(argv, list) else []
+                    rendered = " ".join([command, *[str(item) for item in argv]]).strip()
+                    details.append(
+                        "Host command (runs outside the sandbox): "
+                        + _approval_summary(rendered or "<not supplied>", kind="command")
+                    )
+                else:
+                    details.append(f"URL: {_approval_summary(args.get('url'), kind='url')}")
+                auth = str(args.get("auth_type") or "none")
+                token_env = str(args.get("token_env") or "")
+                details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))
+                details.append("Saves an MCP server on the host. Reject leaves the configuration unchanged.")
+            elif name == "mcp_remove":
+                details.append(f"Remove host MCP server: {_approval_summary(args.get('name'), kind='name')}")
+                details.append("Reject leaves the configuration unchanged.")
+            elif name.startswith("mcp__"):
+                details.append("Host MCP tool. It runs outside the sandbox, not under allow/sandbox policy.")
         details.append("Run executes the listed tool calls. Reject denies them.")
         return cls(
             kind="approval",

@@ -41,6 +41,11 @@ def command_table() -> tuple[Command, ...]:
             "Filesystem mode: restricted (default) or full-access (writes the real filesystem, HIGH RISK)",
             _sandbox,
         ),
+        Command(
+            "mcp",
+            "Host MCP servers (/mcp, add, remove <name>, test <name>, tools <name>)",
+            _mcp,
+        ),
         Command("exit", "Exit DeepAgent", _exit),
     )
 
@@ -102,6 +107,12 @@ async def _permission(app: "CliApplication", arg: str) -> None:
 
 async def _sandbox(app: "CliApplication", arg: str) -> None:
     await app.select_sandbox(arg)
+
+
+async def _mcp(app: "CliApplication", arg: str) -> None:
+    from agent.cli.mcp_ui import handle_mcp_command
+
+    handle_mcp_command(app, arg)
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:

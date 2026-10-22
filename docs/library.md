@@ -23,7 +23,7 @@ runner.close()
 
 注意：
 
-- `create_agent()` 不会自动读取配置文件。不传 `settings` 时使用代码内默认值（`http://localhost:8000/v1`，模型 `qwen3.5-plus`）。需要与 CLI 一致时显式传入 `Settings.load()`。
+- `create_agent()` 不会自动读取配置文件，也不会读取 `mcp.json`。不传 `settings` 时使用代码内默认值（`http://localhost:8000/v1`，模型 `qwen3.5-plus`）。需要与 CLI 一致时显式传入 `Settings.load()`。要使用 MCP，自行构造 `MCPManager`，`load()` 后传给 `create_agent(mcp=manager)` 或 `AgentRunner(mcp_manager=manager)`。不传 manager 时工具表与未配置 MCP 的行为一致。MCP 连接在宿主进程中建立，不进入 Bubblewrap。
 - 默认模板中的工具挂载来自配置文件；直接构造 `Settings()` 或 `SandboxConfig()` 不会自动添加这些条目，也不做工具链发现。NVM 版本、Cargo / Rustup、浏览器缓存及 PATH 由调用方配置，见 [默认工具挂载](configuration.md#默认工具挂载)。
 - 不传 `backend` 时与 CLI 一样做沙箱预检，失败时抛出 `SandboxUnavailableError`。Bubblewrap 是必需的。
 - 不传 `session_store` 时，会话只保存在内存中。持久化可参考 `agent/cli/main.py` 中的 `create_runner()`。
