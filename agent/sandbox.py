@@ -9,6 +9,7 @@ import logging
 import os
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import selectors
 import shutil
 import signal
@@ -265,9 +266,9 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
             raise ValueError(f"mount destination must be an absolute sandbox path: {raw_destination!r}")
         if not source.exists():
             raise ValueError(f"mount source does not exist: {source}")
-        is_file = source.is_file()
+        is_file = source.is_file() or _is_device_node(source)
         if not is_file and not source.is_dir():
-            raise ValueError(f"mount source must be a file or directory: {destination}")
+            raise ValueError(f"mount source must be a file, directory, or device node: {destination}")
         point = _MountPoint(destination, source, read_only, is_file)
         for existing in effective:
             if existing.destination == destination:
@@ -1166,7 +1167,8 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         for mount in self.config.extra_read_only_mounts:
             args += _mount_args("--ro-bind", mount, workspace_root=self.workspace_root)
         for mount in self.config.extra_read_write_mounts:
-            args += _mount_args("--bind", mount, workspace_root=self.workspace_root)
+            flag = "--dev-bind" if mount.dev_bind else "--bind"
+            args += _mount_args(flag, mount, workspace_root=self.workspace_root)
         if self.skills_dir is not None:
             args += ["--bind", str(self.skills_dir), SKILLS_ROOT]
         # Shared by persistent workers and one-shot shell commands.
@@ -1348,9 +1350,11 @@ def _host_root_mirror_args(workspace_root: str, created: set[str]) -> list[str]:
     ``/run/deep-agent`` on that real root, which a normal user cannot do.
     The empty tmpfs root can hold those new directories. Host directories
     that must contain one of them are recreated there, and their existing
-    children are mounted individually. ``/proc`` and ``/dev`` stay available
-    for the sandbox's own instances. The workspace itself is its real
-    absolute path and is not created as a new top-level name.
+    children are mounted individually. ``/proc`` is left for the sandbox's
+    own instance. ``/dev`` is skipped here so ``sandbox_args`` can attach a
+    private tmpfs, which extra ``dev_bind`` mounts may overlay. The
+    workspace itself is its real absolute path and is not created as a new
+    top-level name.
     """
     del workspace_root
     try:
@@ -1532,7 +1536,21 @@ def _mount_args(flag: str, mount: BindMount, *, workspace_root: str = SANDBOX_RO
         raise ValueError(f"extra mount conflicts with the sandbox worker: {destination}")
     if destination == PurePosixPath(SKILLS_ROOT) or PurePosixPath(SKILLS_ROOT) in destination.parents or destination in PurePosixPath(SKILLS_ROOT).parents:
         raise ValueError(f"extra mount conflicts with skills destination: {destination}")
+    if mount.dev_bind:
+        if flag == "--ro-bind":
+            raise ValueError("dev_bind cannot be used on extra_read_only_mounts")
+        flag = "--dev-bind"
+    elif _is_device_node(source):
+        raise ValueError(f"device node {source} requires extra_read_write_mounts with dev_bind: true")
     return [flag, str(source), str(destination)]
+
+
+def _is_device_node(path: Path) -> bool:
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISCHR(mode) or stat.S_ISBLK(mode)
 
 
 def _effective_timeout(requested: int | None, cap: int | None) -> int | None:

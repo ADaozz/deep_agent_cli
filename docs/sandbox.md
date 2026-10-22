@@ -28,7 +28,7 @@
 
 ## 文件系统模式
 
-`sandbox.mode` 缺省为 `restricted`。运行中用 `/sandbox` 切换；切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `allow`。
+配置文件未写 `sandbox.mode` 时，代码缺省为 `restricted`。随程序提供的模板写的是 `full-access`，并用 `dev_bind` 把宿主 `/dev` 作为额外挂载。运行中用 `/sandbox` 切换；切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `allow`。
 
 随程序提供的沙箱配置是一份最小基线，不是针对具体部署的安全策略。它只确定工作区、运行所需的只读系统目录、持久的 `/tmp` 与 `/home`，以及模板里若干可选的常见工具路径。这些可选路径在源目录不存在时跳过，既不表示工具已经可用，也不覆盖容器、多用户主机或自定义安装前缀。
 
@@ -79,9 +79,10 @@
 | `/usr`、`/bin`、`/lib`、`/lib64` | 宿主机对应目录，只读 |
 | `/etc` | 只有 `passwd`、`group`、`nsswitch.conf`、`os-release`、`ld.so.cache`、`localtime`、`alternatives`；开放网络时另加 `hosts`、`resolv.conf`、`ssl`。这份列表写在代码里。还需要别的路径时，在 `extra_read_only_mounts` 里按相同路径补上，并设 `optional: true`；源路径不存在就跳过。示例配置里的 `/etc/pki` 就是这样补上的 |
 | `/tmp`、`/home` | 持久目录 `~/.deep-agent/sandbox/tmp` 与 `~/.deep-agent/sandbox/home`；`HOME=/home/agent` |
-| `/proc`、`/dev` | 沙箱自己的实例 |
+| `/proc` | 沙箱自己的实例 |
+| `/dev` | 沙箱自己的设备 tmpfs。要宿主设备节点时，在 `extra_read_write_mounts` 写 `source: /dev`、`destination: /dev`、`dev_bind: true` |
 
-表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。`full-access` 改为映射当前文件系统，并在最后盖上安装只读和配置目录遮罩。默认模板已包含若干可选工具目录挂载，完整清单见 [默认工具挂载](configuration.md#默认工具挂载)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
+表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。`full-access` 改为映射当前文件系统，再在最后盖上安装只读和配置目录遮罩。`/dev` 仍先是沙箱自己的 tmpfs，由额外 `dev_bind` 挂载覆盖。`restricted` 的工具挂载示例见 [restricted 下的工具挂载示例](configuration.md#restricted-下的工具挂载示例)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
 
 额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/mnt/d/test`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
 
@@ -98,7 +99,7 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。自定义 `PATH` 替换默认工具目录，程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。生成模板另含 Cargo 和浏览器相关环境设置，见下节。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。
 - 不限制 CPU、内存、磁盘或进程数。
 
 ## 工具目录与环境变量
@@ -180,10 +181,10 @@ CUSTOM backend 保留调用方自己的规则。
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
 | `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete` | 所有执行模式 |
-| `allow` | 无；所有工具自动批准，所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
+| `allow` | 原生工具自动批准，所有 `execute` 开放宿主网络。宿主 MCP 工具、`mcp_add` 和 `mcp_remove` 仍需批准 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
-- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，也不写入会话目录。
+- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，也不取消宿主 MCP 工具的审批，也不写入会话目录。
 - 正在输入 `ALLOW` 时，新的工具审批、提问或暂停不会替换确认栏。提交或取消确认后才打开该面板；`F2` 可先查看，`Esc` 回到确认栏。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。

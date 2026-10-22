@@ -207,6 +207,13 @@ class SlashCompleter(Completer):
                 "full-access": "Write the real filesystem except the agent install and configuration (HIGH RISK)",
             }
             candidates.extend((mode, descriptions[mode]) for mode in self.sandbox_modes())
+        elif name == "mcp":
+            candidates.extend((
+                ("add", "Add a host MCP server"),
+                ("remove", "Remove a configured server"),
+                ("test", "Connect and list tools"),
+                ("tools", "Show one server's tools"),
+            ))
         ranked = []
         for index, (value, description) in enumerate(candidates):
             rank = self._rank(value.lower(), arg.lower())
@@ -682,11 +689,17 @@ class CliApplication:
         try:
             with self._capture_filesystem_warnings():
                 await self.sessions.start()
-                await self.application.run_async()
+                await self.application.run_async(pre_run=self._start_mcp_connections)
         finally:
             self.sessions.notify_exit()
             await self._stop_git_watch()
             self._io_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _start_mcp_connections(self) -> None:
+        manager = getattr(self.runner, "mcp", None)
+        if manager is not None and manager.list_servers():
+            from agent.cli.mcp_ui import _start_operation
+            _start_operation(self, manager.connect_pending)
 
     @contextmanager
     def _capture_filesystem_warnings(self) -> Iterator[None]:
@@ -1990,6 +2003,13 @@ class CliApplication:
                     self.set_status("Cancelling…", transient=False)
                 self.application.invalidate()
 
+            elif getattr(self, "_mcp_busy", False):
+                self.set_status(
+                    "MCP is still running in the background; wait for completion or timeout",
+                    transient=False,
+                )
+                self.application.invalidate()
+
         @bind("clear_or_exit")
         def ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
             if self.interaction is not None:
@@ -2427,6 +2447,11 @@ class CliApplication:
         if interaction is None:
             return
         self._reviewing = False
+        if interaction.kind.startswith("mcp_"):
+            from agent.cli.mcp_ui import finish_mcp_interaction
+
+            finish_mcp_interaction(self, interaction, cancelled=cancelled)
+            return
         if interaction.kind == "approval":
             self._restore_approval_draft()
         if interaction.kind == "skill":

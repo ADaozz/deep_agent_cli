@@ -59,3 +59,14 @@ def graph_tool_names(graph: Any) -> set[str]:
 @pytest.fixture
 def fake_done() -> ScriptedToolModel:
     return scripted_model([AIMessage(content="done")])
+
+
+@pytest.fixture(scope="session")
+def http_mcp() -> Iterator[Any]:
+    from tests.mcp_fixture import HttpFixture
+
+    server = HttpFixture()
+    try:
+        yield server
+    finally:
+        server.close()

@@ -212,6 +212,7 @@ class AgentRunner:
         workspace: Path | None = None,
         settings: Settings | None = None,
         model_id: str | None = None,
+        mcp_manager: Any | None = None,
     ) -> None:
         if prepared is not None and (backend is not None or sandbox_config is not None):
             raise ValueError("prepared already defines the backend and sandbox configuration")
@@ -240,6 +241,7 @@ class AgentRunner:
         self._environment = EnvironmentCache()
         self._closed = False
         self._close_completed = False
+        self.mcp = mcp_manager
         self._runtime: SessionRuntime | None = None
 
         self.session_store = session_store
@@ -279,18 +281,34 @@ class AgentRunner:
         )
         self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
         self._custom_interrupt_on = None
-        if prepared is not None and prepared.interrupt_on and prepared.interrupt_on != interrupt_on_for_mode(PermissionMode.ASK):
-            self._custom_interrupt_on = dict(prepared.interrupt_on)
+        if prepared is not None and prepared.interrupt_on:
+            from agent.mcp.names import is_managed_mcp_name
+
+            native_interrupt = {
+                name: rule for name, rule in prepared.interrupt_on.items() if not is_managed_mcp_name(name)
+            }
+            if native_interrupt and native_interrupt != (interrupt_on_for_mode(PermissionMode.ASK) or {}):
+                self._custom_interrupt_on = native_interrupt
         if prepared is not None:
             inferred = permission_mode_from_interrupt_on(prepared.interrupt_on)
             if inferred is PermissionMode.ALLOW and not allow_mode_available(prepared.execution_mode):
                 raise ValueError(allow_mode_unavailable_reason(prepared.execution_mode))
             self._permission_mode = inferred
-        self.prepared = prepared if prepared is not None and saver is prepared.checkpointer and initial_model is prepared.model else build_agent(
+        reuse_prepared = (
+            prepared is not None
+            and saver is prepared.checkpointer
+            and initial_model is prepared.model
+            and mcp_manager is None
+        )
+        override = prepared.interrupt_on if prepared is not None else None
+        if mcp_manager is not None:
+            override = self._custom_interrupt_on if self._permission_mode is PermissionMode.ASK else None
+        self.prepared = prepared if reuse_prepared else build_agent(
             self._spec, initial_model, self._permission_mode, saver,
             self.control, self._pause_condition,
-            interrupt_on_override=prepared.interrupt_on if prepared is not None else None,
+            interrupt_on_override=override,
             backend_selection=prepared.backend_selection if prepared is not None else None,
+            mcp=mcp_manager,
         )
         self._checkpointer = self.prepared.checkpointer
         self._chat_model = initial_model
@@ -389,8 +407,9 @@ class AgentRunner:
 
     def _has_pending_runtime_config(self) -> bool:
         with self._pending_config_lock:
-            return (self._pending_model_id is not None or self._pending_permission_mode is not None
-                    or self._pending_reasoning_effort is not None or self._pending_sandbox_mode is not None)
+            pending = (self._pending_model_id is not None or self._pending_permission_mode is not None
+                       or self._pending_reasoning_effort is not None or self._pending_sandbox_mode is not None)
+        return pending or (self.mcp is not None and self.mcp.toolset_dirty())
 
     def _save_pending_config(self) -> None:
         if self.session_store is not None:
@@ -453,7 +472,8 @@ class AgentRunner:
             mode = self._pending_permission_mode
             effort = self._pending_reasoning_effort
             sandbox_mode = self._pending_sandbox_mode
-            if model_id is None and mode is None and effort is None and sandbox_mode is None:
+            mcp_dirty = self.mcp is not None and self.mcp.toolset_dirty()
+            if model_id is None and mode is None and effort is None and sandbox_mode is None and not mcp_dirty:
                 return
             profile = self.current_model()
             if model_id is not None:
@@ -477,8 +497,9 @@ class AgentRunner:
                 failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
                 mode = None
             previous = self.prepared, self._chat_model
+            applied_mcp = False
             try:
-                if model_id is not None or mode is not None or effort is not None:
+                if model_id is not None or mode is not None or effort is not None or mcp_dirty:
                     target_mode = mode or self._permission_mode
                     target_effort = effort if effort is not None else self._reasoning_effort
                     chat = self._chat_model
@@ -488,6 +509,7 @@ class AgentRunner:
                             reasoning_effort=None if target_effort == "default" else target_effort,
                         )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
+                    applied_mcp = mcp_dirty
                     if self.session_store is not None:
                         self.session_store.touch(
                             self.thread_id, model_id=profile.id if model_id is not None else self._current_model_id,
@@ -499,6 +521,7 @@ class AgentRunner:
                 model_id = None
                 mode = None
                 effort = None
+                applied_mcp = False
             if model_id is not None:
                 self._context_usage_invalidated = True
                 self._current_model_id = profile.id
@@ -522,13 +545,14 @@ class AgentRunner:
             self._save_pending_config()
         for failure in failures:
             _emit(handler or self.on_event, RunEvent(type="runtime_config_failed", content=failure, is_error=True))
-        if model_id is not None or mode is not None or effort is not None or applied_sandbox is not None:
+        if model_id is not None or mode is not None or effort is not None or applied_sandbox is not None or applied_mcp:
             _emit(handler or self.on_event, RunEvent(
                 type="runtime_config_applied",
                 result={"model_id": self._current_model_id, "permission_mode": self._permission_mode.value,
                         "reasoning_effort": self._reasoning_effort, "reasoning_changed": effort is not None,
                         "model_changed": model_id is not None, "permission_changed": mode is not None,
-                        "sandbox_mode": self._sandbox_mode, "sandbox_changed": applied_sandbox is not None},
+                        "sandbox_mode": self._sandbox_mode, "sandbox_changed": applied_sandbox is not None,
+                        "mcp_changed": applied_mcp},
             ))
 
     def _apply_sandbox_mode(self, mode: str) -> None:
@@ -685,6 +709,7 @@ class AgentRunner:
             self.control, self._pause_condition,
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
             backend_selection=self.prepared.backend_selection,
+            mcp=self.mcp,
         )
         self._chat_model = chat
 
@@ -697,6 +722,11 @@ class AgentRunner:
         pool = self.sandbox_pool
         if pool is not None:
             pool.shutdown(reason)
+
+    def _close_mcp(self) -> None:
+        manager = getattr(self, "mcp", None)
+        if manager is not None:
+            manager.close()
 
     def request_pause(self) -> None:
         self.control.request_pause()
@@ -996,6 +1026,8 @@ class AgentRunner:
         # 卡住的命令不得在 close 之后继续占用沙箱，即便租约必须保留。
         self._end_sandbox_session("agent session closed")
         if not drained:
+            # The active graph may still be unwinding an MCP call. Keep its
+            # bridge and clients alive with the lease until close is retried.
             raise RuntimeError(
                 "Runner close timed out with a run still active; the session "
                 "lease is kept until the run drains and close is retried"
@@ -1005,6 +1037,7 @@ class AgentRunner:
                 "Runner close could not confirm the model request stopped; the "
                 "session lease is kept until it closes and close is retried"
             )
+        self._close_mcp()
         self._close_completed = True
         self._runtime.close()
         if self._attachment_tempdir is not None:

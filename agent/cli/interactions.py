@@ -22,6 +22,13 @@ def _approval_summary(value: Any, kind: str = "command") -> str:
     return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
 
 
+def _mcp_approval_summary(text: str) -> str:
+    from agent.mcp.config import redact_config_text
+    text = redact_config_text(text)
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    return text if len(text) <= 180 else text[:180] + "…"
+
+
 @dataclass
 class InteractionController:
     kind: str
@@ -86,6 +93,29 @@ class InteractionController:
                 details.append(f"Target: {_approval_summary(target, kind='target')}")
             elif name == "web_search":
                 details.append("Network: public web search via Tavily")
+            elif name == "mcp_add":
+                transport = str(args.get("transport") or "")
+                details.append(f"Transport: {transport or '<not supplied>'}")
+                if transport == "stdio":
+                    command = str(args.get("command") or "")
+                    argv = args.get("argv") if isinstance(args.get("argv"), list) else args.get("args")
+                    argv = argv if isinstance(argv, list) else []
+                    rendered = " ".join([command, *[str(item) for item in argv]]).strip()
+                    details.append(
+                        "Host command (runs outside the sandbox): "
+                        + _mcp_approval_summary(rendered or "<not supplied>")
+                    )
+                else:
+                    details.append(f"URL: {_mcp_approval_summary(str(args.get('url') or ''))}")
+                auth = str(args.get("auth_type") or "none")
+                token_env = str(args.get("token_env") or "")
+                details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))
+                details.append("Saves an MCP server on the host. Reject leaves the configuration unchanged.")
+            elif name == "mcp_remove":
+                details.append(f"Remove host MCP server: {_approval_summary(args.get('name'), kind='name')}")
+                details.append("Reject leaves the configuration unchanged.")
+            elif name.startswith("mcp__"):
+                details.append("Host MCP tool. It runs outside the sandbox, not under allow/sandbox policy.")
         details.append("Run executes the listed tool calls. Reject denies them.")
         return cls(
             kind="approval",

@@ -109,67 +109,56 @@ sandbox:
   # 宿主机项目目录。沙箱内的路径和当前目录都使用它的真实绝对路径；“.” 表示启动终端界面时的当前目录。
   workspace: .
   bwrap_path: bwrap
-  # restricted：工作区、skills 和声明的挂载可写，系统目录只读。
-  # full-access：当前文件系统可写，仅保护 Agent 安装文件和配置目录。未设置时为 restricted。
-  mode: restricted
+  # restricted：只开放工作区、skills 和下面声明的挂载，系统目录只读。
+  # full-access：开放宿主上的全部路径，仅保护 Agent 安装文件和配置目录。
+  # 配置文件未写 mode 时，代码默认仍是 restricted。/dev 由 extra_read_write_mounts 的 dev_bind 决定。
+  mode: full-access
   # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
   timeout_seconds: null
   max_output_bytes: 100000
-  # 明确允许传递给 Agent 命令的宿主机环境变量名称。
-  # 有头浏览器复用宿主 X11 显示；宿主未设置 DISPLAY 时不传入。
+  # 允许传入沙箱的宿主环境变量。PATH 用宿主的，命令就在宿主目录里解析
+  # （~/.nvm、~/esp、~/.espressif 等）。未列入的变量不会传入。
+  # 有头浏览器复用宿主 X11；宿主未设置 DISPLAY 时不传入。
   env_allowlist:
+    - PATH
     - DISPLAY
-  # 注入沙箱的固定环境变量。PATH 可自定义工具目录，请保留系统目录；/run/deep-agent 会自动置于最前。
-  # NVM 的所有已安装版本挂载在 /opt/node 下；请自行将选定版本的 bin 目录加入 PATH，
-  # 例如 /opt/node/<实际版本>/bin。PATH 不会展开通配符，也不会自动选择 Node 版本。
-  # 使用系统 Node.js 时，已有的 /usr/bin 等系统路径即可；非标准安装位置请调整 source 和 PATH。
-  # playwright-cli open 使用 /opt/google/chrome/chrome。不要在沙箱中执行
-  # `npx playwright install chrome` 安装 Chrome，该命令需要 sudo apt-get。
-  # 安装与命令行工具匹配的 Chromium：先在宿主机执行 `playwright-cli install-browser chromium`，再执行
-  # `playwright-cli open --browser=chromium`。浏览器路径由 PLAYWRIGHT_BROWSERS_PATH 指定。
-  env_set:
-    PATH: /opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
-    RUSTUP_HOME: /opt/rustup
-    PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
-  # source 是宿主路径，支持 ~；destination 是沙箱内的绝对路径，不支持 ~。
-  # extra_read_only_mounts 允许读取；extra_read_write_mounts 允许读取和写入。
-  # optional: true 表示源目录不存在时跳过，不会寻找替代路径，也不保证工具可用。
-  # 可按需求扩大或缩小挂载范围；若只需要一个 Node 版本，可将 source 缩小到该版本目录，
-  # 并同步调整 PATH。挂载控制文件系统可见范围；ask / allow 仍独立决定工具调用是否需审批。
-  # 挂载整个宿主目录会暴露其中的敏感文件；readonly 只能禁止写入，不能阻止读取。
-  # 首次启动生成此配置；更新模板不会覆盖已有的 ~/.deep-agent/config.yaml，请自行调整。
-  extra_read_only_mounts:
-    - source: ~/.nvm/versions/node
-      destination: /opt/node
-      optional: true
-    # Cargo 可执行文件与 Rustup 工具链分别挂载；自定义安装位置请同时调整 source 和环境变量。
-    - source: ~/.cargo
-      destination: /opt/cargo
-      optional: true
-    - source: ~/.rustup
-      destination: /opt/rustup
-      optional: true
-    # Chrome 程序目录只读；浏览器缓存另行读写挂载。其他安装位置请修改 source / destination。
-    - source: /opt/google
-      destination: /opt/google
-      optional: true
-    # 常见 Linux / WSL2 环境的 X11 Socket 目录；文件 Socket 支持 network=false。
-    # WSLg 若使用其他位置，可将 source 改为 /mnt/wslg/.X11-unix，保留同一个 destination。
-    # 不要同时配置相同目标；无显示服务时跳过此挂载。
-    - source: /tmp/.X11-unix
-      destination: /tmp/.X11-unix
-      optional: true
-    # 内置系统文件里没有的路径在这里补。源路径不存在时跳过。
-    # CentOS / RHEL 的证书在 /etc/pki；Ubuntu、Debian、Arch 通常没有这个目录。
-    - source: /etc/pki
-      destination: /etc/pki
-      optional: true
-  # 可写的浏览器缓存；沙箱内的创建、修改和删除操作会同步到宿主机目录。
-  # 若宿主使用 XDG_CACHE_HOME 或自定义 Playwright 缓存位置，请将 source 改为实际目录。
+  # 固定注入的变量，会盖住上面从宿主传入的同名变量。full-access 不要在这里写 PATH，
+  # 否则会盖住宿主 PATH。/run/deep-agent 仍会自动放在 PATH 最前。
+  env_set: {}
+  # full-access 已经能看见宿主目录，默认不再把工具改挂到 /opt。
+  # 改成 restricted 后，只剩下工作区、skills 和这里声明的挂载。需要工具时再按实际路径加上，例如：
+  # extra_read_only_mounts:
+  #   - source: ~/.nvm/versions/node
+  #     destination: /opt/node
+  #     optional: true
+  #   - source: ~/.cargo
+  #     destination: /opt/cargo
+  #     optional: true
+  #   - source: ~/.rustup
+  #     destination: /opt/rustup
+  #     optional: true
+  #   - source: /opt/google
+  #     destination: /opt/google
+  #     optional: true
+  #   - source: /tmp/.X11-unix
+  #     destination: /tmp/.X11-unix
+  #     optional: true
+  #   - source: /etc/pki
+  #     destination: /etc/pki
+  #     optional: true
+  # extra_read_write_mounts:
+  #   - source: ~/.cache/ms-playwright
+  #     destination: /opt/ms-playwright
+  #     optional: true
+  # source 支持 ~；destination 必须是沙箱内绝对路径。optional: true 表示源不存在就跳过。
+  # 挂载整个目录仍会暴露其中的敏感文件。只读只能禁止写入。
+  extra_read_only_mounts: []
   extra_read_write_mounts:
-    - source: ~/.cache/ms-playwright
-      destination: /opt/ms-playwright
-      optional: true
+    # --dev 会换成沙箱自己的 /dev。要打开 USB 串口等设备节点，用 dev_bind 覆盖宿主 /dev。
+    # 不要这一条就把此项删掉。只读挂载不能设 dev_bind。
+    - source: /dev
+      destination: /dev
+      dev_bind: true
 
 paths:
   # SQLite 会话数据库；null 表示使用 ~/.deep-agent/sessions/<workspace-hash>.sqlite3。

@@ -265,6 +265,45 @@ sandbox:
         ("/opt/present", True),
         ("/opt/required", False),
     ]
+    assert mounts[0].dev_bind is False
+
+
+def test_dev_bind_mount_from_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        _MODEL_YAML
+        + """
+sandbox:
+  workspace: work
+  extra_read_write_mounts:
+    - source: /dev
+      destination: /dev
+      dev_bind: true
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "work").mkdir()
+    mount = Settings.load(path).sandbox.extra_read_write_mounts[0]
+    assert mount.source == Path("/dev")
+    assert mount.destination == "/dev"
+    assert mount.dev_bind is True
+
+
+def test_dev_bind_on_read_only_mounts_from_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        _MODEL_YAML
+        + """
+sandbox:
+  extra_read_only_mounts:
+    - source: /dev
+      destination: /dev
+      dev_bind: true
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="cannot be true"):
+        Settings.load(path)
 
 
 def test_sandbox_timeout_is_optional_and_must_be_positive(tmp_path: Path) -> None:
@@ -552,6 +591,13 @@ def test_invalid_sandbox_mode_raises(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(_MODEL_YAML + "sandbox:\n  mode: maybe\n", encoding="utf-8")
     with pytest.raises(ValueError, match="sandbox.mode"):
+        Settings.load(path)
+
+
+def test_removed_sandbox_dev_raises(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_MODEL_YAML + "sandbox:\n  dev: host\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="sandbox.dev was removed"):
         Settings.load(path)
 
 

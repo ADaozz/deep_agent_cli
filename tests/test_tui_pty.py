@@ -314,3 +314,31 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
         finally:
             tui.close()
         assert server.open_connections() == []
+
+
+def test_real_pty_mcp_connection_does_not_block_input(tmp_path):
+    probe = _PROBE.replace(
+        "runner = AgentRunner(model=scripted_model(messages), sandbox_config=config)",
+        """
+    import threading
+    from deepagents.backends import StateBackend
+    from agent.mcp.manager import MCPManager, MCPResult
+    manager = MCPManager(workspace / 'mcp.json')
+    def slow_test(name):
+        (workspace / 'connecting').write_text(name)
+        if not threading.Event().wait(0.8):
+            return MCPResult(False, False, 'MCP connection timeout; retry available')
+    manager.test = slow_test
+    runner = AgentRunner(model=scripted_model(messages), backend=StateBackend(), mcp_manager=manager)
+""".strip(),
+    )
+    tui = Tui(tmp_path, probe=probe)
+    try:
+        tui.wait(lambda state: state["status"] == "Ready")
+        tui.send("/mcp test unreachable\r")
+        tui.wait(lambda state: (tui.workspace / "connecting").exists())
+        tui.send("input during connection")
+        tui.wait(lambda state: state["input"] == "input during connection")
+        tui.wait(lambda state: "MCP connection timeout" in state["transcript"])
+    finally:
+        tui.close()

@@ -36,6 +36,7 @@ class BindMount:
     source: Path
     destination: str
     optional: bool = False
+    dev_bind: bool = False
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,10 @@ class Settings:
             raise ValueError(
                 "sandbox.allow_unsandboxed was removed; Bubblewrap is required"
             )
+        if "dev" in sandbox_raw:
+            raise ValueError(
+                "sandbox.dev was removed; use extra_read_write_mounts with dev_bind: true for host device nodes"
+            )
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
@@ -442,9 +447,16 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
         else:
             source_path = source_path.resolve()
         optional = _as_bool(item.get("optional", False), field_name=f"{field_name}[{index}].optional")
+        dev_bind = _as_bool(item.get("dev_bind", False), field_name=f"{field_name}[{index}].dev_bind")
+        if dev_bind and field_name == "sandbox.extra_read_only_mounts":
+            raise ValueError(
+                f"{field_name}[{index}].dev_bind cannot be true; device binds must be extra_read_write_mounts"
+            )
         if optional and not source_path.exists():
             continue
-        mounts.append(BindMount(source=source_path, destination=str(destination), optional=optional))
+        mounts.append(BindMount(
+            source=source_path, destination=str(destination), optional=optional, dev_bind=dev_bind,
+        ))
     return tuple(mounts)
 
 

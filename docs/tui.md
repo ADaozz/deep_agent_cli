@@ -31,6 +31,7 @@ deep-agent --version
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
+| `/mcp` | 列出宿主 MCP 服务器。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。服务在宿主运行，不受 Bubblewrap 限制 |
 | `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |

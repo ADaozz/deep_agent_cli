@@ -14,7 +14,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一 Runner 的模型、权限切换及新建、切换对话会话复用沙箱；文件系统模式变化或关闭 Runner 时清理沙箱。
 
-当前没有启用子 Agent 或 MCP 客户端，也没有容器编排、CPU、内存、磁盘或进程数的硬配额。这些不属于现有 Harness 的能力承诺。
+当前没有启用子 Agent，也没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
 
 ## 分层
 
@@ -212,7 +212,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 隔离边界
 
-默认工作区和 `/skills` 可写。`restricted` 下系统运行时目录只读，`/tmp` 与 `/home` 是 `~/.deep-agent/sandbox/` 下的持久目录；工作区仍通过它的真实绝对路径挂载。`full-access` 映射当前文件系统，并把 Agent 安装目录重新挂成只读、用权限 `000` 的 tmpfs 遮住配置目录。沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
+默认工作区和 `/skills` 可写。`restricted` 下系统运行时目录只读，`/tmp` 与 `/home` 是 `~/.deep-agent/sandbox/` 下的持久目录；工作区仍通过它的真实绝对路径挂载。`full-access` 映射当前文件系统，再把 Agent 安装目录重新挂成只读、用权限 `000` 的 tmpfs 遮住配置目录。两种模式的 `/dev` 默认都是沙箱自己的设备 tmpfs；宿主设备节点由 `extra_read_write_mounts` 的 `dev_bind` 覆盖。沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
 
 无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网；共享工作区中的 Unix socket、FIFO 或普通文件可能成为通信通道。当前也没有资源硬配额。部署边界以 [sandbox.md](sandbox.md#网络) 为准，不能靠提示词补足。
 
@@ -296,7 +296,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 扩展边界
 
-新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。未来接入 MCP 时，还需明确远程请求实际发生的位置与授权上下文，不能声称它自动受到 Bubblewrap 保护。
+新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。MCP 工具由 `MCPMiddleware` 注入，不写入 `AgentSpec.tools`；连接、stdio 子进程和 OAuth 都发生在宿主，不能声称它们受到 Bubblewrap 保护。
 
 增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。终端和库调用方以既有 RunResult 和 RunEvent 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
 

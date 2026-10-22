@@ -16,6 +16,32 @@ CLI 按以下顺序查找主配置：
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
 - 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
+## MCP（`mcp.json`）
+
+MCP 目录与模型配置分开，默认是 `~/.deep-agent/mcp.json`。CLI 把它放在沙箱隐藏的配置目录里。这个文件是项目自己的目录，不会原样交给 LangChain `MCPAdapter`。
+
+MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不受沙箱的文件系统或网络限制。`allow` 不会把它们当成可信工具。stdio 的命令直接在宿主运行。Bearer token 只记录环境变量名，文件里不写明文。OAuth 由 FastMCP 打开浏览器，Agent 不能代替用户确认。
+
+```json
+{
+  "servers": {
+    "deepwiki": {
+      "transport": "streamable_http",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "enabled": true
+    },
+    "internal": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "auth": {"type": "bearer", "token_env": "INTERNAL_MCP_TOKEN"},
+      "enabled": true
+    }
+  }
+}
+```
+
+MCP HTTP 请求不使用环境变量里的代理，和模型、Tavily 客户端一致，避免把 token 交给代理。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；这两项都要用户确认。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+
 ## 工具可见性（`tools.hidden`）
 
 ```yaml
@@ -161,19 +187,19 @@ web_search:
 |---|---|---|
 | `workspace` | `.` | 宿主项目目录。沙箱路径和当前目录都是它的真实绝对路径（如 `/mnt/d/test`）；`.` 表示启动时的当前目录 |
 | `bwrap_path` | `bwrap` | Bubblewrap 可执行文件名或路径 |
-| `mode` | `restricted` | 文件系统模式：`restricted` 或 `full-access`。其他值启动失败。`full-access` 写入当前真实环境，仍在 Bubblewrap 中执行，不取消审批。运行中可用 `/sandbox` 切换，不写回本文件。`restricted` 使用独立持久 HOME（`~/.deep-agent/sandbox/home`），`full-access` 使用真实用户 HOME。切换模式不迁移用户级安装，也不删除另一模式已有的数据。行为见 [HOME 隔离与持久化](sandbox.md#home-隔离与持久化) |
+| `mode` | `restricted` | 文件系统模式：`restricted` 或 `full-access`。其他值启动失败。`full-access` 写入当前真实环境，仍在 Bubblewrap 中执行，不取消审批。`/dev` 默认是沙箱自己的设备 tmpfs，宿主设备由 `extra_read_write_mounts` 的 `dev_bind` 传入。运行中可用 `/sandbox` 切换，不写回本文件。`restricted` 使用独立持久 HOME（`~/.deep-agent/sandbox/home`），`full-access` 使用真实用户 HOME。切换模式不迁移用户级安装，也不删除另一模式已有的数据。行为见 [HOME 隔离与持久化](sandbox.md#home-隔离与持久化) |
 | `timeout_seconds` | `null` | 单条命令的超时上限（秒）；`null` 表示不限制。模型可为单次调用请求更短的超时 |
 | `max_output_bytes` | `100000` | 单条命令保留的输出上限，超出部分写入日志文件 |
 | `env_allowlist` | `[]` | 允许传入沙箱的宿主环境变量名 |
 | `env_set` | `{}` | 固定注入沙箱的环境变量 |
-| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。固定系统文件列表里没有的路径也写在这里，例如 CentOS 的 `/etc/pki` 挂到同名路径。SANDBOXED 下文件工具按只读使用同一目标 |
-| `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
+| `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。固定系统文件列表里没有的路径也写在这里，例如 CentOS 的 `/etc/pki` 挂到同名路径。SANDBOXED 下文件工具按只读使用同一目标。不能设 `dev_bind` |
+| `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上，另可设 `dev_bind: true`，对该条使用 `--dev-bind`，用来挂宿主 `/dev` 或单个设备节点。普通 `--bind` 带 `nodev`，打不开 USB 串口。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
-表中的默认值是代码内默认值；首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 另含下列可选工具挂载。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。
+表中的默认值是代码内默认值。首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 写成 `full-access`，并用 `dev_bind` 挂宿主 `/dev`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。`sandbox.dev` 已移除，配置里出现时启动失败。
 
 `sandbox.protected_workspace_paths` 与 `sandbox.allow_unsandboxed` 已移除，配置中出现时启动报错。Bubblewrap 不可用时启动失败，没有宿主机执行回退。
 
-### 默认工具挂载
+### restricted 下的工具挂载示例
 
 | 用途 | 宿主 `source` | 沙箱 `destination` | 权限 |
 |---|---|---|---|
@@ -184,18 +210,9 @@ web_search:
 | X11 文件 Socket | `/tmp/.X11-unix` | `/tmp/.X11-unix` | 只读 |
 | Playwright 浏览器缓存 | `~/.cache/ms-playwright` | `/opt/ms-playwright` | 读写 |
 
-以上项目均为 `optional: true`。路径不存在就跳过，不寻找替代路径，也不表示对应工具已通过运行检查。系统目录内的工具沿用基础挂载；其他安装位置由用户修改配置。
+以上项目是 `restricted` 收窄可见范围时的例子，不是模板的生效配置。路径不存在就跳过，不寻找替代路径，也不表示对应工具已通过运行检查。
 
-模板的环境设置为：
-
-```yaml
-env_set:
-  PATH: /opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
-  RUSTUP_HOME: /opt/rustup
-  PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
-```
-
-程序会将内置工具目录 `/run/deep-agent` 自动放到 PATH 最前。NVM 用户需自行在 PATH 中加入 `/opt/node/<实际版本>/bin`，将 `<实际版本>` 换成已安装的目录名。PATH 不展开通配符，也不会自动选择 Node 版本；系统 Node.js 可沿用 `/usr/bin` 等系统路径。
+模板默认是 `mode: full-access`。宿主目录按真实路径使用；`/dev` 通过 `extra_read_write_mounts` 里 `dev_bind: true` 的 `/dev` → `/dev` 传入。不要设备节点时删掉这一条。`env_allowlist` 含 `PATH` 和 `DISPLAY`，因此命令沿宿主 `PATH` 查找。`env_set` 为空；若在其中写入 `PATH`，会盖住宿主 `PATH`。改成 `restricted` 后，再按需把上表挂载写回配置，并让 `env_set.PATH` 指向这些沙箱路径。程序会将 `/run/deep-agent` 自动放到 `PATH` 最前。配置文件未写 `mode` 时，代码默认仍是 `restricted`。
 
 `source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
 

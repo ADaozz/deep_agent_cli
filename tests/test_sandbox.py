@@ -60,6 +60,19 @@ def test_sandbox_environment_is_allowlist_based(tmp_path: Path) -> None:
     assert "HTTP_PROXY" not in result
 
 
+def test_host_path_comes_from_config_not_sandbox_mode(tmp_path: Path) -> None:
+    host_path = "/home/neo/.espressif/python_env/idf5.4_py3.12_env/bin:/usr/bin"
+    opened = SandboxConfig(workspace=tmp_path, mode="full-access")
+    assert sandbox_environment(opened, {"PATH": host_path})["PATH"] == "/run/deep-agent:/usr/local/bin:/usr/bin:/bin"
+    allowed = replace(opened, env_allowlist=("PATH",))
+    assert sandbox_environment(allowed, {"PATH": host_path})["PATH"] == f"/run/deep-agent:{host_path}"
+    overridden = sandbox_environment(
+        replace(allowed, env_set={"PATH": "/opt/cargo/bin:/usr/bin"}),
+        {"PATH": host_path},
+    )
+    assert overridden["PATH"] == "/run/deep-agent:/opt/cargo/bin:/usr/bin"
+
+
 def test_bubblewrap_command_has_isolation_mounts_and_no_user_remap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     skills = home / ".deep-agent" / "skills"
@@ -87,6 +100,8 @@ def test_bubblewrap_command_has_isolation_mounts_and_no_user_remap(tmp_path: Pat
     assert "--tmpfs /tmp" not in joined
     assert "--tmpfs /home" not in joined
     assert "--dir /home/agent" in joined
+    assert "--dev /dev" in joined
+    assert "--dev-bind /dev /dev" not in joined
     assert args[-3:] == ["/bin/sh", "-lc", "id -u"]
 
 
@@ -1397,7 +1412,9 @@ def test_full_access_mounts_the_host_and_masks_agent_state(tmp_path: Path, monke
     assert ("--bind", "/usr", "/usr") in binds
     assert ("--bind", _root(workspace), _root(workspace)) in binds
     assert ("--chdir", _root(workspace)) in flags
-    assert ("--proc", "/proc") in flags and ("--dev", "/dev") in flags
+    assert ("--proc", "/proc") in flags
+    assert ("--dev", "/dev") in flags
+    assert ("--dev-bind", "/dev", "/dev") not in binds
     assert ("--tmpfs", "/tmp") not in flags and ("--tmpfs", "/home") not in flags
     stable_tmp = str((config_dir / "sandbox" / "tmp").resolve())
     stable_home = str((config_dir / "sandbox" / "home").resolve())
@@ -1425,6 +1442,52 @@ def test_full_access_mounts_the_host_and_masks_agent_state(tmp_path: Path, monke
     names = {entry["path"] for entry in listing.entries or []}
     assert "/skills" in names
     assert str(config_dir) not in names
+
+
+def test_restricted_keeps_a_private_dev(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    config = replace(config_for(workspace), bwrap_path="/bin/true", mode="restricted")
+    args = select_backend(config, check=False).backend.executor.sandbox_args()
+    binds = list(zip(args, args[1:], args[2:]))
+    flags = list(zip(args, args[1:]))
+    assert ("--dev", "/dev") in flags
+    assert ("--dev-bind", "/dev", "/dev") not in binds
+
+
+def test_dev_bind_extra_mount_overlays_sandbox_dev(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    (home / ".deep-agent" / "sandbox").mkdir(parents=True)
+    config = replace(
+        config_for(workspace),
+        bwrap_path="/bin/true",
+        mode="full-access",
+        extra_read_write_mounts=(BindMount(Path("/dev"), "/dev", dev_bind=True),),
+    )
+    args = select_backend(config, check=False).backend.executor.sandbox_args()
+    binds = list(zip(args, args[1:], args[2:]))
+    flags = list(zip(args, args[1:]))
+    assert ("--dev", "/dev") in flags
+    assert ("--dev-bind", "/dev", "/dev") in binds
+    assert args.index("--dev") < args.index("--dev-bind")
+
+
+def test_dev_bind_rejected_on_read_only_mounts(tmp_path: Path) -> None:
+    config = replace(
+        config_for(tmp_path),
+        extra_read_only_mounts=(BindMount(Path("/dev"), "/dev", dev_bind=True),),
+    )
+    with pytest.raises(ValueError, match="dev_bind cannot be used on extra_read_only_mounts"):
+        select_backend(config, check=False)
 
 
 def test_full_access_rejects_mounts_that_expose_protected_paths(
@@ -1481,7 +1544,10 @@ def test_sandbox_mode_switch_keeps_permission_mode(
     assert runner.pending_sandbox_mode() is None
     assert runner.permission_mode() is PermissionMode.ASK
     mounted = runner.prepared.backend.executor.sandbox_args()
-    assert ("--bind", "/usr", "/usr") in list(zip(mounted, mounted[1:], mounted[2:]))
+    mounted_binds = list(zip(mounted, mounted[1:], mounted[2:]))
+    assert ("--bind", "/usr", "/usr") in mounted_binds
+    assert ("--dev", "/dev") in list(zip(mounted, mounted[1:]))
+    assert ("--dev-bind", "/dev", "/dev") not in mounted_binds
     runner._restore_configured_sandbox_mode()
     assert runner.sandbox_mode() == "restricted"
     joined = " ".join(runner.prepared.backend.executor.sandbox_args())
@@ -1521,3 +1587,51 @@ def test_both_modes_keep_the_real_workspace_path(
     switched.backend.apply_sandbox_mode("restricted")
     restricted_args = switched.backend.executor.sandbox_args()
     assert restricted_args[restricted_args.index("--chdir") + 1] == root
+
+
+@pytest.mark.sandbox
+def test_full_access_uses_real_host_home_and_tmp(tmp_path):
+    import os
+    import shlex
+    import shutil
+    import uuid
+
+    executable = shutil.which("bwrap")
+    if executable is None:
+        pytest.skip("bubblewrap is not installed")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = Path.home()
+    marker = ".deep-agent-regression-" + uuid.uuid4().hex
+    home_marker, tmp_marker = home / marker, Path("/tmp") / marker
+    config = replace(config_for(workspace), bwrap_path=executable, mode="full-access")
+    try:
+        selected = select_backend(config)
+    except SandboxUnavailableError as exc:
+        if os.environ.get("REQUIRE_BWRAP_TEST"):
+            pytest.fail(str(exc))
+        pytest.skip(str(exc))
+    try:
+        command = (
+            f'test "$HOME" = {shlex.quote(str(home))} && '
+            f'printf real-home > "$HOME"/{marker} && '
+            f'printf real-tmp > /tmp/{marker}'
+        )
+        result = selected.backend.execute(command)
+        assert result.exit_code == 0, result.output
+        assert home_marker.read_text() == "real-home"
+        assert tmp_marker.read_text() == "real-tmp"
+    finally:
+        home_marker.unlink(missing_ok=True)
+        tmp_marker.unlink(missing_ok=True)
+
+
+def test_single_device_can_be_configured_without_exposing_host_dev(tmp_path):
+    config = replace(
+        config_for(tmp_path), bwrap_path="/bin/true", mode="full-access",
+        extra_read_write_mounts=(BindMount(Path("/dev/null"), "/dev/ttyUSB0", dev_bind=True),),
+    )
+    args = select_backend(config, check=False).backend.executor.sandbox_args()
+    binds = list(zip(args, args[1:], args[2:]))
+    assert ("--dev-bind", "/dev/null", "/dev/ttyUSB0") in binds
+    assert ("--dev-bind", "/dev", "/dev") not in binds

@@ -139,6 +139,7 @@ def build_agent(
     should_pause: Callable[[], bool],
     interrupt_on_override: dict[str, Any] | None = None,
     backend_selection: BackendSelection | None = None,
+    mcp: Any | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = spec.sandbox or SandboxConfig()
     selected: BackendSelection | None = None
@@ -173,53 +174,72 @@ def build_agent(
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     saver = checkpointer if checkpointer is not None else InMemorySaver()
     compact_middleware = create_summarization_tool_middleware(model, fs_backend)
-    graph = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=prompt,
-        middleware=[
-            RuntimeConfigGateMiddleware(run_controller.has_pending_config),
-            PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
-            RecoveryContextMiddleware(),
-            EnvironmentContextMiddleware(),
-            UsageIdentityMiddleware(),
-            SteeringMiddleware(run_controller),
-            ToolCancelMiddleware(run_controller),
-            ToolArgHintMiddleware(),
-            WriteOperationMiddleware(fs_backend),
-            AttachmentMaterializationMiddleware(),
-            WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
-            compact_middleware,
-            *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
-        ],
-        skills=skill_sources,
-        backend=fs_backend,
-        interrupt_on=hitl or None,
-        checkpointer=saver,
-        name="deep-agent-template",
-    )
-    return PreparedAgent(
-        graph=graph,
-        backend=fs_backend,
-        model=model,
-        spec=spec,
-        interrupt_on=hitl,
-        system_prompt=prompt,
-        model_tool_names=tuple(
-            name for name in graph.nodes["tools"].bound.tools_by_name if name not in spec.hidden_tools
-        ),
-        exposed_tool_names=[tool.name for tool in tools if tool.name != "request_human_input"],
-        filesystem_tools=[name for name in filesystem_tools if name not in spec.hidden_tools],
-        execution_mode=execution_mode,
-        security_warning=security_warning,
-        checkpointer=saver,
-        run_controller=run_controller,
-        pause_condition=should_pause,
-        compact_middleware=compact_middleware,
-        backend_selection=selected,
-        sandbox_pool=sandbox_pool,
-        skill_sources=tuple(skill_sources or ()),
-    )
+    mcp_revision: int | None = None
+    mcp_tools: list[Any] = []
+    if mcp is not None:
+        from agent.mcp.middleware import MCPMiddleware, MCP_HOST_PROMPT
+        from agent.mcp.names import host_interrupt_on
+
+        mcp_revision, mcp_tools = mcp.snapshot()
+        hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
+        prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
+    try:
+        graph = create_deep_agent(
+            model=model,
+            tools=tools,
+            system_prompt=prompt,
+            middleware=[
+                RuntimeConfigGateMiddleware(run_controller.has_pending_config),
+                PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
+                RecoveryContextMiddleware(),
+                EnvironmentContextMiddleware(),
+                UsageIdentityMiddleware(),
+                SteeringMiddleware(run_controller),
+                ToolCancelMiddleware(run_controller),
+                ToolArgHintMiddleware(),
+                WriteOperationMiddleware(fs_backend),
+                AttachmentMaterializationMiddleware(),
+                WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+                compact_middleware,
+                *([MCPMiddleware(mcp, mcp_tools)] if mcp is not None else []),
+                *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
+            ],
+            skills=skill_sources,
+            backend=fs_backend,
+            interrupt_on=hitl or None,
+            checkpointer=saver,
+            name="deep-agent-template",
+        )
+        prepared = PreparedAgent(
+            graph=graph,
+            backend=fs_backend,
+            model=model,
+            spec=spec,
+            interrupt_on=hitl,
+            system_prompt=prompt,
+            model_tool_names=tuple(
+                name for name in graph.nodes["tools"].bound.tools_by_name if name not in spec.hidden_tools
+            ),
+            exposed_tool_names=[tool.name for tool in tools if tool.name != "request_human_input"],
+            filesystem_tools=[name for name in filesystem_tools if name not in spec.hidden_tools],
+            execution_mode=execution_mode,
+            security_warning=security_warning,
+            checkpointer=saver,
+            run_controller=run_controller,
+            pause_condition=should_pause,
+            compact_middleware=compact_middleware,
+            backend_selection=selected,
+            sandbox_pool=sandbox_pool,
+            skill_sources=tuple(skill_sources or ()),
+        )
+
+        if mcp is not None and mcp_revision is not None:
+            mcp.commit(mcp_revision)
+        return prepared
+    except BaseException:
+        if mcp is not None and mcp_revision is not None:
+            mcp.discard(mcp_revision)
+        raise
 
 
 def create_agent(
@@ -235,6 +255,7 @@ def create_agent(
     backend: BackendProtocol | None = None,
     sandbox_config: SandboxConfig | None = None,
     run_controller: RunController | None = None,
+    mcp: Any | None = None,
 ) -> PreparedAgent:
     cfg = settings or Settings()
     spec = AgentSpec(
@@ -258,6 +279,7 @@ def create_agent(
         spec, model or _default_model(cfg), permission, checkpointer,
         run_controller or RunController(), should_pause or (lambda: False),
         interrupt_on_override=effective_interrupt_on,
+        mcp=mcp,
     )
 
 
