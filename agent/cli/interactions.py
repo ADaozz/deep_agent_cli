@@ -24,17 +24,11 @@ def _approval_summary(value: Any, kind: str = "command") -> str:
 
 
 def _mcp_approval_summary(text: str) -> str:
-    from agent.mcp.config import redact_config_text
-    text = redact_config_text(text)
+    text = mcp_display_text(text)
     text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
     return text if len(text) <= 180 else text[:180] + "…"
 
 
-_MCP_SECRET_KEYS = {
-    "apikey", "token", "accesstoken", "refreshtoken", "authorization",
-    "password", "secret", "clientsecret", "privatekey", "cookie", "cookies",
-    "credential", "credentials", "setcookie", "proxyauthorization",
-}
 _TERMINAL_ESCAPE = re.compile(
     r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)"
     r"|\x1b[P^_].*?(?:\x1b\\|$)"
@@ -45,10 +39,9 @@ _TERMINAL_ESCAPE = re.compile(
 
 def mcp_display_text(value: str) -> str:
     """Render untrusted MCP text without terminal control sequences."""
-    from agent.mcp.config import redact_config_text
     value = _TERMINAL_ESCAPE.sub("", value)
     value = "".join(c for c in value if c.isprintable() or c in "\n\r\t")
-    return redact_config_text(value)
+    return value
 
 
 def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
@@ -104,9 +97,6 @@ def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
                     break
                 if isinstance(value, dict):
                     label = text(str(key), 100)
-                    normalized = re.sub(r"[^a-z0-9]", "", mcp_display_text(str(key)).casefold())
-                    if normalized in _MCP_SECRET_KEYS:
-                        item = "[redacted]"
                     # Quote unusual keys so ':' or whitespace cannot forge structure.
                     label = label if re.fullmatch(r"[A-Za-z0-9_.-]+", label) else json.dumps(label, ensure_ascii=False)
                     child = "  " * (depth + 1) + label + ": "
@@ -130,7 +120,7 @@ def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
     visit(args, "", 0)
     if omitted:
         lines.append(
-            "  … content omitted (bounded redacted preview)"
+            "  … content omitted (bounded preview)"
             + ("" if expanded else "; Esc, Ctrl+O for more; F2 to reopen approval")
         )
     return "\n".join(lines)
@@ -219,7 +209,7 @@ class InteractionController:
                 details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))
                 details.append("Saves an MCP server on the host. Reject leaves the configuration unchanged.")
             elif name == "mcp_remove":
-                details.append(f"Remove host MCP server: {_approval_summary(args.get('name'), kind='name')}")
+                details.append(f"Remove host MCP server: {_mcp_approval_summary(str(args.get('name') or '<not supplied>'))}")
                 details.append("Reject leaves the configuration unchanged.")
             elif name.startswith("mcp__"):
                 details.append("Execution: Host (outside sandbox)")
