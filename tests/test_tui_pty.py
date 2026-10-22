@@ -395,8 +395,9 @@ _MCP_TUI_PROBE = _PROBE.replace(
 def _mcp_tui(tmp_path, mode="call"):
     (tmp_path / "server_with_[brackets].py").write_text(_MCP_TUI_SERVER)
     app = Tui(tmp_path, probe=_MCP_TUI_PROBE, extra_args=(mode,))
+    expected = "Ready" if mode == "wizard" else "MCP operation finished"
     try:
-        app.wait(lambda state: state["status"] in {"Ready", "MCP operation finished"}, timeout=20)
+        app.wait(lambda state: state["status"] == expected, timeout=20)
     except BaseException:
         app.close()
         raise
