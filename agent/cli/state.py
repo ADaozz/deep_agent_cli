@@ -69,6 +69,7 @@ class CliState:
     pending_user_ids: dict[str, str] = field(default_factory=dict)
     attachments: list[ImageAttachmentRef] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    model_metrics_history: list[dict[str, Any]] = field(default_factory=list)
     # Separate a never-started conversation from missing model usage.
     # Clearing the visible transcript must not reset this session property.
     context_pristine: bool = True
@@ -93,11 +94,16 @@ class CliState:
     def add_system(self, text: str, *, error: bool = False) -> None:
         self.blocks.append(MessageBlock(kind="error" if error else "system", content=text, is_error=error))
 
-    def clear(self) -> None:
+    def clear(self, *, preserve_model_metrics: bool = False) -> None:
         self.blocks.clear()
         self.active_block = None
         self.pending_user_ids.clear()
         self.usage.clear()
+        if not preserve_model_metrics:
+            self.model_metrics_history.clear()
+
+    def load_model_metrics(self, history: list[dict[str, Any]]) -> None:
+        self.model_metrics_history = [dict(metrics) for metrics in history]
 
     def load_transcript(self, blocks: list[TranscriptBlock]) -> None:
         self.clear()
@@ -137,6 +143,8 @@ class CliState:
             self.compacting = False
         elif event.type == "assistant_started":
             self.active_block = None
+        elif event.type == "model_metrics" and isinstance(event.result, dict):
+            self.model_metrics_history.append(dict(event.result))
         elif event.type == "usage" and isinstance(event.result, dict):
             usage = {
                 key: int(value)

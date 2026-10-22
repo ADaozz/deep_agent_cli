@@ -377,3 +377,98 @@ def test_sdk_responses_parse_resource_normalizes_missing_input(asynchronous, raw
         result = result.parse()
     assert result.usage is None
     assert result.output_parsed == Answer(answer="ok")
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("reasoning_count", [2000, 0, None])
+def test_provider_neutral_metrics_preserve_actual_reasoning_usage(api, asynchronous, reasoning_count, monkeypatch):
+    import itertools
+    from agent.stream import StreamDeltaCallback
+
+    clock = itertools.count()
+    monkeypatch.setattr("agent.stream.monotonic", lambda: float(next(clock)))
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    def serve(request):
+        if api == "chat_completions":
+            usage = {"prompt_tokens": 12450, "completion_tokens": 3000, "total_tokens": 15450}
+            if reasoning_count is not None:
+                usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_count}
+            deltas = ([] if reasoning_count == 0 else [{"reasoning_content": "think"}, {"reasoning_content": " more"}])
+            deltas += [{"content": "answer"}, {"content": " more"}]
+            events = [{"id": "chat_1", "object": "chat.completion.chunk", "created": 0, "model": "arbitrary-model",
+                       "choices": [{"index": 0, "delta": delta, "finish_reason": None}]} for delta in deltas]
+            events.append({"id": "chat_1", "object": "chat.completion.chunk", "created": 0, "model": "arbitrary-model",
+                           "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage})
+            return sse(events, done=True)
+        usage = {"input_tokens": 12450, "output_tokens": 3000, "total_tokens": 15450}
+        if reasoning_count is not None:
+            usage["output_tokens_details"] = {"reasoning_tokens": reasoning_count}
+        events = []
+        if reasoning_count != 0:
+            for text in ["think", " more"]:
+                events.append({"type": "response.reasoning_text.delta", "sequence_number": len(events),
+                               "output_index": 0, "item_id": "rs_1", "delta": text})
+        for text in ["answer", " more"]:
+            events.append({"type": "response.output_text.delta", "sequence_number": len(events),
+                           "output_index": 1, "content_index": 0, "item_id": "msg_1", "delta": text})
+        events.append({"type": "response.completed", "sequence_number": len(events), "response": response_body(usage)})
+        return sse(events)
+    profile = ModelProfile("s/arbitrary", "arbitrary-model", api=api,
+                           base_url="https://standard.example/v1", reasoning_efforts=("low",))
+    model = make_model(api, serve, profile=profile, reasoning_effort="low")
+    config = {"callbacks": [cb]}
+    if asynchronous:
+        asyncio.run(model.ainvoke("hello", config=config))
+    else:
+        model.invoke("hello", config=config)
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["model"] == "arbitrary-model"
+    assert report["reasoning_effort"] == "low"
+    assert report["output_tokens"] == 3000  # Reasoning is already included, never add it again.
+    assert report["reasoning_tokens"] == reasoning_count
+    assert report["answer_tokens"] == (None if reasoning_count is None else 3000 - reasoning_count)
+    assert report["tps"] == 3000 / report["output_duration"]
+    if reasoning_count is not None and reasoning_count > 0:
+        assert report["reasoning_tps"] == reasoning_count / report["reasoning_duration"]
+    elif reasoning_count is None:
+        assert report["reasoning_tps"] is report["answer_tps"] is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_responses_reasoning_summary_is_not_full_reasoning_generation(asynchronous, monkeypatch):
+    import itertools
+    from agent.stream import StreamDeltaCallback
+
+    clock = itertools.count()
+    monkeypatch.setattr("agent.stream.monotonic", lambda: float(next(clock)))
+    reports = []
+    def serve(request):
+        events = [
+            {"type": "response.reasoning_summary_text.delta", "sequence_number": 0, "output_index": 0,
+             "item_id": "rs_1", "summary_index": 0, "delta": "summary"},
+            {"type": "response.reasoning_summary_text.delta", "sequence_number": 1, "output_index": 0,
+             "item_id": "rs_1", "summary_index": 0, "delta": " more"},
+            {"type": "response.output_text.delta", "sequence_number": 2, "output_index": 1,
+             "content_index": 0, "item_id": "msg_1", "delta": "answer"},
+            {"type": "response.output_text.delta", "sequence_number": 3, "output_index": 1,
+             "content_index": 0, "item_id": "msg_1", "delta": " more"},
+            {"type": "response.completed", "sequence_number": 4, "response": response_body({
+                "input_tokens": 10, "output_tokens": 30, "total_tokens": 40,
+                "output_tokens_details": {"reasoning_tokens": 20},
+            })},
+        ]
+        return sse(events)
+    model = make_model("responses", serve)
+    config = {"callbacks": [StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)]}
+    if asynchronous:
+        asyncio.run(model.ainvoke("hello", config=config))
+    else:
+        model.invoke("hello", config=config)
+    report = reports[0]
+    assert report["output_tokens"] == 30 and report["reasoning_tokens"] == 20
+    assert report["tps"] is report["reasoning_tps"] is None
+    assert report["answer_tps"] == 10 / report["answer_duration"]
+    assert "Hidden/summarized" in report["timing_note"]

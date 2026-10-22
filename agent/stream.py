@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from time import monotonic
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessageChunk, BaseMessage
+
+from agent.performance import GenerationTiming
 
 DeltaHandler = Callable[[str, str], None]
 
@@ -111,6 +114,7 @@ class StreamDeltaCallback(BaseCallbackHandler):
         on_end: Callable[[str, str], None] | None = None,
         on_compaction: Callable[[bool], None] | None = None,
         on_usage: Callable[[dict[str, int]], None] | None = None,
+        on_metrics: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_delta = on_delta
@@ -119,6 +123,8 @@ class StreamDeltaCallback(BaseCallbackHandler):
         self._on_start = on_start
         self._on_end = on_end
         self._on_usage = on_usage
+        self._on_metrics = on_metrics
+        self._timing: GenerationTiming | None = None
         self._on_compaction = on_compaction
         self._summary_runs: set[Any] = set()
         self._assistant = ""
@@ -132,6 +138,12 @@ class StreamDeltaCallback(BaseCallbackHandler):
             if self._on_compaction:
                 self._on_compaction(True)
             return
+        invocation = kwargs.get("invocation_params") or {}
+        metadata = kwargs.get("metadata") or {}
+        self._timing = GenerationTiming(
+            monotonic(), str(invocation.get("model") or metadata.get("ls_model_name") or "unknown"),
+            str(invocation.get("reasoning_effort") or (invocation.get("reasoning") or {}).get("effort") or "default"),
+        )
         self._assistant = ""
         self._reasoning = ""
         self._message = None
@@ -158,6 +170,27 @@ class StreamDeltaCallback(BaseCallbackHandler):
         else:
             self._raw_text += token
             visible, reasoning = _split_think(self._raw_text)
+        if self._timing is not None:
+            tool_output = isinstance(message, AIMessageChunk) and any(
+                item.get("args") or item.get("name") for item in message.tool_call_chunks
+            )
+            if bool(reasoning) and reasoning != self._reasoning and isinstance(message, AIMessageChunk):
+                kind = message.response_metadata.get("deep_agent_reasoning_kind") or {}
+                if not kind:
+                    # Async callbacks run before the adapter yields its annotated chunk.
+                    from agent.llm import _STREAM_STATUS
+                    status = _STREAM_STATUS.get()
+                    if status is not None and status.reasoning_kind is not None:
+                        kind = {status.reasoning_kind: True}
+                summary = any(isinstance(block, dict) and block.get("summary") for block in (
+                    message.content if isinstance(message.content, list) else []
+                ))
+                if kind.get("summary") or (summary and not kind.get("full")):
+                    self._timing.summarized_reasoning = True
+            self._timing.mark(
+                monotonic(), reasoning=bool(reasoning) and reasoning != self._reasoning,
+                answer=(bool(visible) and visible != self._assistant) or bool(tool_output),
+            )
         if reasoning != self._reasoning:
             self._reasoning = reasoning
             self._on_delta("reasoning", reasoning)
@@ -175,6 +208,9 @@ class StreamDeltaCallback(BaseCallbackHandler):
                 or not isinstance(retry_state.outcome.exception(), ModelStreamInterrupted)
                 or kwargs.get("run_id") in self._summary_runs):
             return
+        if self._timing is not None:
+            # Discard failed-attempt spans; TTFT retains total call latency.
+            self._timing = GenerationTiming(self._timing.started, self._timing.model, self._timing.reasoning_effort)
         self._message = None
         self._raw_text = self._assistant = self._reasoning = ""
         # Delta payloads are cumulative replacements. Clear the existing block
@@ -191,13 +227,24 @@ class StreamDeltaCallback(BaseCallbackHandler):
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
         if self._finish_summary(kwargs.get("run_id")):
             return
+        usage = self._message.usage_metadata if self._message is not None else None
+        # Non-streaming models report usage on the final generation instead.
+        if not isinstance(usage, dict) and args:
+            generations = getattr(args[0], "generations", [])
+            if generations and generations[0]:
+                usage = getattr(getattr(generations[0][0], "message", None), "usage_metadata", None)
+        if self._on_metrics and self._timing is not None:
+            self._on_metrics(self._timing.snapshot(usage))
+        self._timing = None
         if self._on_end:
             self._on_end(self._assistant, self._reasoning)
         self._assistant = ""
         self._reasoning = ""
 
     def on_llm_error(self, *args: Any, **kwargs: Any) -> None:
-        self._finish_summary(kwargs.get("run_id"))
+        if self._finish_summary(kwargs.get("run_id")):
+            return
+        self._timing = None
 
     def _finish_summary(self, run_id: Any) -> bool:
         if run_id not in self._summary_runs:

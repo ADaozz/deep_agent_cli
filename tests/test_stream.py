@@ -121,3 +121,107 @@ def test_usage_only_chunk_is_forwarded_and_summary_usage_is_ignored():
     assert len(usages) == 2
     callback.on_llm_start({}, run_id="next")
     assert usages[-1] == {}
+
+
+def test_output_metrics_include_thinking_and_exclude_ttft_and_usage_tail(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    cb.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
+    for timestamp, reasoning, answer in [(1, "think", ""), (31, " more", "begin"), (41, "", " end")]:
+        now[0] = timestamp
+        cb.on_llm_new_token(answer, chunk=AIMessageChunk(content=answer, additional_kwargs={"reasoning_content": reasoning}))
+    now[0] = 100  # Neither the usage-only tail nor callback completion adds generation time.
+    cb.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 12450, "output_tokens": 3000, "total_tokens": 15450,
+        "output_token_details": {"reasoning": 2000},
+    }))
+    assert reports == []
+    cb.on_llm_end(None)
+    report = reports[0]
+    assert report["model"] == "deepseek-flash" and report["thinking"] is True
+    assert report["ttft"] == 1 and report["output_duration"] == 40
+    assert report["reasoning_duration"] == 30 and report["answer_duration"] == 10
+    assert report["reasoning_tokens"] == 2000 and report["answer_tokens"] == 1000
+    assert report["tps"] == 75 and report["answer_tps"] == 100
+    assert abs(report["reasoning_tps"] - 2000 / 30) < 1e-9
+
+
+def test_output_metrics_retry_resets_failed_spans_and_preserves_thinking_counts(monkeypatch):
+    from agent.llm_stream import ModelStreamInterrupted, stream_retry_state
+
+    now = [0.0]
+    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    cb.on_llm_start({})
+    now[0] = 10
+    cb.on_llm_new_token("broken", chunk=AIMessageChunk(content="broken"))
+    cb.on_retry(stream_retry_state(ModelStreamInterrupted("broken"), 1))
+    now[0] = 100
+    cb.on_llm_new_token("new", chunk=AIMessageChunk(content="new"))
+    now[0] = 102
+    cb.on_llm_new_token(" answer", chunk=AIMessageChunk(content=" answer", usage_metadata={
+        "input_tokens": 10, "output_tokens": 20, "total_tokens": 30,
+        "output_token_details": {"reasoning": 0},
+    }))
+    cb.on_llm_end(None)
+    report = reports[0]
+    assert report["tps"] == report["answer_tps"] == 10
+    assert report["ttft"] == 100 and report["thinking"] is False
+    assert report["reasoning_tps"] is None
+    cb.on_llm_start({})
+    cb.on_llm_error(RuntimeError("cancelled"))
+    assert len(reports) == 1  # Failed calls never replace the latest snapshot.
+
+
+def test_output_metrics_ignore_compaction_and_nonstreaming_has_no_fake_timings(monkeypatch):
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    cb.on_llm_start({}, run_id="summary", metadata={"lc_source": "summarization"})
+    cb.on_llm_new_token("internal", run_id="summary")
+    cb.on_llm_end(None, run_id="summary")
+    assert reports == []
+    cb.on_llm_start({}, metadata={"ls_model_name": "another-model"})
+    cb.on_llm_end(LLMResult(generations=[[ChatGeneration(message=AIMessage(
+        content="reply", usage_metadata={"input_tokens": 5, "output_tokens": 10, "total_tokens": 15},
+    ))]]))
+    report = reports[0]
+    assert report["model"] == "another-model" and report["output_tokens"] == 10
+    assert report["tps"] is report["ttft"] is report["reasoning_tokens"] is report["answer_tokens"] is None
+
+
+def test_tool_argument_chunks_count_as_generated_output(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    cb.on_llm_start({})
+    now[0] = 1
+    cb.on_llm_new_token("", chunk=AIMessageChunk(content=""))  # Role/heartbeat only.
+    now[0] = 2
+    cb.on_llm_new_token("", chunk=AIMessageChunk(content="", tool_call_chunks=[{
+        "name": "execute", "args": '{"command":', "id": "call-1", "index": 0,
+    }]))
+    now[0] = 4
+    cb.on_llm_new_token("", chunk=AIMessageChunk(content="", tool_call_chunks=[{
+        "name": None, "args": '"ls"}', "id": None, "index": 0,
+    }], usage_metadata={"input_tokens": 5, "output_tokens": 20, "total_tokens": 25,
+                       "output_token_details": {"reasoning": 0}}))
+    cb.on_llm_end(None)
+    assert reports[0]["ttft"] == 2
+    assert reports[0]["tps"] == reports[0]["answer_tps"] == 10
+
+
+def test_metrics_capture_reasoning_effort_for_both_protocols():
+    for params in [{"model": "deepseek-flash", "reasoning_effort": "low"},
+                   {"model": "qwen", "reasoning": {"effort": "high"}}]:
+        reports = []
+        callback = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+        callback.on_llm_start({}, invocation_params=params)
+        callback.on_llm_end(None)
+        assert reports[0]["reasoning_effort"] in {"low", "high"}
+        assert reports[0]["model"] == params["model"]

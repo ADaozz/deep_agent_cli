@@ -173,6 +173,7 @@ class SessionSnapshot:
     human_input: dict[str, Any] = field(default_factory=dict)
     pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
+    model_metrics_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -554,6 +555,9 @@ class AgentRunner:
         profile = self.current_model()
         return 0 if profile is None else profile.context_window
 
+    def model_metrics_history(self) -> list[dict[str, Any]]:
+        return self.session_store.model_metrics_history(self.thread_id) if self.session_store is not None else []
+
     def latest_usage(self) -> dict[str, int]:
         """Token usage of the most recent model call still held in the checkpoint."""
         try:
@@ -772,6 +776,7 @@ class AgentRunner:
         return SessionSnapshot(
             info=info,
             transcript=transcript,
+            model_metrics_history=self.session_store.model_metrics_history(info.id) if self.session_store is not None else [],
             interrupt_kind=interrupt.kind if interrupt is not None else None,
             human_input=interrupt.payload if interrupt is not None and interrupt.kind is InterruptKind.WAITING_HUMAN else {},
             pending_tool_calls=list(interrupt.pending_tools) if interrupt is not None else [],
@@ -1280,9 +1285,17 @@ class AgentRunner:
                 self._context_usage_invalidated = False
             _emit(event_handler, RunEvent(type="usage", result=usage))
 
+        metrics_thread_id = self.thread_id
+
+        def record_model_metrics(metrics: dict[str, Any]) -> None:
+            if self.session_store is not None:
+                self.session_store.append_model_metrics(metrics_thread_id, metrics)
+            _emit(event_handler, RunEvent(type="model_metrics", result=metrics))
+
         callback = StreamDeltaCallback(
             handler or (lambda _kind, _text: None),
             on_usage=stream_usage,
+            on_metrics=record_model_metrics,
             on_compaction=(
                 (lambda active: _emit(event_handler, RunEvent(
                     type="compaction_started" if active else "compaction_finished",

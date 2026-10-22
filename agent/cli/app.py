@@ -79,8 +79,8 @@ from agent.permission import (
     allow_mode_available,
     allow_mode_unavailable_reason,
     parse_permission_mode,
-    permission_mode_label,
 )
+from agent.performance import model_metric_groups
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
 
 # Workspace/model and execution settings on the left; git/context on the right.
@@ -396,6 +396,7 @@ class CliApplication:
             require_keybindings_outside_workspace(config_dir, workspace)
         _register_terminal_sequences()
         self.state = CliState()
+        self.state.load_model_metrics(runner.model_metrics_history())
         self.state.context_pristine = not runner.thread_has_content()
         self.commands = command_table()
         self.command_by_name = {item.name: item for item in self.commands}
@@ -894,7 +895,6 @@ class CliApplication:
 
     def show_status(self) -> None:
         prepared = self.runner.prepared
-        mode = prepared.execution_mode.value
         tool_names = ", ".join(prepared.model_tool_names)
         tool_count = len(prepared.model_tool_names)
         tool_line = f"Tools: {tool_count}" + (f" · {tool_names}" if tool_names else "")
@@ -909,30 +909,35 @@ class CliApplication:
         pending_effort = self.runner.pending_reasoning_effort()
         if pending_effort is not None:
             model_line += f"Reasoning: {self.runner.reasoning_effort()} → {pending_effort} (pending)\n"
-        perm = permission_mode_label(self.runner.permission_mode())
-        pending_permission = self.runner.pending_permission_mode()
-        if pending_permission is not None:
-            perm += f" → {pending_permission.value} (pending)"
         self.state.add_system(
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
-            f"Permission: {perm}\n"
-            f"Thread: {self.runner.thread_id}\nSandbox: {mode}\n"
-            f"Filesystem: {self.runner.sandbox_mode()}"
-            + (f" → {self.runner.pending_sandbox_mode()} (pending)" if self.runner.pending_sandbox_mode() else "")
-            + "\n"
-            f"{self._sandbox_status_lines()}"
-            f"{tool_line}"
+            f"{tool_line}\n"
+            f"{self._model_metrics_lines()}"
         )
 
-    def _sandbox_status_lines(self) -> str:
-        pool = self.runner.sandbox_pool
-        if pool is None:
-            return ""
-        def state(network: bool) -> str:
-            sandbox = pool.sandbox(network)
-            return f"running ({sandbox.id})" if sandbox is not None else "not started"
-        return f"Offline sandbox: {state(False)}\nNetworked sandbox: {state(True)}\n"
+    def _model_metrics_lines(self) -> str:
+        groups = model_metric_groups(self.state.model_metrics_history)
+        if not groups:
+            profile = self.runner.current_model()
+            groups = model_metric_groups([{
+                "model": profile.model if profile is not None else "unknown",
+                "reasoning_effort": self.runner.reasoning_effort(),
+            }])
+        sections = []
+        for group in groups:
+            model = group["model"]
+            effort = group["reasoning_effort"]
+            label = f"{model}-{effort}" if effort != "default" else model
+            lines = [label]
+            for name, value in (
+                ("5% low TPS", group["tps_low"]),
+                ("5% top TPS", group["tps_top"]),
+                ("Average TPS", group["tps_average"]),
+            ):
+                lines.append(f"  {name}: " + (f"{value:.1f}" if value is not None else "--"))
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
 
     def show_session(self) -> None:
         store = self.runner.session_store
@@ -1396,6 +1401,7 @@ class CliApplication:
         self._clear_skill_draft()
         self.clear_transcript_selection()
         self.state.load_transcript(snapshot.transcript)
+        self.state.load_model_metrics(snapshot.model_metrics_history)
         self.interaction = None
         self._reviewing = False
         self.state.add_system(

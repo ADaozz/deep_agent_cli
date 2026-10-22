@@ -34,6 +34,7 @@ from agent.llm_stream import (
 @dataclass
 class _StreamStatus:
     done: bool = False
+    reasoning_kind: str | None = None
 
 
 _STREAM_STATUS: ContextVar[_StreamStatus | None] = ContextVar("deep_agent_stream_status", default=None)
@@ -114,6 +115,12 @@ class ResponsesEventProxy:
 def normalize_responses_event(event: Any) -> Any:
     """Normalize only Qwen's reasoning event spelling for LangChain 1.6.x."""
     raw_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    status = _STREAM_STATUS.get()
+    if status is not None:
+        if raw_type == "response.reasoning_text.delta":
+            status.reasoning_kind = "full"
+        elif raw_type == "response.reasoning_summary_text.delta":
+            status.reasoning_kind = "summary"
     event_type = _REASONING_EVENT_TYPES.get(raw_type)
     if event_type is not None:
         return ResponsesEventProxy(event, event_type)
@@ -370,6 +377,8 @@ class ProtocolChatOpenAI(ChatOpenAI):
                     (chunk.generation_info or {}).get("finish_reason")
                     or chunk.message.chunk_position == "last"
                 )
+                if status.reasoning_kind is not None:
+                    chunk.message.response_metadata["deep_agent_reasoning_kind"] = {status.reasoning_kind: True}
                 yield chunk
             if not completed and not status.done:
                 # HTTP EOF can look like successful SSE exhaustion to the SDK.

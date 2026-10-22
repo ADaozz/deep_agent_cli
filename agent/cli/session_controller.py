@@ -140,6 +140,7 @@ class SessionController:
         app._clear_skill_draft()
         app.clear_transcript_selection()
         app.state.load_transcript(snapshot.transcript)
+        app.state.load_model_metrics(snapshot.model_metrics_history)
         app.interaction = None
         app._deferred_config_interaction = None
         app._reviewing = False

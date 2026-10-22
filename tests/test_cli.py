@@ -4377,7 +4377,7 @@ def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
 
 
 
-def test_status_reports_both_sandboxes(tmp_path) -> None:
+def test_status_omits_permission_session_and_sandbox_details(tmp_path) -> None:
     from dataclasses import replace as dc_replace
     from agent.config import SandboxConfig
     from agent.sandbox import select_backend
@@ -4392,8 +4392,9 @@ def test_status_reports_both_sandboxes(tmp_path) -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         app.show_status()
         status = app.state.blocks[-1].content
-        assert "Offline sandbox: not started" in status
-        assert "Networked sandbox: not started" in status
+        for label in ("Permission:", "Thread:", "Sandbox:", "Filesystem:", "Offline sandbox:", "Networked sandbox:"):
+            assert label not in status
+        assert "Model:" in status and "Tools:" in status and "Average TPS:" in status
     runner.close()
 
 
@@ -4682,3 +4683,70 @@ def test_approval_preserves_pasted_content_and_queues_new_input() -> None:
                 runner.close()
 
     asyncio.run(scenario())
+
+
+def test_status_metrics_are_compact_indented_and_grouped_by_model_effort():
+    runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(), settings=Settings())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.state.apply(RunEvent(type="run_started"))
+        for metrics in [
+            {"model": "deepseek-flash", "reasoning_effort": "low", "tps": 75.0, "reasoning_tps": 66.7, "answer_tps": 100.0},
+            {"model": "deepseek-flash", "reasoning_effort": "high", "tps": 20.0},
+            {"model": "qwen", "tps": 200.0},
+        ]:
+            app.state.apply(RunEvent(type="model_metrics", result=metrics))
+        assert "TPS" not in "".join(value for _, value in app._status_text())
+        text = app._model_metrics_lines()
+        assert text.startswith("deepseek-flash-low\n  5% low TPS: 75.0")
+        assert "\ndeepseek-flash-high\n  5% low TPS: 20.0" in text
+        assert "\nqwen\n  5% low TPS: 200.0" in text
+        for section in text.split("\n\n"):
+            lines = section.splitlines()
+            assert len(lines) == 4 and all(line.startswith("  ") for line in lines[1:])
+        assert "Prompt Tokens" not in text and "client-observed" not in text and "Duration" not in text
+        for label in ("Total Output TPS:", "Reasoning TPS:", "Answer TPS:"):
+            assert label not in text
+        app.state.apply(RunEvent(type="run_completed"))
+        assert not app._status_visible()
+        app.show_status()
+        assert text in app.state.blocks[-1].content
+
+
+def test_status_metrics_restore_on_restart_switch_and_clear(tmp_path):
+    from agent.session import SessionStore
+    from agent.cli.commands import _clear
+
+    path = tmp_path / "metrics.sqlite3"
+    store = SessionStore(path)
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store, settings=Settings())
+    first_id = runner.thread_id
+    reports = [{"model": "deepseek-flash", "reasoning_effort": "low", "tps": value} for value in [10.0, 20.0]]
+    for report in reports:
+        store.append_model_metrics(first_id, report)
+    second_id = runner.new_session().id
+    store.append_model_metrics(second_id, {"model": "qwen", "tps": 200.0})
+    runner.close()
+    store.close()
+    store = SessionStore(path)
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store,
+                         thread_id=first_id, settings=Settings())
+    try:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            assert app.state.model_metrics_history == reports
+            assert "  Average TPS: 15.0" in app._model_metrics_lines()
+            assert "  5% low TPS: 10.0" in app._model_metrics_lines()
+            asyncio.run(_clear(app, ""))
+            assert app.state.model_metrics_history == reports
+            app.sessions.apply_snapshot(runner.switch_session(second_id))
+            assert app._model_metrics_lines().startswith("qwen\n")
+            assert "  Average TPS: 200.0" in app._model_metrics_lines()
+            assert "deepseek" not in app._model_metrics_lines()
+            app._apply_session_snapshot(runner.switch_session(first_id))
+            assert "  Average TPS: 15.0" in app._model_metrics_lines()
+            app.sessions.new_session()
+            assert app.state.model_metrics_history == []
+    finally:
+        runner.close()
+        store.close()

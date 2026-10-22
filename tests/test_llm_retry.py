@@ -71,6 +71,9 @@ def test_midstream_text_and_reasoning_are_replaced(api, mode, runner_factory):
         assert all("broken" not in text for kind, text in deltas[deltas.index(("assistant", "")):])
         completed = [e for e in events if e.type == "assistant_completed"]
         assert len(completed) == 1 and completed[0].content == "fresh answer"
+        rates = [e.result["tps"] for e in events if e.type == "model_metrics"]
+        assert len(rates) == 1 and rates[0] > 0
+        assert runner.model_metrics_history() == [e.result for e in events if e.type == "model_metrics"]
         state = CliState()
         for event in events:
             state.apply(event)
@@ -112,10 +115,25 @@ def test_retry_does_not_reexecute_completed_tool(api, runner_factory):
         calls.append(1)
         return "recorded"
     call = {"id": "call-1", "name": "record", "args": {}}
-    with ScriptedSSEServer(api, [Turn(tool_calls=[call]),
+    with ScriptedSSEServer(api, [Turn(text="calling tool", tool_calls=[call]),
                                  Turn(text="broken text", mode="disconnect", chunks_before_hang=2),
-                                 Turn(text="done")]) as server:
-        result = runner_factory(server, tools=[record]).invoke("record")
+                                 Turn(text="done", reasoning="thinking briefly")]) as server:
+        events = []
+        result = runner_factory(server, tools=[record]).invoke("record", on_event=events.append)
+        rates = [e.result["tps"] for e in events if e.type == "model_metrics"]
+        assert len(rates) == 2 and all(rate > 0 for rate in rates)
+        state = CliState()
+        tools_seen = 0
+        for event in events:
+            state.apply(event)
+            if event.type in {"tool_started", "tool_completed"}:
+                tools_seen += 1
+                assert state.model_metrics_history[-1]["tps"] == rates[0]
+                from agent.performance import model_metric_groups
+                group = model_metric_groups(state.model_metrics_history)[0]
+                assert group["tps_low"] == group["tps_top"] == group["tps_average"] == rates[0]
+        assert tools_seen >= 2
+        assert len(state.model_metrics_history) == 2
         assert result.status == "completed" and result.output == "done"
         assert calls == [1] and len(server.connections) == 3
         assert server.connections[1].body == server.connections[2].body

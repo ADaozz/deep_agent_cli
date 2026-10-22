@@ -24,7 +24,7 @@ deep-agent --version
 | 命令 | 作用 |
 |---|---|
 | `/help` | 命令和快捷键列表 |
-| `/status` | 运行状态、模型与推理强度、权限、文件系统模式、会话 id、执行模式、有网与无网沙箱状态、工具数及其名称 |
+| `/status` | 运行状态、模型与推理强度、输入能力、工具数及其名称、按模型与强度分组的会话 TPS 统计 |
 | `/session` | 当前会话信息与数据库路径 |
 | `/new` | 新建会话（首次发送消息后才保存） |
 | `/resume` | 列出有内容的会话并选择；`/resume <id前缀>` 直接切换 |
@@ -122,12 +122,23 @@ deep-agent --version
 
 ## 状态栏与底栏
 
+- `/status` 按“模型 + 推理强度”分组，例如 `deepseek-flash-low`；每组下方仅缩进显示 5% low / 5% top / Average TPS 三项。状态栏不显示性能指标，任务完成后照常隐藏。
 - 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、排队数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。
 - 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
 - 底栏第一行：工作区路径、当前模型、会话 id；右侧为 Git 分支和改动文件数。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。
 - 上下文占用 = 模型最近一次返回的 token usage / `context_window`。端点不返回 usage 时只显示窗口大小；`context_window` 为 0 时不显示。
 - Git 状态每 5 秒在后台刷新，单次探测最长 10 秒。可能的显示：`⎇ checking git`、`⎇ no git`、`git unavailable`、`git error`、`git timeout`。
+
+
+### `/status` 性能统计口径
+
+- **Total Output TPS** = 服务端完整输出 token 数 / 首个到最后一个有效生成 chunk 的时间。输出 token 已包含 Thinking，不再次相加；分母排除 TTFT、末尾 usage/完成事件、工具执行及失败重试的输出片段。
+- **Reasoning / Answer TPS** 分别使用推理 token 与非推理 token（总输出减推理）除以各自首末 chunk 的时间。非推理输出包含生成的工具参数，不包含工具执行。阶段之间的空隙不计入阶段耗时，但仍包含在总输出跨度内。
+- **TTFT** 为模型调用开始到首个有效生成 chunk 的时间；如果调用中发生重试，包含先前失败和退避等待。计时使用客户端单调时钟，网络、缓冲和 chunk 粒度会影响精度。
+- 两种 API 均通过通用 usage 明细适配：Chat Completions 的 `completion_tokens_details.reasoning_tokens`、Responses 的 `output_tokens_details.reasoning_tokens`。不按厂商或模型名猜测计数；明细缺失时不计算拆分 token 与 TPS，完整输出计数仍保存在数据库中。
+- 如果模型隐藏推理过程，或只返回推理摘要，无法从流中测出完整生成时间，不计算 Total Output / Reasoning TPS，该请求不计入汇总样本；有足够正文时间样本时内部仍可计算 Answer TPS。Qwen 的完整 `reasoning_text` 与标准 Responses 的推理摘要分开识别。非流式、单 chunk 或零时间跨度同样不编造 TPS。
+- **5% low / 5% top / Average TPS** 基于当前会话内同一模型与推理强度的有效 Total Output TPS 样本，前两者分别取最慢 / 最快 5% 样本的算术平均（样本数向上取整），Average 为全部有效样本的算术平均。工具执行、等待、失败或取消不清空统计；上下文压缩不参与。每次成功调用结束后将原始计数、计时和指标写入会话 SQLite 数据库；重启、恢复或切回会话时加载记录并重算各组统计，模型和强度之间不混算。`/clear` 仅清空显示，保留性能记录；新会话从空记录开始。更新前未采集的历史耗时无法补算。
 
 ## 会话
 

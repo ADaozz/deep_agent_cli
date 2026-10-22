@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -53,6 +54,13 @@ CREATE TABLE IF NOT EXISTS session_catalog (
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
     ON session_catalog (updated_at DESC);
+CREATE TABLE IF NOT EXISTS session_model_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    metrics_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_model_metrics_session_idx
+    ON session_model_metrics (session_id, id);
 """
 
 
@@ -273,6 +281,24 @@ class SessionStore:
                 (model_id, permission_mode, reasoning_effort, _utc_now().isoformat(), session_id),
             )
             self._conn.commit()
+
+    def append_model_metrics(self, session_id: str, metrics: dict[str, Any]) -> None:
+        payload = json.dumps(metrics, ensure_ascii=False, allow_nan=False)
+        with self.checkpointer.lock:
+            self._conn.execute(
+                "INSERT INTO session_model_metrics (session_id, metrics_json) "
+                "SELECT id, ? FROM session_catalog WHERE id = ?",
+                (payload, session_id),
+            )
+            self._conn.commit()
+
+    def model_metrics_history(self, session_id: str) -> list[dict[str, Any]]:
+        with self.checkpointer.lock:
+            rows = self._conn.execute(
+                "SELECT metrics_json FROM session_model_metrics WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:

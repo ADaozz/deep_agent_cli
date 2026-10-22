@@ -400,3 +400,56 @@ def test_unsupported_catalog_is_rejected_without_migration(tmp_path: Path, colum
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT sql FROM sqlite_master WHERE name = 'session_catalog'").fetchone()[0] == original_schema
         assert conn.execute("SELECT * FROM session_catalog").fetchall() == original_rows
+
+
+def test_model_metrics_persist_across_store_reopen_and_are_session_isolated(tmp_path):
+    path = tmp_path / "metrics.sqlite3"
+    first = {"model": "deepseek-flash", "reasoning_effort": "low", "tps": 75.0,
+             "reasoning_tps": 66.7, "answer_tps": 100.0, "input_tokens": 12450}
+    second = {**first, "reasoning_effort": "high", "tps": None}
+    with_store = SessionStore(path)
+    with_store.create_session(session_id="a")
+    with_store.create_session(session_id="b")
+    with_store.append_model_metrics("a", first)
+    with_store.append_model_metrics("a", second)
+    with_store.append_model_metrics("b", {"model": "qwen", "tps": 200.0})
+    with_store.close()
+    reopened = SessionStore(path)
+    try:
+        assert reopened.model_metrics_history("a") == [first, second]
+        assert reopened.model_metrics_history("b") == [{"model": "qwen", "tps": 200.0}]
+        assert reopened.model_metrics_history("missing") == []
+    finally:
+        reopened.close()
+
+
+def test_runner_records_metrics_without_event_subscriber(tmp_path):
+    store = SessionStore(tmp_path / "runner-metrics.sqlite3")
+    runner = AgentRunner(model=scripted_model([AIMessage(content="reply")]), backend=StateBackend(),
+                         session_store=store, persist_on_first_message=True)
+    try:
+        assert runner.model_metrics_history() == []
+        assert runner.invoke("hello").status == "completed"
+        assert len(runner.model_metrics_history()) == 1
+        snapshot = runner.load_session(runner.thread_id)
+        assert snapshot.model_metrics_history == runner.model_metrics_history()
+    finally:
+        runner.close()
+        store.close()
+
+
+def test_metrics_table_is_added_without_changing_existing_sessions(tmp_path):
+    path = tmp_path / "existing.sqlite3"
+    store = SessionStore(path)
+    saved = store.create_session(session_id="existing", title="Keep this session")
+    store.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE session_model_metrics")
+    store = SessionStore(path)
+    try:
+        assert store.get(saved.id) == saved
+        assert store.model_metrics_history(saved.id) == []
+        store.append_model_metrics(saved.id, {"model": "qwen", "tps": 10.0})
+        assert store.model_metrics_history(saved.id) == [{"model": "qwen", "tps": 10.0}]
+    finally:
+        store.close()
