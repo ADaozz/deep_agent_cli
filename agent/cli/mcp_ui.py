@@ -6,7 +6,6 @@ from functools import partial
 from typing import Any
 
 from agent.cli.interactions import InteractionController
-from agent.mcp.config import redact_config_text
 
 
 async def handle_mcp_command(app: Any, arg: str) -> None:
@@ -177,9 +176,9 @@ def _summary(draft: dict[str, str]) -> str:
     lines = [f"Name: {draft.get('name', '')}", f"Transport: {draft.get('transport', '')}"]
     if draft.get("transport") == "stdio":
         lines.append("This command will run on the host, outside the sandbox:")
-        lines.append(redact_config_text(draft.get("target") or "<missing command>"))
+        lines.append(draft.get("target") or "<missing command>")
     else:
-        lines.append("URL: " + redact_config_text(draft.get("target", "")))
+        lines.append("URL: " + draft.get("target", ""))
         auth = draft.get("auth") or "none"
         lines.append(f"Auth: {auth}")
         if auth == "bearer":
@@ -222,8 +221,7 @@ def _start_operation(app: Any, operation: Any) -> asyncio.Task | None:
             if app.runner.mcp.toolset_dirty():
                 await _apply_when_idle(app)
         except Exception as exc:
-            from agent.mcp.adapter import redact
-            app.state.add_system(f"MCP operation failed: {redact(str(exc), [])}", error=True)
+            app.state.add_system(f"MCP operation failed: {str(exc)[:400]}", error=True)
             app.set_status("MCP operation failed; you can retry", transient=False)
         finally:
             app._mcp_busy = False

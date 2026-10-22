@@ -31,13 +31,6 @@ _URL_SECRET = re.compile(r"(?i)(token|access_token|api_key|key|password)=")
 
 # Deliberately limited to explicit credential flags, not paths or arbitrary words.
 _SECRET_ARG = re.compile(r"(?i)^--(?:token|access-token|api-key|api_key|password|secret|client-secret)(?:=|$)")
-_SECRET_TEXT = re.compile(
-    r"""(?ix)(?<![\w/.-])(--(?:token|access-token|api-key|api_key|password|secret|client-secret)(?:=|\s+))("[^"]*"|'[^']*'|[^\s]+)"""
-)
-_URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s]+@")
-_URL_VALUE = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
-_BEARER_TEXT = re.compile(r"(?i)bearer\s+\S+")
-_AUTH_TEXT = re.compile(r"(?i)(authorization\s*[:=]\s*)\S+")
 
 
 @dataclass(frozen=True)
@@ -332,23 +325,3 @@ def _env_names(name: str, value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and _ENV_NAME.fullmatch(item) for item in value):
         raise MCPConfigError(f"MCP server {name} env_passthrough must be a list of environment variable names")
     return tuple(value)
-
-
-
-def redact_config_text(text: str, secrets: list[str] | tuple[str, ...] = ()) -> str:
-    """Shared public rendering for config targets, approval cards and errors."""
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, "[redacted]")
-    text = _URL_USERINFO.sub(r"\1[redacted]@", text)
-    text = _URL_VALUE.sub(
-        lambda match: (
-            f"{match[1]}{match[2]}=[redacted]"
-            if unquote(match[2]).lower() in {"token", "access_token", "api_key", "key", "password"}
-            else match[0]
-        ),
-        text,
-    )
-    text = _SECRET_TEXT.sub(r"\1[redacted]", text)
-    text = _BEARER_TEXT.sub("Bearer [redacted]", text)
-    return _AUTH_TEXT.sub(r"\1[redacted]", text)

@@ -10,7 +10,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
-from agent.mcp.adapter import close_client, open_server, redact
+from agent.mcp.adapter import close_client, open_server
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import (
     MCPAuthError,
@@ -22,7 +22,6 @@ from agent.mcp.config import (
     load_mcp_file,
     parse_server,
     server_from_fields,
-    redact_config_text,
 )
 
 
@@ -176,14 +175,14 @@ class MCPManager:
             return "No MCP servers are configured."
         lines = ["MCP servers run on the host, outside the sandbox."]
         for state in rows:
-            target = redact_config_text(state.config.url or _command_line(state.config))
+            target = state.config.url or _command_line(state.config)
             error = f" — {state.error}" if state.error else ""
             lines.append(
                 f"{state.config.name}  {state.config.transport}  {state.status.value}  "
                 f"{state.tool_count} tools  {target}{error}"
             )
             for warning in state.warnings:
-                lines.append(f"  Warning: {redact_config_text(warning)}")
+                lines.append(f"  Warning: {warning}")
         for name, (_raw, error) in invalid.items():
             lines.append(f"{name}  invalid  {error}")
         return "\n".join(lines)
@@ -451,7 +450,7 @@ class MCPManager:
 
 
 def _warning_summary(state: ServerState) -> str:
-    return "".join(f"\nWarning: {redact_config_text(note)}" for note in state.warnings)
+    return "".join(f"\nWarning: {note}" for note in state.warnings)
 
 
 def _command_line(server: MCPServerConfig) -> str:
@@ -459,7 +458,7 @@ def _command_line(server: MCPServerConfig) -> str:
 
 
 def _public_error(exc: BaseException) -> str:
-    text = redact(str(exc), [])
+    text = str(exc)[:400]
     text = " ".join(text.split())
     return text or exc.__class__.__name__
 

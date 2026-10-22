@@ -333,3 +333,63 @@ def test_alias_keeps_remote_schema_description_and_actual_call_target():
         assert asyncio.run(wrapped.ainvoke({"value": "async"})) == "async"
     finally:
         bridge.shutdown()
+
+
+def test_exact_secret_replacement_preserves_unknown_json_and_nested_values():
+    import json
+    from copy import deepcopy
+    from agent.mcp.adapter import _redact_value, redact
+
+    secret = "configured-secret-value"
+    unknown = '{\n "api_key": "unknown", "Authorization": "Bearer unknown", "payload": "' + "A" * 1000 + '"\n}\n'
+    assert redact(unknown, [secret, ""]) == unknown
+    assert _redact_value(unknown, [secret]) == unknown
+    known = json.dumps({"api_key": secret, "text": f"Bearer {secret}", "unknown": unknown})
+    expected = known.replace(secret, "[redacted]")
+    assert _redact_value(known, [secret]) == expected
+    assert json.loads(expected)["api_key"] == "[redacted]"
+    assert json.loads(expected)["unknown"] == unknown
+    values = {"api_key": "unknown", "rows": [known, {"token": "unknown"}], "pair": (secret, 3)}
+    original = deepcopy(values)
+    assert _redact_value(values, [secret]) == {
+        "api_key": "unknown", "rows": [expected, {"token": "unknown"}], "pair": ("[redacted]", 3),
+    }
+    assert values == original
+
+
+def test_wrapped_tool_uses_exact_replacement_and_only_bounds_errors():
+    import asyncio
+    from langchain_core.tools import StructuredTool
+    from agent.mcp.adapter import _bridge_tool, redact
+
+    secret = "configured-secret-value"
+    received = []
+    error = f"{secret} Authorization: Bearer unknown-error " + "X" * 1000
+
+    async def remote(text: str, fail: bool = False):
+        received.append({"text": text, "fail": fail})
+        if fail:
+            raise RuntimeError(error)
+        return {"api_key": text, "Authorization": "Bearer unknown-result"}
+
+    description = f"{secret} api_key=unknown-doc " + "documentation " * 100
+    original = StructuredTool.from_function(coroutine=remote, name="echo", description=description)
+    bridge = SyncAsyncBridge()
+    try:
+        tool = _bridge_tool(original, name="mcp__local__echo", bridge=bridge, timeout=3,
+                            server="local", remote_name="echo", secrets=[secret])
+        assert tool.description.startswith(redact(original.description, [secret]))
+        assert len(tool.description) > 400
+        args = {"text": f"{secret} Authorization: Bearer unknown-input"}
+        expected = {"api_key": "[redacted] Authorization: Bearer unknown-input",
+                    "Authorization": "Bearer unknown-result"}
+        assert tool.invoke(args) == expected
+        assert asyncio.run(tool.ainvoke(args)) == expected
+        assert received == [{**args, "fail": False}, {**args, "fail": False}]
+        for result in (tool.invoke({**args, "fail": True}),
+                       asyncio.run(tool.ainvoke({**args, "fail": True}))):
+            assert result == redact(error, [secret])[:400]
+            assert len(result) == 400
+        assert args["text"].startswith(secret)
+    finally:
+        bridge.shutdown()

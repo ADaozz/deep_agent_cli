@@ -170,13 +170,13 @@ def test_explicit_stdio_secret_flags_are_rejected(args):
 
 
 def test_normal_stdio_args_and_env_names_remain_valid():
-    from agent.mcp.config import server_from_fields, redact_config_text
+    from agent.mcp.config import server_from_fields
     args = ["server.py", "/path/token/cache", "/path/--token=ordinary-file",
             "--tokenizer", "normal", "--api-key-file", "/keys/local"]
     config = server_from_fields(name="local", transport="stdio", command="python", args=args,
                                 env_passthrough=["MCP_TOKEN"])
     assert config.args == tuple(args)
-    assert redact_config_text(" ".join(args)) == " ".join(args)
+    assert config.env_passthrough == ("MCP_TOKEN",)
 
 
 @pytest.mark.parametrize("target", [
@@ -186,17 +186,15 @@ def test_normal_stdio_args_and_env_names_remain_valid():
     "https://example.com/mcp?token=credential-xyz",
     "https://example.com/mcp?%74oken=credential-xyz",
 ])
-def test_public_config_rendering_is_shared_and_hides_credentials(target):
-    from agent.mcp.config import redact_config_text
+def test_config_previews_preserve_unknown_text_separately_from_validation(target):
     from agent.cli.mcp_ui import _summary
     from agent.cli.interactions import InteractionController
     transport = "streamable_http" if target.startswith("http") else "stdio"
-    assert "credential-xyz" not in redact_config_text(target)
-    assert "credential-xyz" not in _summary({"transport": transport, "target": target})
+    assert target in _summary({"transport": transport, "target": target})
     card = InteractionController.approval([{"name": "mcp_add", "args": {
         "transport": transport, "command": target, "url": target,
     }}])
-    assert "credential-xyz" not in card.question
+    assert target in card.question
 
 
 @pytest.mark.parametrize("url", ["https://[broken/mcp", "https://host:invalid/mcp"])

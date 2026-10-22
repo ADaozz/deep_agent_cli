@@ -15,7 +15,7 @@ from langchain.mcp import MCPAdapter  # noqa: E402
 
 from agent.cancel import get_cancel_context
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
-from agent.mcp.config import MCPAuthError, MCPServerConfig, redact_config_text
+from agent.mcp.config import MCPAuthError, MCPServerConfig
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -33,7 +33,10 @@ class LoadedServer:
 
 
 def redact(text: str, secrets: list[str]) -> str:
-    return redact_config_text(text, secrets)[:400]
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text
 
 
 def open_server(
@@ -58,9 +61,9 @@ def open_server(
     except MCPAuthError:
         raise
     except (MCPCallTimeout, MCPCallCancelled) as exc:
-        raise type(exc)(redact(str(exc), secrets)) from None
+        raise type(exc)(redact(str(exc), secrets)[:400]) from None
     except Exception as exc:
-        message = redact(str(exc), secrets)
+        message = redact(str(exc), secrets)[:400]
         if _looks_like_auth(message):
             raise MCPAuthError(message) from None
         raise RuntimeError(message) from None
@@ -145,12 +148,12 @@ async def _load(
             try:
                 local_name = external_tool_name(server.name, remote.name)
             except ValueError as exc:
-                notes.append(redact(f"Skipped tool ({exc}): {remote.name!r}", secrets))
+                notes.append(redact(f"Skipped tool ({exc}): {remote.name!r}", secrets)[:400])
                 continue
             if not _TOOL_NAME.fullmatch(local_name) or local_name in seen or local_name in _RESERVED:
                 notes.append(redact(
                     f"Skipped tool: local alias conflicts or is invalid; remote={remote.name!r}, alias={local_name!r}", secrets,
-                ))
+                )[:400])
                 continue
             seen.add(local_name)
             tools.append(_bridge_tool(
@@ -188,7 +191,7 @@ def _bridge_tool(
         try:
             yield
         except Exception as exc:  # CancelledError propagates to async callers.
-            raise ToolException(redact(str(exc), secrets)) from None
+            raise ToolException(redact(str(exc), secrets)[:400]) from None
 
     def _cancel_event():
         context = get_cancel_context()
@@ -212,12 +215,12 @@ def _bridge_tool(
 
     def _handle(error: ToolException) -> Any:
         if error.__class__ is ToolException:
-            return redact(str(error), secrets)
+            return redact(str(error), secrets)[:400]
         if not callable(original_handler):
             raise error
         return _redact_value(original_handler(error), secrets)
 
-    description = redact_config_text(remote.description or "", secrets) or f"MCP tool {remote_name} from server {server}."
+    description = remote.description or f"MCP tool {remote_name} from server {server}."
     description = (
         f"{description}\n"
         f"(MCP server {server}, remote tool {remote_name}. "
@@ -227,7 +230,7 @@ def _bridge_tool(
     metadata["deep_agent_mcp"] = {"server": server, "remote_name": remote_name}
     return StructuredTool(
         name=name,
-        description=description,
+        description=redact(description, secrets),
         args_schema=remote.args_schema,
         func=_call,
         coroutine=_acall,
@@ -239,7 +242,7 @@ def _bridge_tool(
 
 def _redact_value(value: Any, secrets: list[str]) -> Any:
     if isinstance(value, str):
-        return redact_config_text(value, secrets)
+        return redact(value, secrets)
     if isinstance(value, list):
         return [_redact_value(item, secrets) for item in value]
     if isinstance(value, tuple):
