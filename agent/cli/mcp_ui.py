@@ -268,12 +268,16 @@ def _show_tools(app: Any, manager: Any, name: str) -> None:
         app.state.add_system(f"No MCP server named {name}.", error=True)
         return
     if not state.tools:
-        app.state.add_system(f"{name} is {state.status.value}. {state.error}".strip())
+        app.state.add_system("\n".join([
+            f"{name} is {state.status.value}. {state.error}".strip(),
+            *[f"Warning: {note}" for note in state.warnings],
+        ]))
         return
     lines = [f"{name} · {state.status.value} · {len(state.tools)} tools"]
     for tool in state.tools:
         summary = " ".join((tool.description or "").split())
         lines.append(f"- {tool.name}: {summary[:180]}")
+    lines.extend(f"Warning: {note}" for note in state.warnings)
     app.state.add_system("\n".join(lines))
 
 

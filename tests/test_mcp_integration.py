@@ -461,3 +461,110 @@ def test_runner_close_retries_after_model_cleanup_failure(tmp_path, monkeypatch)
     finally:
         monkeypatch.setattr(runner.control, "wait_model_streams_closed", lambda timeout: True)
         runner.close()
+
+
+def test_official_graph_astream_calls_mcp_after_host_approval(tmp_path, http_mcp):
+    import asyncio
+    from langchain.agents import create_agent as create_langchain_agent
+    from langchain.agents.middleware import HumanInTheLoopMiddleware
+    from langchain_core.messages import HumanMessage
+    from langgraph.types import Command
+    from agent.mcp.middleware import MCPMiddleware
+    from agent.mcp.names import host_interrupt_on
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    try:
+        assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+        revision, tools = manager.snapshot()
+        # This tests LangChain's async graph and MCP integration. The project's
+        # synchronous Runner and its native middleware are deliberately unchanged.
+        graph = create_langchain_agent(
+            model=scripted_model([
+                AIMessage(content="", tool_calls=[{
+                    "id": "async-echo", "name": "mcp__local__echo", "args": {"text": "async graph"},
+                }]), AIMessage(content="done"),
+            ]),
+            middleware=[
+                MCPMiddleware(manager, tools),
+                HumanInTheLoopMiddleware(interrupt_on=host_interrupt_on(t.name for t in tools)),
+            ], checkpointer=InMemorySaver(),
+        )
+        manager.commit(revision)
+
+        async def check():
+            config = {"configurable": {"thread_id": "async-mcp"}}
+            chunks = [chunk async for chunk in graph.astream(
+                {"messages": [HumanMessage(content="call echo")]}, config,
+            )]
+            assert any("__interrupt__" in chunk for chunk in chunks)
+            waiting = await graph.aget_state(config)
+            assert not any(isinstance(m, ToolMessage) for m in waiting.values["messages"])
+            awaitables = graph.astream(Command(resume={"decisions": [{"type": "approve"}]}), config)
+            async for _ in awaitables:
+                pass
+            state = await graph.aget_state(config)
+            messages = [m for m in state.values["messages"] if isinstance(m, ToolMessage)]
+            assert any(m.name == "mcp__local__echo" and "async graph" in str(m.content) for m in messages)
+        asyncio.run(check())
+    finally:
+        manager.close()
+
+
+def test_checkpoint_pending_alias_survives_manager_restart(tmp_path):
+    from agent.mcp.names import external_tool_name
+    from tests.mcp_fixture import build_compat_server
+
+    fixture = HttpFixture(server_factory=build_compat_server)
+    saver = InMemorySaver()
+    path = tmp_path / "mcp.json"
+    alias = external_tool_name("local", "read.file")
+    manager = MCPManager(path, connect_timeout=5)
+    first = second = None
+    try:
+        assert manager.add_from_fields(name="local", transport="streamable_http", url=fixture.url).ok
+        first = _runner(manager, [AIMessage(content="", tool_calls=[{
+            "id": "alias-call", "name": alias, "args": {"value": "checkpoint"},
+        }])], checkpointer=saver, thread_id="compat")
+        assert first.invoke("call").status == "waiting_confirmation"
+        assert first.current_interrupt() is not None
+        first.close()
+        manager = MCPManager(path, connect_timeout=5)
+        manager.load()
+        assert manager.connect_pending().ok
+        second = _runner(manager, [AIMessage(content="restored")], checkpointer=saver, thread_id="compat")
+        assert alias in graph_tool_names(second.prepared.graph)
+        result = second.approve_tool("alias-call")
+        assert result.status == "completed", result.error
+        messages = [m for m in _messages(second) if isinstance(m, ToolMessage)]
+        assert any(m.name == alias and "read.file:checkpoint" in str(m.content) for m in messages)
+    finally:
+        if second is not None:
+            second.close()
+        if first is not None:
+            first.close()
+        manager.close()
+        fixture.close()
+
+
+def test_manager_close_finishes_async_request_and_drains_bridge(tmp_path, http_mcp):
+    import asyncio
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    try:
+        assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+        tool = next(t for t in manager.get("local").tools if t.name.endswith("__wait_for_cancel"))
+        started, cancelled = tmp_path / "started", tmp_path / "cancelled"
+
+        async def check():
+            call = asyncio.create_task(tool.ainvoke({"started": str(started), "cancelled": str(cancelled)}))
+            async with asyncio.timeout(3):
+                while not started.exists():
+                    await asyncio.sleep(.01)
+            await asyncio.to_thread(manager.close)
+            outcome = str(await call).lower()
+            assert "cancel" in outcome or "closed" in outcome
+            assert not manager._bridge._thread.is_alive()
+            assert not asyncio.all_tasks(manager._bridge._loop)
+        asyncio.run(check())
+    finally:
+        manager.close()

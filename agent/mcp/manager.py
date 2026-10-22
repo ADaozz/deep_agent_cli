@@ -182,6 +182,8 @@ class MCPManager:
                 f"{state.config.name}  {state.config.transport}  {state.status.value}  "
                 f"{state.tool_count} tools  {target}{error}"
             )
+            for warning in state.warnings:
+                lines.append(f"  Warning: {redact_config_text(warning)}")
         for name, (_raw, error) in invalid.items():
             lines.append(f"{name}  invalid  {error}")
         return "\n".join(lines)
@@ -219,7 +221,7 @@ class MCPManager:
                 names = ", ".join(tool.name for tool in existing.tools) or "(none)"
                 return MCPResult(
                     True, False,
-                    f"MCP server {server.name} is already connected. {existing.tool_count} tools: {names}.",
+                    f"MCP server {server.name} is already connected. {existing.tool_count} tools: {names}." + _warning_summary(existing),
                 )
             if not already:
                 self._document.servers[server.name] = server
@@ -236,7 +238,7 @@ class MCPManager:
             prefix = "already configured and connected" if already else "saved and connected"
             return MCPResult(
                 True, not already,
-                f"MCP server {server.name} is {prefix}. Discovered {state.tool_count} tools: {names}.",
+                f"MCP server {server.name} is {prefix}. Discovered {state.tool_count} tools: {names}." + _warning_summary(state),
                 pending=True,
             )
         if state.status is ServerStatus.AUTH_REQUIRED:
@@ -296,7 +298,7 @@ class MCPManager:
         state = self._activate(server, bump=True)
         if state.status is ServerStatus.CONNECTED:
             names = ", ".join(tool.name for tool in state.tools) or "(none)"
-            return MCPResult(True, False, f"{name} connected. {state.tool_count} tools: {names}.")
+            return MCPResult(True, False, f"{name} connected. {state.tool_count} tools: {names}." + _warning_summary(state))
         return MCPResult(False, False, f"{name} {state.status.value}: {state.error}")
 
     def snapshot(self) -> tuple[int, list[BaseTool]]:
@@ -446,6 +448,10 @@ class MCPManager:
                 self._bridge.call(close_client(client), timeout=5)
             except Exception:  # noqa: BLE001 — shutdown still has to finish
                 pass
+
+
+def _warning_summary(state: ServerState) -> str:
+    return "".join(f"\nWarning: {redact_config_text(note)}" for note in state.warnings)
 
 
 def _command_line(server: MCPServerConfig) -> str:

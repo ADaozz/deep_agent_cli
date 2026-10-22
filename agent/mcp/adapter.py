@@ -1,6 +1,7 @@
-"""Call LangChain's MCPAdapter and expose synchronous tools to the runner."""
+"""Wrap official MCPAdapter tools with shared sync/async bridge safeguards."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import re
 import warnings
@@ -141,9 +142,15 @@ async def _load(
         notes: list[str] = []
         seen: set[str] = set()
         for remote in remote_tools:
-            local_name = external_tool_name(server.name, remote.name)
+            try:
+                local_name = external_tool_name(server.name, remote.name)
+            except ValueError as exc:
+                notes.append(redact(f"Skipped tool ({exc}): {remote.name!r}", secrets))
+                continue
             if not _TOOL_NAME.fullmatch(local_name) or local_name in seen or local_name in _RESERVED:
-                notes.append(f"Skipped {remote.name}: the local name conflicts or is invalid")
+                notes.append(redact(
+                    f"Skipped tool: local alias conflicts or is invalid; remote={remote.name!r}, alias={local_name!r}", secrets,
+                ))
                 continue
             seen.add(local_name)
             tools.append(_bridge_tool(
@@ -176,22 +183,32 @@ def _bridge_tool(
         raise RuntimeError(f"MCP tool {remote_name} has no async implementation")
     original_handler = remote.handle_tool_error
 
-    def _call(**kwargs: Any) -> Any:
+    @contextmanager
+    def _tool_errors():
+        try:
+            yield
+        except Exception as exc:  # CancelledError propagates to async callers.
+            raise ToolException(redact(str(exc), secrets)) from None
+
+    def _cancel_event():
         context = get_cancel_context()
         if context is not None and context.cancelled:
             raise ToolException("Cancelled by user.")
-        try:
-            return _redact_value(bridge.call(
-                coroutine(**kwargs),
-                timeout=timeout,
-                cancel_event=None if context is None else context.cancel_event,
-            ), secrets)
-        except MCPCallCancelled as exc:
-            raise ToolException(redact(str(exc), secrets)) from None
-        except MCPCallTimeout as exc:
-            raise ToolException(redact(str(exc), secrets)) from None
-        except Exception as exc:
-            raise ToolException(redact(str(exc), secrets)) from None
+        return None if context is None else context.cancel_event
+
+    def _call(**kwargs: Any) -> Any:
+        with _tool_errors():
+            event = _cancel_event()
+            return _redact_value(
+                bridge.call(coroutine(**kwargs), timeout=timeout, cancel_event=event), secrets,
+            )
+
+    async def _acall(**kwargs: Any) -> Any:
+        with _tool_errors():
+            event = _cancel_event()
+            return _redact_value(
+                await bridge.acall(coroutine(**kwargs), timeout=timeout, cancel_event=event), secrets,
+            )
 
     def _handle(error: ToolException) -> Any:
         if error.__class__ is ToolException:
@@ -213,7 +230,7 @@ def _bridge_tool(
         description=description,
         args_schema=remote.args_schema,
         func=_call,
-        coroutine=coroutine,
+        coroutine=_acall,
         response_format=remote.response_format,
         metadata=metadata,
         handle_tool_error=_handle,
