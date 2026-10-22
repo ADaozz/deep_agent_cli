@@ -1026,13 +1026,13 @@ class AgentRunner:
         # 卡住的命令不得在 close 之后继续占用沙箱，即便租约必须保留。
         self._end_sandbox_session("agent session closed")
         if not drained:
-            self._close_mcp()
+            # The active graph may still be unwinding an MCP call. Keep its
+            # bridge and clients alive with the lease until close is retried.
             raise RuntimeError(
                 "Runner close timed out with a run still active; the session "
                 "lease is kept until the run drains and close is retried"
             )
         if not self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS):
-            self._close_mcp()
             raise RuntimeError(
                 "Runner close could not confirm the model request stopped; the "
                 "session lease is kept until it closes and close is retried"

@@ -1,12 +1,15 @@
 """`/mcp` uses the same InteractionController as the other slash commands."""
 from __future__ import annotations
 
+import asyncio
+from functools import partial
 from typing import Any
 
 from agent.cli.interactions import InteractionController
+from agent.mcp.config import redact_config_text
 
 
-def handle_mcp_command(app: Any, arg: str) -> None:
+async def handle_mcp_command(app: Any, arg: str) -> None:
     manager = getattr(app.runner, "mcp", None)
     if manager is None:
         app.state.add_system("MCP is not available in this session.", error=True)
@@ -22,16 +25,16 @@ def handle_mcp_command(app: Any, arg: str) -> None:
         if rest:
             app.state.add_system("Usage: /mcp add", error=True)
             return
+        if getattr(app, "_mcp_busy", False):
+            app.set_status("MCP operation still running")
+            return
         _begin_add(app)
         return
     if command == "remove":
         if not rest or " " in rest:
             app.state.add_system("Usage: /mcp remove <name>", error=True)
             return
-        result = manager.remove(rest)
-        app.state.add_system(result.message, error=not result.ok)
-        if result.changed:
-            _apply_when_idle(app)
+        await _wait_operation(app, _start_operation(app, partial(manager.remove, rest)))
         return
     if command in {"test", "tools"}:
         if not rest or " " in rest:
@@ -40,10 +43,7 @@ def handle_mcp_command(app: Any, arg: str) -> None:
         if command == "tools":
             _show_tools(app, manager, rest)
             return
-        result = manager.test(rest)
-        app.state.add_system(result.message, error=not result.ok)
-        if manager.toolset_dirty():
-            _apply_when_idle(app)
+        await _wait_operation(app, _start_operation(app, partial(manager.test, rest)))
         return
     app.state.add_system("Usage: /mcp, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>", error=True)
 
@@ -177,9 +177,9 @@ def _summary(draft: dict[str, str]) -> str:
     lines = [f"Name: {draft.get('name', '')}", f"Transport: {draft.get('transport', '')}"]
     if draft.get("transport") == "stdio":
         lines.append("This command will run on the host, outside the sandbox:")
-        lines.append(draft.get("target") or "<missing command>")
+        lines.append(redact_config_text(draft.get("target") or "<missing command>"))
     else:
-        lines.append(f"URL: {draft.get('target', '')}")
+        lines.append("URL: " + redact_config_text(draft.get("target", "")))
         auth = draft.get("auth") or "none"
         lines.append(f"Auth: {auth}")
         if auth == "bearer":
@@ -203,12 +203,59 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
         fields["command"] = draft.get("target") or ""
     else:
         fields["url"] = draft.get("target") or ""
-    result = manager.add_from_fields(**fields)
-    app.state.add_system(result.message, error=not result.ok)
-    if result.changed or result.pending:
-        _apply_when_idle(app)
-    else:
-        app.set_status("MCP add finished" if result.ok else "MCP add failed")
+    _start_operation(app, partial(manager.add_from_fields, **fields))
+
+
+def _start_operation(app: Any, operation: Any) -> asyncio.Task | None:
+    # Reserve before scheduling: two Enter events must not launch two workers.
+    if getattr(app, "_mcp_busy", False):
+        app.set_status("MCP operation still running")
+        return None
+    app._mcp_busy = True
+    app.set_status("MCP operation running; connections and OAuth have a timeout", transient=False)
+
+    async def run() -> None:
+        try:
+            result = await app._run_blocking(operation)
+            app.state.add_system(result.message, error=not result.ok)
+            app.set_status("MCP operation finished" if result.ok else "MCP operation failed; you can retry", transient=False)
+            if app.runner.mcp.toolset_dirty():
+                await _apply_when_idle(app)
+        except Exception as exc:
+            from agent.mcp.adapter import redact
+            app.state.add_system(f"MCP operation failed: {redact(str(exc), [])}", error=True)
+            app.set_status("MCP operation failed; you can retry", transient=False)
+        finally:
+            app._mcp_busy = False
+            app.application.invalidate()
+
+    app._mcp_operation = asyncio.create_task(run())
+    return app._mcp_operation
+
+
+async def _wait_operation(app: Any, task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        app.state.add_system(
+            "MCP wait cancelled. The background operation is still running until completion or timeout."
+        )
+
+
+def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
+    # Only the graph build runs on the worker. UI updates return through the loop.
+    events: list[Any] = []
+    if not runner._operation_lock.acquire(blocking=False):
+        return None
+    try:
+        if runner.current_interrupt() is not None:
+            return None
+        runner._apply_pending_runtime_config(events.append)
+    finally:
+        runner._operation_lock.release()
+    return events
 
 
 def _show_tools(app: Any, manager: Any, name: str) -> None:
@@ -230,23 +277,17 @@ def _show_tools(app: Any, manager: Any, name: str) -> None:
     app.state.add_system("\n".join(lines))
 
 
-def _apply_when_idle(app: Any) -> None:
-    runner = app.runner
-    try:
-        interrupt = runner.current_interrupt()
-    except Exception:  # noqa: BLE001 — an unknown interrupt still means the graph is busy
-        interrupt = object()
-    if app.state.running or interrupt is not None or not runner._operation_lock.acquire(blocking=False):
+async def _apply_when_idle(app: Any) -> None:
+    if app.state.running:
+        events = None
+    else:
+        events = await app._run_blocking(_apply_when_idle_worker, app.runner)
+    if events is None:
         app.set_status("MCP change queued until the current run reaches a safe point", transient=False)
         return
-    events: list[Any] = []
-    try:
-        runner._apply_pending_runtime_config(events.append)
-    finally:
-        runner._operation_lock.release()
     for event in events:
         app._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
-        app.set_status("MCP tool update failed")
-        return
-    app.set_status("MCP tools updated")
+        app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
+    else:
+        app.set_status("MCP tools updated", transient=False)

@@ -22,6 +22,13 @@ def _approval_summary(value: Any, kind: str = "command") -> str:
     return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
 
 
+def _mcp_approval_summary(text: str) -> str:
+    from agent.mcp.config import redact_config_text
+    text = redact_config_text(text)
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    return text if len(text) <= 180 else text[:180] + "…"
+
+
 @dataclass
 class InteractionController:
     kind: str
@@ -96,10 +103,10 @@ class InteractionController:
                     rendered = " ".join([command, *[str(item) for item in argv]]).strip()
                     details.append(
                         "Host command (runs outside the sandbox): "
-                        + _approval_summary(rendered or "<not supplied>", kind="command")
+                        + _mcp_approval_summary(rendered or "<not supplied>")
                     )
                 else:
-                    details.append(f"URL: {_approval_summary(args.get('url'), kind='url')}")
+                    details.append(f"URL: {_mcp_approval_summary(str(args.get('url') or ''))}")
                 auth = str(args.get("auth_type") or "none")
                 token_env = str(args.get("token_env") or "")
                 details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))

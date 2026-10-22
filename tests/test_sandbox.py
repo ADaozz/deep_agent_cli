@@ -1587,3 +1587,51 @@ def test_both_modes_keep_the_real_workspace_path(
     switched.backend.apply_sandbox_mode("restricted")
     restricted_args = switched.backend.executor.sandbox_args()
     assert restricted_args[restricted_args.index("--chdir") + 1] == root
+
+
+@pytest.mark.sandbox
+def test_full_access_uses_real_host_home_and_tmp(tmp_path):
+    import os
+    import shlex
+    import shutil
+    import uuid
+
+    executable = shutil.which("bwrap")
+    if executable is None:
+        pytest.skip("bubblewrap is not installed")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = Path.home()
+    marker = ".deep-agent-regression-" + uuid.uuid4().hex
+    home_marker, tmp_marker = home / marker, Path("/tmp") / marker
+    config = replace(config_for(workspace), bwrap_path=executable, mode="full-access")
+    try:
+        selected = select_backend(config)
+    except SandboxUnavailableError as exc:
+        if os.environ.get("REQUIRE_BWRAP_TEST"):
+            pytest.fail(str(exc))
+        pytest.skip(str(exc))
+    try:
+        command = (
+            f'test "$HOME" = {shlex.quote(str(home))} && '
+            f'printf real-home > "$HOME"/{marker} && '
+            f'printf real-tmp > /tmp/{marker}'
+        )
+        result = selected.backend.execute(command)
+        assert result.exit_code == 0, result.output
+        assert home_marker.read_text() == "real-home"
+        assert tmp_marker.read_text() == "real-tmp"
+    finally:
+        home_marker.unlink(missing_ok=True)
+        tmp_marker.unlink(missing_ok=True)
+
+
+def test_single_device_can_be_configured_without_exposing_host_dev(tmp_path):
+    config = replace(
+        config_for(tmp_path), bwrap_path="/bin/true", mode="full-access",
+        extra_read_write_mounts=(BindMount(Path("/dev/null"), "/dev/ttyUSB0", dev_bind=True),),
+    )
+    args = select_backend(config, check=False).backend.executor.sandbox_args()
+    binds = list(zip(args, args[1:], args[2:]))
+    assert ("--dev-bind", "/dev/null", "/dev/ttyUSB0") in binds
+    assert ("--dev-bind", "/dev", "/dev") not in binds

@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 class MCPConfigError(ValueError):
@@ -27,6 +27,17 @@ _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,32}$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_FIELD = re.compile(r"(?i)token|secret|password|authorization|api_key|apikey")
 _URL_SECRET = re.compile(r"(?i)(token|access_token|api_key|key|password)=")
+
+
+# Deliberately limited to explicit credential flags, not paths or arbitrary words.
+_SECRET_ARG = re.compile(r"(?i)^--(?:token|access-token|api-key|api_key|password|secret|client-secret)(?:=|$)")
+_SECRET_TEXT = re.compile(
+    r"""(?ix)(?<![\w/.-])(--(?:token|access-token|api-key|api_key|password|secret|client-secret)(?:=|\s+))("[^"]*"|'[^']*'|[^\s]+)"""
+)
+_URL_USERINFO = re.compile(r"(?i)(https?://)[^/\s]+@")
+_URL_VALUE = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
+_BEARER_TEXT = re.compile(r"(?i)bearer\s+\S+")
+_AUTH_TEXT = re.compile(r"(?i)(authorization\s*[:=]\s*)\S+")
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,8 @@ def load_mcp_file(path: Path) -> MCPFile:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         return MCPFile(fatal=f"Cannot read MCP config: {exc.strerror or exc}")
+    except UnicodeError:
+        return MCPFile(fatal="MCP config is not valid UTF-8")
     if not text.strip():
         return MCPFile(fatal="MCP config is empty")
     try:
@@ -260,10 +273,16 @@ def _http_url(name: str, value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MCPConfigError(f"MCP server {name} requires an http(s) url")
     url = value.strip()
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        parsed.port  # Validate malformed authority/ports without echoing the URL.
+    except ValueError:
+        raise MCPConfigError(f"MCP server {name} has an invalid URL authority") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise MCPConfigError(f"MCP server {name} url must be an http or https URL")
-    if _URL_SECRET.search(parsed.query) or _URL_SECRET.search(url):
+    if parsed.username is not None or parsed.password is not None:
+        raise MCPConfigError(f"MCP server {name} url must not carry userinfo credentials")
+    if _URL_SECRET.search(unquote(parsed.query)) or _URL_SECRET.search(url):
         raise MCPConfigError(f"MCP server {name} url must not carry a token or key")
     return url
 
@@ -300,6 +319,10 @@ def _args(name: str, value: Any) -> tuple[str, ...]:
         return ()
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise MCPConfigError(f"MCP server {name} args must be a list of strings")
+    if any(_SECRET_ARG.match(item) for item in value):
+        raise MCPConfigError(
+            f"MCP server {name} args must not contain credential flags; use env_passthrough"
+        )
     return tuple(value)
 
 
@@ -309,3 +332,23 @@ def _env_names(name: str, value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and _ENV_NAME.fullmatch(item) for item in value):
         raise MCPConfigError(f"MCP server {name} env_passthrough must be a list of environment variable names")
     return tuple(value)
+
+
+
+def redact_config_text(text: str, secrets: list[str] | tuple[str, ...] = ()) -> str:
+    """Shared public rendering for config targets, approval cards and errors."""
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    text = _URL_USERINFO.sub(r"\1[redacted]@", text)
+    text = _URL_VALUE.sub(
+        lambda match: (
+            f"{match[1]}{match[2]}=[redacted]"
+            if unquote(match[2]).lower() in {"token", "access_token", "api_key", "key", "password"}
+            else match[0]
+        ),
+        text,
+    )
+    text = _SECRET_TEXT.sub(r"\1[redacted]", text)
+    text = _BEARER_TEXT.sub("Bearer [redacted]", text)
+    return _AUTH_TEXT.sub(r"\1[redacted]", text)

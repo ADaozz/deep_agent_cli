@@ -202,6 +202,7 @@ def test_restored_session_keeps_the_tool_message_and_the_reloaded_tool(
     second_manager = MCPManager(path, call_timeout=8, connect_timeout=5)
     try:
         second_manager.load()
+        assert second_manager.connect_pending().ok
         second = AgentRunner(
             model=scripted_model([AIMessage(content="还在。")]),
             backend=StateBackend(),
@@ -298,4 +299,165 @@ def test_no_manager_matches_the_current_native_tool_set() -> None:
         assert "mcp_add" not in runner.prepared.exposed_tool_names
         assert not any(getattr(tool, "name", "").startswith("mcp") for tool in runner._spec.tools)
     finally:
+        runner.close()
+
+
+def test_registry_change_during_build_retains_old_graph_and_allows_retry(tmp_path, http_mcp, monkeypatch):
+    import agent.factory as factory
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+    runner = _runner(manager, [AIMessage(content="done")])
+    original = runner.prepared.graph
+    build = factory.create_deep_agent
+    try:
+        # Force a dirty revision, then mutate it halfway through the real build.
+        assert manager.test("local").ok
+
+        def changed(**kwargs):
+            assert manager.remove("local").ok
+            return build(**kwargs)
+
+        monkeypatch.setattr(factory, "create_deep_agent", changed)
+        events = []
+        runner._apply_pending_runtime_config(events.append)
+        assert runner.prepared.graph is original
+        assert manager.toolset_dirty()
+        assert any(event.type == "runtime_config_failed" for event in events)
+        old_echo = original.nodes["tools"].bound.tools_by_name["mcp__local__echo"]
+        assert "retained" in str(old_echo.invoke({"text": "retained"}))
+        assert not manager._snapshots
+        monkeypatch.setattr(factory, "create_deep_agent", build)
+        runner._apply_pending_runtime_config()
+        assert runner.prepared.graph is not original
+        assert "mcp__local__echo" not in graph_tool_names(runner.prepared.graph)
+        assert not manager.toolset_dirty()
+        assert not manager._retired
+    finally:
+        runner.close()
+
+
+def test_failed_build_keeps_published_client_until_successful_retry(tmp_path, http_mcp, monkeypatch):
+    import agent.factory as factory
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+    runner = _runner(manager, [AIMessage(content="done")])
+    original = runner.prepared.graph
+    build = factory.create_deep_agent
+    try:
+        assert manager.remove("local").ok
+
+        def fail(**kwargs):
+            raise RuntimeError("intentional graph build failure")
+
+        monkeypatch.setattr(factory, "create_deep_agent", fail)
+        runner._apply_pending_runtime_config()
+        assert runner.prepared.graph is original
+        echo = original.nodes["tools"].bound.tools_by_name["mcp__local__echo"]
+        assert "alive" in str(echo.invoke({"text": "alive"}))
+        assert not manager._snapshots
+        assert manager.toolset_dirty()
+        monkeypatch.setattr(factory, "create_deep_agent", build)
+        runner._apply_pending_runtime_config()
+        assert not manager.toolset_dirty()
+        assert not manager._retired
+    finally:
+        runner.close()
+
+
+def test_remove_during_executing_graph_keeps_client_until_safe_boundary(tmp_path, http_mcp):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+    runner = _runner(manager, [
+        AIMessage(content="", tool_calls=[{
+            "id": "live", "name": "mcp__local__echo", "args": {"text": "completed after removal"},
+        }]), AIMessage(content="done"),
+    ])
+    started, release = threading.Event(), threading.Event()
+    try:
+        assert runner.invoke("call").status == "waiting_confirmation"
+        original = runner.prepared.graph
+        tool = original.nodes["tools"].bound.tools_by_name["mcp__local__echo"]
+        invoke = tool.func
+
+        def held(**kwargs):
+            started.set()
+            assert release.wait(5)
+            return invoke(**kwargs)
+
+        tool.func = held
+        with ThreadPoolExecutor() as pool:
+            pending = pool.submit(runner.approve_tool, "live")
+            assert started.wait(5)
+            assert manager.remove("local").ok
+            assert runner.prepared.graph is original
+            release.set()
+            result = pending.result(5)
+        assert result.status == "completed", result.error
+        assert any("completed after removal" in str(m.content)
+                   for m in _messages(runner) if isinstance(m, ToolMessage))
+        assert "mcp__local__echo" not in graph_tool_names(runner.prepared.graph)
+    finally:
+        release.set()
+        runner.close()
+
+
+def test_runner_close_timeout_keeps_mcp_bridge_and_session_lease(tmp_path, http_mcp, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import pytest
+    from agent.session import SessionStore
+
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
+    assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+    store = SessionStore(tmp_path / "sessions.sqlite")
+    runner = _runner(manager, [AIMessage(content="done")], session_store=store)
+    entered, release = threading.Event(), threading.Event()
+
+    def hold(event):
+        if event.type == "run_started":
+            entered.set()
+            assert release.wait(5)
+
+    try:
+        with ThreadPoolExecutor() as pool:
+            pending = pool.submit(runner.invoke, "hold", on_event=hold)
+            assert entered.wait(5)
+            monkeypatch.setattr("agent.runner.CLOSE_DRAIN_SECONDS", .05)
+            with pytest.raises(RuntimeError, match="timed out"):
+                runner.close()
+            assert not manager._closed and not manager._bridge._closed
+            assert runner._runtime.lease is not None
+            assert store.try_acquire_session(runner.thread_id) is None
+            release.set()
+            assert pending.result(5).status == "cancelled"
+        runner.close()
+        assert manager._closed and manager._bridge._closed
+        assert runner._runtime.lease is None
+    finally:
+        release.set()
+        runner.close()
+        store.close()
+
+
+def test_runner_close_retries_after_model_cleanup_failure(tmp_path, monkeypatch):
+    import pytest
+
+    manager = MCPManager(tmp_path / "mcp.json")
+    runner = _runner(manager, [AIMessage(content="done")])
+    monkeypatch.setattr(runner.control, "wait_model_streams_closed", lambda timeout: False)
+    try:
+        with pytest.raises(RuntimeError, match="model request stopped"):
+            runner.close()
+        assert not manager._closed and not manager._bridge._closed
+        assert not runner._close_completed
+        monkeypatch.setattr(runner.control, "wait_model_streams_closed", lambda timeout: True)
+        runner.close()
+        assert manager._closed and runner._close_completed
+    finally:
+        monkeypatch.setattr(runner.control, "wait_model_streams_closed", lambda timeout: True)
         runner.close()

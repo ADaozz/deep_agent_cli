@@ -37,7 +37,11 @@ def create_runner(settings: Settings) -> AgentRunner:
             mcp_manager=mcp_manager,
         )
     except SandboxUnavailableError as exc:
+        mcp_manager.close()
         raise SystemExit(str(exc)) from exc
+    except BaseException:
+        mcp_manager.close()
+        raise
 
 
 def parse_startup_args(argv: list[str]) -> tuple[str | None, bool]:

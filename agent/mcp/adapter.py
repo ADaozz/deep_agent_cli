@@ -14,11 +14,9 @@ from langchain.mcp import MCPAdapter  # noqa: E402
 
 from agent.cancel import get_cancel_context
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
-from agent.mcp.config import MCPAuthError, MCPServerConfig
+from agent.mcp.config import MCPAuthError, MCPServerConfig, redact_config_text
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
 
-_BEARER = re.compile(r"(?i)bearer\s+\S+")
-_AUTHORIZATION = re.compile(r"(?i)(authorization\s*[:=]\s*)\S+")
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _RESERVED = MANAGEMENT_TOOLS | {
     "ls", "read_file", "write_file", "edit_file", "delete", "execute",
@@ -34,13 +32,7 @@ class LoadedServer:
 
 
 def redact(text: str, secrets: list[str]) -> str:
-    cleaned = text
-    for secret in secrets:
-        if secret:
-            cleaned = cleaned.replace(secret, "[redacted]")
-    cleaned = _BEARER.sub("Bearer [redacted]", cleaned)
-    cleaned = _AUTHORIZATION.sub(r"\1[redacted]", cleaned)
-    return cleaned[:400]
+    return redact_config_text(text, secrets)[:400]
 
 
 def open_server(
@@ -114,6 +106,7 @@ def build_transport(
     if missing:
         raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
     env = {name: os.environ[name] for name in server.env_passthrough}
+    secrets.extend(env.values())
     return StdioTransport(
         command=server.command or "",
         args=list(server.args),
@@ -141,31 +134,31 @@ async def _load(
 ) -> LoadedServer:
     adapter = MCPAdapter(transport)
     client = adapter.client
-    await client.__aenter__()
     try:
+        await client.__aenter__()
         remote_tools = await adapter.list_tools(cache_mode="refresh")
+        tools: list[BaseTool] = []
+        notes: list[str] = []
+        seen: set[str] = set()
+        for remote in remote_tools:
+            local_name = external_tool_name(server.name, remote.name)
+            if not _TOOL_NAME.fullmatch(local_name) or local_name in seen or local_name in _RESERVED:
+                notes.append(f"Skipped {remote.name}: the local name conflicts or is invalid")
+                continue
+            seen.add(local_name)
+            tools.append(_bridge_tool(
+                remote,
+                name=local_name,
+                bridge=bridge,
+                timeout=call_timeout,
+                server=server.name,
+                remote_name=remote.name,
+                secrets=list(secrets),
+            ))
+        return LoadedServer(client, tools, notes)
     except BaseException:
         await client.close()
         raise
-    tools: list[BaseTool] = []
-    notes: list[str] = []
-    seen: set[str] = set()
-    for remote in remote_tools:
-        local_name = external_tool_name(server.name, remote.name)
-        if not _TOOL_NAME.fullmatch(local_name) or local_name in seen or local_name in _RESERVED:
-            notes.append(f"Skipped {remote.name}: the local name conflicts or is invalid")
-            continue
-        seen.add(local_name)
-        tools.append(_bridge_tool(
-            remote,
-            name=local_name,
-            bridge=bridge,
-            timeout=call_timeout,
-            server=server.name,
-            remote_name=remote.name,
-            secrets=list(secrets),
-        ))
-    return LoadedServer(client, tools, notes)
 
 
 def _bridge_tool(
@@ -188,14 +181,16 @@ def _bridge_tool(
         if context is not None and context.cancelled:
             raise ToolException("Cancelled by user.")
         try:
-            return bridge.call(
+            return _redact_value(bridge.call(
                 coroutine(**kwargs),
                 timeout=timeout,
                 cancel_event=None if context is None else context.cancel_event,
-            )
+            ), secrets)
         except MCPCallCancelled as exc:
             raise ToolException(redact(str(exc), secrets)) from None
         except MCPCallTimeout as exc:
+            raise ToolException(redact(str(exc), secrets)) from None
+        except Exception as exc:
             raise ToolException(redact(str(exc), secrets)) from None
 
     def _handle(error: ToolException) -> Any:
@@ -205,7 +200,7 @@ def _bridge_tool(
             raise error
         return _redact_value(original_handler(error), secrets)
 
-    description = remote.description or f"MCP tool {remote_name} from server {server}."
+    description = redact_config_text(remote.description or "", secrets) or f"MCP tool {remote_name} from server {server}."
     description = (
         f"{description}\n"
         f"(MCP server {server}, remote tool {remote_name}. "
@@ -227,11 +222,18 @@ def _bridge_tool(
 
 def _redact_value(value: Any, secrets: list[str]) -> Any:
     if isinstance(value, str):
-        return redact(value, secrets)
+        return redact_config_text(value, secrets)
     if isinstance(value, list):
         return [_redact_value(item, secrets) for item in value]
-    if isinstance(value, dict) and isinstance(value.get("text"), str):
-        return {**value, "text": redact(value["text"], secrets)}
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item, secrets) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item, secrets) for key, item in value.items()}
+    if hasattr(value, "model_dump") and hasattr(value, "model_copy"):
+        return value.model_copy(update={
+            key: _redact_value(getattr(value, key), secrets)
+            for key in type(value).model_fields
+        })
     return value
 
 

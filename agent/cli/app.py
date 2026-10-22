@@ -689,11 +689,17 @@ class CliApplication:
         try:
             with self._capture_filesystem_warnings():
                 await self.sessions.start()
-                await self.application.run_async()
+                await self.application.run_async(pre_run=self._start_mcp_connections)
         finally:
             self.sessions.notify_exit()
             await self._stop_git_watch()
             self._io_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _start_mcp_connections(self) -> None:
+        manager = getattr(self.runner, "mcp", None)
+        if manager is not None and manager.list_servers():
+            from agent.cli.mcp_ui import _start_operation
+            _start_operation(self, manager.connect_pending)
 
     @contextmanager
     def _capture_filesystem_warnings(self) -> Iterator[None]:
@@ -1995,6 +2001,13 @@ class CliApplication:
                     self.set_status("Cancelling… · queued messages restored", transient=False)
                 else:
                     self.set_status("Cancelling…", transient=False)
+                self.application.invalidate()
+
+            elif getattr(self, "_mcp_busy", False):
+                self.set_status(
+                    "MCP is still running in the background; wait for completion or timeout",
+                    transient=False,
+                )
                 self.application.invalidate()
 
         @bind("clear_or_exit")

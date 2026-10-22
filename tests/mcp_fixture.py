@@ -78,13 +78,13 @@ def text_of(value: object) -> str:
 class HttpFixture:
     """One Streamable HTTP server on 127.0.0.1 with an ephemeral port."""
 
-    def __init__(self, *, auth: Any | None = None) -> None:
-        self.mcp = build_server(auth)
+    def __init__(self, *, auth: Any | None = None, auth_factory: Any = None) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(128)
         self.port = self._sock.getsockname()[1]
+        self.mcp = build_server(auth_factory(f"http://127.0.0.1:{self.port}") if auth_factory else auth)
         self._server: Any = None
         self._error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name=f"mcp-fixture-{self.port}", daemon=True)

@@ -121,3 +121,39 @@ def test_native_tools_still_run_when_mcp_is_connected(tmp_path: Path, http_mcp: 
     finally:
         if not manager._closed:
             manager.close()
+
+
+def test_stdio_timeout_and_cancel_reap_processes(tmp_path):
+    from tests.mcp_fixture import stdio_argv
+    from tests.test_mcp_manager import _children
+    import os
+
+    for cancel in (False, True):
+        before = _children(os.getpid())
+        manager = MCPManager(tmp_path / f"{cancel}.json", call_timeout=.2 if not cancel else 8,
+                             connect_timeout=8)
+        executable, script = stdio_argv()
+        spawned = set()
+        try:
+            assert manager.add_from_fields(
+                name="local", transport="stdio", command=executable, args=[script],
+            ).ok
+            spawned = _children(os.getpid()) - before
+            sleep = next(t for t in manager.get("local").tools if t.name.endswith("__sleep"))
+            event = threading.Event()
+            timer = threading.Timer(.1, event.set) if cancel else None
+            if timer is not None:
+                timer.start()
+            set_cancel_context(ToolCancelContext("mcp__local__sleep", "call", event))
+            try:
+                outcome = text_of(sleep.invoke({"seconds": 3}))
+                assert ("cancel" if cancel else "timed out") in outcome.lower()
+            finally:
+                clear_cancel_context()
+                if timer is not None:
+                    timer.cancel()
+                    timer.join()
+        finally:
+            manager.close()
+        assert spawned
+        assert not any(Path(f"/proc/{pid}").exists() for pid in spawned)

@@ -112,7 +112,7 @@ async def _sandbox(app: "CliApplication", arg: str) -> None:
 async def _mcp(app: "CliApplication", arg: str) -> None:
     from agent.cli.mcp_ui import handle_mcp_command
 
-    handle_mcp_command(app, arg)
+    await handle_mcp_command(app, arg)
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:

@@ -20,7 +20,9 @@ from agent.mcp.config import (
     atomic_write_text,
     dumps_mcp_file,
     load_mcp_file,
+    parse_server,
     server_from_fields,
+    redact_config_text,
 )
 
 
@@ -79,6 +81,8 @@ class MCPManager:
         self._states: dict[str, ServerState] = {}
         self._retired: list[Any] = []
         self._published_clients: list[Any] = []
+        self._versions: dict[str, int] = {}
+        self._snapshots: dict[int, tuple[list[Any], int]] = {}
         self._revision = 0
         self._published_revision = 0
         self._config_error = ""
@@ -92,24 +96,44 @@ class MCPManager:
 
     def load(self) -> None:
         """Read the catalog. A later load marks the toolset dirty without rewriting the file."""
-        document = load_mcp_file(self.path)
         with self._lock:
-            first = not self._loaded
+            if self._closed:
+                return
+            # Serialize disk reads with our writes, so a slow reload cannot
+            # resurrect a configuration removed while it was being read.
+            document = load_mcp_file(self.path)
+            for name in self._versions:
+                self._versions[name] += 1
             for state in self._states.values():
                 if state.client is not None:
                     self._retired.append(state.client)
-            self._states = {}
             self._document = document
             self._config_error = document.fatal or ""
             self._loaded = True
-            if not first:
-                self._revision += 1
-            servers = () if document.fatal else tuple(document.servers.values())
+            self._revision += 1
+            self._states = {
+                name: ServerState(
+                    config=server,
+                    status=ServerStatus.DISCONNECTED if server.enabled else ServerStatus.DISABLED,
+                )
+                for name, server in document.servers.items()
+            }
         self._close_unpublished()
-        if document.fatal:
-            return
-        for server in servers:
-            self._activate(server, bump=False)
+
+    def connect_pending(self) -> MCPResult:
+        """Startup connections never initiate interactive OAuth authorization."""
+        with self._lock:
+            names = [
+                name for name, state in self._states.items()
+                if state.config.enabled and state.status is ServerStatus.DISCONNECTED
+                and not (state.config.auth and state.config.auth.type == "oauth")
+            ]
+        results = [self.test(name) for name in names]
+        return MCPResult(
+            all(result.ok for result in results), False,
+            "\n".join(result.message for result in results) or
+            "MCP catalog loaded. Use /mcp test <name> to authorize OAuth servers.",
+        )
 
     def list_servers(self) -> list[ServerState]:
         with self._lock:
@@ -152,7 +176,7 @@ class MCPManager:
             return "No MCP servers are configured."
         lines = ["MCP servers run on the host, outside the sandbox."]
         for state in rows:
-            target = state.config.url or _command_line(state.config)
+            target = redact_config_text(state.config.url or _command_line(state.config))
             error = f" — {state.error}" if state.error else ""
             lines.append(
                 f"{state.config.name}  {state.config.transport}  {state.status.value}  "
@@ -171,6 +195,10 @@ class MCPManager:
 
     def add(self, server: MCPServerConfig) -> MCPResult:
         """Save a server and try to connect. Identical repeats are a no-op."""
+        try:
+            server = parse_server(server.name, server.to_json())
+        except MCPConfigError as exc:
+            return MCPResult(False, False, str(exc))
         with self._lock:
             if self._closed:
                 return MCPResult(False, False, "MCP manager is closed")
@@ -184,6 +212,8 @@ class MCPManager:
                     "Remove it before adding it again. The file was not modified.",
                 )
             already = current is not None and current.fingerprint() == server.fingerprint()
+            if already:
+                server = current
             existing = self._states.get(server.name)
             if already and existing is not None and existing.status is ServerStatus.CONNECTED:
                 names = ", ".join(tool.name for tool in existing.tools) or "(none)"
@@ -198,12 +228,9 @@ class MCPManager:
                 except OSError as exc:
                     self._document.servers.pop(server.name, None)
                     return MCPResult(False, False, f"Could not save MCP config: {exc.strerror or exc}")
-        if not server.enabled:
-            with self._lock:
-                self._states[server.name] = ServerState(config=server, status=ServerStatus.DISABLED)
-                self._revision += 1
-            return MCPResult(True, not already, f"Saved MCP server {server.name} as disabled. It exposes no tools.", pending=True)
         state = self._activate(server, bump=True)
+        if state.status is ServerStatus.DISABLED:
+            return MCPResult(True, not already, f"Saved MCP server {server.name} as disabled. It exposes no tools.", pending=True)
         if state.status is ServerStatus.CONNECTED:
             names = ", ".join(tool.name for tool in state.tools) or "(none)"
             prefix = "already configured and connected" if already else "saved and connected"
@@ -242,6 +269,7 @@ class MCPManager:
                 if removed_invalid is not None:
                     self._document.invalid[name] = removed_invalid
                 return MCPResult(False, False, f"Could not save MCP config: {exc.strerror or exc}")
+            self._versions[name] = self._versions.get(name, 0) + 1
             state = self._states.pop(name, None)
             if state is not None and state.client is not None:
                 self._retired.append(state.client)
@@ -272,26 +300,46 @@ class MCPManager:
         return MCPResult(False, False, f"{name} {state.status.value}: {state.error}")
 
     def snapshot(self) -> tuple[int, list[BaseTool]]:
+        """Pin this revision's clients until commit() or discard() finishes the build."""
         with self._lock:
             tools: list[BaseTool] = []
+            clients: list[Any] = []
             for state in self._states.values():
                 if state.config.enabled and state.status is ServerStatus.CONNECTED:
                     tools.extend(state.tools)
+                    clients.append(state.client)
+            _, count = self._snapshots.get(self._revision, ([], 0))
+            self._snapshots[self._revision] = (clients, count + 1)
             return self._revision, tools
+
+    def discard(self, revision: int) -> None:
+        """Release a failed graph build's snapshot without changing publication."""
+        with self._lock:
+            self._discard_locked(revision)
+        self._close_unpublished()
+
+    def _discard_locked(self, revision: int) -> None:
+        item = self._snapshots.get(revision)
+        if item is not None:
+            clients, count = item
+            if count > 1:
+                self._snapshots[revision] = (clients, count - 1)
+            else:
+                self._snapshots.pop(revision)
 
     def commit(self, revision: int) -> None:
         with self._lock:
-            live = [
-                state.client
-                for state in self._states.values()
-                if state.client is not None and state.status is ServerStatus.CONNECTED
-            ]
-            published = set(id(client) for client in live)
+            snapshot = self._snapshots.get(revision)
+            if self._closed or revision != self._revision or snapshot is None:
+                raise RuntimeError("MCP registry changed during graph build; retry at the next safe point")
+            live = snapshot[0]
+            published = {id(client) for client in live}
             for client in self._published_clients:
                 if id(client) not in published:
                     self._retired.append(client)
-            self._published_clients = live
+            self._published_clients = list(live)
             self._published_revision = revision
+            self._discard_locked(revision)
         self._close_unpublished()
 
     def toolset_dirty(self) -> bool:
@@ -306,6 +354,8 @@ class MCPManager:
             clients = [state.client for state in self._states.values() if state.client is not None]
             clients.extend(self._published_clients)
             clients.extend(self._retired)
+            clients.extend(client for clients, _ in self._snapshots.values() for client in clients)
+            self._snapshots.clear()
             self._retired.clear()
             for state in self._states.values():
                 state.client = None
@@ -314,25 +364,22 @@ class MCPManager:
         self._bridge.shutdown()
 
     def _activate(self, server: MCPServerConfig, *, bump: bool) -> ServerState:
-        if not server.enabled:
-            state = ServerState(config=server, status=ServerStatus.DISABLED)
-            with self._lock:
-                previous = self._states.get(server.name)
-                if previous is not None and previous.client is not None:
-                    self._retired.append(previous.client)
-                self._states[server.name] = state
-                if bump:
-                    self._revision += 1
-            self._close_unpublished()
-            return state
+        with self._lock:
+            if self._closed or self._document.servers.get(server.name) is not server:
+                return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
+            version = self._versions.get(server.name, 0) + 1
+            self._versions[server.name] = version
         try:
-            loaded = open_server(
-                server,
-                self._bridge,
-                call_timeout=self._call_timeout,
-                connect_timeout=self._connect_timeout,
-                oauth_callback_timeout=self._oauth_callback_timeout,
-            )
+            if not server.enabled:
+                loaded = None
+            else:
+                loaded = open_server(
+                    server,
+                    self._bridge,
+                    call_timeout=self._call_timeout,
+                    connect_timeout=self._connect_timeout,
+                    oauth_callback_timeout=self._oauth_callback_timeout,
+                )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))
         except (MCPCallTimeout, MCPCallCancelled) as exc:
@@ -355,18 +402,26 @@ class MCPManager:
         else:
             state = ServerState(
                 config=server,
-                status=ServerStatus.CONNECTED,
-                tools=loaded.tools,
-                client=loaded.client,
-                warnings=loaded.warnings,
+                status=ServerStatus.CONNECTED if loaded is not None else ServerStatus.DISABLED,
+                tools=loaded.tools if loaded is not None else [],
+                client=loaded.client if loaded is not None else None,
+                warnings=loaded.warnings if loaded is not None else [],
             )
         with self._lock:
-            previous = self._states.get(server.name)
-            if previous is not None and previous.client is not None and previous.client is not state.client:
-                self._retired.append(previous.client)
-            self._states[server.name] = state
-            if bump:
-                self._revision += 1
+            valid = (
+                not self._closed and self._versions.get(server.name) == version
+                and self._document.servers.get(server.name) is server
+            )
+            if valid:
+                previous = self._states.get(server.name)
+                if previous is not None and previous.client is not None and previous.client is not state.client:
+                    self._retired.append(previous.client)
+                self._states[server.name] = state
+                if bump:
+                    self._revision += 1
+        if not valid:
+            self._close_clients([state.client])
+            return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
         self._close_unpublished()
         return state
 
@@ -376,6 +431,7 @@ class MCPManager:
     def _close_unpublished(self) -> None:
         with self._lock:
             published = {id(client) for client in self._published_clients}
+            published.update(id(client) for clients, _ in self._snapshots.values() for client in clients)
             closing = [client for client in self._retired if id(client) not in published]
             self._retired = [client for client in self._retired if id(client) in published]
         self._close_clients(closing)

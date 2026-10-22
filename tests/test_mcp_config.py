@@ -144,3 +144,81 @@ def test_duplicate_name_with_a_different_config_is_rejected(tmp_path: Path) -> N
         assert path.read_bytes() == saved
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:credential-xyz@example.com/mcp",
+    "https://credential-xyz@example.com/mcp",
+    "https://example.com/mcp?%74oken=credential-xyz",
+])
+def test_url_credentials_are_rejected_without_echoing_value(url):
+    from agent.mcp.config import server_from_fields
+    with pytest.raises(MCPConfigError) as caught:
+        server_from_fields(name="private", transport="streamable_http", url=url)
+    assert "credential-xyz" not in str(caught.value)
+
+
+@pytest.mark.parametrize("args", [
+    ["--token=credential-xyz"], ["--api-key", "credential-xyz"],
+    ["--password", "credential-xyz"], ["--client-secret=credential-xyz"],
+])
+def test_explicit_stdio_secret_flags_are_rejected(args):
+    from agent.mcp.config import server_from_fields
+    with pytest.raises(MCPConfigError) as caught:
+        server_from_fields(name="private", transport="stdio", command="python", args=args)
+    assert "credential-xyz" not in str(caught.value)
+
+
+def test_normal_stdio_args_and_env_names_remain_valid():
+    from agent.mcp.config import server_from_fields, redact_config_text
+    args = ["server.py", "/path/token/cache", "/path/--token=ordinary-file",
+            "--tokenizer", "normal", "--api-key-file", "/keys/local"]
+    config = server_from_fields(name="local", transport="stdio", command="python", args=args,
+                                env_passthrough=["MCP_TOKEN"])
+    assert config.args == tuple(args)
+    assert redact_config_text(" ".join(args)) == " ".join(args)
+
+
+@pytest.mark.parametrize("target", [
+    "python server.py --token=credential-xyz",
+    "python server.py --password 'credential-xyz with spaces'",
+    "https://user:credential-xyz@word@example.com/mcp",
+    "https://example.com/mcp?token=credential-xyz",
+    "https://example.com/mcp?%74oken=credential-xyz",
+])
+def test_public_config_rendering_is_shared_and_hides_credentials(target):
+    from agent.mcp.config import redact_config_text
+    from agent.cli.mcp_ui import _summary
+    from agent.cli.interactions import InteractionController
+    transport = "streamable_http" if target.startswith("http") else "stdio"
+    assert "credential-xyz" not in redact_config_text(target)
+    assert "credential-xyz" not in _summary({"transport": transport, "target": target})
+    card = InteractionController.approval([{"name": "mcp_add", "args": {
+        "transport": transport, "command": target, "url": target,
+    }}])
+    assert "credential-xyz" not in card.question
+
+
+@pytest.mark.parametrize("url", ["https://[broken/mcp", "https://host:invalid/mcp"])
+def test_invalid_authority_is_a_config_error_without_leaking_input(url):
+    from agent.mcp.config import server_from_fields
+    with pytest.raises(MCPConfigError, match="invalid URL authority"):
+        server_from_fields(name="local", transport="streamable_http", url=url)
+
+
+
+def test_invalid_utf8_catalog_is_reported_and_never_overwritten(tmp_path):
+    from agent.mcp.manager import MCPManager
+
+    path = tmp_path / "mcp.json"
+    content = b'{"servers": {}}\xff'
+    path.write_bytes(content)
+    manager = MCPManager(path)
+    try:
+        manager.load()
+        assert "UTF-8" in manager.config_error
+        result = manager.add_from_fields(name="local", transport="stdio", command="python")
+        assert not result.ok
+        assert path.read_bytes() == content
+    finally:
+        manager.close()
