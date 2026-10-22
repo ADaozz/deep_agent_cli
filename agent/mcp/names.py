@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import hashlib
+import re
 
 MCP_ADD = "mcp_add"
 MCP_LIST = "mcp_list"
@@ -13,7 +15,20 @@ HOST_APPROVAL: dict[str, list[str]] = {"allowed_decisions": ["approve", "reject"
 
 
 def external_tool_name(server: str, remote: str) -> str:
-    return f"{EXTERNAL_PREFIX}{server}__{remote}"
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,32}", server):
+        raise ValueError("invalid MCP server name")
+    if not isinstance(remote, str) or not remote:
+        raise ValueError("remote tool name must be a non-empty string")
+    prefix = f"{EXTERNAL_PREFIX}{server}__"
+    budget = 80 - len(prefix)
+    if len(remote) <= budget and re.fullmatch(r"[A-Za-z0-9_-]+", remote):
+        return prefix + remote
+    try:
+        digest = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:12]
+    except UnicodeError:
+        raise ValueError("remote tool name is not valid UTF-8") from None
+    slug = re.sub(r"[^A-Za-z0-9_-]", "_", remote)
+    return prefix + slug[:budget - len(digest) - 1] + "_" + digest
 
 
 def is_external_mcp_tool(name: str) -> bool:

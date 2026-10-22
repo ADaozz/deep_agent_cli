@@ -340,3 +340,90 @@ def test_close_during_real_stdio_handshake_reaps_child(tmp_path):
         assert not manager._bridge._thread.is_alive()
     finally:
         manager.close()
+
+
+def test_remote_aliases_route_independently_and_survive_reconnect_and_restart(tmp_path):
+    from agent.mcp.names import external_tool_name
+    from tests.mcp_fixture import COMPAT_TOOL_NAMES, build_compat_server
+
+    fixture = HttpFixture(server_factory=build_compat_server)
+    path = tmp_path / "mcp.json"
+    manager = MCPManager(path, connect_timeout=5)
+    try:
+        for server in ("alpha", "beta"):
+            assert manager.add_from_fields(name=server, transport="streamable_http", url=fixture.url).ok
+        expected = {
+            external_tool_name(server, remote)
+            for server in ("alpha", "beta") for remote in COMPAT_TOOL_NAMES
+        }
+        assert len(expected) == 2 * len(COMPAT_TOOL_NAMES)
+
+        def check():
+            found = set()
+            for server in ("alpha", "beta"):
+                state = manager.get(server)
+                assert not state.warnings
+                for tool in state.tools:
+                    found.add(tool.name)
+                    raw = tool.metadata["deep_agent_mcp"]["remote_name"]
+                    assert raw in COMPAT_TOOL_NAMES
+                    assert tool.name == external_tool_name(server, raw)
+                    assert f"{raw}:routed" in text_of(tool.invoke({"value": "routed"}))
+            assert found == expected
+
+        check()
+        assert manager.test("alpha").ok
+        check()
+        manager.close()
+        manager = MCPManager(path, connect_timeout=5)
+        manager.load()
+        assert manager.connect_pending().ok
+        check()
+    finally:
+        manager.close()
+        fixture.close()
+
+
+def test_unmappable_and_duplicate_tools_are_reported_to_user(tmp_path, monkeypatch):
+    from langchain_core.tools import StructuredTool
+    from agent.cli.mcp_ui import _show_tools
+    from agent.cli.state import CliState
+    from types import SimpleNamespace
+
+    async def call(value: str) -> str:
+        return value
+
+    tools = [StructuredTool.from_function(
+        coroutine=call, name="placeholder", description="test",
+    ).model_copy(update={"name": name}) for name in ("", "duplicate", "duplicate")]
+
+    class Client:
+        async def __aenter__(self):
+            return self
+        async def close(self):
+            pass
+
+    class Adapter:
+        def __init__(self, target):
+            self.client = Client()
+        async def list_tools(self, **kwargs):
+            return tools
+
+    monkeypatch.setattr("agent.mcp.adapter.MCPAdapter", Adapter)
+    manager = MCPManager(tmp_path / "mcp.json")
+    try:
+        result = manager.add_from_fields(name="local", transport="stdio", command="fixture")
+        assert result.ok
+        assert "non-empty" in result.message and "conflicts" in result.message
+        assert "non-empty" in manager.test("local").message
+        state = manager.get("local")
+        assert len(state.tools) == 1
+        assert len(state.warnings) == 2
+        assert "non-empty" in manager.describe()
+        assert "conflicts" in manager.describe()
+        app = SimpleNamespace(state=CliState())
+        _show_tools(app, manager, "local")
+        assert "non-empty" in app.state.blocks[-1].content
+        assert "conflicts" in app.state.blocks[-1].content
+    finally:
+        manager.close()

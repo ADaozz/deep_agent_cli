@@ -222,3 +222,37 @@ def test_invalid_utf8_catalog_is_reported_and_never_overwritten(tmp_path):
         assert path.read_bytes() == content
     finally:
         manager.close()
+
+
+@pytest.mark.parametrize("remote", [
+    "read_file", "read.file", "read file", "读取文件", "x" * 200,
+])
+def test_remote_alias_is_stable_and_fits_maximum_server_name(remote):
+    import re
+    from agent.mcp.names import external_tool_name
+
+    server = "s" * 33
+    config = server_from_fields(name=server, transport="stdio", command="fixture")
+    first = external_tool_name(config.name, remote)
+    assert first == external_tool_name(config.name, remote)
+    assert first.startswith(f"mcp__{server}__")
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,80}", first)
+    if remote == "read_file":
+        assert first == f"mcp__{server}__read_file"
+
+
+def test_remote_aliases_are_unique_for_normalization_and_truncation():
+    from agent.mcp.names import external_tool_name
+
+    names = ["read.file", "read_file", "read file", "读取文件", "read-file",
+             "x" * 100 + "a", "x" * 100 + "b"]
+    aliases = [external_tool_name("local", name) for name in names]
+    assert len(set(aliases)) == len(names)
+    assert external_tool_name("other", "read.file") not in aliases
+
+
+@pytest.mark.parametrize("name", ["", "\ud800"])
+def test_unsafe_remote_names_have_explicit_mapping_errors(name):
+    from agent.mcp.names import external_tool_name
+    with pytest.raises(ValueError, match="remote tool name"):
+        external_tool_name("local", name)

@@ -48,11 +48,60 @@ class SyncAsyncBridge:
         timeout: float | None,
         cancel_event: threading.Event | None = None,
     ) -> Any:
-        if self._closed:
-            coro.close()
-            raise RuntimeError("MCP bridge is closed")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = self._submit(coro)
         return self._wait(future, timeout=timeout, cancel_event=cancel_event)
+
+    def _submit(self, coro: Any) -> Any:
+        try:
+            if self._closed:
+                raise RuntimeError("MCP bridge is closed")
+            return asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except RuntimeError:
+            coro.close()
+            raise
+
+    async def acall(
+        self,
+        coro: Any,
+        *,
+        timeout: float | None,
+        cancel_event: threading.Event | None = None,
+    ) -> Any:
+        """Await the existing bridge loop without blocking the caller's loop."""
+        future = self._submit(coro)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise MCPCallCancelled("Cancelled by user.")
+                if future.done():
+                    try:
+                        return future.result()
+                    except FutureCancelled as exc:
+                        raise MCPCallCancelled("Cancelled by user.") from exc
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise MCPCallTimeout(f"MCP call timed out after {timeout:.0f}s")
+                await asyncio.sleep(.05 if remaining is None else min(.05, remaining))
+        except (asyncio.CancelledError, MCPCallCancelled, MCPCallTimeout):
+            future.cancel()
+            # Concurrent Future cancellation is acknowledged before the asyncio
+            # task has unwound. Join only this request, on its owning loop.
+            async def join_request() -> None:
+                tasks = [
+                    task for task in asyncio.all_tasks()
+                    if task.get_coro() is coro and not task.done()
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(self._submit(join_request())), timeout=2,
+                )
+            except (TimeoutError, RuntimeError):
+                pass  # A closing manager drains the bridge; cleanup is bounded.
+            raise
 
     def _wait(
         self,

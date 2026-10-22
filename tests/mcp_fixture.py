@@ -42,6 +42,20 @@ def build_server(auth: Any | None = None) -> FastMCP:
         return "awake"
 
     @mcp.tool
+    async def wait_for_cancel(started: str, cancelled: str) -> str:
+        """Wait until the MCP client sends cancellation."""
+        Path(started).write_text("started")
+        try:
+            await asyncio.sleep(30)
+            return "finished"
+        except asyncio.CancelledError:
+            import anyio
+            with anyio.CancelScope(shield=True):
+                await asyncio.sleep(.02)  # Exercise asynchronous server cleanup.
+                Path(cancelled).write_text("cancelled")
+            raise
+
+    @mcp.tool
     def write_marker(path: str) -> str:
         """Write a marker file on the host."""
         Path(path).write_text("marker", encoding="utf-8")
@@ -78,13 +92,13 @@ def text_of(value: object) -> str:
 class HttpFixture:
     """One Streamable HTTP server on 127.0.0.1 with an ephemeral port."""
 
-    def __init__(self, *, auth: Any | None = None, auth_factory: Any = None) -> None:
+    def __init__(self, *, auth: Any | None = None, auth_factory: Any = None, server_factory: Any = None) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(128)
         self.port = self._sock.getsockname()[1]
-        self.mcp = build_server(auth_factory(f"http://127.0.0.1:{self.port}") if auth_factory else auth)
+        self.mcp = (server_factory or build_server)(auth_factory(f"http://127.0.0.1:{self.port}") if auth_factory else auth)
         self._server: Any = None
         self._error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name=f"mcp-fixture-{self.port}", daemon=True)
@@ -137,3 +151,24 @@ class HttpFixture:
 
 if __name__ == "__main__":
     asyncio.run(build_server().run_stdio_async(show_banner=False, log_level="error"))
+
+
+COMPAT_TOOL_NAMES = (
+    "read.file", "read_file", "read file", "读取文件",
+    "long_tool_" + "a" * 110 + "x", "long_tool_" + "a" * 110 + "y",
+)
+
+
+def build_compat_server(auth: Any | None = None) -> FastMCP:
+    mcp = FastMCP("compatibility-fixture", auth=auth)
+
+    def implementation(name):
+        async def call(value: str) -> str:
+            return f"{name}:{value}"
+        return call
+
+    for name in COMPAT_TOOL_NAMES:
+        mcp.tool(name=name, description="Read a value from the original remote tool.")(
+            implementation(name),
+        )
+    return mcp
