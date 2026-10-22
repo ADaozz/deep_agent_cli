@@ -148,7 +148,7 @@ async def test_busy_run_keeps_the_current_graph(tmp_path: Path, http_mcp: HttpFi
         runner.close()
 
 
-def test_approval_card_shows_the_host_command_and_hides_tokens() -> None:
+def test_approval_card_shows_host_config_without_guessing_credentials() -> None:
     stdio = InteractionController.approval([{
         "name": "mcp_add",
         "toolCallId": "call-1",
@@ -171,10 +171,10 @@ def test_approval_card_shows_the_host_command_and_hides_tokens() -> None:
             "token_env": "INTERNAL_MCP_TOKEN",
         },
     }])
-    assert "super-secret" not in bearer.question
+    assert "https://example.com/mcp?token=super-secret" in bearer.question
     assert "INTERNAL_MCP_TOKEN" in bearer.question
-    remove = InteractionController.approval([{"name": "mcp_remove", "args": {"name": "local"}}])
-    assert "local" in remove.question
+    remove = InteractionController.approval([{"name": "mcp_remove", "args": {"name": "secret-server"}}])
+    assert "secret-server" in remove.question
     assert "unchanged" in remove.question
 
 
@@ -267,7 +267,7 @@ def test_mcp_approval_preview_preserves_structure_and_original_arguments():
     assert card.tool_call_ids == ["original-id"]
 
 
-def test_nested_mcp_credentials_and_bearer_strings_are_redacted():
+def test_mcp_preview_preserves_unknown_credential_fields_and_authorization_text():
     from agent.cli.interactions import mcp_arguments_preview
 
     values = ["api_key", "apiKey", "token", "access_token", "Authorization", "password",
@@ -276,9 +276,9 @@ def test_nested_mcp_credentials_and_bearer_strings_are_redacted():
         key: f"fake-secret-{index}" for index, key in enumerate(values)
     }, "headers": ["Authorization: Bearer fake-bearer-value"], "token_count": 9}
     preview = mcp_arguments_preview(args, expanded=True)
-    assert "auth:\n    api_key: [redacted]" in preview
-    assert all(f"fake-secret-{index}" not in preview for index in range(len(values)))
-    assert "fake-bearer-value" not in preview
+    assert "auth:\n    api_key: fake-secret-0" in preview
+    assert all(f"fake-secret-{index}" in preview for index in range(len(values)))
+    assert "Authorization: Bearer fake-bearer-value" in preview
     assert "repo: ADaozz/deep_agent_cli" in preview
     assert "token_count: 9" in preview
 
@@ -295,7 +295,7 @@ def test_multiple_mcp_approvals_keep_arguments_with_their_call():
     assert card.tool_call_ids == ["first", "second"]
 
 
-def test_mcp_argument_previews_have_safe_bounded_expansion():
+def test_mcp_argument_previews_have_bounded_expansion_without_credential_guessing():
     from agent.cli.interactions import mcp_arguments_preview
     from agent.cli.state import ToolBlock
     from agent.cli.rendering import render_transcript
@@ -313,8 +313,8 @@ def test_mcp_argument_previews_have_safe_bounded_expansion():
         state = CliState(blocks=[ToolBlock("private", "mcp__local__write", args, status="waiting")],
                          tools_expanded=expanded)
         rendered = render_transcript(state, 80)
-        assert "fake-private-value" not in rendered
-        assert "[redacted]" in rendered
+        assert "fake-private-value" in rendered
+        assert "[redacted]" not in rendered
     assert args["auth"]["api_key"] == "fake-private-value"
     assert len(args["payload"]) == 100000
 
@@ -328,7 +328,8 @@ def test_mcp_preview_strips_terminal_controls_and_cannot_forge_keys():
     result = mcp_arguments_preview(args, expanded=True)
     assert "visible" in result
     assert "\x1b" not in result and "\x00" not in result and "\u202e" not in result
-    assert "clipboard" not in result and "fake-ansi-token" not in result
+    assert "clipboard" not in result
+    assert "Bearer fake-ansi-token" in result
     import json
     assert json.dumps(r"bad\npassword: forged", ensure_ascii=False) in result
     assert r"plain\nline\tvalue" in result

@@ -187,6 +187,7 @@ def test_oauth_success_authorizes_discovers_and_calls_real_server(tmp_path, monk
 
 
 def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkeypatch, http_mcp, caplog):
+    import json
     from tests.mcp_fixture import stdio_argv
 
     token = "credential-xyz-echo-test"
@@ -207,6 +208,14 @@ def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkey
             result = echo.invoke({"text": token})
             assert token not in str(result)
             assert "[redacted]" in str(result)
+            unknown = '{  "api_key": "unknown", "Authorization": "Bearer unknown", "payload": "' + "A" * 600 + '" }\n'
+            for text in (unknown, json.dumps({"token": token, "unknown": unknown})):
+                args = {"text": text}
+                result = echo.invoke(args)
+                returned = next(block["text"] for block in result if block["type"] == "text")
+                assert returned == text.replace(token, "[redacted]")
+                assert json.loads(returned) == json.loads(text.replace(token, "[redacted]"))
+                assert args == {"text": text}
         assert token not in manager.describe()
         from agent.mcp.middleware import MCPMiddleware
         # mcp_list uses the same public rendering as the CLI.

@@ -406,7 +406,7 @@ def _mcp_tui(tmp_path, mode="call"):
 
 @pytest.mark.parametrize("permission", ["ask", "allow"])
 @pytest.mark.parametrize("approve", [False, True])
-def test_real_pty_host_mcp_arguments_redacted_but_execution_unchanged(tmp_path, permission, approve):
+def test_real_pty_host_mcp_arguments_visible_and_execution_unchanged(tmp_path, permission, approve):
     tui = _mcp_tui(tmp_path)
     marker = tmp_path / "host-marker"
     try:
@@ -420,17 +420,18 @@ def test_real_pty_host_mcp_arguments_redacted_but_execution_unchanged(tmp_path, 
         assert state["interrupt"] == "waiting_confirmation"
         assert "nonce: TUI_E2E_APPROVE_002" in state["rendered_interaction"]
         assert "Execution: Host (outside sandbox)" in state["question"]
-        assert "[redacted]" in state["question"]
+        assert "FAKE_TUI_API_SECRET" in state["question"]
+        assert "Bearer FAKE_TUI_BEARER" in state["question"]
         assert not marker.exists()
         # Existing detail view is reached without answering the pending approval.
         tui.send("\x1b")
         tui.wait(lambda state: state["interaction"] is None and state["interrupt"])
         tui.send("\x0f")  # Ctrl+O
         state = tui.wait(lambda state: state["expanded"])
-        assert "api_key: [redacted]" in state["rendered_transcript"]
-        assert "Authorization: [redacted]" in state["rendered_transcript"]
+        assert "api_key: FAKE_TUI_API_SECRET" in state["rendered_transcript"]
+        assert "Authorization: Bearer FAKE_TUI_BEARER" in state["rendered_transcript"]
         for secret in ("FAKE_TUI_API_SECRET", "FAKE_TUI_BEARER"):
-            assert secret not in state["rendered_transcript"]
+            assert secret in state["rendered_transcript"]
         tui.send("\x1bOQ")  # F2 reopens the same approval and toolCallId
         tui.wait(lambda state: state["interaction"] == "approval")
         tui.send("\x1b[B\r" if approve else "\r")
@@ -448,7 +449,7 @@ def test_real_pty_host_mcp_arguments_redacted_but_execution_unchanged(tmp_path, 
     finally:
         tui.close()
     for secret in (b"FAKE_TUI_API_SECRET", b"FAKE_TUI_BEARER"):
-        assert secret not in tui.terminal
+        assert secret in tui.terminal
 
 
 def _mcp_add_wizard(tui, command):

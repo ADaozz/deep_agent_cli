@@ -1,10 +1,12 @@
 # MCP host approval preview acceptance — 2026-10-22
 
+Historical snapshot: this report records PR #22 at commit `55af2b1`. The subsequent explicit-secret simplification removes credential-key/text guessing and UI redaction; screenshots below document the earlier behavior.
+
 Implementation baseline: latest `origin/main`, `e73d616` (`fix: unify async MCP safeguards and stabilize remote tool aliases (#21)`), confirmed before creating `fix/mcp-host-approval-preview`.
 
 ## Changes
 
-- `agent/cli/interactions.py`: bounded, indented MCP argument previews, recursive credential-key redaction, existing `redact_config_text()` string rules, ANSI/control filtering, and independent arguments for each tool call. `mcp_confirm` renders plain Rich `Text`; other non-approval interactions retain Markdown.
+- `agent/cli/interactions.py`: bounded, indented MCP argument previews, recursive credential-key redaction, then-existing MCP configuration text-redaction rules, ANSI/control filtering, and independent arguments for each tool call. `mcp_confirm` renders plain Rich `Text`; other non-approval interactions retain Markdown.
 - `agent/cli/rendering.py`: collapsed and Ctrl+O expanded external MCP cards use the same safe argument renderer, including paths that previously became generic tool targets.
 - `tests/test_mcp_cli.py`: seven additional tests cover structure, multiple calls, redaction, bearer strings, bounded expansion, controls, cycles/depth, and multiline confirmation.
 - `tests/test_tui_pty.py`: five additional actual PTY cases cover approval/rejection in ASK and ALLOW, safe Ctrl+O details, unchanged raw execution arguments, and narrow-screen add/cancel/connect.
