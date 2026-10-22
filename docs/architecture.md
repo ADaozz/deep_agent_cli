@@ -212,7 +212,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 隔离边界
 
-默认工作区和 `/skills` 可写。`restricted` 下系统运行时目录只读，`/tmp` 与 `/home` 是 `~/.deep-agent/sandbox/` 下的持久目录；工作区仍通过它的真实绝对路径挂载。`full-access` 映射当前文件系统，并把 Agent 安装目录重新挂成只读、用权限 `000` 的 tmpfs 遮住配置目录。沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
+默认工作区和 `/skills` 可写。`restricted` 下系统运行时目录只读，`/tmp` 与 `/home` 是 `~/.deep-agent/sandbox/` 下的持久目录；工作区仍通过它的真实绝对路径挂载。`full-access` 映射当前文件系统，再把 Agent 安装目录重新挂成只读、用权限 `000` 的 tmpfs 遮住配置目录。两种模式的 `/dev` 默认都是沙箱自己的设备 tmpfs；宿主设备节点由 `extra_read_write_mounts` 的 `dev_bind` 覆盖。沙箱使用独立 PID、IPC、UTS namespace，无网实例另有 network namespace。环境变量按配置白名单传入，额外挂载和环境设置会影响实际可访问范围。完整挂载与配置见 [sandbox.md](sandbox.md)。
 
 无网实例阻断直接 IP 网络访问，不承诺阻断一切间接联网；共享工作区中的 Unix socket、FIFO 或普通文件可能成为通信通道。当前也没有资源硬配额。部署边界以 [sandbox.md](sandbox.md#网络) 为准，不能靠提示词补足。
 
