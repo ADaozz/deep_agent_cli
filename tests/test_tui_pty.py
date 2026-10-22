@@ -342,3 +342,148 @@ def test_real_pty_mcp_connection_does_not_block_input(tmp_path):
         tui.wait(lambda state: "MCP connection timeout" in state["transcript"])
     finally:
         tui.close()
+
+# Real host stdio service, scripted model, and the production TUI/approval handlers.
+# All credential literals below are deliberately fake.
+_MCP_TUI_SERVER = r'''
+import asyncio, json
+from pathlib import Path
+from fastmcp import FastMCP
+
+server = FastMCP("tui-e2e")
+@server.tool
+def write_marker(nonce: str, path: str, auth: dict) -> str:
+    """Write the supplied nonce on the host."""
+    Path(path).write_text(nonce)
+    Path(path + ".args.json").write_text(json.dumps({"nonce": nonce, "path": path, "auth": auth}))
+    return "wrote marker"
+asyncio.run(server.run_stdio_async(show_banner=False, log_level="error"))
+'''
+
+_MCP_TUI_PROBE = _PROBE.replace(
+    "runner = AgentRunner(model=scripted_model(messages), sandbox_config=config)",
+    """
+    from agent.mcp.manager import MCPManager
+    service = workspace.parent / 'server_with_[brackets].py'
+    marker = workspace.parent / 'host-marker'
+    manager = MCPManager(workspace / 'mcp.json', connect_timeout=8, call_timeout=8)
+    if sys.argv[3] != 'wizard':
+        added = manager.add_from_fields(name='tui_e2e', transport='stdio', command=sys.executable,
+                                        args=[str(service)])
+        assert added.ok, added.message
+    arguments = {'nonce':'TUI_E2E_APPROVE_002', 'path':str(marker),
+                 'auth':{'api_key':'FAKE_TUI_API_SECRET', 'Authorization':'Bearer FAKE_TUI_BEARER'}}
+    messages = [AIMessage(content='', tool_calls=[{'id':'mcp-original-id',
+                'name':'mcp__tui_e2e__write_marker', 'args':arguments}]),
+                AIMessage(content='MCP task finished')]
+    runner = AgentRunner(model=scripted_model(messages), sandbox_config=config, mcp_manager=manager)
+""".strip(),
+).replace(
+    "if len(sys.argv) > 3:", "if False:",
+).replace(
+    "'status':app.state.status,",
+    """'status':app.state.status,
+                'expanded':app.state.tools_expanded,
+                'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
+                'rendered_transcript':render_transcript(app.state, 60),""",
+).replace(
+    "from agent.cli.app import CliApplication",
+    "from agent.cli.app import CliApplication\nfrom agent.cli.rendering import render_interaction, render_transcript",
+)
+
+
+def _mcp_tui(tmp_path, mode="call"):
+    (tmp_path / "server_with_[brackets].py").write_text(_MCP_TUI_SERVER)
+    app = Tui(tmp_path, probe=_MCP_TUI_PROBE, extra_args=(mode,))
+    expected = "Ready" if mode == "wizard" else "MCP operation finished"
+    try:
+        app.wait(lambda state: state["status"] == expected, timeout=20)
+    except BaseException:
+        app.close()
+        raise
+    return app
+
+
+@pytest.mark.parametrize("permission", ["ask", "allow"])
+@pytest.mark.parametrize("approve", [False, True])
+def test_real_pty_host_mcp_arguments_redacted_but_execution_unchanged(tmp_path, permission, approve):
+    tui = _mcp_tui(tmp_path)
+    marker = tmp_path / "host-marker"
+    try:
+        if permission == "allow":
+            tui.send("/permission allow\r")
+            tui.wait(lambda state: state["interaction"] == "permission_confirm")
+            tui.send("ALLOW\r")
+            tui.wait(lambda state: state["permission"] == "allow")
+        tui.send("write the host marker\r")
+        state = tui.wait(lambda state: state["interaction"] == "approval", timeout=15)
+        assert state["interrupt"] == "waiting_confirmation"
+        assert "nonce: TUI_E2E_APPROVE_002" in state["rendered_interaction"]
+        assert "Execution: Host (outside sandbox)" in state["question"]
+        assert "[redacted]" in state["question"]
+        assert not marker.exists()
+        # Existing detail view is reached without answering the pending approval.
+        tui.send("\x1b")
+        tui.wait(lambda state: state["interaction"] is None and state["interrupt"])
+        tui.send("\x0f")  # Ctrl+O
+        state = tui.wait(lambda state: state["expanded"])
+        assert "api_key: [redacted]" in state["rendered_transcript"]
+        assert "Authorization: [redacted]" in state["rendered_transcript"]
+        for secret in ("FAKE_TUI_API_SECRET", "FAKE_TUI_BEARER"):
+            assert secret not in state["rendered_transcript"]
+        tui.send("\x1bOQ")  # F2 reopens the same approval and toolCallId
+        tui.wait(lambda state: state["interaction"] == "approval")
+        tui.send("\x1b[B\r" if approve else "\r")
+        tui.wait(lambda state: state["interrupt"] is None and state["status"] == "Ready", timeout=15)
+        if approve:
+            assert marker.read_text() == "TUI_E2E_APPROVE_002"
+            actual = json.loads(Path(str(marker) + ".args.json").read_text())
+            assert actual["auth"] == {
+                "api_key": "FAKE_TUI_API_SECRET", "Authorization": "Bearer FAKE_TUI_BEARER",
+            }
+            assert actual["nonce"] == "TUI_E2E_APPROVE_002"
+        else:
+            assert not marker.exists()
+            assert not Path(str(marker) + ".args.json").exists()
+    finally:
+        tui.close()
+    for secret in (b"FAKE_TUI_API_SECRET", b"FAKE_TUI_BEARER"):
+        assert secret not in tui.terminal
+
+
+def _mcp_add_wizard(tui, command):
+    tui.send("/mcp add\r")
+    tui.wait(lambda state: state["interaction"] == "mcp_name")
+    tui.send("tui_e2e\r")
+    tui.wait(lambda state: state["interaction"] == "mcp_transport")
+    tui.send("\x1b[B\r")
+    tui.wait(lambda state: state["interaction"] == "mcp_target")
+    tui.send(command + "\r")
+    return tui.wait(lambda state: state["interaction"] == "mcp_confirm")
+
+
+def test_real_pty_mcp_add_confirmation_multiline_cancel_and_save(tmp_path):
+    import shlex
+
+    tui = _mcp_tui(tmp_path, "wizard")
+    command = shlex.join([sys.executable, str(tmp_path / "server_with_[brackets].py")])
+    try:
+        # A real SIGWINCH exercises narrow-terminal wrapping as well as Rich text.
+        fcntl.ioctl(tui.master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 60, 0, 0))
+        os.kill(tui.process.pid, signal.SIGWINCH)
+        state = _mcp_add_wizard(tui, command)
+        lines = state["rendered_interaction"].splitlines()
+        assert any(line.strip() == "Name: tui_e2e" for line in lines)
+        assert any(line.strip() == "Transport: stdio" for line in lines)
+        assert "[brackets]" in state["rendered_interaction"]
+        assert command in state["question"]
+        tui.send("\r")  # default Cancel
+        tui.wait(lambda state: state["interaction"] is None)
+        assert not (tui.workspace / "mcp.json").exists()
+        _mcp_add_wizard(tui, command)
+        tui.send("\x1b[B\r")
+        tui.wait(lambda state: "connected" in state["transcript"].lower(), timeout=20)
+        saved = json.loads((tui.workspace / "mcp.json").read_text())
+        assert "tui_e2e" in str(saved)
+    finally:
+        tui.close()

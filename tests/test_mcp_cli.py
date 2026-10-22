@@ -245,3 +245,131 @@ async def test_real_prompt_toolkit_loop_remains_responsive_and_busy_until_worker
                 app.application.exit()
             await task
             runner.close()
+
+
+def test_mcp_approval_preview_preserves_structure_and_original_arguments():
+    from copy import deepcopy
+
+    args = {"nonce": "TUI_E2E_APPROVE_002", "path": "/tmp/test.txt", "count": 7,
+            "enabled": True, "items": [1, False, {"target": "repo"}], "empty": None}
+    original = deepcopy(args)
+    call = {"name": "mcp__tui_e2e__write_marker", "toolCallId": "original-id", "args": args}
+    card = InteractionController.approval([call])
+    assert "Execution: Host (outside sandbox)" in card.question
+    assert "nonce: TUI_E2E_APPROVE_002" in card.question
+    assert "path: /tmp/test.txt" in card.question
+    assert "count: 7" in card.question and "enabled: true" in card.question
+    from agent.cli.interactions import mcp_arguments_preview
+    expanded = mcp_arguments_preview(args, expanded=True)
+    assert "- false" in expanded and "target: repo" in expanded and "empty: null" in expanded
+    assert args == original
+    assert card.calls[0]["args"] is args
+    assert card.tool_call_ids == ["original-id"]
+
+
+def test_nested_mcp_credentials_and_bearer_strings_are_redacted():
+    from agent.cli.interactions import mcp_arguments_preview
+
+    values = ["api_key", "apiKey", "token", "access_token", "Authorization", "password",
+              "secret", "client_secret", "private_key", "cookie", "credential"]
+    args = {"repo": "ADaozz/deep_agent_cli", "auth": {
+        key: f"fake-secret-{index}" for index, key in enumerate(values)
+    }, "headers": ["Authorization: Bearer fake-bearer-value"], "token_count": 9}
+    preview = mcp_arguments_preview(args, expanded=True)
+    assert "auth:\n    api_key: [redacted]" in preview
+    assert all(f"fake-secret-{index}" not in preview for index in range(len(values)))
+    assert "fake-bearer-value" not in preview
+    assert "repo: ADaozz/deep_agent_cli" in preview
+    assert "token_count: 9" in preview
+
+
+def test_multiple_mcp_approvals_keep_arguments_with_their_call():
+    card = InteractionController.approval([
+        {"name": "mcp__alpha__write", "toolCallId": "first", "args": {"nonce": "FIRST"}},
+        {"name": "mcp__beta__remove", "toolCallId": "second", "args": {"path": "/tmp/SECOND"}},
+    ])
+    first, second = card.question.split("Tool: mcp__beta__remove")
+    assert "nonce: FIRST" in first and "/tmp/SECOND" not in first
+    assert "path: /tmp/SECOND" in second and "FIRST" not in second
+    assert card.question.count("Execution: Host") == 2
+    assert card.tool_call_ids == ["first", "second"]
+
+
+def test_mcp_argument_previews_have_safe_bounded_expansion():
+    from agent.cli.interactions import mcp_arguments_preview
+    from agent.cli.state import ToolBlock
+    from agent.cli.rendering import render_transcript
+
+    args = {"payload": "A" * 100000, "auth": {"api_key": "fake-private-value"},
+            "tail": "AFTER_PAYLOAD"}
+    short = mcp_arguments_preview(args)
+    full = mcp_arguments_preview(args, expanded=True)
+    assert len(short) < 1000 and len(short.splitlines()) <= 9
+    assert len(full) < 8500 and len(full.splitlines()) <= 81
+    assert "omitted" in short and "omitted" in full
+    assert len(full) > len(short)
+    assert "AFTER_PAYLOAD" in full
+    for expanded in (False, True):
+        state = CliState(blocks=[ToolBlock("private", "mcp__local__write", args, status="waiting")],
+                         tools_expanded=expanded)
+        rendered = render_transcript(state, 80)
+        assert "fake-private-value" not in rendered
+        assert "[redacted]" in rendered
+    assert args["auth"]["api_key"] == "fake-private-value"
+    assert len(args["payload"]) == 100000
+
+
+def test_mcp_preview_strips_terminal_controls_and_cannot_forge_keys():
+    from agent.cli.interactions import mcp_arguments_preview
+
+    args = {"nonce": "\x1b[31mvisible\x1b[0m\x1b]52;c;clipboard\x07\x00\u202e",
+            "bad\npassword: forged": "plain\nline\tvalue",
+            "authorization": "\x1b[32mBearer fake-ansi-token"}
+    result = mcp_arguments_preview(args, expanded=True)
+    assert "visible" in result
+    assert "\x1b" not in result and "\x00" not in result and "\u202e" not in result
+    assert "clipboard" not in result and "fake-ansi-token" not in result
+    import json
+    assert json.dumps(r"bad\npassword: forged", ensure_ascii=False) in result
+    assert r"plain\nline\tvalue" in result
+
+
+def test_mcp_preview_depth_cycles_and_large_objects_are_bounded():
+    from agent.cli.interactions import mcp_arguments_preview
+
+    args = {}
+    args["self"] = args
+    assert "omitted" in mcp_arguments_preview(args)
+    large = {f"long-key-{i}" * 10: "x" * 1000 for i in range(10000)}
+    result = mcp_arguments_preview(large)
+    assert len(result) < 1000 and "omitted" in result
+    nested = {"leaf": "NOT_AT_THIS_DEPTH"}
+    for _ in range(20):
+        nested = {"nested": nested}
+    assert "NOT_AT_THIS_DEPTH" not in mcp_arguments_preview(nested, expanded=True)
+
+
+def test_mcp_confirm_preserves_multiline_plain_text_and_other_panels_use_markdown():
+    from rich.markdown import Markdown
+    from rich.text import Text
+    from agent.cli.mcp_ui import _ask_confirm
+    from agent.cli.rendering import render_interaction
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(set_status=lambda *a, **kw: None)
+    draft = {"name": "tui_e2e", "transport": "stdio",
+             "target": "/path/to/python /tmp/mcp-e2e/server_with_[brackets].py"}
+    _ask_confirm(app, draft)
+    panel = app.interaction
+    assert isinstance(list(panel.render().renderables)[1], Text)
+    for width in (45, 100):
+        rendered = render_interaction(panel, width)
+        assert "Name: tui_e2e" in rendered and "Transport: stdio" in rendered
+        assert rendered.index("Name:") < rendered.index("Transport:")
+        assert "[brackets]" in rendered
+    other = InteractionController.human({"question": "**Keep Markdown**",
+                                        "fields": [{"id": "reply", "type": "text"}]})
+    assert isinstance(list(other.render().renderables)[1], Markdown)
+    panel.move(1)
+    assert panel.option_index == 1
+    assert panel.accept() and panel.values["confirm"] == "add"

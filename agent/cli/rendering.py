@@ -631,6 +631,21 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
 
 
 def _tool(block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+    if block.name.startswith("mcp__"):
+        from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
+        symbol, color = _tool_status_marker(block.status, block.is_error)
+        body = [
+            Text(f"{symbol} {mcp_display_text(block.name)} — {block.status}", style=color),
+            Text("Execution: Host (outside sandbox)", style="dim"),
+            Text("Arguments:\n" + mcp_arguments_preview(block.arguments, expanded=expanded)),
+        ]
+        if block.output and block.status != "waiting":
+            output = mcp_display_text(block.output).splitlines()
+            limit = limits.expanded_tool_lines if expanded else limits.tool_tail_lines
+            if len(output) > limit:
+                output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
+            body.append(Text("\n".join(output), style="dim"))
+        return Padding(Group(*body), (1, 1, 0, 1), expand=False)
     return render_tool_preview(
         block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits,
     )
