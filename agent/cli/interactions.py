@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import re
 from typing import Any
 
@@ -27,6 +28,112 @@ def _mcp_approval_summary(text: str) -> str:
     text = redact_config_text(text)
     text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
     return text if len(text) <= 180 else text[:180] + "…"
+
+
+_MCP_SECRET_KEYS = {
+    "apikey", "token", "accesstoken", "refreshtoken", "authorization",
+    "password", "secret", "clientsecret", "privatekey", "cookie", "cookies",
+    "credential", "credentials", "setcookie", "proxyauthorization",
+}
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)"
+    r"|\x1b[P^_].*?(?:\x1b\\|$)"
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b[@-_]",
+    re.DOTALL,
+)
+
+
+def mcp_display_text(value: str) -> str:
+    """Render untrusted MCP text without terminal control sequences."""
+    from agent.mcp.config import redact_config_text
+    value = _TERMINAL_ESCAPE.sub("", value)
+    value = "".join(c for c in value if c.isprintable() or c in "\n\r\t")
+    return redact_config_text(value)
+
+
+def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
+    """Bounded display-only traversal; never writes into the original arguments."""
+    max_lines, max_chars, max_depth, string_limit = (
+        (80, 8000, 8, 1200) if expanded else (8, 700, 4, 100)
+    )
+    lines: list[str] = []
+    remaining = max_chars
+    omitted = False
+    ancestors: set[int] = set()
+
+    def text(value: str, limit: int) -> str:
+        nonlocal omitted
+        value = mcp_display_text(value).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
+        if len(value) > limit:
+            omitted = True
+            return value[:limit] + "… [omitted]"
+        return value
+
+    def emit(line: str) -> None:
+        nonlocal remaining, omitted
+        if len(line) > remaining:
+            remaining = 0
+            omitted = True
+            return
+        if len(lines) >= max_lines:
+            omitted = True
+            return
+        lines.append(line)
+        remaining -= len(line) + 1
+
+    def visit(value: Any, prefix: str, depth: int) -> None:
+        nonlocal omitted
+        if len(lines) >= max_lines or remaining <= 0:
+            omitted = True
+            return
+        if isinstance(value, (dict, list)):
+            if not value:
+                emit(prefix + ("{}" if isinstance(value, dict) else "[]"))
+                return
+            if depth >= max_depth or id(value) in ancestors:
+                emit(prefix + "[nested content omitted]")
+                omitted = True
+                return
+            if prefix.strip():
+                emit(prefix.rstrip())
+            ancestors.add(id(value))
+            entries = value.items() if isinstance(value, dict) else enumerate(value)
+            for key, item in entries:
+                if len(lines) >= max_lines or remaining <= 0:
+                    omitted = True
+                    break
+                if isinstance(value, dict):
+                    label = text(str(key), 100)
+                    normalized = re.sub(r"[^a-z0-9]", "", mcp_display_text(str(key)).casefold())
+                    if normalized in _MCP_SECRET_KEYS:
+                        item = "[redacted]"
+                    # Quote unusual keys so ':' or whitespace cannot forge structure.
+                    label = label if re.fullmatch(r"[A-Za-z0-9_.-]+", label) else json.dumps(label, ensure_ascii=False)
+                    child = "  " * (depth + 1) + label + ": "
+                else:
+                    child = "  " * (depth + 1) + "- "
+                visit(item, child, depth + 1)
+            ancestors.remove(id(value))
+        else:
+            if isinstance(value, str):
+                rendered = text(value, string_limit)
+            elif value is None:
+                rendered = "null"
+            elif isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                rendered = str(value)
+            else:
+                rendered = "[unsupported value]"
+            emit(prefix + rendered)
+
+    visit(args, "", 0)
+    if omitted:
+        lines.append(
+            "  … content omitted (bounded redacted preview)"
+            + ("" if expanded else "; Esc, Ctrl+O for more; F2 to reopen approval")
+        )
+    return "\n".join(lines)
 
 
 @dataclass
@@ -115,7 +222,8 @@ class InteractionController:
                 details.append(f"Remove host MCP server: {_approval_summary(args.get('name'), kind='name')}")
                 details.append("Reject leaves the configuration unchanged.")
             elif name.startswith("mcp__"):
-                details.append("Host MCP tool. It runs outside the sandbox, not under allow/sandbox policy.")
+                details.append("Execution: Host (outside sandbox)")
+                details.append("Arguments:\n" + mcp_arguments_preview(call.get("args", {})))
         details.append("Run executes the listed tool calls. Reject denies them.")
         return cls(
             kind="approval",
@@ -236,7 +344,7 @@ class InteractionController:
         if self.reason:
             parts.append(Text(self.reason, style="dim"))
         if self.question:
-            parts.append(Text(self.question) if self.kind == "approval" else Markdown(self.question))
+            parts.append(Text(self.question) if self.kind in {"approval", "mcp_confirm"} else Markdown(self.question))
         if self.recommendation:
             value = self.recommendation.get("value") or ""
             why = self.recommendation.get("reason") or ""
