@@ -31,7 +31,7 @@ deep-agent --version
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
-| `/mcp` | 列出宿主 MCP 服务器。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。工具审批统一由 `/permission` 控制；服务在宿主运行，不受 Bubblewrap 限制 |
+| `/mcp` | 查看 MCP 全局开关和宿主服务。`/mcp enable` 打开并自动连接；`/mcp disable` 关闭连接和工具，但保留配置与 OAuth 缓存。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。关闭期间只能查询和 `/mcp enable`。工具审批统一由 `/permission` 控制；服务在宿主运行，不受 Bubblewrap 限制 |
 | `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
@@ -42,27 +42,44 @@ deep-agent --version
 
 ## MCP 服务
 
-`/mcp` 显示已配置的服务，例如：
+`/mcp` 先显示全局开关。开启时列出服务，例如：
 
 ```text
-• codex_apps: connected (294 tools)
-• codex_tui: connected (12 tools)
-• psd2live: failed (0 tools)
+MCP: Enabled
+
+Servers:
+  codex_apps   connected       294 tools
+  codex_tui    connected        12 tools
+  psd2live     failed            0 tools
 ```
 
-圆点使用字符 `•`。已连接服务的圆点和 `connected` 为绿色，其余服务的圆点和状态为红色：
+`connected` 为绿色，其余状态为红色：
 
 | 状态 | 含义 |
 |---|---|
-| `connected` | 已连接，括号内为已发现的工具数量 |
+| `connected` | 已连接，同一行给出已发现的工具数量 |
 | `failed` | 连接失败或服务配置无效 |
 | `disconnected` | 有配置，尚未连接 |
 | `auth_required` | 尚未完成授权或鉴权失败 |
-| `disabled` | 配置为 `enabled: false`，不会自动连接 |
+| `disabled` | 该服务在 `mcp.json` 里是 `enabled: false`，全局开关打开时也不会自动连接 |
 
-使用 `/mcp tools <服务名>` 查看工具；服务不可用时显示错误详情。输入时会补全 `add`、`remove`、`test`、`tools` 子命令，服务名需要手动填写。`/mcp remove <服务名>` 删除配置，连接在安全点释放；要保留配置并禁用服务，将 `mcp.json` 中的 `enabled` 改为 `false` 后重启。当前没有单独的 disconnect 命令。
+全局关闭时不列出连接状态：
 
-启动时自动连接已启用的服务。无需鉴权的服务直接连接；OAuth 使用缓存凭证，令牌过期先自动刷新，首次授权或刷新失败时打开浏览器。同一进程中每个服务 60 秒内最多打开一次授权页，用于防止重复弹窗，并非每隔 60 秒重新授权。取消或超时后可稍后执行 `/mcp test <服务名>` 重试。工具审批由 `/permission` 控制，浏览器授权由用户完成。
+```text
+MCP: Disabled
+
+3 servers configured.
+Connections and tools are inactive.
+
+Commands:
+  /mcp enable
+```
+
+Agent 正在运行或仍有待决审批时，`/mcp disable` 只排队，并说明当前操作会先完成、工具要到下一个安全点才移除。工具表真正切换之后才显示上面的 `MCP: Disabled`。待决审批保留，不会被丢弃。空闲时会立即重建 Graph。`/mcp enable` 写回配置后自动连接已启用的服务，并在安全点恢复 MCP 工具。
+
+使用 `/mcp tools <服务名>` 查看工具；服务不可用时显示错误详情。输入时会补全 `enable`、`disable`、`add`、`remove`、`test`、`tools`，服务名需要手动填写。`/mcp remove <服务名>` 删除配置，连接在安全点释放。要停用全部 MCP，执行 `/mcp disable`；要只停用一个服务并保留它的配置，把该服务的 `enabled` 改为 `false`。关闭全局开关不会删除 `mcp.json` 或 OAuth 令牌缓存。重复执行已经生效的 `/mcp enable` 或 `/mcp disable` 只显示当前状态，不会重新连接或再次写配置。
+
+启动时，只有全局开关为开启才自动连接已启用的服务。无需鉴权的服务直接连接；OAuth 使用缓存凭证，令牌过期先自动刷新，首次授权或刷新失败时打开浏览器。同一进程中每个服务 60 秒内最多打开一次授权页，用于防止重复弹窗，并非每隔 60 秒重新授权。取消或超时后可稍后执行 `/mcp test <服务名>` 重试。工具审批由 `/permission` 控制，浏览器授权由用户完成。全局关闭期间执行 `/mcp test` 或其他修改命令会要求先 `/mcp enable`，并且不会打开浏览器。
 
 MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文件 `~/.deep-agent/logs/mcp-<进程号>.log`，不显示在 TUI。自定义配置目录时，日志位于该目录的 `logs/` 下。凭证缓存、连接恢复和资源返回方式见 [MCP 配置](configuration.md#mcpmcpjson)。
 

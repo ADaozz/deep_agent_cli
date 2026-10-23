@@ -55,6 +55,67 @@ def test_atomic_write_replaces_and_sets_mode(tmp_path: Path) -> None:
     assert list(tmp_path.glob(".mcp-*.tmp")) == []
 
 
+def test_missing_global_enabled_defaults_true_without_rewriting(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text('{"note": "keep", "servers": {}}\n', encoding="utf-8")
+    before = path.read_bytes()
+    document = load_mcp_file(path)
+    assert document.enabled is True
+    assert document.extras["note"] == "keep"
+    assert path.read_bytes() == before
+    assert not (tmp_path / "missing.json").exists()
+    assert load_mcp_file(tmp_path / "missing.json").enabled is True
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, "true"])
+def test_non_boolean_global_enabled_is_a_config_error(tmp_path: Path, value: object) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"enabled": value, "note": "keep", "servers": {}}), encoding="utf-8")
+    before = path.read_bytes()
+    document = load_mcp_file(path)
+    assert document.fatal == "MCP config field enabled must be a boolean"
+    manager = MCPManager(path)
+    try:
+        manager.load()
+        result = manager.set_enabled(True)
+        assert not result.ok
+        assert "not modified" in result.message
+        assert path.read_bytes() == before
+    finally:
+        manager.close()
+
+
+def test_global_enabled_round_trip_preserves_unknown_fields(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({
+        "note": "keep",
+        "servers": {
+            "local": {"transport": "streamable_http", "url": "https://example.com/mcp", "enabled": True},
+        },
+    }), encoding="utf-8")
+    manager = MCPManager(path)
+    try:
+        manager.load()
+        assert manager.enabled is True
+        assert manager.set_enabled(False).ok
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["enabled"] is False
+        assert saved["note"] == "keep"
+        assert saved["servers"]["local"]["enabled"] is True
+        manager.close()
+        reloaded = MCPManager(path)
+        try:
+            reloaded.load()
+            assert reloaded.enabled is False
+            assert reloaded.set_enabled(True).ok
+            assert json.loads(path.read_text(encoding="utf-8"))["enabled"] is True
+        finally:
+            reloaded.close()
+    finally:
+        if not manager._closed:
+            manager.close()
+
+
 def test_corrupt_file_is_not_overwritten(tmp_path: Path) -> None:
     path = tmp_path / "mcp.json"
     path.write_text("{", encoding="utf-8")

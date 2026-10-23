@@ -8,6 +8,10 @@ from typing import Any
 from agent.cli.interactions import InteractionController
 from agent.mcp.manager import ServerStatus
 from agent.permission import PermissionMode
+from agent.runner import InterruptKind
+
+_USAGE = "Usage: /mcp, /mcp enable, /mcp disable, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>"
+_DISABLED_HINT = "MCP is disabled. Run /mcp enable first."
 
 
 async def handle_mcp_command(app: Any, arg: str) -> None:
@@ -17,11 +21,28 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
         return
     text = arg.strip()
     if not text:
-        _show_servers(app, manager)
-        app.set_status("MCP servers")
+        _show_mcp_status(app, manager)
         return
     command, _, rest = text.partition(" ")
     rest = rest.strip()
+    if command == "enable":
+        if rest:
+            app.state.add_system("Usage: /mcp enable", error=True)
+            return
+        await _set_mcp_enabled(app, True)
+        return
+    if command == "disable":
+        if rest:
+            app.state.add_system("Usage: /mcp disable", error=True)
+            return
+        await _set_mcp_enabled(app, False)
+        return
+    if manager.config_error:
+        app.state.add_system(manager.describe(), error=True)
+        return
+    if not manager.enabled:
+        app.state.add_system(_DISABLED_HINT, error=True)
+        return
     if command == "add":
         if rest:
             app.state.add_system("Usage: /mcp add", error=True)
@@ -46,7 +67,7 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
             return
         await _wait_operation(app, _start_operation(app, partial(manager.test, rest)))
         return
-    app.state.add_system("Usage: /mcp, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>", error=True)
+    app.state.add_system(_USAGE, error=True)
 
 
 def finish_mcp_interaction(app: Any, interaction: InteractionController, *, cancelled: bool) -> None:
@@ -214,20 +235,30 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
 
 def _start_operation(app: Any, operation: Any) -> asyncio.Task | None:
     # Reserve before scheduling: two Enter events must not launch two workers.
+    # /mcp disable does not use this gate, so it can cancel an OAuth wait.
     if getattr(app, "_mcp_busy", False):
         app.set_status("MCP operation still running")
         return None
     app._mcp_busy = True
     app.set_status("MCP operation running; connections and OAuth have a timeout", transient=False)
+    epoch = app.runner.mcp.switch_epoch
 
     async def run() -> None:
         try:
             result = await app._run_blocking(operation)
+            if app.runner.mcp.switch_epoch != epoch:
+                # A later enable/disable owns the status text. Still publish tools
+                # when this task is the one that finished the catalog change.
+                if app.runner.mcp.toolset_dirty():
+                    await _apply_when_idle(app, announce_status=False)
+                return
             app.state.add_system(result.message, error=not result.ok)
             app.set_status("MCP operation finished" if result.ok else "MCP operation failed; you can retry", transient=False)
             if app.runner.mcp.toolset_dirty():
                 await _apply_when_idle(app)
         except Exception as exc:
+            if app.runner.mcp.switch_epoch != epoch:
+                return
             app.state.add_system(f"MCP operation failed: {str(exc)[:400]}", error=True)
             app.set_status("MCP operation failed; you can retry", transient=False)
         finally:
@@ -263,10 +294,131 @@ def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
     return events
 
 
-def _show_servers(app: Any, manager: Any) -> None:
+def disabled_status_text(manager: Any) -> str:
+    count = len(manager.list_servers()) + len(manager.invalid_servers())
+    if count == 0:
+        summary = "No MCP servers are configured."
+    elif count == 1:
+        summary = "1 server configured."
+    else:
+        summary = f"{count} servers configured."
+    return "\n".join([
+        "MCP: Disabled",
+        "",
+        summary,
+        "Connections and tools are inactive.",
+        "",
+        "Commands:",
+        "  /mcp enable",
+    ])
+
+
+def _queued_switch_text(enabled: bool, *, approval: bool) -> str:
+    action = "enable" if enabled else "disable"
+    follow = (
+        "MCP tools will be added at the next safe point."
+        if enabled else
+        "MCP tools will be removed at the next safe point."
+    )
+    lines = [
+        f"MCP {action} queued.",
+        "Current operation will finish first.",
+        follow,
+    ]
+    if approval:
+        lines.append("Resolve the pending approval before the MCP tool list can change.")
+    return "\n".join(lines)
+
+
+def _switch_block_reason(app: Any) -> str | None:
+    if getattr(app.state, "running", False):
+        return "running"
+    current = app.runner.current_interrupt()
+    if current is None:
+        return None
+    if current.kind is InterruptKind.WAITING_CONFIRMATION:
+        return "approval"
+    return "busy"
+
+
+async def _set_mcp_enabled(app: Any, enabled: bool) -> None:
+    manager = app.runner.mcp
     if manager.config_error:
         app.state.add_system(manager.describe(), error=True)
         return
+    if manager.enabled is enabled:
+        _show_mcp_status(app, manager)
+        return
+    result = await app._run_blocking(partial(manager.set_enabled, enabled))
+    if not result.ok:
+        app.state.add_system(result.message, error=True)
+        app.set_status("MCP update failed", transient=False)
+        return
+    if enabled:
+        # A disable issued during OAuth may still be winding the previous task down.
+        existing = getattr(app, "_mcp_operation", None)
+        if getattr(app, "_mcp_busy", False) and existing is not None:
+            await _wait_operation(app, existing)
+        _start_operation(app, manager.connect_pending)
+    await _report_switch(app, enabled)
+
+
+async def _publish_mcp_toolset(app: Any) -> str:
+    """Apply a pending MCP toolset now. Returns applied, queued, or failed."""
+    if _switch_block_reason(app) is not None:
+        return "queued"
+    events = await app._run_blocking(_apply_when_idle_worker, app.runner)
+    if events is None:
+        return "queued"
+    for event in events:
+        app._apply_event(event, announce=False)
+    if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
+        return "failed"
+    if app.runner.mcp.toolset_dirty():
+        return "failed"
+    return "applied"
+
+
+async def _report_switch(app: Any, enabled: bool) -> None:
+    manager = app.runner.mcp
+    outcome = "queued"
+    for _ in range(3):
+        outcome = await _publish_mcp_toolset(app)
+        if outcome != "failed":
+            break
+    if outcome == "queued":
+        reason = _switch_block_reason(app)
+        app.state.add_system(_queued_switch_text(enabled, approval=reason == "approval"))
+        action = "enable" if enabled else "disable"
+        app.set_status(f"MCP {action} queued", transient=False)
+        return
+    if outcome == "failed" or manager.toolset_dirty():
+        app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
+        return
+    manager.consume_switch_notice()
+    _show_mcp_status(app, manager)
+
+
+def _show_mcp_status(app: Any, manager: Any) -> None:
+    if manager.config_error:
+        app.state.add_system(manager.describe(), error=True)
+        app.set_status("MCP config error", transient=False)
+        return
+    if not manager.enabled and manager.toolset_dirty():
+        reason = _switch_block_reason(app)
+        app.state.add_system(_queued_switch_text(False, approval=reason == "approval"))
+        app.set_status("MCP disable queued", transient=False)
+        return
+    if not manager.enabled:
+        app.state.add_system(disabled_status_text(manager))
+        app.set_status("MCP: Disabled", transient=False)
+        return
+    text, spans = _enabled_listing(manager)
+    app.state.add_system(text, styled_spans=spans)
+    app.set_status("MCP: Enabled", transient=False)
+
+
+def _enabled_listing(manager: Any) -> tuple[str, tuple[tuple[int, int, str], ...]]:
     rows = [
         (
             state.config.name,
@@ -276,24 +428,33 @@ def _show_servers(app: Any, manager: Any) -> None:
         for state in manager.list_servers()
     ]
     rows.extend((name, "failed", 0) for name in manager.invalid_servers())
-    if not rows:
-        app.state.add_system("No MCP servers are configured.")
-        return
-    lines: list[str] = []
+    lines = ["MCP: Enabled", "", "Servers:"]
     spans: list[tuple[int, int, str]] = []
-    offset = 0
-    for name, status, count in rows:
-        prefix = f"• {name}: "
-        line = f"{prefix}{status} ({count} tools)"
-        color = "green" if status == "connected" else "red"
-        status_start = offset + len(prefix)
-        spans.extend((
-            (offset, offset + 1, color),
-            (status_start, status_start + len(status), color),
-        ))
-        lines.append(line)
-        offset += len(line) + 1
-    app.state.add_system("\n".join(lines), styled_spans=tuple(spans))
+    if not rows:
+        lines.append("  (none)")
+    else:
+        name_width = max(len(name) for name, _status, _count in rows)
+        status_width = max(len(status) for _name, status, _count in rows)
+        offset = len("\n".join(lines)) + 1
+        for name, status, count in rows:
+            prefix = f"  {name:<{name_width}}  "
+            gap = " " * (status_width - len(status) + 2)
+            line = f"{prefix}{status}{gap}{count} tools"
+            color = "green" if status == "connected" else "red"
+            status_start = offset + len(prefix)
+            spans.append((status_start, status_start + len(status), color))
+            lines.append(line)
+            offset += len(line) + 1
+    lines.extend([
+        "",
+        "Commands:",
+        "  /mcp disable",
+        "  /mcp add",
+        "  /mcp remove <name>",
+        "  /mcp test <name>",
+        "  /mcp tools <name>",
+    ])
+    return "\n".join(lines), tuple(spans)
 
 
 def _show_tools(app: Any, manager: Any, name: str) -> None:
@@ -319,17 +480,21 @@ def _show_tools(app: Any, manager: Any, name: str) -> None:
     app.state.add_system("\n".join(lines))
 
 
-async def _apply_when_idle(app: Any) -> None:
+async def _apply_when_idle(app: Any, *, announce_status: bool = True) -> bool:
     if app.state.running:
         events = None
     else:
         events = await app._run_blocking(_apply_when_idle_worker, app.runner)
     if events is None:
-        app.set_status("MCP change queued until the current run reaches a safe point", transient=False)
-        return
+        if announce_status:
+            app.set_status("MCP change queued until the current run reaches a safe point", transient=False)
+        return False
     for event in events:
         app._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
-        app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
-    else:
+        if announce_status:
+            app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
+        return False
+    if announce_status:
         app.set_status("MCP tools updated", transient=False)
+    return not app.runner.mcp.toolset_dirty()

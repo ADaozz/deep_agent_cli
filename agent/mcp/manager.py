@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.tools import BaseTool
 
@@ -56,6 +56,12 @@ class MCPResult:
     pending: bool = False
 
 
+class _Snapshot(NamedTuple):
+    clients: list[Any]
+    count: int
+    include_mcp: bool
+
+
 class MCPManager:
     """Owns mcp.json and the host-side MCP connections.
 
@@ -87,13 +93,29 @@ class MCPManager:
         self._connecting: dict[int, Future[ServerState]] = {}
         self._oauth_browser_attempts: dict[str, float] = {}
         self._connection_cancel = threading.Event()
-        self._snapshots: dict[int, tuple[list[Any], int]] = {}
+        self._attempt_cancels: dict[int, threading.Event] = {}
+        self._activation_epoch = 0
+        self._switch_epoch = 0
+        self._switch_notice: str | None = None
+        self._snapshots: dict[int, _Snapshot] = {}
         self._revision = 0
         self._published_revision = 0
         self._config_error = ""
         self._loaded = False
         self._closed = False
         atexit.register(self.close)
+
+    @property
+    def enabled(self) -> bool:
+        """Global MCP switch. A broken catalog stays inactive so startup cannot connect."""
+        with self._lock:
+            return self._document.enabled and not self._config_error
+
+    @property
+    def switch_epoch(self) -> int:
+        """Increments on each global enable or disable. Stale connection tasks compare it."""
+        with self._lock:
+            return self._switch_epoch
 
     @property
     def config_error(self) -> str:
@@ -125,9 +147,66 @@ class MCPManager:
             }
         self._close_unpublished()
 
+    def set_enabled(self, enabled: bool) -> MCPResult:
+        """Persist the global MCP switch and drop or restore tool publication.
+
+        Disable cancels this round of connection attempts without using the
+        permanent shutdown flag. A later enable can connect again. Clients a
+        published graph still holds stay open until that graph is rebuilt.
+        """
+        if not isinstance(enabled, bool):
+            return MCPResult(False, False, "MCP enabled must be a boolean. The file was not modified.")
+        if not self._loaded and self.path.exists():
+            # Read before creating a switch file, but do not reload a catalog
+            # add() or remove() has already written. load() closes clients,
+            # so it must run outside the switch lock.
+            self.load()
+        with self._lock:
+            if self._closed or self._connection_cancel.is_set():
+                return MCPResult(False, False, "MCP manager is closed")
+            if not self._loaded:
+                self._loaded = True
+            if self._config_error:
+                return MCPResult(
+                    False, False,
+                    f"MCP config error: {self._config_error} The file was not modified.",
+                )
+            if self._document.enabled is enabled:
+                state = "enabled" if enabled else "disabled"
+                return MCPResult(True, False, f"MCP is already {state}.")
+            previous = self._document.enabled
+            self._document.enabled = enabled
+            try:
+                self._write_locked()
+            except OSError as exc:
+                self._document.enabled = previous
+                return MCPResult(False, False, f"Could not save MCP config: {exc.strerror or exc}")
+            if enabled:
+                self._switch_epoch += 1
+                self._switch_notice = "enabled"
+                self._revision += 1
+            else:
+                self._deactivate_connections_locked()
+        if not enabled:
+            self._close_unpublished()
+        return MCPResult(True, True, "MCP enabled." if enabled else "MCP disabled.", pending=True)
+
+    def consume_switch_notice(self) -> str | None:
+        """Return the pending enable/disable notice once the graph has published it."""
+        with self._lock:
+            if self._revision != self._published_revision:
+                return None
+            notice = self._switch_notice
+            self._switch_notice = None
+            return notice
+
     def connect_pending(self) -> MCPResult:
         """Connect at startup using cached credentials, refreshing or authorizing as needed."""
         with self._lock:
+            if self._closed or self._connection_cancel.is_set():
+                return MCPResult(False, False, "MCP connections are shutting down")
+            if not self._document.enabled:
+                return MCPResult(True, False, "MCP is disabled.")
             names = [
                 name for name, state in self._states.items()
                 if state.config.enabled and state.status is ServerStatus.DISCONNECTED
@@ -201,6 +280,11 @@ class MCPManager:
                 return MCPResult(False, False, "MCP manager is closed")
             if self._config_error:
                 return MCPResult(False, False, f"MCP config error: {self._config_error} The file was not modified.")
+            if not self._document.enabled:
+                return MCPResult(
+                    False, False,
+                    "MCP is disabled. Run /mcp enable first. The file was not modified.",
+                )
             current = self._document.servers.get(server.name)
             if current is not None and current.fingerprint() != server.fingerprint():
                 return MCPResult(
@@ -285,6 +369,8 @@ class MCPManager:
         with self._lock:
             if self._config_error:
                 return MCPResult(False, False, f"MCP config error: {self._config_error}")
+            if not self._document.enabled:
+                return MCPResult(False, False, "MCP is disabled. Run /mcp enable first.")
             server = self._document.servers.get(name)
             invalid = self._document.invalid.get(name)
         if invalid is not None:
@@ -300,17 +386,30 @@ class MCPManager:
         return MCPResult(False, False, f"{name} {state.status.value}: {state.error}")
 
     def snapshot(self) -> tuple[int, list[BaseTool]]:
-        """Pin this revision's clients until commit() or discard() finishes the build."""
+        """Pin this revision's clients until commit() or discard() finishes the build.
+
+        A disabled catalog still takes a snapshot so the empty tool list can be
+        published. Otherwise the revision stays dirty and the graph rebuilds forever.
+        """
         with self._lock:
+            include = self._document.enabled and not self._config_error
             tools: list[BaseTool] = []
             clients: list[Any] = []
-            for state in self._states.values():
-                if state.config.enabled and state.status is ServerStatus.CONNECTED:
-                    tools.extend(state.tools)
-                    clients.append(state.client)
-            _, count = self._snapshots.get(self._revision, ([], 0))
-            self._snapshots[self._revision] = (clients, count + 1)
+            if include:
+                for state in self._states.values():
+                    if state.config.enabled and state.status is ServerStatus.CONNECTED and state.client is not None:
+                        tools.extend(state.tools)
+                        clients.append(state.client)
+            current = self._snapshots.get(self._revision)
+            count = current.count if current is not None else 0
+            self._snapshots[self._revision] = _Snapshot(clients, count + 1, include)
             return self._revision, tools
+
+    def snapshot_includes_mcp(self, revision: int) -> bool:
+        """Whether the graph built from this snapshot should register MCP tools."""
+        with self._lock:
+            current = self._snapshots.get(revision)
+            return bool(current.include_mcp) if current is not None else False
 
     def discard(self, revision: int) -> None:
         """Release a failed graph build's snapshot without changing publication."""
@@ -321,9 +420,8 @@ class MCPManager:
     def _discard_locked(self, revision: int) -> None:
         item = self._snapshots.get(revision)
         if item is not None:
-            clients, count = item
-            if count > 1:
-                self._snapshots[revision] = (clients, count - 1)
+            if item.count > 1:
+                self._snapshots[revision] = _Snapshot(item.clients, item.count - 1, item.include_mcp)
             else:
                 self._snapshots.pop(revision)
 
@@ -332,7 +430,7 @@ class MCPManager:
             snapshot = self._snapshots.get(revision)
             if self._closed or revision != self._revision or snapshot is None:
                 raise RuntimeError("MCP registry changed during graph build; retry at the next safe point")
-            live = snapshot[0]
+            live = snapshot.clients
             published = {id(client) for client in live}
             for client in self._published_clients:
                 if id(client) not in published:
@@ -347,8 +445,16 @@ class MCPManager:
             return self._revision != self._published_revision
 
     def cancel_pending_connections(self) -> None:
-        """Stop startup/authorization work when the UI exits; leave active tools to runner.close()."""
+        """Stop startup/authorization work when the UI exits; leave active tools to runner.close().
+
+        This is permanent for the process. Runtime disable uses a separate,
+        reversible cancellation of the current connection round.
+        """
         self._connection_cancel.set()
+        with self._lock:
+            for event in self._attempt_cancels.values():
+                event.set()
+            self._activation_epoch += 1
 
     def close(self) -> None:
         self.cancel_pending_connections()
@@ -359,7 +465,7 @@ class MCPManager:
             clients = [state.client for state in self._states.values() if state.client is not None]
             clients.extend(self._published_clients)
             clients.extend(self._retired)
-            clients.extend(client for clients, _ in self._snapshots.values() for client in clients)
+            clients.extend(client for snapshot in self._snapshots.values() for client in snapshot.clients)
             self._snapshots.clear()
             self._retired.clear()
             for state in self._states.values():
@@ -368,22 +474,48 @@ class MCPManager:
         self._close_clients(clients)
         self._bridge.shutdown()
 
+    def _deactivate_connections_locked(self) -> None:
+        """Cancel the current connection round and hide MCP tools until republished."""
+        self._activation_epoch += 1
+        self._switch_epoch += 1
+        self._switch_notice = "disabled"
+        for event in self._attempt_cancels.values():
+            event.set()
+        for name in list(self._versions):
+            self._versions[name] += 1
+        for state in self._states.values():
+            if state.client is not None:
+                self._retired.append(state.client)
+                state.client = None
+            state.tools = []
+            state.warnings = []
+            if state.config.enabled:
+                state.status = ServerStatus.DISCONNECTED
+                state.error = ""
+        self._revision += 1
+
     def _activate(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
         # Startup, /mcp test and mcp_add share an in-flight connection for the
         # same catalog entry. Removal/reload still invalidate the old attempt.
         key = id(server)
         with self._lock:
-            if self._connection_cancel.is_set():
+            if self._closed or self._connection_cancel.is_set():
                 return ServerState(server, ServerStatus.DISCONNECTED, "MCP connections are shutting down")
+            if not self._document.enabled:
+                return ServerState(server, ServerStatus.DISCONNECTED, "MCP is disabled")
             attempt = self._connecting.get(key)
             owner = attempt is None
             if owner:
                 attempt = Future()
                 self._connecting[key] = attempt
+                cancel = threading.Event()
+                self._attempt_cancels[key] = cancel
         if not owner:
             return attempt.result()
         try:
-            state = self._activate_once(server, allow_oauth_browser=allow_oauth_browser)
+            state = self._activate_once(
+                server, allow_oauth_browser=allow_oauth_browser, cancel_event=cancel,
+            )
         except BaseException as exc:
             attempt.set_exception(exc)
             raise
@@ -393,11 +525,22 @@ class MCPManager:
         finally:
             with self._lock:
                 self._connecting.pop(key, None)
+                self._attempt_cancels.pop(key, None)
 
-    def _activate_once(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
+    def _activate_once(
+        self,
+        server: MCPServerConfig,
+        *,
+        allow_oauth_browser: bool,
+        cancel_event: threading.Event,
+    ) -> ServerState:
         with self._lock:
-            if self._closed or self._document.servers.get(server.name) is not server:
+            if (
+                self._closed or self._connection_cancel.is_set() or not self._document.enabled
+                or self._document.servers.get(server.name) is not server
+            ):
                 return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
+            epoch = self._activation_epoch
             version = self._versions.get(server.name, 0) + 1
             self._versions[server.name] = version
         try:
@@ -414,7 +557,7 @@ class MCPManager:
                     oauth_storage_dir=self.path.parent / "oauth",
                     allow_oauth_browser=allow_oauth_browser,
                     oauth_browser_attempts=self._oauth_browser_attempts,
-                    cancel_event=self._connection_cancel,
+                    cancel_event=cancel_event,
                 )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))
@@ -445,7 +588,9 @@ class MCPManager:
             )
         with self._lock:
             valid = (
-                not self._closed and self._versions.get(server.name) == version
+                not self._closed and not self._connection_cancel.is_set()
+                and self._document.enabled and self._activation_epoch == epoch
+                and self._versions.get(server.name) == version
                 and self._document.servers.get(server.name) is server
             )
             if valid:
@@ -462,11 +607,14 @@ class MCPManager:
 
     def _write_locked(self) -> None:
         atomic_write_text(self.path, dumps_mcp_file(self._document))
+        self._loaded = True
 
     def _close_unpublished(self) -> None:
         with self._lock:
             published = {id(client) for client in self._published_clients}
-            published.update(id(client) for clients, _ in self._snapshots.values() for client in clients)
+            published.update(
+                id(client) for snapshot in self._snapshots.values() for client in snapshot.clients
+            )
             closing = [client for client in self._retired if id(client) not in published]
             self._retired = [client for client in self._retired if id(client) in published]
         self._close_clients(closing)

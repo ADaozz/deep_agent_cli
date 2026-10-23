@@ -78,6 +78,7 @@ class MCPFile:
     invalid: dict[str, tuple[Any, str]] = field(default_factory=dict)
     extras: dict[str, Any] = field(default_factory=dict)
     fatal: str | None = None
+    enabled: bool = True
 
     def to_json(self) -> dict[str, Any]:
         servers: dict[str, Any] = {}
@@ -87,6 +88,8 @@ class MCPFile:
             if name not in servers:
                 servers[name] = raw
         body = dict(self.extras)
+        body.pop("enabled", None)
+        body["enabled"] = self.enabled
         body["servers"] = servers
         return body
 
@@ -203,6 +206,12 @@ def load_mcp_file(path: Path) -> MCPFile:
     servers_raw = data.get("servers", {})
     if not isinstance(servers_raw, dict):
         return MCPFile(fatal="MCP config field servers must be an object")
+    if "enabled" in data:
+        enabled = data["enabled"]
+        if not isinstance(enabled, bool):
+            return MCPFile(fatal="MCP config field enabled must be a boolean")
+    else:
+        enabled = True
     parsed: dict[str, MCPServerConfig] = {}
     invalid: dict[str, tuple[Any, str]] = {}
     for name, raw in servers_raw.items():
@@ -214,8 +223,8 @@ def load_mcp_file(path: Path) -> MCPFile:
             invalid[name] = (raw, str(exc))
             continue
         parsed[name] = server
-    extras = {key: value for key, value in data.items() if key != "servers"}
-    return MCPFile(servers=parsed, invalid=invalid, extras=extras)
+    extras = {key: value for key, value in data.items() if key not in {"servers", "enabled"}}
+    return MCPFile(servers=parsed, invalid=invalid, extras=extras, enabled=enabled)
 
 
 def dumps_mcp_file(document: MCPFile) -> str:
