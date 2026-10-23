@@ -12,6 +12,7 @@ from agent.runner import InterruptKind
 
 _USAGE = "Usage: /mcp, /mcp enable, /mcp disable, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>"
 _DISABLED_HINT = "MCP is disabled. Run /mcp enable first."
+_MCP_OPERATION_RUNNING = "MCP operation running; connections and OAuth have a timeout"
 
 
 async def handle_mcp_command(app: Any, arg: str) -> None:
@@ -245,7 +246,7 @@ def _start_operation(
     app._mcp_busy = True
     op_id = getattr(app, "_mcp_op_id", 0) + 1
     app._mcp_op_id = op_id
-    app.set_status("MCP operation running; connections and OAuth have a timeout", transient=False)
+    app.set_status(_MCP_OPERATION_RUNNING, transient=False)
     epoch = app.runner.mcp.switch_epoch
 
     async def run() -> None:
@@ -263,10 +264,12 @@ def _start_operation(
             if quiet_success:
                 if not result.ok:
                     app.state.add_system(result.message, error=True)
+                    return
                 if app.runner.mcp.toolset_dirty():
                     await _coalesced_publish(app)
                     if app.runner.mcp.switch_epoch == epoch:
                         _announce_published_switch(app)
+                _finish_quiet_success(app, op_id, epoch)
                 return
             app.state.add_system(result.message, error=not result.ok)
             if not _switch_status_visible(app):
@@ -413,6 +416,28 @@ async def _connect_after_enable(app: Any, epoch: int) -> None:
     if app.runner.mcp.switch_epoch != epoch:
         return
     _start_operation(app, app.runner.mcp.connect_pending, quiet_success=True, force=True)
+
+
+def _shown_status(app: Any) -> str:
+    state = getattr(app, "state", None)
+    if state is not None and getattr(state, "status", None):
+        return state.status
+    return getattr(app, "status", "") or ""
+
+
+def _finish_quiet_success(app: Any, op_id: int, epoch: int) -> None:
+    """Return the status line to idle after an automatic connect, unless a switch owns it."""
+    if getattr(app, "_mcp_op_id", 0) != op_id:
+        return
+    manager = getattr(app.runner, "mcp", None)
+    if manager is None or manager.switch_epoch != epoch:
+        return
+    if getattr(app.state, "running", False):
+        return
+    app._mcp_quiet_settled = True
+    if _shown_status(app) != _MCP_OPERATION_RUNNING:
+        return
+    app.set_status("Ready", transient=False)
 
 
 def _switch_status_visible(app: Any) -> bool:

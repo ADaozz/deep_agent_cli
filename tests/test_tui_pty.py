@@ -383,6 +383,7 @@ _MCP_TUI_PROBE = _PROBE.replace(
 ).replace(
     "'status':app.state.status,",
     """'status':app.state.status,
+                'mcp_settled':bool(getattr(app, '_mcp_quiet_settled', False)),
                 'expanded':app.state.tools_expanded,
                 'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
                 'rendered_transcript':render_transcript(app.state, 60),""",
@@ -395,9 +396,16 @@ _MCP_TUI_PROBE = _PROBE.replace(
 def _mcp_tui(tmp_path, mode="call"):
     (tmp_path / "server_with_[brackets].py").write_text(_MCP_TUI_SERVER)
     app = Tui(tmp_path, probe=_MCP_TUI_PROBE, extra_args=(mode,))
-    expected = "Ready" if mode == "wizard" else "MCP operation finished"
     try:
-        app.wait(lambda state: state["status"] == expected, timeout=20)
+        if mode == "wizard":
+            app.wait(lambda state: state["status"] == "Ready", timeout=20)
+        else:
+            app.wait(
+                lambda state: state.get("mcp_settled") and state["status"] in {
+                    "Ready", "MCP: Enabled", "MCP: Disabled",
+                },
+                timeout=20,
+            )
     except BaseException:
         app.close()
         raise
