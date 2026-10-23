@@ -169,9 +169,12 @@ def _stream(argv: list[str], consume: Callable[[bytes], bool], *, deadline: floa
                 pass
             finally:
                 process.stdin.close()
+        stdout = process.stdout
+        stderr_pipe = process.stderr
+        assert stdout is not None and stderr_pipe is not None
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, "out")
-            selector.register(process.stderr, selectors.EVENT_READ, "err")
+            selector.register(stdout, selectors.EVENT_READ, "out")
+            selector.register(stderr_pipe, selectors.EVENT_READ, "err")
             while selector.get_map():
                 if context and context.cancelled:
                     status = "cancelled"

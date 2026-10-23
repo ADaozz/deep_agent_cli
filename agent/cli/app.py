@@ -2668,11 +2668,11 @@ class CliApplication:
                 return
             mode_raw = str(interaction.values.get("mode") or "")
             self.interaction = None
-            mode = parse_sandbox_mode(mode_raw)
-            if mode is None:
+            sandbox_mode = parse_sandbox_mode(mode_raw)
+            if sandbox_mode is None:
                 self.state.add_system("No sandbox mode selected", error=True)
                 return
-            self._request_sandbox_mode(mode)
+            self._request_sandbox_mode(sandbox_mode)
             return
         if interaction.kind == "permission_confirm":
             if cancelled:

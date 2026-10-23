@@ -10,11 +10,13 @@ import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 
 if TYPE_CHECKING:
     from agent.cli.app import CliApplication
+
+_TaskResult = TypeVar("_TaskResult")
 
 
 class ExitPhase(Enum):
@@ -69,10 +71,13 @@ class AppLifecycle:
     def exiting(self) -> bool:
         return self.phase is not ExitPhase.ACTIVE
 
-    def spawn(self, coro: Coroutine[Any, Any, object], *, stop: TaskStop, name: str) -> asyncio.Task[object]:
+    def spawn(
+        self, coro: Coroutine[Any, Any, _TaskResult], *, stop: TaskStop, name: str,
+    ) -> asyncio.Task[_TaskResult]:
         if stop is TaskStop.CANCEL and self.phase is not ExitPhase.ACTIVE:
             coro.close()
-            return asyncio.create_task(_refuse_ui_task(), name=name)
+            # UI helpers return None. The stand-in matches that result.
+            return cast(asyncio.Task[_TaskResult], asyncio.create_task(_refuse_ui_task(), name=name))
         task = asyncio.create_task(coro, name=name)
         self._tracked.append((task, stop))
         task.add_done_callback(self._forget)

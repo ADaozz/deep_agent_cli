@@ -520,8 +520,12 @@ def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
         status = "interrupted"
     elif block.status == "running":
         status = "running"
-    elif reason in ("cancelled", "timeout", "spawn_error"):
-        status = reason
+    elif reason == "cancelled":
+        status = "cancelled"
+    elif reason == "timeout":
+        status = "timeout"
+    elif reason == "spawn_error":
+        status = "spawn_error"
     elif exit_code not in (None, 0) or block.is_error or block.status == "error":
         status = "failed"
     else:
