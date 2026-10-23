@@ -1,3 +1,9 @@
+"""Host path routing, mount rules, and one-shot command execution.
+
+Persistent sandbox reuse lives in ``sandbox_pool.py``. The in-sandbox worker
+lives in ``sandbox_worker.py`` and cannot import this package. ``restricted``
+and ``full-access`` mounts are decided here; pool reuse does not change them.
+"""
 from __future__ import annotations
 
 import asyncio

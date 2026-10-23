@@ -140,7 +140,9 @@ sequenceDiagram
     R->>S: 记录结束原因或待恢复状态
 ```
 
-`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。它把模型与工具消息转成 `RunEvent`，负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。
+`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。中断分类、消息文本和 `RunEvent` 的构造在 `agent/run_events.py`；`RunResult` 与 `RunEvent` 仍从 `agent.runner` 导入。Runner 负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。`RunController` 仍是取消当前 Run 的唯一入口。
+
+终端侧的所有者也是分开的：`Keymap` 只做按键映射，`InputActionRouter` 决定 Ctrl+C、Esc、Ctrl+D 和 `/exit`，`CliApplication` 执行界面动作，`AppLifecycle` 在离开全屏之后收尾界面任务，`Runner.close()` 才释放 Session 租约。MCP 的忙闲和工具表发布状态在 `MCPController`，连接和宿主执行仍在 `MCPManager`。
 
 `RunResult` 的状态包括 `completed`、`failed`、`cancelled`、`waiting_confirmation`、`waiting_human`、`paused` 和 `runtime_config_boundary`。几类中断含义不同：审批是执行前授权；人工输入是 Agent 提问；暂停是用户请求；配置边界用于安全切换模型或权限。它们借助 checkpoint 恢复，但不能互相替代。
 
@@ -188,7 +190,15 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 双持久沙箱
 
-一个 Runner 按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。`SandboxPool` 负责懒启动、复用、失效替换与 Runner 关闭时的清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。
+一个 Runner 按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。三个模块的所有者是分开的：
+
+| 模块 | 负责 | 不负责 |
+|---|---|---|
+| `agent/sandbox.py` | 路径校验、挂载参数、文件工具路由、单次命令的输出收集与取消 | 跨会话复用沙箱进程 |
+| `agent/sandbox_pool.py` | 有网和无网实例的懒启动、复用、失效替换，以及关闭 Runner 时的清理 | 改写 restricted / full-access 的挂载规则 |
+| `agent/sandbox_worker.py` | 沙箱内常驻进程，按 request id 执行一条 shell 或 argv；`kill` 只作用于该命令 | import `agent`，或在 Worker 丢失后自动重放命令 |
+
+`SandboxPool` 负责懒启动、复用、失效替换与 Runner 关闭时的清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。取消一条命令不会关闭 Pool，也不会影响另一个网络实例。
 
 每次 `execute` 启动新的 `/bin/sh -lc`，Shell 变量和 `cd` 不跨调用保留；实例内 `/tmp`、`/home` 文件以及仍存活的后台进程可以保留。有网和无网实例绑定同一组 `/tmp` 与 `/home`：`restricted` 是专用持久目录，`full-access` 是当前环境的真实目录。切换回 `ask` 不会停止此前有网实例中的后台进程。`/sandbox` 会关闭两个实例。
 

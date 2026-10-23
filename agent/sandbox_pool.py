@@ -1,4 +1,9 @@
-"""按网络能力懒启动、Runner 内跨会话复用的 Bubblewrap 沙箱。"""
+"""Lazy offline and online Bubblewrap instances reused across sessions in one Runner.
+
+Path checks and mount arguments stay in ``sandbox.py``. Each command is a
+``RemoteCommand`` sent to the worker in ``sandbox_worker.py``. Cancelling one
+command does not shut the pool down; closing the Runner does.
+"""
 from __future__ import annotations
 
 import atexit
