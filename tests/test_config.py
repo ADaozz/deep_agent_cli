@@ -711,6 +711,63 @@ def test_model_retry_defaults_inheritance_and_override():
     assert model.max_retries == model.root_client.max_retries == model.root_async_client.max_retries == 0
 
 
+def test_mount_modes_reject_empty_unknown_and_duplicate_values(tmp_path: Path) -> None:
+    present = tmp_path / "present"
+    present.mkdir()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_write_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: []
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="modes"):
+        Settings.load(config)
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_write_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: [restricted, restricted]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        Settings.load(config)
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_only_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: [full-access]
+""",
+        encoding="utf-8",
+    )
+    mount = Settings.load(config).sandbox.extra_read_only_mounts[0]
+    assert mount.modes == ("full-access",)
+
+
+def test_shipped_template_is_restricted_and_scopes_host_dev() -> None:
+    import yaml
+    from importlib.resources import files
+
+    data = yaml.safe_load(files("agent").joinpath("config.example.yaml").read_text(encoding="utf-8"))
+    sandbox = data["sandbox"]
+    assert sandbox["mode"] == "restricted"
+    dev = sandbox["extra_read_write_mounts"][0]
+    assert dev["source"] == "/dev" and dev["dev_bind"] is True
+    assert dev["modes"] == ["full-access"]
+
+
 def test_hidden_tools_default_and_yaml_loading(tmp_path):
     assert Settings().hidden_tools == ()
     assert Settings.from_mapping({}).hidden_tools == ()

@@ -120,8 +120,9 @@ sandbox:
   bwrap_path: bwrap
   # restricted：只开放工作区、skills 和下面声明的挂载，系统目录只读。
   # full-access：开放宿主上的全部路径，仅保护 Agent 安装文件和配置目录。
-  # 配置文件未写 mode 时，代码默认仍是 restricted。/dev 由 extra_read_write_mounts 的 dev_bind 决定。
-  mode: full-access
+  # 配置文件未写 mode 时，代码默认仍是 restricted。
+  # 新模板也从 restricted 开始。已有 ~/.deep-agent/config.yaml 不会被这次改动覆盖。
+  mode: restricted
   # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
   timeout_seconds: null
   max_output_bytes: 100000
@@ -165,11 +166,13 @@ sandbox:
   # 挂载整个目录仍会暴露其中的敏感文件。只读只能禁止写入。
   extra_read_only_mounts: []
   extra_read_write_mounts:
-    # --dev 会换成沙箱自己的 /dev。要打开 USB 串口等设备节点，用 dev_bind 覆盖宿主 /dev。
+    # --dev 会换成沙箱自己的 /dev。要在 full-access 打开 USB 串口等设备节点，用 dev_bind。
+    # modes 省略时，这条挂载在 restricted 和 full-access 都生效。旧配置没有 modes，因此仍会在 restricted 开放宿主 /dev。
     # 不要这一条就把此项删掉。只读挂载不能设 dev_bind。
     - source: /dev
       destination: /dev
       dev_bind: true
+      modes: [full-access]
 
 paths:
   # SQLite 会话数据库；null 表示使用 ~/.deep-agent/sessions/<workspace-hash>.sqlite3。

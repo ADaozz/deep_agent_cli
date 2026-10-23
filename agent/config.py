@@ -31,12 +31,17 @@ def default_skills_dir() -> Path:
 
 @dataclass(frozen=True)
 class BindMount:
-    """An explicit host-to-sandbox mount."""
+    """An explicit host-to-sandbox mount.
+
+    ``modes`` is ``None`` when the mount applies in both filesystem modes.
+    That is the historical behavior for entries that omit the field.
+    """
 
     source: Path
     destination: str
     optional: bool = False
     dev_bind: bool = False
+    modes: tuple["SandboxMode", ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -441,6 +446,21 @@ def _as_str_dict(value: Any, *, field_name: str) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
+def _mount_modes(value: Any, *, field_name: str) -> tuple[SandboxMode, ...] | None:
+    """``None`` means both modes. An empty or unknown list is a config error."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field_name} must list restricted and/or full-access")
+    modes: list[SandboxMode] = []
+    for item in value:
+        parsed = parse_sandbox_mode(item) if isinstance(item, str) else None
+        if parsed is None or parsed in modes:
+            raise ValueError(f"{field_name} has an invalid or duplicate mode: {item!r}")
+        modes.append(parsed)
+    return tuple(modes)
+
+
 def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMount, ...]:
     if value is None:
         return ()
@@ -461,6 +481,7 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
             source_path = source_path.resolve()
         optional = _as_bool(item.get("optional", False), field_name=f"{field_name}[{index}].optional")
         dev_bind = _as_bool(item.get("dev_bind", False), field_name=f"{field_name}[{index}].dev_bind")
+        modes = _mount_modes(item.get("modes"), field_name=f"{field_name}[{index}].modes")
         if dev_bind and field_name == "sandbox.extra_read_only_mounts":
             raise ValueError(
                 f"{field_name}[{index}].dev_bind cannot be true; device binds must be extra_read_write_mounts"
@@ -469,6 +490,7 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
             continue
         mounts.append(BindMount(
             source=source_path, destination=str(destination), optional=optional, dev_bind=dev_bind,
+            modes=modes,
         ))
     return tuple(mounts)
 
