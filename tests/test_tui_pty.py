@@ -194,6 +194,12 @@ def test_real_pty_completion_permission_and_pending_approval(tui):
     assert state['pending'] is None
 
 
+def test_real_pty_exit_command_leaves_the_process(tui):
+    tui.send("/exit\r")
+    tui.process.wait(timeout=4)
+    assert tui.process.returncode == 0
+
+
 @pytest.mark.parametrize('gap,exits', [(0.3, True), (0.7, True), (1.2, False)])
 def test_real_pty_ctrl_c_window(tui, gap, exits):
     tui.send('draft\x03')
