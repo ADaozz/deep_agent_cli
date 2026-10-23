@@ -214,7 +214,6 @@ class InteractionController:
             elif name.startswith("mcp__"):
                 details.append("Execution: Host (outside sandbox)")
                 details.append("Arguments:\n" + mcp_arguments_preview(call.get("args", {})))
-        details.append("Run executes the listed tool calls. Reject denies them.")
         return cls(
             kind="approval",
             title="Approve tool call?",

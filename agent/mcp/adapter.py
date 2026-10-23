@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import partial
 import os
 import re
 import warnings
@@ -46,11 +47,12 @@ def open_server(
     call_timeout: float,
     connect_timeout: float,
     oauth_callback_timeout: float,
+    trust_env: bool = False,
 ) -> LoadedServer:
     """Connect on the bridge loop and return synchronous LangChain tools."""
     secrets: list[str] = []
     try:
-        transport = build_transport(server, secrets, oauth_callback_timeout=oauth_callback_timeout)
+        transport = build_transport(server, secrets, oauth_callback_timeout=oauth_callback_timeout, trust_env=trust_env)
         timeout = connect_timeout
         if server.auth is not None and server.auth.type == "oauth":
             timeout = oauth_callback_timeout + 5
@@ -79,6 +81,7 @@ def build_transport(
     secrets: list[str],
     *,
     oauth_callback_timeout: float,
+    trust_env: bool = False,
 ) -> Any:
     if server.transport == "streamable_http":
         from fastmcp.client.auth import BearerAuth, OAuth
@@ -101,7 +104,7 @@ def build_transport(
         return StreamableHttpTransport(
             server.url or "",
             auth=auth,
-            httpx_client_factory=_proxy_free_http_client,
+            httpx_client_factory=partial(_http_client, trust_env=trust_env),
         )
 
     from fastmcp.client.transports import StdioTransport
@@ -111,6 +114,9 @@ def build_transport(
         raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
     env = {name: os.environ[name] for name in server.env_passthrough}
     secrets.extend(env.values())
+    from agent.http_environment import apply_http_environment
+
+    env = apply_http_environment(env, os.environ, trust_env=trust_env)
     return StdioTransport(
         command=server.command or "",
         args=list(server.args),
@@ -119,13 +125,13 @@ def build_transport(
     )
 
 
-def _proxy_free_http_client(**kwargs: Any) -> Any:
-    """Match the model client: do not send MCP requests through env proxies."""
+def _http_client(*, trust_env: bool = False, **kwargs: Any) -> Any:
+    """Apply the global environment policy to MCP HTTP and OAuth requests."""
     import httpx2
 
     if kwargs.get("timeout") is None:
         kwargs["timeout"] = httpx2.Timeout(30.0, read=300.0)
-    kwargs["trust_env"] = False
+    kwargs["trust_env"] = trust_env
     return httpx2.AsyncClient(**kwargs)
 
 

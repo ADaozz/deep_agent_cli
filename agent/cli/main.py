@@ -24,7 +24,7 @@ def create_runner(settings: Settings) -> AgentRunner:
         override=settings.state_path,
     )
     config_dir = settings.sandbox.protected_config_dir or settings.config_dir or default_config_dir()
-    mcp_manager = MCPManager(config_dir / "mcp.json")
+    mcp_manager = MCPManager(config_dir / "mcp.json", trust_env=settings.trust_env)
     mcp_manager.load()
     try:
         return AgentRunner(

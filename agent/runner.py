@@ -270,10 +270,11 @@ class AgentRunner:
         profile = cfg.get_profile(model_id) if model_id else cfg.active_profile
         self._current_model_id = profile.id
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
-            profile, attachment_store=self.attachment_store,
+            profile, attachment_store=self.attachment_store, trust_env=cfg.trust_env,
         ))
         object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
+            trust_env=cfg.trust_env,
             instructions=cfg.agent_instructions,
             hidden_tools=cfg.hidden_tools,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
@@ -506,6 +507,7 @@ class AgentRunner:
                     if profile is not None and (model_id is not None or effort is not None):
                         chat = build_chat_model(
                             profile, attachment_store=self.attachment_store,
+                            trust_env=self._spec.trust_env,
                             reasoning_effort=None if target_effort == "default" else target_effort,
                         )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
@@ -701,6 +703,7 @@ class AgentRunner:
         if chat is None and self.settings is not None:
             chat = build_chat_model(
                 self.settings.get_profile(self._current_model_id),
+                trust_env=self._spec.trust_env,
                 reasoning_effort=None if self._reasoning_effort == "default" else self._reasoning_effort,
                 attachment_store=self.attachment_store,
             )
@@ -973,6 +976,7 @@ class AgentRunner:
             self._rebuild_prepared(
                 model=build_chat_model(
                     profile, attachment_store=self.attachment_store,
+                    trust_env=self._spec.trust_env,
                     reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
                 ),
                 permission_mode=plan.permission_mode,

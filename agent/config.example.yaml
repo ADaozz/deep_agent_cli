@@ -3,6 +3,15 @@
 #
 # 通过 DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml 指定配置文件路径。
 
+# 全局代理/CA 环境变量：模型 API、MCP HTTP/OAuth、Tavily、stdio MCP 和 execute。
+# false（默认）：HTTP 客户端忽略代理/CA 环境变量，子进程也不传递这些变量。
+# true：继承 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY（含小写）和 CA 配置。
+# 子进程额外支持 REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE / NODE_EXTRA_CA_CERTS；
+# NODE_USE_ENV_PROXY 未指定时自动设为 1，程序是否使用由其自身实现决定。
+# 此项只写在主配置顶层，不写在 llm、sandbox 或 mcp.json 中。
+# 修改后重启生效；不会开启 execute 的沙箱网络权限。
+trust_env: false
+
 agent:
   # 长期用户指令，追加在内置身份说明之后。
   # instructions: |
@@ -117,13 +126,15 @@ sandbox:
   timeout_seconds: null
   max_output_bytes: 100000
   # 允许传入沙箱的宿主环境变量。PATH 用宿主的，命令就在宿主目录里解析
-  # （~/.nvm、~/esp、~/.espressif 等）。未列入的变量不会传入。
+  # （~/.nvm、~/esp、~/.espressif 等）。其他普通变量需在这里列出。
+  # 代理/CA 变量统一由顶层 trust_env 控制；true 时自动传入，无需重复列出。
   # 有头浏览器复用宿主 X11；宿主未设置 DISPLAY 时不传入。
   env_allowlist:
     - PATH
     - DISPLAY
   # 固定注入的变量，会盖住上面从宿主传入的同名变量。full-access 不要在这里写 PATH，
   # 否则会盖住宿主 PATH。/run/deep-agent 仍会自动放在 PATH 最前。
+  # trust_env=false 时，即使在此显式设置代理/CA 变量，也会被移除。
   env_set: {}
   # full-access 已经能看见宿主目录，默认不再把工具改挂到 /opt。
   # 改成 restricted 后，只剩下工作区、skills 和这里声明的挂载。需要工具时再按实际路径加上，例如：

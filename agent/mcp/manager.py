@@ -69,8 +69,10 @@ class MCPManager:
         call_timeout: float = 120,
         connect_timeout: float = 20,
         oauth_callback_timeout: float = 120,
+        trust_env: bool = False,
     ) -> None:
         self.path = path
+        self._trust_env = trust_env
         self._call_timeout = call_timeout
         self._connect_timeout = connect_timeout
         self._oauth_callback_timeout = oauth_callback_timeout
@@ -380,6 +382,7 @@ class MCPManager:
                     call_timeout=self._call_timeout,
                     connect_timeout=self._connect_timeout,
                     oauth_callback_timeout=self._oauth_callback_timeout,
+                    trust_env=self._trust_env,
                 )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))

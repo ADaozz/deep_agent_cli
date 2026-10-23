@@ -16,9 +16,41 @@ CLI 按以下顺序查找主配置：
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
 - 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
+## 全局网络环境（`trust_env`）
+
+在主配置 `config.yaml` 顶层设置，修改后重启生效：
+
+```yaml
+trust_env: false
+```
+
+只接受 YAML 布尔值 `true` / `false`，不要写成字符串 `"true"`，也不要放在 `llm`、`sandbox` 或 `mcp.json` 中。
+
+默认 `false`。设为 `true` 后，模型 API（同步和异步）、MCP HTTP/OAuth 和 Tavily 客户端读取代理与 CA 环境变量；stdio MCP 子进程和 `execute` 命令也自动继承这些变量。
+
+- 代理：`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，以及对应的小写名称。
+- CA：`SSL_CERT_FILE`、`SSL_CERT_DIR`；子进程还传递 `REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`。
+- 子进程传递 `NODE_USE_ENV_PROXY`，未指定时默认设为 `1`，让支持该开关的 Node 版本使用环境代理。其他程序是否使用这些变量由程序自身决定。
+
+`false` 时，上述变量也会从子进程环境移除，即使写在 `sandbox.env_allowlist`、`sandbox.env_set` 或 MCP `env_passthrough` 中。`true` 时显式的子进程配置优先于继承值。此开关不改变沙箱网络审批与文件挂载；自定义 CA 路径需要在子进程所在环境中可访问。它也不阻止命令自行设置代理或读取自己的配置文件。
+
+例如使用本机 HTTP 代理，在主配置顶层改为 `trust_env: true`，再从设置了代理的终端启动：
+
+```bash
+# 将端口替换为实际代理端口。
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+export NO_PROXY=localhost,127.0.0.1,::1
+deep-agent
+```
+
+无需再把代理变量列入 `sandbox.env_allowlist` 或 MCP `env_passthrough`。已有用户配置不会随升级覆盖，需手动添加此项。
+
 ## MCP（`mcp.json`）
 
 MCP 目录与模型配置分开，默认是 `~/.deep-agent/mcp.json`。CLI 把它放在沙箱隐藏的配置目录里。这个文件是项目自己的目录，不会原样交给 LangChain `MCPAdapter`。
+
+使用 `node` / `npx` 启动 stdio MCP 服务时，推荐 Node.js 24（使用最新的 24.x 补丁版本），具体兼容范围以服务自身要求为准。HTTP MCP 客户端由 Python 运行，不依赖本机 Node 版本。
 
 MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不受沙箱的文件系统或网络限制。`allow` 不会把它们当成可信工具。stdio 的命令直接在宿主运行。Bearer token 只记录环境变量名，文件里不写明文。OAuth 由 FastMCP 打开浏览器，Agent 不能代替用户确认。
 
@@ -40,7 +72,7 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
 }
 ```
 
-MCP HTTP 请求不使用环境变量里的代理，和模型、Tavily 客户端一致，避免把 token 交给代理。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；这两项都要用户确认。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；这两项都要用户确认。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
 
 ## 工具可见性（`tools.hidden`）
 
@@ -95,7 +127,7 @@ llm:
 - `chat_completions`：Chat Completions。会读取流式和非流式响应中的 `reasoning_content` 或 `reasoning` 字符串字段作为思考内容，并在后续请求中原样回传。
 - `responses`：Responses API。会把 Qwen 的 `response.reasoning_text.*` 事件转换成 LangChain 能识别的格式。
 
-两种 API 的客户端都设置了 `trust_env=False`，因此忽略 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理环境变量。连接失败、请求超时、429、5xx 等请求故障默认额外重试 5 次，可通过来源级或模型级 `max_retries` 调整。
+两种 API 的客户端统一受全局 `trust_env` 控制，默认忽略代理与 CA 环境变量。连接失败、请求超时、429、5xx 等请求故障默认额外重试 5 次，可通过来源级或模型级 `max_retries` 调整。
 
 流式调用由单层逻辑统一重试连接错误和响应读取中断（包括缺少结束事件就直接 EOF），共享同一预算：首次请求 + 最多 5 次重试，总 HTTP 请求次数不超过 6 次。每次流式请求使用独立的 SDK 客户端副本并禁用 SDK 内部重试，不修改共享客户端；非流式调用仍使用 SDK 原生重试。
 

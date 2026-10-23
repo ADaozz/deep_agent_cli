@@ -279,7 +279,7 @@ class _RawResponsesClient(_Delegate):
 
 
 class ProtocolChatOpenAI(ChatOpenAI):
-    """Shared request-local attachment resolution and proxy-free transport.
+    """Shared request-local attachment resolution and HTTP transport.
 
     Synchronous streaming runs LangChain's async stream on the managed stream
     loop (``agent.llm_stream``) so the run that owns the request can cancel a
@@ -528,6 +528,7 @@ def build_chat_model(
     streaming: bool = True,
     attachment_store: AttachmentStore | None = None,
     reasoning_effort: str | None = None,
+    trust_env: bool = False,
 ) -> ChatOpenAI:
     """Build the template chat client from a ModelProfile."""
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
@@ -549,8 +550,8 @@ def build_chat_model(
     model = adapter(
         model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
         streaming=streaming, max_retries=profile.max_retries, timeout=600.0,
-        http_socket_options=(), http_client=httpx.Client(trust_env=False),
-        http_async_client=httpx.AsyncClient(trust_env=False), **protocol_kwargs,
+        http_socket_options=(), http_client=httpx.Client(trust_env=trust_env),
+        http_async_client=httpx.AsyncClient(trust_env=trust_env), **protocol_kwargs,
     )
     object.__setattr__(model, "_deep_agent_model_id", profile.id)
     if attachment_store is not None:

@@ -99,10 +99,12 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。其他变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。代理与 CA 变量由主配置顶层 [`trust_env`](configuration.md#全局网络环境trust_env) 统一控制：`true` 时自动继承，`false` 时移除，包括显式配置的同名变量。其余变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。
 - 不限制 CPU、内存、磁盘或进程数。
 
 ## 工具目录与环境变量
+
+运行 Node 工具推荐 Node.js 24（使用最新的 24.x 补丁版本）；具体工具的版本要求以其文档为准。
 
 程序不自动发现 Node、Cargo、Chrome 等工具的安装位置，也不自动选择版本。默认模板采用常见目录；能加载配置或启动沙箱，不代表所有可选工具都已安装并可运行。
 
@@ -131,6 +133,8 @@
 - 切换会话（`/resume`、`/new`）或等待其他窗口释放会话时，保留当前 Runner 的沙箱及后台进程，不会接管其他 CLI 进程的沙箱。切换会话仍恢复配置中的文件系统模式；若模式确实变化，则重建沙箱。关闭 Runner 或退出 CLI 时，两个沙箱及其中所有进程都被销毁。`/tmp` 与 `/home` 里的文件保留。切换模型或权限模式不会重建沙箱。`/sandbox` 会关闭当前 Runner 的两个沙箱，下一次 `execute` 按新挂载启动。
 
 ## 网络
+
+全局 `trust_env: true` 会将代理与 CA 环境变量传给 `execute`，并为支持环境代理的 Node 默认设置 `NODE_USE_ENV_PROXY=1`。这只控制环境传递，命令是否使用这些变量由其自身决定，也不会改变以下网络权限。
 
 - 默认使用 `--unshare-net`：命令及子进程不能直接访问宿主 IP 网络，但仍可在自己的网络命名空间使用回环接口。
 - 模型在调用 `execute` 时传 `network=true`，该条命令在有网沙箱中运行，能访问互联网、`localhost` 和局域网。`ask` 模式下这条命令仍需审批，审批界面会显示该参数。

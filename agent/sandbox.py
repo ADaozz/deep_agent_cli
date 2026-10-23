@@ -1069,6 +1069,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
 
 
 def sandbox_environment(config: SandboxConfig, environ: dict[str, str] | None = None) -> dict[str, str]:
+    from agent.http_environment import apply_http_environment
+
     source = os.environ if environ is None else environ
     result = {
         "PATH": FIXED_PATH,
@@ -1086,6 +1088,7 @@ def sandbox_environment(config: SandboxConfig, environ: dict[str, str] | None = 
         if name in source:
             result[name] = source[name]
     result.update(config.env_set)
+    result = apply_http_environment(result, source, trust_env=config.trust_env)
     # Keep built-in executables available even when configuration replaces PATH.
     tools_path = str(PurePosixPath(SEARCH_BINARY_PATH).parent)
     configured_paths = [part for part in result["PATH"].split(":") if part != tools_path]

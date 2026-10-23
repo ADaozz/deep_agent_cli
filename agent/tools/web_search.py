@@ -12,7 +12,7 @@ TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 TAVILY_TIMEOUT_SECONDS = 20
 
 
-def build_web_search_tool(api_key: str) -> BaseTool:
+def build_web_search_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
     """Bind a Tavily credential without exposing it in the model's tool schema."""
     if not api_key.strip():
         raise ValueError("Tavily API key must not be empty")
@@ -63,7 +63,7 @@ def build_web_search_tool(api_key: str) -> BaseTool:
         if include_domains:
             payload["include_domains"] = [domain.strip() for domain in include_domains]
         try:
-            with httpx.Client(timeout=TAVILY_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
+            with httpx.Client(timeout=TAVILY_TIMEOUT_SECONDS, follow_redirects=False, trust_env=trust_env) as client:
                 response = client.post(
                     TAVILY_SEARCH_URL,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

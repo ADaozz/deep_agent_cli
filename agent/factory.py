@@ -1,6 +1,6 @@
 # Assembly entry: create_deep_agent() only. Do not fork Deep Agents core.
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -91,6 +91,7 @@ class AgentSpec:
     sandbox: SandboxConfig | None = None
     web_search_api_key: str | None = field(default=None, repr=False)
     hidden_tools: tuple[str, ...] = ()
+    trust_env: bool = False
 
 
 @dataclass
@@ -141,7 +142,7 @@ def build_agent(
     backend_selection: BackendSelection | None = None,
     mcp: Any | None = None,
 ) -> PreparedAgent:
-    sandbox_cfg = spec.sandbox or SandboxConfig()
+    sandbox_cfg = replace(spec.sandbox or SandboxConfig(), trust_env=spec.trust_env)
     selected: BackendSelection | None = None
     if spec.backend is None:
         selected = backend_selection or select_backend(sandbox_cfg)
@@ -159,7 +160,7 @@ def build_agent(
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
     tools = [*build_human_input_tools(), *spec.tools]
     if spec.web_search_api_key:
-        tools.append(build_web_search_tool(spec.web_search_api_key))
+        tools.append(build_web_search_tool(spec.web_search_api_key, trust_env=spec.trust_env))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
@@ -259,6 +260,7 @@ def create_agent(
 ) -> PreparedAgent:
     cfg = settings or Settings()
     spec = AgentSpec(
+        trust_env=cfg.trust_env,
         instructions=instructions if instructions is not None else cfg.agent_instructions,
         tools=tuple(extra_tools or ()),
         hidden_tools=cfg.hidden_tools,
@@ -284,7 +286,7 @@ def create_agent(
 
 
 def _default_model(cfg: Settings) -> BaseChatModel:
-    return build_chat_model(cfg.active_profile, streaming=True)
+    return build_chat_model(cfg.active_profile, streaming=True, trust_env=cfg.trust_env)
 
 
 def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:

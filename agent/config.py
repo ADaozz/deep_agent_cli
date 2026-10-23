@@ -92,6 +92,7 @@ class SandboxConfig:
     extra_read_write_mounts: tuple[BindMount, ...] = ()
     protected_config_dir: Path | None = None
     protected_files: tuple[Path, ...] = ()
+    trust_env: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in _SANDBOX_MODES:
@@ -158,6 +159,12 @@ class Settings:
     ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
     hidden_tools: tuple[str, ...] = ()
     tavily_api_key: str | None = field(default=None, repr=False)
+    trust_env: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trust_env, bool):
+            raise ValueError("trust_env must be a boolean")
+        object.__setattr__(self, "sandbox", replace(self.sandbox, trust_env=self.trust_env))
 
     @property
     def llm_model(self) -> str:
@@ -226,6 +233,9 @@ class Settings:
         workspace: Path | None = None,
     ) -> "Settings":
         raw = dict(data or {})
+        trust_env = raw.get("trust_env", False)
+        if not isinstance(trust_env, bool):
+            raise ValueError("trust_env must be a boolean")
         root = (base_dir or Path.cwd()).expanduser().resolve()
         llm = _section(raw, "llm")
         agent = _section(raw, "agent")
@@ -267,6 +277,7 @@ class Settings:
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError(f"ui.timezone is invalid: {timezone_name}") from exc
         result = cls(
+            trust_env=trust_env,
             hidden_tools=tuple(dict.fromkeys(name.strip() for name in hidden_tools)),
             llm_profiles=profiles,
             llm_default=default_id,

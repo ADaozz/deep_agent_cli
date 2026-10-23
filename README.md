@@ -34,6 +34,8 @@ OpenAI 兼容接口 · Bubblewrap
 
 需要 **Linux / WSL2、Python 3.12+、Bubblewrap**，以及支持 Chat Completions 或 Responses 的模型端点。CLI 需要交互式终端；原生 Windows、macOS 和 WSL1 不支持这套沙箱。Ubuntu / WSL2 的 user namespace 限制见 [沙箱排查](docs/sandbox.md#排查ubuntu--wsl2)。
 
+使用 Node 编写的 stdio MCP 服务或通过 `execute` 运行 Node 工具时，推荐 **Node.js 24（使用最新的 24.x 补丁版本）**；具体 MCP 服务仍以其自身的版本要求为准。
+
 ### 1. 安装
 
 Debian / Ubuntu：
@@ -170,7 +172,7 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。会话切换及关闭时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
 - **本地状态**：同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **客户端**：模型与 Tavily 请求忽略代理环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 只支持 Streamable HTTP 和 stdio 工具调用，在宿主执行；不提供 Resources、Prompts、Sampling 或子 Agent。
+- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 只支持 Streamable HTTP 和 stdio 工具调用，在宿主执行；不提供 Resources、Prompts、Sampling 或子 Agent。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。
 
