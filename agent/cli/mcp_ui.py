@@ -233,13 +233,18 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
     _start_operation(app, partial(manager.add_from_fields, **fields))
 
 
-def _start_operation(app: Any, operation: Any, *, quiet_success: bool = False) -> asyncio.Task | None:
+def _start_operation(
+    app: Any, operation: Any, *, quiet_success: bool = False, force: bool = False,
+) -> asyncio.Task | None:
     # Reserve before scheduling: two Enter events must not launch two workers.
     # /mcp disable does not use this gate, so it can cancel an OAuth wait.
-    if getattr(app, "_mcp_busy", False):
+    # A new enable round may force its own connect without waiting for that work.
+    if getattr(app, "_mcp_busy", False) and not force:
         app.set_status("MCP operation still running")
         return None
     app._mcp_busy = True
+    op_id = getattr(app, "_mcp_op_id", 0) + 1
+    app._mcp_op_id = op_id
     app.set_status("MCP operation running; connections and OAuth have a timeout", transient=False)
     epoch = app.runner.mcp.switch_epoch
 
@@ -267,7 +272,8 @@ def _start_operation(app: Any, operation: Any, *, quiet_success: bool = False) -
             app.state.add_system(f"MCP operation failed: {str(exc)[:400]}", error=True)
             app.set_status("MCP operation failed; you can retry", transient=False)
         finally:
-            app._mcp_busy = False
+            if getattr(app, "_mcp_op_id", 0) == op_id:
+                app._mcp_busy = False
             app.application.invalidate()
 
     app._mcp_operation = asyncio.create_task(run())
@@ -389,52 +395,14 @@ async def _set_mcp_enabled(app: Any, enabled: bool) -> None:
 
 
 async def _connect_after_enable(app: Any, epoch: int) -> None:
-    """Start a new connection round after the previous operation unwinds.
+    """Start this enable's connections without waiting for the previous round.
 
-    Disable has already signalled cancellation. Waiting here stays on the
-    event loop, and a cancelled or failed wait still starts this round when
-    it is the latest switch. The old task's result is not shown as this one.
+    Disable has already cancelled that round. Its task may still be unwinding,
+    but the new connect_pending belongs to this epoch and must not block on it.
     """
-    manager = app.runner.mcp
-    existing = getattr(app, "_mcp_operation", None)
-    cancelled = False
-    if getattr(app, "_mcp_busy", False) and existing is not None:
-        try:
-            await asyncio.shield(existing)
-        except asyncio.CancelledError:
-            cancelled = True
-        except Exception:
-            pass
-    if manager.switch_epoch != epoch:
-        if cancelled:
-            raise asyncio.CancelledError
+    if app.runner.mcp.switch_epoch != epoch:
         return
-    started = _start_operation(app, manager.connect_pending, quiet_success=True)
-    if started is None:
-        existing = getattr(app, "_mcp_operation", None)
-        if existing is not None and existing.done():
-            app._mcp_busy = False
-            _start_operation(app, manager.connect_pending, quiet_success=True)
-        elif existing is not None:
-            _start_connect_when_idle(app, existing, epoch)
-    if cancelled:
-        raise asyncio.CancelledError
-
-
-def _start_connect_when_idle(app: Any, existing: asyncio.Task, epoch: int) -> None:
-    async def follow() -> None:
-        try:
-            await asyncio.shield(existing)
-        except Exception:
-            pass
-        manager = app.runner.mcp
-        if manager.switch_epoch != epoch:
-            return
-        if getattr(app, "_mcp_busy", False):
-            app._mcp_busy = False
-        _start_operation(app, manager.connect_pending, quiet_success=True)
-
-    asyncio.create_task(follow())
+    _start_operation(app, app.runner.mcp.connect_pending, quiet_success=True, force=True)
 
 
 def _switch_status_visible(app: Any) -> bool:

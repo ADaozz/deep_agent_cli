@@ -856,7 +856,9 @@ def test_old_connect_batch_stops_for_a_new_enable_round(tmp_path: Path, monkeypa
             alpha = manager._states["alpha"].client
             beta = manager._states["beta"].client
             release.set()
-            assert not old.result(5).ok
+            old_result = old.result(5)
+            assert not old_result.ok
+            assert old_result.message == "MCP connection round was superseded."
             assert opened.count("beta") == 1
             assert manager._states["alpha"].client is alpha
             assert manager._states["beta"].client is beta
@@ -897,6 +899,83 @@ async def test_switch_publish_queues_when_busy_and_does_not_retry_failure(tmp_pa
         assert calls["n"] == 1
         assert app.status == "MCP tool update failed; retry at the next safe point"
     finally:
+        runner.close()
+        manager.close()
+
+
+def test_partial_batch_reports_superseded(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "alpha": {"transport": "stdio", "command": "fixture"},
+        "beta": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+    opened: list[str] = []
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    def connect(config, _bridge, **_kwargs):
+        opened.append(config.name)
+        return LoadedServer(Client(), [], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    original = manager.test
+
+    def stop_after_alpha(name: str, **kwargs):
+        result = original(name, **kwargs)
+        if name == "alpha":
+            assert manager.set_enabled(False).ok
+        return result
+
+    manager.test = stop_after_alpha  # type: ignore[method-assign]
+    try:
+        result = manager.connect_pending()
+        assert not result.ok
+        assert result.message == "MCP connection round was superseded."
+        assert opened == ["alpha"]
+        assert manager.get("beta").status is ServerStatus.DISCONNECTED
+    finally:
+        manager.close()
+
+
+@async_test
+async def test_enable_does_not_wait_for_the_previous_connection(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "local": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+    entered, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    def connect(config, _bridge, **_kwargs):
+        calls.append(config.name)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return LoadedServer(Client(), [], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    previous = asyncio.create_task(handle_mcp_command(app, "test local"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        await handle_mcp_command(app, "disable")
+        await asyncio.wait_for(handle_mcp_command(app, "enable"), 2)
+        assert calls.count("local") >= 2
+        assert manager.enabled is True
+    finally:
+        release.set()
+        await previous
         runner.close()
         manager.close()
 

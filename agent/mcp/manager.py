@@ -219,18 +219,23 @@ class MCPManager:
         results: list[MCPResult] = []
         for name in names:
             with self._lock:
-                if (
-                    self._closed or self._connection_cancel.is_set()
-                    or not self._document.enabled or self._activation_epoch != epoch
-                ):
-                    break
+                if self._batch_is_stale(epoch):
+                    return MCPResult(False, False, "MCP connection round was superseded.")
             results.append(self.test(name, expected_epoch=epoch))
-        if names and not results:
-            return MCPResult(False, False, "MCP connection round was superseded.")
+            with self._lock:
+                if self._batch_is_stale(epoch):
+                    return MCPResult(False, False, "MCP connection round was superseded.")
         return MCPResult(
             all(result.ok for result in results), False,
             "\n".join(result.message for result in results) or
             "MCP catalog loaded.",
+        )
+
+    def _batch_is_stale(self, epoch: int) -> bool:
+        """True when this connect_pending round is no longer the active generation."""
+        return (
+            self._closed or self._connection_cancel.is_set()
+            or not self._document.enabled or self._activation_epoch != epoch
         )
 
     def list_servers(self) -> list[ServerState]:
