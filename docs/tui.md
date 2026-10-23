@@ -72,7 +72,7 @@ MCP: Disabled
 Connections and tools are inactive.
 ```
 
-Agent 正在运行或仍有待决审批时，`/mcp disable` 只排队，并说明当前操作会先完成、工具要到下一个安全点才移除。工具表真正切换之后才显示上面的 `MCP: Disabled`。待决审批保留，不会被丢弃。空闲时会立即重建 Graph。`/mcp enable` 写回配置后自动连接已启用的服务，并在安全点恢复 MCP 工具。
+Agent 正在运行或仍有待决审批时，`/mcp disable` 只排队，提示 `MCP disable queued until the next safe point`，并要求先结束当前操作；有待决审批时额外提示 `Resolve the pending approval first.`。工具表真正切换之后才显示上面的 `MCP: Disabled`。待决审批保留，不会被丢弃。空闲时会立即重建 Graph。`/mcp enable` 写回配置后自动连接已启用的服务，并在安全点恢复 MCP 工具。
 
 使用 `/mcp tools <服务名>` 查看工具；服务不可用时显示错误详情。输入时会补全 `enable`、`disable`、`add`、`remove`、`test`、`tools`，服务名需要手动填写。`/mcp remove <服务名>` 删除配置，连接在安全点释放。要停用全部 MCP，执行 `/mcp disable`；要只停用一个服务并保留它的配置，把该服务的 `enabled` 改为 `false`。关闭全局开关不会删除 `mcp.json` 或 OAuth 令牌缓存。重复执行已经生效的 `/mcp enable` 或 `/mcp disable` 只显示当前状态，不会重新连接或再次写配置。
 

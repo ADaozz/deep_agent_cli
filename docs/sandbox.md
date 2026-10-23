@@ -184,7 +184,7 @@ CUSTOM backend 保留调用方自己的规则。
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove` | 所有执行模式 |
+| `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
 | `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。

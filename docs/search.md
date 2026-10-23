@@ -19,9 +19,9 @@ rg --files -g 'pattern' path
 
 ## ripgrep 安装与定位
 
-`deep-agent` 的 `grep` 工具默认支持正则表达式，并优先使用
+未注册的本地搜索实现默认按正则匹配，并优先使用
 [ripgrep](https://github.com/BurntSushi/ripgrep)。安装项目时，Python 依赖
-`ripgrep-bin>=15.2.0,<16` 会自动安装 `rg`，通常无需手动安装系统软件包。
+`ripgrep-bin>=15.2.0,<16` 会自动安装 `rg`，通常无需手动安装系统软件包。模型侧搜索走上一节的 `execute` + `rg`，不调用这个实现。
 
 程序按以下顺序选择搜索引擎，无需配置路径：
 

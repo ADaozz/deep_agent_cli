@@ -41,7 +41,7 @@ flowchart TB
 | 运行控制 | `agent/runner.py`、`control.py` | Run 生命周期、中断恢复、取消、steering、统一事件 |
 | 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
-| 工具 | `agent/tools/`、上游文件工具 | Schema、参数校验、结果与 artifact |
+| 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
 | 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 工作区真实路径、命名空间、持久进程、超时与清理 |
 | 会话状态 | `agent/session.py`、`session_runtime.py`、`session_lock.py` | Checkpoint、元数据、附件、独占租约与恢复 |
 
@@ -79,6 +79,8 @@ flowchart TB
 | `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
 | `request_human_input` | 始终注册 | 独立的人工输入中断 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
+| `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
+| `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
 | `extra_tools` | 调用方显式注入 | 有副作用的工具需显式加入审批规则 |
 
 `web_search` 是可用的内置工具，有密钥时正常提供，未配置时不注册。其 Tavily 请求在宿主进程中发送，不受 Shell 的网络命名空间约束。
@@ -96,6 +98,7 @@ Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工
 | `RuntimeConfigGateMiddleware` | 下一次模型调用前处理待生效的模型/权限切换 |
 | `PauseGateMiddleware` | 下一次模型调用前响应暂停 |
 | `RecoveryContextMiddleware` | 异常恢复后的首次模型请求附加说明，不写入 checkpoint |
+| `EnvironmentContextMiddleware` | 每次模型调用附加当前沙箱的短快照，不写入 checkpoint |
 | `UsageIdentityMiddleware` | 模型响应进入 checkpoint 前标记来源 |
 | `SteeringMiddleware` | 注入运行中指令，必要时撤销尚未执行的工具提议并重新推理 |
 | `ToolCancelMiddleware` | 为工具传递可取消上下文 |
@@ -104,8 +107,10 @@ Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工
 | `AttachmentMaterializationMiddleware` | 仅请求模型时将图片引用展开为内容 |
 | `WorkspaceFilesystemMiddleware` | 文件工具及组合 Backend 能力适配 |
 | `SummarizationToolMiddleware` | 提供手动压缩工具 |
+| `MCPMiddleware` | `mcp.json` 根级 `enabled` 为 true 且 Manager 无配置错误时注入管理工具和已连接服务的工具；全局关闭时不进入中间件列表 |
+| `HiddenToolsMiddleware` | 按 `tools.hidden` 从模型请求中过滤工具，不改变审批规则 |
 
-工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。
+工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
 
 ## 运行与中断
 
@@ -159,7 +164,7 @@ sequenceDiagram
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
 
-`ask` 默认审批文件修改、每次 `execute` 和每次 `web_search`。`ls`、`read_file` 等只读文件工具免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
+`ask` 默认审批文件修改、每次 `execute`、每次 `web_search`，以及宿主 MCP 工具和 `mcp_add` / `mcp_remove`。`ls`、`read_file`、`mcp_list` 等只读查询免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
 
 找不到 `bwrap` 时启动失败，没有宿主机执行回退。`CUSTOM` 由调用方注入的 Backend 决定资源边界。`restricted` 与 `full-access` 只改变文件系统挂载，不改变审批，也不提权。`/sandbox` 在下一次模型调用前更换挂载并关闭当前会话的两个沙箱；模式不写入会话库，恢复会话时回到配置文件中的 `sandbox.mode`。
 
@@ -291,12 +296,13 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 | 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
 | 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
+| 宿主 MCP、全局开关、OAuth 与 TUI | `test_mcp_*.py`、`test_tui_pty.py` |
 
 运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟模型端点、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
 
 ## 扩展边界
 
-新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。MCP 工具由 `MCPMiddleware` 注入，不写入 `AgentSpec.tools`；连接、stdio 子进程和 OAuth 都发生在宿主，不能声称它们受到 Bubblewrap 保护。
+新增工具应明确 Schema、副作用、审批、路径权限、超时/取消、输出上限与失败行为，并复用现有注册和运行控制。实现调用进程并不意味着应合并为 `execute`。MCP 工具由 `MCPMiddleware` 注入，不写入 `AgentSpec.tools`。根级 `enabled: false` 时不注册该中间件，也不连接、不启动 stdio、不触发 OAuth。连接、stdio 子进程和 OAuth 都发生在宿主，不能声称它们受到 Bubblewrap 保护。
 
 增加并行执行前需规定 checkpoint 写入所有权、副作用一致性、取消竞态和终态；提高隔离级别前需定义部署威胁模型、间接通信与资源配额要求。终端和库调用方以既有 RunResult 和 RunEvent 为契约，不自行推断审批已生效或取消已完成。这些是扩展时的设计要求，并非当前已有功能。
 
@@ -308,4 +314,5 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 - 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
 - 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
+- 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
 - 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。

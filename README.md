@@ -19,7 +19,7 @@ OpenAI 兼容接口 · Bubblewrap
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
-> 当前版本 **0.1.8**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
+> 当前版本 **0.1.9**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
 
@@ -139,6 +139,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 | `Esc` | 请求取消当前任务 |
 | `Ctrl+O` / `Ctrl+T` | 展开工具输出 / 思考内容 |
 | `/resume` / `/new` | 恢复或新建会话 |
+| `/mcp` | 查看、开关和配置宿主 MCP 服务 |
 | `/help` / `/status` | 查看完整操作与当前状态 |
 
 更多按键、图片附件、队列、Skills 和显示设置见 [终端界面](docs/tui.md)。
@@ -164,9 +165,9 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 | **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
 | 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
-只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，用 `/mcp` 或 `mcp_add` 管理。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
+只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，根级 `enabled` 是全局开关（默认开启）；用 `/mcp`、`/mcp enable`、`/mcp disable` 或 `mcp_add` / `mcp_remove` 管理。全局关闭时不连接、不启动 stdio、不打开 OAuth，也不把 MCP 工具交给模型；配置和令牌缓存仍保留。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
 
-启动时自动连接已启用的 MCP 服务。OAuth 优先使用加密缓存并刷新令牌，无法刷新时打开浏览器授权；无需鉴权的服务直接连接。`/mcp` 以 `• 服务名: connected (N tools)` 显示列表，圆点和状态文字按连接状态显示为绿色或红色。连接恢复、附件处理和后台日志见 [MCP 配置](docs/configuration.md#mcpmcpjson)，命令和状态说明见 [TUI 文档](docs/tui.md#mcp-服务)。
+全局开关打开时，启动会自动连接各服务里 `enabled: true` 的项。OAuth 优先使用加密缓存并刷新令牌，无法刷新时打开浏览器授权；无需鉴权的服务直接连接。`/mcp` 先显示 `MCP: Enabled` 或 `MCP: Disabled`，开启时再列出 `服务名  状态  N tools`；`connected` 为绿色，其余状态为红色。连接恢复、附件处理和后台日志见 [MCP 配置](docs/configuration.md#mcpmcpjson)，命令和状态说明见 [TUI 文档](docs/tui.md#mcp-服务)。
 
 <details>
 <summary>更多边界与当前限制</summary>

@@ -1,23 +1,24 @@
-## v0.1.8 更新内容
+## v0.1.9 更新内容
 
-### 终端状态与显示
+### 宿主 MCP
 
-- 统一工具状态文案：命令运行时显示 `Running`，成功后显示 `Ran`；文件操作运行时显示 `Editing`、`Writing`、`Deleting`，成功后显示 `Edited`、`Created` / `Wrote`、`Deleted`。
-- 探索分组运行时显示 `Exploring`，仅全部成功后显示 `Explored`；等待、失败和中断时保留明确状态，避免提前暗示完成。
-- 新会话与 `/new` 后的上下文占用显示 `0.0% used`；已有对话缺少有效用量时仍显示 `Unknown`，清屏不会误判为新会话。
-- 顶部标题改为 `DeepAgentCLI v<版本号>`，与 `--version` 共用包元数据读取逻辑；移除第二行快捷键提示，完整操作仍可通过 `/help` 查看。
-- 底栏将当前用户家目录缩写为 `~/`，不改变实际工作区路径或文件访问行为。
+- 在宿主进程接入 MCP（Streamable HTTP 与 stdio），独立于 Bubblewrap 和原生文件工具；工具名形如 `mcp__<服务器>__<远程工具>`。
+- `mcp.json` 增加根级 `enabled`（默认 `true`，旧配置兼容）。`/mcp enable` / `/mcp disable` 在运行中排队到安全点切换工具表，不中断当前 Agent；关闭时不连接、不启动 stdio、不触发 OAuth，配置和加密令牌缓存保留。
+- 启动仅在全局开启时自动连接各服务 `enabled: true` 的项。OAuth 优先复用加密缓存并刷新；无法刷新时打开浏览器。退出会取消未完成的连接与授权等待。
+- `/mcp` 显示 `MCP: Enabled` / `MCP: Disabled`，开启时列出服务名、连接状态和工具数；`connected` 为绿色，其余为红色。MCP / OAuth 日志只写后台文件，不进入终端。
+- 工具审批与原生工具共用 `/permission`：`mcp_list` 免审批，`mcp_add` / `mcp_remove` 和外部 MCP 工具在 `ask` 下需批准。审批卡片只展示脱敏后的参数。
 
-### README 与设计文档
+### 沙箱与执行
 
-- 调整 README 为简洁的开发者工具首页，接入真实终端截图，精简首次使用步骤，折叠模型示例、架构图与进阶说明。
-- 保留文件工具与沙箱命令的不同访问边界，以及默认审批、网络和已知限制。
-- 在架构文档中明确“运行中用进行式，成功后用过去式”的统一状态文案规范，同步终端与配置文档。
-- 补充运行状态切换、新会话占用、会话恢复、标题版本和家目录缩写的回归验证。
+- 文件系统收敛为 `restricted` 与 `full-access`；额外挂载支持 `dev_bind`。文件工具按挂载的只读或读写属性授权。
+- 每次模型调用附加当前沙箱环境快照（不写入 checkpoint）。会话切换时复用沙箱，不因换对话而销毁 Worker。
+- 模型工具表不再提供 `grep` / `glob`；代码搜索通过沙箱内 `rg` 完成。已移除独立 HTTP 服务入口，只保留 CLI。
 
-### 运行入口
+### 网络、模型与终端
 
-- 使用入口是交互式终端 `deep-agent`、`deep-agent resume`，以及 Python API。
+- 主配置顶层 `trust_env` 统一模型、MCP、Tavily 与子进程的代理 / CA / SOCKS 行为，默认忽略环境代理。
+- 模型请求增加自动重试；可用 `tools.hidden` 从模型请求中隐藏指定工具。
+- 会话 TPS 统计持久化，并补齐推理摘要识别口径。精简 MCP 向导、开关提示和 ALLOW 确认文案。
 
 ### 安装与升级
 
@@ -29,4 +30,4 @@ pipx install deep-agent-cli
 pipx upgrade deep-agent-cli
 ```
 
-GitHub Release 与 PyPI 由同一个发布工作流构建并发布。更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.8/docs/tui.md)和[架构设计](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.8/docs/architecture.md)。
+GitHub Release 与 PyPI 由同一个发布工作流构建并发布。更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.9/docs/tui.md)和[架构设计](https://github.com/ADaozz/deep_agent_cli/blob/v0.1.9/docs/architecture.md)。

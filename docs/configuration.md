@@ -87,7 +87,7 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
 }
 ```
 
-MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；Agent 调用这两项时，`ask` 需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_list` / `mcp_add` / `mcp_remove` 修改。`mcp_list` 只读、免审批；`mcp_add` / `mcp_remove` 在 `ask` 下需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。全局关闭时不注入这些管理工具。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
 
 同一服务的并发连接请求合并为一次，避免启动连接、`/mcp test` 和 `mcp_add` 相互覆盖。同一 MCP 客户端连接上的工具调用由宿主排队执行，模型可一次提交多个工具，宿主会自动串行发送；不同 MCP 连接仍可并行。排队时间计入调用超时，排队期间取消的调用不会发送。会话关闭后，下一次调用会先通过 SDK 公共接口重建连接；已失败的工具不会自动重放。同名 `mcp_add` 会检查客户端实际连接状态，坏连接可直接重建，无需先删除服务。
 
@@ -254,7 +254,9 @@ web_search:
 
 `sandbox.protected_workspace_paths` 与 `sandbox.allow_unsandboxed` 已移除，配置中出现时启动报错。Bubblewrap 不可用时启动失败，没有宿主机执行回退。
 
-### restricted 下的工具挂载示例
+### 默认工具挂载
+
+以下路径是 `restricted` 收窄可见范围时的示例挂载，不是模板默认生效项。
 
 | 用途 | 宿主 `source` | 沙箱 `destination` | 权限 |
 |---|---|---|---|
@@ -293,7 +295,7 @@ web_search:
 | `expanded_tool_lines` | `40` | 展开的普通工具输出最多显示的行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
-| `create_preview_items` | `5` | 合并的“Create N files”保留的最后几个路径 |
+| `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
 | `edit_preview_changed_lines` | `8` | 修改预览的增删行预算，至少为 2 |
 | `write_preview_lines` | `6` | 覆盖写入预览显示的前几行 |
 | `failure_preview_lines` | `4` | 失败工具摘要显示的前几行 |
