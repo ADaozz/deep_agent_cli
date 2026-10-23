@@ -322,7 +322,8 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 源码入口
 
-- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
+- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[run_events.py](../agent/run_events.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
 - 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
-- 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
+- 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
+- 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_controller.py](../agent/cli/mcp_controller.py)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
 - 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。

@@ -530,7 +530,7 @@ def build_chat_model(
     reasoning_effort: str | None = None,
     trust_env: bool = False,
 ) -> ChatOpenAI:
-    """Build the template chat client from a ModelProfile."""
+    """Build a chat client from a ModelProfile."""
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
         raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
     if profile.api == "responses":
