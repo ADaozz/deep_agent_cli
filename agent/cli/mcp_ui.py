@@ -308,14 +308,8 @@ def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
     # while an agent run is active. Wait out another idle publish instead of
     # treating that brief lock as a failed toolset update.
     events: list[Any] = []
-    if not runner._operation_lock.acquire(timeout=5):
+    if not runner.apply_pending_config_if_idle(events.append, lock_timeout=5):
         return None
-    try:
-        if runner.current_interrupt() is not None:
-            return None
-        runner._apply_pending_runtime_config(events.append)
-    finally:
-        runner._operation_lock.release()
     return events
 
 

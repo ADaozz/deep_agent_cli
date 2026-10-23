@@ -873,7 +873,8 @@ class CliApplication:
         interrupt = self.runner.current_interrupt()
         if not self.state.running and interrupt is None:
             events: list[RunEvent] = []
-            self.runner._apply_pending_runtime_config(events.append)
+            if not self.runner.apply_pending_config_if_idle(events.append):
+                events = []
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -892,12 +893,8 @@ class CliApplication:
         before = self.runner.permission_mode()
         self.runner.request_permission_change(mode)
         interrupt = self.runner.current_interrupt()
-        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
-            events: list[RunEvent] = []
-            try:
-                self.runner._apply_pending_runtime_config(events.append)
-            finally:
-                self.runner._operation_lock.release()
+        events: list[RunEvent] = []
+        if not self.state.running and interrupt is None and self.runner.apply_pending_config_if_idle(events.append):
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -920,12 +917,8 @@ class CliApplication:
             self.state.add_system(str(exc), error=True)
             return
         interrupt = self.runner.current_interrupt()
-        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
-            events: list[RunEvent] = []
-            try:
-                self.runner._apply_pending_runtime_config(events.append)
-            finally:
-                self.runner._operation_lock.release()
+        events: list[RunEvent] = []
+        if not self.state.running and interrupt is None and self.runner.apply_pending_config_if_idle(events.append):
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -1036,6 +1029,16 @@ class CliApplication:
 
     async def resume_session(self, arg: str = "") -> None:
         await self.sessions.resume(arg)
+
+    def reset_session_view(self) -> None:
+        """Drop editor chrome that belonged to the previous session."""
+        self._clear_skill_draft()
+        self.clear_transcript_selection()
+        self.interaction = None
+        self._deferred_config_interaction = None
+        self._reviewing = False
+        self._transcript_anchor = None
+        self._renderer.clear()
 
     def _apply_session_snapshot(self, snapshot: Any) -> None:
         self.sessions.apply_snapshot(snapshot)
@@ -1457,25 +1460,6 @@ class CliApplication:
             buffer.text = text
             buffer.cursor_position = len(text)
         return restored_parts
-
-    def _apply_session_snapshot(self, snapshot: Any) -> None:
-        self._clear_skill_draft()
-        self.clear_transcript_selection()
-        self.state.load_transcript(snapshot.transcript)
-        self.state.load_model_metrics(snapshot.model_metrics_history)
-        self.interaction = None
-        self._reviewing = False
-        self.state.add_system(
-            f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
-        )
-        for notice in snapshot.notices:
-            self.state.add_system(notice)
-        if not self._reopen_pending_interaction(notify_missing=False):
-            self.set_status("Ready", transient=False)
-        self._transcript_anchor = None
-        self._renderer.clear()
-        self.state.usage = dict(self.runner.latest_usage())
-        self.application.invalidate()
 
     @property
     def _exiting(self) -> bool:

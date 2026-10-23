@@ -65,16 +65,10 @@ class SessionController:
         except RuntimeError as exc:
             app.state.add_system(str(exc), error=True)
             return
-        app._clear_skill_draft()
-        app.clear_transcript_selection()
+        app.reset_session_view()
         app.state.clear()
         app.state.context_pristine = True
         app.state.attachments.clear()
-        app.interaction = None
-        app._deferred_config_interaction = None
-        app._reviewing = False
-        app._transcript_anchor = None
-        app._renderer.clear()
         app.state.add_system(f"Started session {info.id}")
         app.set_status("Ready", transient=False)
 
@@ -138,13 +132,9 @@ class SessionController:
 
     def apply_snapshot(self, snapshot: Any) -> None:
         app = self._app
-        app._clear_skill_draft()
-        app.clear_transcript_selection()
+        app.reset_session_view()
         app.state.load_transcript(snapshot.transcript)
         app.state.load_model_metrics(snapshot.model_metrics_history)
-        app.interaction = None
-        app._deferred_config_interaction = None
-        app._reviewing = False
         app.state.add_system(
             f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
         )
@@ -152,8 +142,6 @@ class SessionController:
             app.state.add_system(notice)
         if not app._reopen_pending_interaction(notify_missing=False):
             app.set_status("Ready", transient=False)
-        app._transcript_anchor = None
-        app._renderer.clear()
         app.state.usage = dict(app.runner.latest_usage())
         app.application.invalidate()
 

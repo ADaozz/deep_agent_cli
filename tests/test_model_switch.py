@@ -691,3 +691,33 @@ def test_old_pending_model_without_effort_resets_to_default(tmp_path: Path) -> N
     finally:
         runner.close()
         store.close()
+
+
+def test_apply_pending_config_if_idle_does_not_borrow_a_held_lock() -> None:
+    settings = _settings_two_models()
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(),
+        settings=settings,
+        thread_id="idle-boundary",
+    )
+    try:
+        with runner._operation_lock:
+            runner.switch_model("beta")
+            assert runner.apply_pending_config_if_idle(lock_timeout=0.01) is False
+            assert runner.current_model().id == "alpha"
+        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+            assert runner.apply_pending_config_if_idle() is True
+        assert runner.current_model().id == "beta"
+        assert runner.pending_model() is None
+    finally:
+        runner.close()
+
+
+def test_cli_package_does_not_acquire_the_runner_operation_lock() -> None:
+    offenders = [
+        str(path)
+        for path in Path("agent/cli").rglob("*.py")
+        if "_operation_lock" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
