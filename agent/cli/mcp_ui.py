@@ -311,7 +311,10 @@ async def _wait_operation(app: Any, task: asyncio.Task | None) -> None:
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        app.state.add_system("Wait cancelled. The MCP operation is still running.")
+        # User cancellation still explains the background work. Shutdown
+        # already left the UI, so that notice is not written again.
+        if not _cli_exiting(app):
+            app.state.add_system("Wait cancelled. The MCP operation is still running.")
 
 
 def _apply_when_idle_worker(runner: Any) -> list[Any] | None:

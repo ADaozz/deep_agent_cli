@@ -77,7 +77,8 @@
 - 已经开始的 Run 仍由 `RunController` 取消并收尾。未退出时，完成后仍先取 steering，再取 follow-up。
 - Session 等待被 `Esc` 取消时回到选择器。被 CLI Exit 取消时不打开选择器，也不在底层切换晚到之后改写界面。已经拿到的租约仍由 Runner / SessionRuntime 持有。
 - 新的 MCP 操作在 `MCPController.try_begin()` 之前被拒绝。已经开始的操作仍按原取消路径收尾；它的 `finally` 只清自己的 `operation_id`。退出后的完成回调不发布工具表，也不写转录。
-- 任务在关闭前就以异常结束时，失败摘要记一次。取消成功的界面辅助任务不是失败。再次 `shutdown()` 在 `STOPPED` 直接返回。
+- 任务在关闭前就以异常结束时，失败摘要按仍被引用的 Task 对象记一次，不用会被回收复用的 `id()`。任务对象回收后不再占着这条记录。取消成功的界面辅助任务不是失败。再次 `shutdown()` 在 `STOPPED` 直接返回。
+- 用户取消「等待 MCP 操作结束」时仍提示操作还在后台。CLI 已经退出时不再写这条提示。
 
 `asyncio.to_thread()` 用的是事件循环默认 Executor，和 CLI 的 `_io_executor` 不是同一个。Shutdown 超时只说明等待结束，不说明那条阻塞线程已经退出。`Runner.close()` 仍是租约、模型流、MCP 和沙箱的最终所有者。
 

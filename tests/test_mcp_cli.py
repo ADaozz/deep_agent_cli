@@ -249,6 +249,45 @@ async def test_real_prompt_toolkit_loop_remains_responsive_and_busy_until_worker
             runner.close()
 
 
+@async_test
+async def test_cancelled_mcp_wait_is_silent_after_exit() -> None:
+    from agent.cli.mcp_ui import _wait_operation
+
+    class _State:
+        def __init__(self) -> None:
+            self.blocks: list[str] = []
+
+        def add_system(self, text: str, error: bool = False) -> None:
+            self.blocks.append(text)
+
+    class _Lifecycle:
+        def __init__(self, exiting: bool) -> None:
+            self.exiting = exiting
+
+    async def hang() -> None:
+        await asyncio.sleep(30)
+
+    active = SimpleNamespace(state=_State(), lifecycle=_Lifecycle(False))
+    running = asyncio.create_task(hang())
+    waiter = asyncio.create_task(_wait_operation(active, running))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await waiter
+    assert any("still running" in text for text in active.state.blocks)
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+
+    leaving = SimpleNamespace(state=_State(), lifecycle=_Lifecycle(True))
+    running = asyncio.create_task(hang())
+    waiter = asyncio.create_task(_wait_operation(leaving, running))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await waiter
+    assert leaving.state.blocks == []
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+
+
 def test_mcp_approval_preview_preserves_structure_and_original_arguments():
     from copy import deepcopy
 
