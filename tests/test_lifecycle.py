@@ -494,6 +494,58 @@ def test_cleanup_timeout_is_bounded_and_keeps_the_lease(tmp_path) -> None:
         store.close()
 
 
+def test_exit_refuses_a_new_mcp_operation_and_ignores_its_late_result() -> None:
+    from agent.cli.mcp_ui import _start_operation
+
+    runner = _runner()
+    started, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+
+    class Manager:
+        switch_epoch = 1
+
+        def toolset_dirty(self) -> bool:
+            return False
+
+        def cancel_pending_connections(self) -> None:
+            calls.append("cancel")
+
+        def close(self) -> None:
+            return None
+
+        def connect(self) -> SimpleNamespace:
+            started.set()
+            release.wait(3)
+            return SimpleNamespace(ok=True, message="connected late")
+
+    manager = Manager()
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        runner.mcp = manager  # type: ignore[attr-defined]
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        task = _start_operation(app, manager.connect)
+        assert task is not None and app.mcp_controller.busy
+        assert await asyncio.to_thread(started.wait, 2)
+        app.exit()
+        assert calls == ["cancel"]
+        assert _start_operation(app, manager.connect) is None
+        assert app.mcp_controller.operation_id == 1
+        release.set()
+        await asyncio.wait_for(task, 2)
+        assert app.mcp_controller.busy is False
+        assert all("connected late" not in getattr(block, "content", "") for block in app.state.blocks)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+        pipe.__exit__(None, None, None)
+        runner.close()
+
+
 def test_failure_before_shutdown_is_recorded_once() -> None:
     runner = _runner()
     pipe = create_pipe_input()

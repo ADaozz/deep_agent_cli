@@ -233,12 +233,20 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
     _start_operation(app, partial(manager.add_from_fields, **fields))
 
 
+def _cli_exiting(app: Any) -> bool:
+    lifecycle = getattr(app, "lifecycle", None)
+    return lifecycle is not None and lifecycle.exiting
+
+
 def _start_operation(
     app: Any, operation: Any, *, quiet_success: bool = False, force: bool = False,
 ) -> asyncio.Task | None:
     # Reserve before scheduling: two Enter events must not launch two workers.
     # /mcp disable does not use this gate, so it can cancel an OAuth wait.
     # A new enable round may force its own connect without waiting for that work.
+    # Exit refuses the reservation itself, so busy state is not left behind.
+    if _cli_exiting(app):
+        return None
     controller: MCPController = app.mcp_controller
     op_id = controller.try_begin(force=force)
     if op_id is None:
@@ -253,6 +261,8 @@ def _start_operation(
                 result = await asyncio.to_thread(operation)
             else:
                 result = await app._run_blocking(operation)
+            if _cli_exiting(app):
+                return
             if app.runner.mcp.switch_epoch != epoch:
                 # A later enable/disable owns the status text. Still publish tools
                 # when this task is the one that finished the catalog change.
@@ -277,13 +287,14 @@ def _start_operation(
             if app.runner.mcp.toolset_dirty():
                 await _apply_when_idle(app)
         except Exception as exc:
-            if app.runner.mcp.switch_epoch != epoch:
+            if _cli_exiting(app) or app.runner.mcp.switch_epoch != epoch:
                 return
             app.state.add_system(f"MCP operation failed: {str(exc)[:400]}", error=True)
             app.set_status("MCP operation failed; you can retry", transient=False)
         finally:
             controller.finish(op_id)
-            app.application.invalidate()
+            if not _cli_exiting(app):
+                app.application.invalidate()
 
     lifecycle = getattr(app, "lifecycle", None)
     if lifecycle is None:
