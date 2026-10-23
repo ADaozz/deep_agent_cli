@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import warnings
 
 import pytest
 from deepagents.backends import StateBackend
@@ -412,3 +413,85 @@ def test_cleanup_timeout_is_bounded_and_keeps_the_lease(tmp_path) -> None:
         pipe.__exit__(None, None, None)
         runner.close()
         store.close()
+
+
+def test_failure_before_shutdown_is_recorded_once() -> None:
+    runner = _runner()
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        async def boom() -> None:
+            raise RuntimeError("early clipboard")
+
+        app.lifecycle.spawn(boom(), stop=TaskStop.CANCEL, name="clipboard-copy")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert app.lifecycle._tracked == []
+        app.exit()
+        await app.lifecycle.shutdown(task_timeout=0.2)
+        matches = [
+            item for item in app.lifecycle.failures
+            if item.name == "clipboard-copy" and isinstance(item.error, RuntimeError)
+        ]
+        assert len(matches) == 1
+        assert matches[0].stage == "done"
+        before = app.lifecycle.failures
+        await app.lifecycle.shutdown()
+        assert app.lifecycle.failures == before
+        assert app.lifecycle.phase is ExitPhase.STOPPED
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pipe.__exit__(None, None, None)
+        runner.close()
+
+
+def test_shutdown_refuses_a_new_observe_task_without_await_warning() -> None:
+    runner = _runner()
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        app.exit()
+
+        async def during_exit() -> None:
+            await asyncio.sleep(30)
+
+        with pytest.raises(RuntimeError, match="refusing task during-exit"):
+            app.lifecycle.spawn(during_exit(), stop=TaskStop.OBSERVE, name="during-exit")
+        await app.lifecycle.shutdown(task_timeout=0.05)
+
+        async def late() -> None:
+            await asyncio.sleep(30)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            with pytest.raises(RuntimeError, match="refusing task late-run"):
+                app.lifecycle.spawn(late(), stop=TaskStop.OBSERVE, name="late-run")
+            await asyncio.sleep(0)
+        assert app.lifecycle._tracked == []
+        assert not any("never awaited" in str(item.message) for item in caught)
+
+        async def helper() -> None:
+            await asyncio.sleep(30)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            refused = app.lifecycle.spawn(helper(), stop=TaskStop.CANCEL, name="clipboard-copy")
+            await asyncio.sleep(0)
+        assert refused.done() and refused.exception() is None
+        assert not any("never awaited" in str(item.message) for item in caught)
+        assert all(item.name != "clipboard-copy" for item in app.lifecycle.failures)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pipe.__exit__(None, None, None)
+        runner.close()

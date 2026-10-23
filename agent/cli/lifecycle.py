@@ -64,6 +64,8 @@ class AppLifecycle:
         self.phase = ExitPhase.ACTIVE
         self._tracked: list[tuple[asyncio.Task[object], TaskStop]] = []
         self._owners_signalled = False
+        self._captured_tasks: set[int] = set()
+        self._failure_log: list[TaskCleanupFailure] = []
         self.unfinished: tuple[str, ...] = ()
         self.failures: tuple[TaskCleanupFailure, ...] = ()
 
@@ -74,17 +76,35 @@ class AppLifecycle:
     def spawn(
         self, coro: Coroutine[Any, Any, _TaskResult], *, stop: TaskStop, name: str,
     ) -> asyncio.Task[_TaskResult]:
-        if stop is TaskStop.CANCEL and self.phase is not ExitPhase.ACTIVE:
+        if self.phase is not ExitPhase.ACTIVE:
             coro.close()
-            # UI helpers return None. The stand-in matches that result.
-            return cast(asyncio.Task[_TaskResult], asyncio.create_task(_refuse_ui_task(), name=name))
+            if stop is TaskStop.CANCEL:
+                # UI helpers have no result to report. A completed stand-in avoids
+                # a never-awaited warning without registering new work.
+                return cast(asyncio.Task[_TaskResult], asyncio.create_task(_refuse_ui_task(), name=name))
+            raise RuntimeError(f"CLI is exiting; refusing task {name}")
         task = asyncio.create_task(coro, name=name)
         self._tracked.append((task, stop))
         task.add_done_callback(self._forget)
         return task
 
     def _forget(self, task: asyncio.Task[object]) -> None:
+        self._capture_done(task)
         self._tracked = [item for item in self._tracked if item[0] is not task]
+
+    def _capture_done(self, task: asyncio.Task[object]) -> None:
+        """Record one terminal exception. Cancellation is not a failure."""
+        if id(task) in self._captured_tasks or not task.done():
+            return
+        self._captured_tasks.add(id(task))
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            self._failure_log.append(TaskCleanupFailure(task.get_name(), "done", error))
 
     def request_exit(self) -> None:
         """Idempotent. Leave the full screen and signal live work to stop.
@@ -137,7 +157,7 @@ class AppLifecycle:
             self.phase = ExitPhase.SHUTTING_DOWN
             unfinished, failures = await self._drain_tasks(task_timeout)
             self.unfinished = tuple(unfinished)
-            self.failures = tuple(failures)
+            self.failures = tuple([*self._failure_log, *failures])
         finally:
             try:
                 app._io_executor.shutdown(wait=False, cancel_futures=True)
@@ -159,7 +179,7 @@ class AppLifecycle:
         for task, stop in snapshot:
             kind = "cancel" if stop is TaskStop.CANCEL else "observe"
             if task.done():
-                self._record_done(task, failures)
+                self._capture_done(task)
                 continue
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -178,23 +198,10 @@ class AppLifecycle:
                 if not task.done():
                     unfinished.append(task.get_name())
                     failures.append(TaskCleanupFailure(task.get_name(), kind))
-            except Exception as exc:
-                failures.append(TaskCleanupFailure(task.get_name(), "wait", exc))
-                if task.done() and not task.cancelled():
-                    task.exception()
+            except Exception:
+                self._capture_done(task)
                 if not task.done():
                     unfinished.append(task.get_name())
             else:
-                self._record_done(task, failures)
+                self._capture_done(task)
         return unfinished, failures
-
-    @staticmethod
-    def _record_done(task: asyncio.Task[object], failures: list[TaskCleanupFailure]) -> None:
-        if task.cancelled():
-            return
-        try:
-            error = task.exception()
-        except asyncio.CancelledError:
-            return
-        if error is not None:
-            failures.append(TaskCleanupFailure(task.get_name(), "done", error))
