@@ -695,14 +695,17 @@ class CliApplication:
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._start_git_watch()
-        try:
-            with self._capture_runtime_logs():
+        with self._capture_runtime_logs():
+            try:
                 await self.sessions.start()
                 await self.application.run_async(pre_run=self._start_mcp_connections)
-        finally:
-            self.sessions.notify_exit()
-            await self._stop_git_watch()
-            self._io_executor.shutdown(wait=False, cancel_futures=True)
+            finally:
+                manager = getattr(self.runner, "mcp", None)
+                if manager is not None:
+                    manager.cancel_pending_connections()
+                self.sessions.notify_exit()
+                await self._stop_git_watch()
+                self._io_executor.shutdown(wait=False, cancel_futures=True)
 
     def _start_mcp_connections(self) -> None:
         manager = getattr(self.runner, "mcp", None)
@@ -713,6 +716,9 @@ class CliApplication:
     @contextmanager
     def _capture_runtime_logs(self) -> Iterator[None]:
         """Keep MCP logs in a private background file, away from terminal/UI output."""
+        if getattr(self, "_runtime_logs_active", False):
+            yield
+            return
         class TranscriptHandler(logging.Handler):
             def emit(handler_self, record: logging.LogRecord) -> None:
                 if record.levelno < logging.WARNING:
@@ -754,10 +760,12 @@ class CliApplication:
             logger.handlers = [handler if name == "deepagents.backends.filesystem" else mcp_handler]
             logger.propagate = False
         try:
+            self._runtime_logs_active = True
             with warnings.catch_warnings():
                 warnings.showwarning = show_warning
                 yield
         finally:
+            self._runtime_logs_active = False
             for logger, handlers, propagate in previous:
                 logger.handlers = handlers
                 logger.propagate = propagate
@@ -1478,6 +1486,9 @@ class CliApplication:
         self.application.output.disable_mouse_support()
         self.application.output.flush()
         self.sessions.notify_exit()
+        manager = getattr(self.runner, "mcp", None)
+        if manager is not None:
+            manager.cancel_pending_connections()
         if self.state.running:
             self.runner.request_cancel()
         self._io_executor.shutdown(wait=False, cancel_futures=True)

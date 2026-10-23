@@ -204,6 +204,7 @@ def test_information_flags_do_not_load_config_or_start_runner(monkeypatch, capsy
 
 
 def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
+    from contextlib import contextmanager
     from types import SimpleNamespace
     from agent.cli import main as cli
     from agent.sandbox import ExecutionMode
@@ -220,11 +221,18 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
             self.sessions = SimpleNamespace()
         def run(self):
             calls.append("ran")
+        @contextmanager
+        def _capture_runtime_logs(self):
+            calls.append("capture logs")
+            try:
+                yield
+            finally:
+                calls.append("restore logs")
         def continue_session_message(self):
             return ""
     monkeypatch.setattr(cli, "CliApplication", App)
     cli.main([])
-    assert calls == ["ran", "closed"]
+    assert calls == ["capture logs", "ran", "closed", "restore logs"]
 
 
 def test_cli_reports_missing_required_mount_without_traceback(monkeypatch, tmp_path, capsys):

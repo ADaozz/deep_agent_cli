@@ -66,6 +66,8 @@ deep-agent --version
 
 MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文件 `~/.deep-agent/logs/mcp-<进程号>.log`，不显示在 TUI。自定义配置目录时，日志位于该目录的 `logs/` 下。凭证缓存、连接恢复和资源返回方式见 [MCP 配置](configuration.md#mcpmcpjson)。
 
+退出时会取消尚未完成的 MCP 连接与 OAuth 授权等待，关闭相关连接后再显示继续会话的命令。退出清理期间的 MCP 日志仍写后台文件。
+
 ## 快捷键
 
 | 按键 | 作用 |

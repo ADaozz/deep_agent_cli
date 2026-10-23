@@ -99,20 +99,23 @@ def main(argv: list[str] | None = None) -> None:
         app.sessions.startup_session_id = resume_id
     elif open_picker:
         app.sessions.open_picker_on_start = True
-    try:
-        app.run()
-    finally:
-        message = app.continue_session_message()
-        if message:
-            Console().print(message)
+    # Keep SDK logs in the file until connection tasks and clients have drained,
+    # including the interval after the TUI has restored the terminal.
+    with app._capture_runtime_logs():
         try:
-            runner.close()
-        except RuntimeError as exc:
-            print(
-                f"{exc}\nThe session lock is not released early; the operating "
-                "system releases it when this process actually exits.",
-                file=sys.stderr,
-            )
+            app.run()
+        finally:
+            message = app.continue_session_message()
+            try:
+                runner.close()
+            except RuntimeError as exc:
+                print(
+                    f"{exc}\nThe session lock is not released early; the operating "
+                    "system releases it when this process actually exits.",
+                    file=sys.stderr,
+                )
+            if message:
+                Console().print(message)
 
 
 if __name__ == "__main__":

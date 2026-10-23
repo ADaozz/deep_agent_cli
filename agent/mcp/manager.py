@@ -86,6 +86,7 @@ class MCPManager:
         self._versions: dict[str, int] = {}
         self._connecting: dict[int, Future[ServerState]] = {}
         self._oauth_browser_attempts: dict[str, float] = {}
+        self._connection_cancel = threading.Event()
         self._snapshots: dict[int, tuple[list[Any], int]] = {}
         self._revision = 0
         self._published_revision = 0
@@ -345,7 +346,12 @@ class MCPManager:
         with self._lock:
             return self._revision != self._published_revision
 
+    def cancel_pending_connections(self) -> None:
+        """Stop startup/authorization work when the UI exits; leave active tools to runner.close()."""
+        self._connection_cancel.set()
+
     def close(self) -> None:
+        self.cancel_pending_connections()
         with self._lock:
             if self._closed:
                 return
@@ -367,6 +373,8 @@ class MCPManager:
         # same catalog entry. Removal/reload still invalidate the old attempt.
         key = id(server)
         with self._lock:
+            if self._connection_cancel.is_set():
+                return ServerState(server, ServerStatus.DISCONNECTED, "MCP connections are shutting down")
             attempt = self._connecting.get(key)
             owner = attempt is None
             if owner:
@@ -406,6 +414,7 @@ class MCPManager:
                     oauth_storage_dir=self.path.parent / "oauth",
                     allow_oauth_browser=allow_oauth_browser,
                     oauth_browser_attempts=self._oauth_browser_attempts,
+                    cancel_event=self._connection_cancel,
                 )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))

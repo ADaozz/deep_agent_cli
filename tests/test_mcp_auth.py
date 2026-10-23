@@ -215,6 +215,49 @@ def test_oauth_success_authorizes_discovers_and_calls_real_server(tmp_path, monk
         protected.close()
 
 
+def test_exit_cancels_pending_oauth_before_browser_opens(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from fastmcp.client.auth import OAuth
+    from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+    from fastmcp.server.auth.auth import ClientRegistrationOptions
+
+    started, cancelled = threading.Event(), threading.Event()
+    opened = []
+
+    async def delayed_redirect(self, url):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+            opened.append(url)
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(OAuth, 'redirect_handler', delayed_redirect)
+    protected = HttpFixture(auth_factory=lambda base: InMemoryOAuthProvider(
+        base_url=base, client_registration_options=ClientRegistrationOptions(enabled=True),
+    ))
+    manager = MCPManager(tmp_path / 'mcp.json', oauth_callback_timeout=120)
+    manager.path.write_text(json.dumps({'servers': {'oauth': {
+        'transport': 'streamable_http', 'url': protected.url, 'auth': {'type': 'oauth'},
+    }}}))
+    manager.load()
+    try:
+        with ThreadPoolExecutor() as pool:
+            pending = pool.submit(manager.connect_pending)
+            assert started.wait(5)
+            manager.cancel_pending_connections()
+            assert not pending.result(3).ok
+            assert cancelled.wait(3)
+            assert not manager.test('oauth').ok  # Exit cannot start another connection.
+        assert opened == []
+    finally:
+        manager.close()
+        protected.close()
+
+
 def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkeypatch, http_mcp, caplog):
     import json
     from tests.mcp_fixture import stdio_argv

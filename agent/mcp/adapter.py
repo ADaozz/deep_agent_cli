@@ -7,6 +7,7 @@ from pathlib import Path
 import asyncio
 import os
 import re
+import threading
 import warnings
 from typing import Any
 
@@ -54,6 +55,7 @@ def open_server(
     oauth_storage_dir: Path | None = None,
     allow_oauth_browser: bool = True,
     oauth_browser_attempts: dict[str, float] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> LoadedServer:
     """Connect on the bridge loop and return synchronous LangChain tools."""
     secrets: list[str] = []
@@ -70,6 +72,7 @@ def open_server(
         return bridge.call(
             _load(server, transport, bridge, call_timeout, secrets),
             timeout=timeout,
+            cancel_event=cancel_event,
         )
     except MCPAuthError:
         raise

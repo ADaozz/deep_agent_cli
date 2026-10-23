@@ -4764,12 +4764,17 @@ def test_mcp_logs_use_background_file_and_restore_handlers(capsys, tmp_path) -> 
         logger = logging.getLogger("fastmcp")
         previous = (logger.handlers[:], logger.propagate)
         with app._capture_runtime_logs():
-            asyncio.run(default_log_handler(LogMessage(level="critical", data="server alert")))
+            handlers = logger.handlers[:]
+            with app._capture_runtime_logs():
+                asyncio.run(default_log_handler(LogMessage(level="critical", data="server alert")))
+            assert logger.handlers == handlers  # UI exit keeps the outer shutdown log scope.
             logging.getLogger("fastmcp.client.auth.oauth").warning("OAuth callback waiting")
+            logging.getLogger("mcp").warning("Shutdown cleanup completed")
             assert len(app.state.blocks) == before
             logs = app._mcp_log_path.read_text()
             assert "Received CRITICAL from server: server alert" in logs
             assert "OAuth callback waiting" in logs
+            assert "Shutdown cleanup completed" in logs
             assert app.buffer.text == "unfinished input"
         assert (logger.handlers, logger.propagate) == previous
         assert capsys.readouterr().err == ""
