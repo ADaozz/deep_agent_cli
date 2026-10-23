@@ -17,7 +17,7 @@ from prompt_toolkit.output import DummyOutput
 from agent.cli.app import INPUT_CLEARED_HINT, CliApplication
 from agent.cli.interactions import InteractionController
 from agent.cli.lifecycle import TaskStop
-from agent.runner import AgentRunner
+from agent.runner import AgentRunner, RunResult
 from agent.session import SessionStore
 from tests.conftest import scripted_model
 
@@ -345,3 +345,90 @@ def test_ui_exit_keeps_the_session_lease(tmp_path) -> None:
     finally:
         pipe.__exit__(None, None, None)
         store.close()
+
+
+def test_completed_run_does_not_start_follow_up_after_exit() -> None:
+    harness, pipe = _open()
+    app, runner = harness.app, harness.runner
+    reservations: list[int] = []
+    real_reserve = runner.reserve_run
+
+    def reserve() -> int:
+        reservations.append(1)
+        return real_reserve()
+
+    runner.reserve_run = reserve  # type: ignore[method-assign]
+    try:
+        runner.follow_up("still queued")
+        app.state.running = True
+        epoch = app._run_epoch
+        app.exit()
+        app._handle_result(RunResult(status="completed", output="done"))
+        assert reservations == []
+        assert app._run_epoch == epoch
+        assert runner.control.pending_follow_up_count() == 1
+        assert runner.control.pending_message_texts() == ["still queued"]
+    finally:
+        _finish(harness, pipe)
+
+
+def test_exit_does_not_mark_a_queued_follow_up_applied() -> None:
+    harness, pipe = _open()
+    app, runner = harness.app, harness.runner
+    try:
+        runner.control.follow_up("keep me")
+        app.state.running = True
+        app.exit()
+        app._start_queued_run()
+        assert runner.control.pending_follow_up_count() == 1
+        assert runner.control.pending_message_texts() == ["keep me"]
+        assert all(getattr(block, "content", None) != "keep me" for block in app.state.blocks)
+    finally:
+        _finish(harness, pipe)
+
+
+def test_exit_does_not_reserve_another_run() -> None:
+    harness, pipe = _open()
+    app, runner = harness.app, harness.runner
+    reservations: list[int] = []
+    runner.reserve_run = lambda: reservations.append(1)  # type: ignore[method-assign]
+    try:
+        runner.steer("first")
+        runner.follow_up("second")
+        app.state.running = True
+        app.exit()
+        app._start_run("direct")
+        app._start_queued_run()
+        app._handle_result(RunResult(status="completed", output="done"))
+        assert reservations == []
+        assert runner.control.pending_message_texts() == ["first", "second"]
+    finally:
+        _finish(harness, pipe)
+
+
+def test_completed_run_still_starts_steering_before_follow_up() -> None:
+    harness, pipe = _open()
+    app, runner = harness.app, harness.runner
+    started: list[str] = []
+    real_start = app._start_run
+
+    def start(text: str, **kwargs: object) -> None:
+        resume = kwargs.get("resume_call")
+        args = getattr(resume, "args", ())
+        started.append(args[0] if args else text)
+        if kwargs.get("resume_call") is None:
+            real_start(text, **kwargs)  # type: ignore[arg-type]
+
+    app._start_run = start  # type: ignore[method-assign]
+    try:
+        runner.steer("steer-first")
+        runner.follow_up("follow-second")
+        app._handle_result(RunResult(status="completed", output="done"))
+        assert started == ["steer-first"]
+        assert runner.control.pending_steering_count() == 0
+        assert runner.control.pending_message_texts() == ["follow-second"]
+        app._handle_result(RunResult(status="completed", output="again"))
+        assert started == ["steer-first", "follow-second"]
+        assert runner.control.pending_message_texts() == []
+    finally:
+        _finish(harness, pipe)

@@ -2262,6 +2262,10 @@ class CliApplication:
         resume_call: Any | None = None,
         image_refs: tuple[ImageAttachmentRef, ...] = (),
     ) -> None:
+        # Exit may win the race with a completion callback. Refuse before any
+        # visible state change or a new run reservation.
+        if self.lifecycle.exiting:
+            return
         if resume_call is None:
             self.state.add_user(text, attachments=image_refs)
             self.state.attachments.clear()
@@ -2307,6 +2311,10 @@ class CliApplication:
         self._run_task = self.lifecycle.spawn(work(), stop=TaskStop.OBSERVE, name="agent-run")
 
     def _start_queued_run(self) -> None:
+        # Do not pop steering or follow-up after exit: those messages are not
+        # consumed, and they are not marked applied.
+        if self.lifecycle.exiting:
+            return
         if self.interaction is not None or self.runner.current_interrupt() is not None:
             return
         text = self.runner.control.pop_steering()
