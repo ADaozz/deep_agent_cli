@@ -475,8 +475,11 @@ class AgentRunner:
 
         The operation lock is taken here, so callers do not touch it. Returns
         False when a run holds the lock or an interrupt is still pending; the
-        queued change stays in place for the next safe point.
+        queued change stays in place for the next safe point. A closed runner
+        raises instead of applying.
         """
+        if self._closed:
+            raise RuntimeError("Runner is closed")
         if not self._operation_lock.acquire(timeout=lock_timeout):
             return False
         try:
