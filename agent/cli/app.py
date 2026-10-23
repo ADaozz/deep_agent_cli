@@ -81,6 +81,7 @@ from agent.permission import (
     allow_mode_unavailable_reason,
     parse_permission_mode,
 )
+from agent.cli.lifecycle import AppLifecycle, TaskStop
 from agent.cli.input_actions import (
     EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
     InputAction,
@@ -440,7 +441,7 @@ class CliApplication:
         self._status_notice_handle: asyncio.TimerHandle | None = None
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
-        self._exiting = False
+        self.lifecycle = AppLifecycle(self)
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
@@ -707,12 +708,7 @@ class CliApplication:
                 await self.sessions.start()
                 await self.application.run_async(pre_run=self._start_mcp_connections)
             finally:
-                manager = getattr(self.runner, "mcp", None)
-                if manager is not None:
-                    manager.cancel_pending_connections()
-                self.sessions.notify_exit()
-                await self._stop_git_watch()
-                self._io_executor.shutdown(wait=False, cancel_futures=True)
+                await self.lifecycle.shutdown()
 
     def _start_mcp_connections(self) -> None:
         manager = getattr(self.runner, "mcp", None)
@@ -787,7 +783,7 @@ class CliApplication:
     def _start_git_watch(self) -> None:
         if self._git_task is not None:
             return
-        self._git_task = asyncio.get_running_loop().create_task(self._watch_git())
+        self._git_task = self.lifecycle.spawn(self._watch_git(), stop=TaskStop.CANCEL, name="git-watch")
 
     async def _watch_git(self) -> None:
         """Keep the footer's git summary fresh without ever blocking a render pass."""
@@ -1482,6 +1478,10 @@ class CliApplication:
         self.application.invalidate()
 
     @property
+    def _exiting(self) -> bool:
+        return self.lifecycle.exiting
+
+    @property
     def _last_ctrl_c(self) -> float | None:
         """Double-press clock. Owned by InputActionRouter; exposed for existing checks."""
         return self._input_actions.last_ctrl_c
@@ -1589,25 +1589,8 @@ class CliApplication:
         self.apply_input_action(self._input_actions.decide_exit_command(), self.buffer)
 
     def exit(self) -> None:
-        if self._exiting:
-            return
-        self._exiting = True
-        if self._status_notice_handle is not None:
-            self._status_notice_handle.cancel()
-            self._status_notice_handle = None
-        self._stop_selection_scroll()
-        # Stop mouse reports before prompt_toolkit leaves the alternate screen.
-        # Otherwise motion generated during shutdown can reach the shell.
-        self.application.output.disable_mouse_support()
-        self.application.output.flush()
-        self.sessions.notify_exit()
-        manager = getattr(self.runner, "mcp", None)
-        if manager is not None:
-            manager.cancel_pending_connections()
-        if self.state.running:
-            self.runner.request_cancel()
-        self._io_executor.shutdown(wait=False, cancel_futures=True)
-        self.application.exit()
+        """Ask the lifecycle to leave. Resource shutdown happens after the prompt loop."""
+        self.lifecycle.request_exit()
 
     async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -1735,7 +1718,7 @@ class CliApplication:
             self._stop_selection_scroll()
             selected = self._selected_transcript_text()
             if selected:
-                asyncio.create_task(self._copy_selection(selected))
+                self.lifecycle.spawn(self._copy_selection(selected), stop=TaskStop.CANCEL, name="clipboard-copy")
         else:
             return
         self.application.invalidate()
@@ -2034,7 +2017,7 @@ class CliApplication:
             if self.interaction is not None:
                 return
             self.set_status("Reading clipboard…", transient=False)
-            asyncio.create_task(self._paste_clipboard())
+            self.lifecycle.spawn(self._paste_clipboard(), stop=TaskStop.CANCEL, name="clipboard-paste")
 
         @kb.add(Keys.BracketedPaste, eager=True)
         def bracketed_paste(event) -> None:  # type: ignore[no-untyped-def]
@@ -2243,7 +2226,7 @@ class CliApplication:
         if (not self._pasted_content.has_blocks and not self._skill_draft.is_present(displayed)
                 and text.startswith("/") and "\n" not in text):
             self.buffer.reset(append_to_history=True)
-            asyncio.create_task(self._dispatch_command(text))
+            self.lifecycle.spawn(self._dispatch_command(text), stop=TaskStop.CANCEL, name="slash-command")
             return
         pending_interrupt = self.runner.current_interrupt() if not self.state.running else None
         if self.state.running or self.runner.control.pending_message_texts() or pending_interrupt is not None:
@@ -2334,7 +2317,7 @@ class CliApplication:
                 if epoch == self._run_epoch:
                     self._cancel_sent = False
 
-        self._run_task = asyncio.create_task(work())
+        self._run_task = self.lifecycle.spawn(work(), stop=TaskStop.OBSERVE, name="agent-run")
 
     def _start_queued_run(self) -> None:
         if self.interaction is not None or self.runner.current_interrupt() is not None:
@@ -2414,7 +2397,11 @@ class CliApplication:
                 looks_like_image = path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
                 if path.is_file() and looks_like_image:
                     if self.runner.supports_next_input("image"):
-                        asyncio.create_task(self._attach_pasted_path(trimmed, payload))
+                        self.lifecycle.spawn(
+                            self._attach_pasted_path(trimmed, payload),
+                            stop=TaskStop.CANCEL,
+                            name="attach-image",
+                        )
                         return
                     self.set_status("Image path pasted as text: current or pending model does not support images")
             except (OSError, ClipboardError):

@@ -10,6 +10,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from agent.cli.interactions import InteractionController
+from agent.cli.lifecycle import TaskStop
 
 if TYPE_CHECKING:
     from agent.cli.app import CliApplication
@@ -187,7 +188,9 @@ class SessionController:
             f"Session {target_id[:8]} is open in another window; waiting for it to be released."
         )
         app.set_status(self.wait_status(), transient=False)
-        self._wait_task = asyncio.create_task(self._wait_for_session(target_id))
+        self._wait_task = self._app.lifecycle.spawn(
+            self._wait_for_session(target_id), stop=TaskStop.OBSERVE, name="session-wait",
+        )
         app.application.invalidate()
 
     async def _wait_for_session(self, target_id: str) -> None:

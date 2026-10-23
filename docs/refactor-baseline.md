@@ -22,7 +22,8 @@
 | 动作 | 当前入口 | 做的事 | 不做的事 |
 |---|---|---|---|
 | Run Cancel | `Esc` 在运行中，或 `AgentRunner.request_cancel()` | 取消当前 Run 的模型流、可取消工具和图 | 不退出 TUI，不释放 Session 租约，不回滚已发生的副作用 |
-| UI Exit | `CliApplication.exit()` | 忽略重复调用；停掉鼠标、状态计时和选择滚动；通知 Session 等待取消；取消未完成的 MCP 连接；运行中则再请求一次 Run Cancel；然后离开全屏 | 不调用 `Runner.close()`，不在这里释放租约 |
+| UI Exit | `CliApplication.exit()` → `AppLifecycle.request_exit()` | 忽略重复调用；停掉鼠标、状态计时和选择滚动；通知 Session 等待取消；取消未完成的 MCP 连接；运行中则再请求一次 Run Cancel；然后离开全屏 | 不调用 `Runner.close()`，不在这里释放租约 |
+| UI Shutdown | `AppLifecycle.shutdown()`，在 TUI 循环结束后 | 再次取消待连接的 MCP、通知 Session 等待、停掉 Git 监听，并取消已登记的界面后台任务；超时后记录仍未结束的任务 | 不取消正在执行的 Run、MCP 操作或 Session 等待任务，也不释放租约 |
 | 进程 Shutdown | `main()` 在 `app.run()` 返回后调用 `Runner.close()` | 禁止新操作，排空或取消仍在进行的 Run，确认模型流关闭后释放租约并关闭 MCP 与沙箱 | Run 未排空或模型流未确认关闭时保留租约并抛出错误 |
 
 `Ctrl+D` 在输入为空时，以及 `/exit`，都进入 `CliApplication.exit()`。`Ctrl+D` 在输入非空时删除光标后面的字符；光标已经在末尾时文本不变，也不会退出。审批界面开着时同样如此。

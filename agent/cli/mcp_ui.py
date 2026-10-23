@@ -6,6 +6,7 @@ from functools import partial
 from typing import Any
 
 from agent.cli.interactions import InteractionController
+from agent.cli.lifecycle import TaskStop
 from agent.mcp.manager import ServerStatus
 from agent.permission import PermissionMode
 from agent.runner import InterruptKind
@@ -284,7 +285,12 @@ def _start_operation(
                 app._mcp_busy = False
             app.application.invalidate()
 
-    app._mcp_operation = asyncio.create_task(run())
+    lifecycle = getattr(app, "lifecycle", None)
+    if lifecycle is None:
+        # Test doubles construct only the MCP surface. The real CLI always has a lifecycle.
+        app._mcp_operation = asyncio.create_task(run())
+    else:
+        app._mcp_operation = lifecycle.spawn(run(), stop=TaskStop.OBSERVE, name="mcp-operation")
     return app._mcp_operation
 
 
