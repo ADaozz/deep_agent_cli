@@ -11,8 +11,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Callable, Sequence
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from agent.llm_stream import ModelStreamCancelled
+from agent.session import tool_message_is_error
 from agent.stream import visible_text
 
 
@@ -291,3 +293,92 @@ def _tool_decisions(
         else {"type": "reject", "message": "另一个并发的待确认调用未包含在本次人工决策中，按拒绝处理"}
         for tool_call_id in pending_ids
     ]}
+
+
+def final_answer_committed(messages: Any, previous_message_id: str | None) -> bool:
+    """True when this run checkpointed a final answer before the graph drained.
+
+    After an answer without tool calls, only no-op middleware hooks remain, so a
+    late cancel must not report the turn as cancelled.
+    """
+    if not messages or _last_message_id({"messages": messages}) == previous_message_id:
+        return False
+    last = messages[-1]
+    return isinstance(last, AIMessage) and not last.tool_calls
+
+
+def completed_result(output: str) -> RunResult:
+    return RunResult(status="completed", output=output)
+
+
+def interaction_result(
+    status: str,
+    pending: list[dict[str, Any]],
+    human_input: dict[str, Any],
+) -> RunResult:
+    return RunResult(
+        status=status,
+        pending_tool_calls=list(pending),
+        human_input=dict(human_input),
+    )
+
+
+def failed_result(error: str) -> RunResult:
+    return RunResult(status="failed", error=error)
+
+
+def cancelled_result(*, model_stream_closed: bool, unclosed_message: str) -> tuple[str, RunResult]:
+    """Error text is empty only after the model request confirms it stopped."""
+    error = "" if model_stream_closed else unclosed_message
+    return error, RunResult(status="cancelled", error=error)
+
+
+def normalize_stream_error(exc: BaseException, *, cancel_requested: bool) -> BaseException | None:
+    """None means the caller should record a user cancel, not a failure."""
+    if cancel_requested:
+        return None
+    if isinstance(exc, ModelStreamCancelled):
+        return RuntimeError(f"Model stream stopped unexpectedly: {exc}")
+    return exc
+
+
+def update_tool_events(chunk: Any, seen: set[str]) -> tuple[list[RunEvent], bool]:
+    """Tool and usage events for one graph update.
+
+    Mutates ``seen`` so a replayed tool start is not emitted twice. The bool is
+    true when the update carried input-token usage.
+    """
+    events: list[RunEvent] = []
+    saw_input_usage = False
+    for message in _messages_in_update(chunk):
+        if isinstance(message, AIMessage):
+            message_id = str(getattr(message, "id", "") or "")
+            usage = _usage_metadata_dict(message)
+            if "input_tokens" in usage:
+                saw_input_usage = True
+                events.append(RunEvent(type="usage", result=usage))
+            for call in message.tool_calls or []:
+                tool_call_id = str(call.get("id") or "")
+                identity = tool_call_id or f"{call.get('name')}:{id(call)}"
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                events.append(RunEvent(
+                    type="tool_started",
+                    message_id=message_id,
+                    tool_call_id=tool_call_id,
+                    name=str(call.get("name") or "tool"),
+                    arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
+                ))
+        elif isinstance(message, ToolMessage):
+            content = _message_text(message)
+            events.append(RunEvent(
+                type="tool_completed",
+                tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
+                name=str(getattr(message, "name", "") or "tool"),
+                content=content,
+                result=getattr(message, "content", content),
+                is_error=tool_message_is_error(message),
+                artifact=getattr(message, "artifact", None),
+            ))
+    return events, saw_input_usage

@@ -54,12 +54,16 @@ from agent.run_events import (
     _emit,
     _final_output,
     _last_message_id,
-    _message_text,
-    _messages_in_update,
     _tool_decisions,
     _usage_from_messages,
-    _usage_metadata_dict,
+    cancelled_result,
     classify_interrupt,
+    completed_result,
+    failed_result,
+    final_answer_committed,
+    interaction_result,
+    normalize_stream_error,
+    update_tool_events,
     interrupt_kind_from_state,
     interrupt_payloads,
     is_valid_hitl_interrupt,
@@ -80,7 +84,6 @@ from agent.session import (
     TranscriptBlock,
     messages_to_transcript,
     settle_restored_tools,
-    tool_message_is_error,
     workspace_state_path,
 )
 from agent.session_lock import SessionLockBusyError
@@ -1473,19 +1476,17 @@ class AgentRunner:
                         human_input = interrupt.payload
         except GraphDrained:
             if self._final_answer_committed(last_message_id):
-                return RunResult(status="completed",
-                                 output=_final_output(self.prepared.graph, self._thread_config()))
+                return completed_result(_final_output(self.prepared.graph, self._thread_config()))
             return self._cancelled_result(event_handler)
         except Exception as exc:  # noqa: BLE001
             # A ModelStreamCancelled without a cancel request of this run is
             # not a user cancel and stays a failure, like any network error.
-            if self.control.cancel_requested:
+            failure = normalize_stream_error(exc, cancel_requested=self.control.cancel_requested)
+            if failure is None:
                 return self._cancelled_result(event_handler)
-            if isinstance(exc, ModelStreamCancelled):
-                exc = RuntimeError(f"Model stream stopped unexpectedly: {exc}")
-            _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
+            _emit(event_handler, RunEvent(type="run_failed", content=str(failure), is_error=True))
             self._touch_status(StopReason.ERROR)
-            return RunResult(status="failed", error=str(exc))
+            return failed_result(str(failure))
 
         # graph.stream returned without GraphDrained: the graph reached its end
         # and the final message is already checkpointed. A cancel that arrived
@@ -1493,16 +1494,11 @@ class AgentRunner:
         if interrupted:
             self.control.set_defer_steering(True)
             self._touch_status(StopReason.DEFERRED)
-            result = RunResult(
-                status=interrupted,
-                pending_tool_calls=pending,
-                human_input=human_input,
-            )
+            result = interaction_result(interrupted, pending, human_input)
             _emit(event_handler, RunEvent(type="interaction_requested", result=result))
             return result
 
-        output = _final_output(self.prepared.graph, self._thread_config())
-        return RunResult(status="completed", output=output)
+        return completed_result(_final_output(self.prepared.graph, self._thread_config()))
 
     def _final_answer_committed(self, last_message_id: str | None) -> bool:
         """Whether this run checkpointed a final answer before it was drained.
@@ -1512,10 +1508,7 @@ class AgentRunner:
         complete and the late cancel must not report it as cancelled.
         """
         values = self.prepared.graph.get_state(self._thread_config()).values or {}
-        messages = values.get("messages") or []
-        if not messages or _last_message_id(values) == last_message_id:
-            return False
-        return isinstance(messages[-1], AIMessage) and not messages[-1].tool_calls
+        return final_answer_committed(values.get("messages") or [], last_message_id)
 
     def _cancelled_result(self, event_handler: RunEventHandler | None) -> RunResult:
         """Finish a cancelled run once its model request is confirmed closed.
@@ -1526,9 +1519,11 @@ class AgentRunner:
         """
         closed = self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS)
         self._touch_status(StopReason.ABORTED)
-        error = "" if closed else MODEL_STREAM_UNCLOSED
+        error, result = cancelled_result(
+            model_stream_closed=closed, unclosed_message=MODEL_STREAM_UNCLOSED,
+        )
         _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
-        return RunResult(status="cancelled", error=error)
+        return result
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
@@ -1553,38 +1548,9 @@ class AgentRunner:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
-        for message in _messages_in_update(chunk):
-            if isinstance(message, AIMessage):
-                message_id = str(getattr(message, "id", "") or "")
-                usage = _usage_metadata_dict(message)
-                # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
-                if "input_tokens" in usage:
-                    self._context_usage_invalidated = False
-                    _emit(handler, RunEvent(type="usage", result=usage))
-                for call in message.tool_calls or []:
-                    tool_call_id = str(call.get("id") or "")
-                    identity = tool_call_id or f"{call.get('name')}:{id(call)}"
-                    if identity in self._seen_tool_calls:
-                        continue
-                    self._seen_tool_calls.add(identity)
-                    _emit(handler, RunEvent(
-                        type="tool_started",
-                        message_id=message_id,
-                        tool_call_id=tool_call_id,
-                        name=str(call.get("name") or "tool"),
-                        arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
-                    ))
-            elif isinstance(message, ToolMessage):
-                tool_name = str(getattr(message, "name", "") or "tool")
-                content = _message_text(message)
-                artifact = getattr(message, "artifact", None)
-                is_error = tool_message_is_error(message)
-                _emit(handler, RunEvent(
-                    type="tool_completed",
-                    tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
-                    name=tool_name,
-                    content=content,
-                    result=getattr(message, "content", content),
-                    is_error=is_error,
-                    artifact=artifact,
-                ))
+        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
+        # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
+        if saw_input_usage:
+            self._context_usage_invalidated = False
+        for event in events:
+            _emit(handler, event)
