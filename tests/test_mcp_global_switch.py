@@ -18,7 +18,7 @@ from agent.cli.mcp_ui import handle_mcp_command
 from agent.cli.state import CliState
 from agent.mcp.adapter import LoadedServer
 from agent.mcp.config import atomic_write_text
-from agent.mcp.manager import MCPManager, ServerStatus
+from agent.mcp.manager import MCPManager, MCPResult, ServerStatus
 from agent.mcp.middleware import MCP_HOST_PROMPT
 from agent.permission import PermissionMode
 from agent.runner import AgentRunner, InterruptKind
@@ -901,6 +901,55 @@ async def test_switch_publish_queues_when_busy_and_does_not_retry_failure(tmp_pa
     finally:
         runner.close()
         manager.close()
+
+
+@async_test
+async def test_two_blocked_connects_do_not_stall_the_cli_executor(tmp_path: Path) -> None:
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from agent.cli.app import CliApplication
+    from agent.cli.mcp_ui import _apply_when_idle_worker, _start_operation
+
+    entered, release = threading.Event(), threading.Event()
+    started = {"n": 0}
+    gate = threading.Lock()
+
+    def block() -> MCPResult:
+        with gate:
+            started["n"] += 1
+            if started["n"] == 2:
+                entered.set()
+        assert release.wait(5)
+        return MCPResult(True, False, "connected")
+
+    manager = MCPManager(tmp_path / "mcp.json")
+    manager.load()
+    runner = _runner(manager)
+    with create_pipe_input() as pipe:
+        app = CliApplication(
+            runner, config_dir=tmp_path / "config", input=pipe, output=DummyOutput(),
+        )
+        assert app._io_executor._max_workers == 2
+        first = second = None
+        try:
+            first = _start_operation(app, block, quiet_success=True)
+            second = _start_operation(app, block, quiet_success=True, force=True)
+            assert first is not None and second is not None
+            assert await asyncio.to_thread(entered.wait, 2)
+            published = await asyncio.wait_for(
+                app._run_blocking(_apply_when_idle_worker, app.runner), 1,
+            )
+            worked = await asyncio.wait_for(app._run_blocking(lambda: "agent-work"), 1)
+            assert isinstance(published, list)
+            assert worked == "agent-work"
+        finally:
+            release.set()
+            for task in (first, second):
+                if task is not None:
+                    await task
+            app._io_executor.shutdown(wait=False, cancel_futures=True)
+            runner.close()
 
 
 def test_partial_batch_reports_superseded(tmp_path: Path, monkeypatch) -> None:

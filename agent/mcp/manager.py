@@ -470,6 +470,12 @@ class MCPManager:
         with self._lock:
             return self._revision != self._published_revision
 
+    @property
+    def toolset_revision(self) -> int:
+        """Catalog revision the next graph build would publish."""
+        with self._lock:
+            return self._revision
+
     def cancel_pending_connections(self) -> None:
         """Stop startup/authorization work when the UI exits; leave active tools to runner.close().
 

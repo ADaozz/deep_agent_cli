@@ -250,22 +250,32 @@ def _start_operation(
 
     async def run() -> None:
         try:
-            result = await app._run_blocking(operation)
+            if quiet_success:
+                result = await asyncio.to_thread(operation)
+            else:
+                result = await app._run_blocking(operation)
             if app.runner.mcp.switch_epoch != epoch:
                 # A later enable/disable owns the status text. Still publish tools
                 # when this task is the one that finished the catalog change.
                 if app.runner.mcp.toolset_dirty():
-                    await _apply_when_idle(app, announce_status=False)
+                    await _coalesced_publish(app)
                 return
-            if not (quiet_success and result.ok):
-                app.state.add_system(result.message, error=not result.ok)
+            if quiet_success:
+                if not result.ok:
+                    app.state.add_system(result.message, error=True)
+                if app.runner.mcp.toolset_dirty():
+                    await _coalesced_publish(app)
+                    if app.runner.mcp.switch_epoch == epoch:
+                        _announce_published_switch(app)
+                return
+            app.state.add_system(result.message, error=not result.ok)
             if not _switch_status_visible(app):
                 app.set_status(
                     "MCP operation finished" if result.ok else "MCP operation failed; you can retry",
                     transient=False,
                 )
             if app.runner.mcp.toolset_dirty():
-                await _apply_when_idle(app, announce_status=not _switch_status_visible(app))
+                await _apply_when_idle(app)
         except Exception as exc:
             if app.runner.mcp.switch_epoch != epoch:
                 return
@@ -426,6 +436,41 @@ def _announce_published_switch(app: Any) -> None:
     _show_mcp_status(app, manager)
 
 
+def _publish_lock(app: Any) -> asyncio.Lock:
+    lock = getattr(app, "_mcp_publish_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app._mcp_publish_lock = lock
+    return lock
+
+
+async def _coalesced_publish(app: Any) -> str:
+    """Publish one toolset revision once. A second caller joins or skips it.
+
+    A later revision, such as tools discovered after connect, still publishes.
+    A failed attempt is not repeated for that same revision.
+    """
+    async with _publish_lock(app):
+        manager = app.runner.mcp
+        revision = manager.toolset_revision
+        if (
+            getattr(app, "_mcp_publish_revision", None) == revision
+            and getattr(app, "_mcp_publish_outcome", None) == "failed"
+        ):
+            return "failed"
+        if (
+            getattr(app, "_mcp_publish_revision", None) == revision
+            and getattr(app, "_mcp_publish_outcome", None) == "applied"
+            and not manager.toolset_dirty()
+        ):
+            return "applied"
+        outcome = await _publish_mcp_toolset(app)
+        if manager.toolset_revision == revision:
+            app._mcp_publish_revision = revision
+            app._mcp_publish_outcome = outcome
+        return outcome
+
+
 async def _publish_mcp_toolset(app: Any) -> str:
     """Apply a pending MCP toolset once. Returns applied, queued, or failed."""
     if _switch_block_reason(app) is not None:
@@ -446,7 +491,7 @@ async def _report_switch(app: Any, enabled: bool, epoch: int) -> None:
     manager = app.runner.mcp
     if manager.switch_epoch != epoch:
         return
-    outcome = await _publish_mcp_toolset(app)
+    outcome = await _coalesced_publish(app)
     if manager.switch_epoch != epoch:
         return
     if outcome == "failed":
@@ -552,15 +597,15 @@ async def _apply_when_idle(app: Any, *, announce_status: bool = True) -> bool:
     else:
         events = await app._run_blocking(_apply_when_idle_worker, app.runner)
     if events is None:
-        if announce_status:
+        if announce_status and not _switch_status_visible(app):
             app.set_status("MCP change queued until the current run reaches a safe point", transient=False)
         return False
     for event in events:
         app._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
-        if announce_status:
+        if announce_status and not _switch_status_visible(app):
             app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
         return False
-    if announce_status:
+    if announce_status and not _switch_status_visible(app):
         app.set_status("MCP tools updated", transient=False)
     return not app.runner.mcp.toolset_dirty()
