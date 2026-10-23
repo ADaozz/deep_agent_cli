@@ -11,7 +11,7 @@ class PermissionMode(StrEnum):
     """两态工具权限策略。"""
 
     ASK = "ask"  # 有副作用的工具、每次 execute 和 web_search 都暂停等待审批。
-    ALLOW = "allow"  # 自动批准原生工具；宿主 MCP 仍需审批。沙箱网络开放（仅 SANDBOXED）。
+    ALLOW = "allow"  # 自动批准所有工具（含宿主 MCP）；沙箱网络开放（仅 SANDBOXED）。
 
 
 ASK_INTERRUPT_ON: dict[str, Any] = {
@@ -23,15 +23,16 @@ ASK_INTERRUPT_ON: dict[str, Any] = {
 }
 
 PERMISSION_ALLOW_WARNING = (
-    "HIGH RISK: Permission mode ALLOW auto-approves native tool calls and any "
+    "HIGH RISK: Permission mode ALLOW auto-approves all tool calls and any "
     "capabilities they declare (including file writes and deletes), and runs "
     "every execute with the sandbox network OPEN: full host network access "
     "(internet, localhost, LAN). There is no per-call confirmation for those "
-    "tools. Host MCP servers and mcp_add / mcp_remove still require approval; "
-    "ALLOW does not make an MCP server trusted. Switching back to ask only "
+    "tools, including host MCP calls and mcp_add / mcp_remove. MCP commands "
+    "run on the host, outside the sandbox. Switching back to ask only "
     "restores approval for later commands; already running sandbox processes "
     "keep going. Only enable this if the agent is running in a SANDBOXED backend."
 )
+
 
 def allow_mode_available(execution_mode: ExecutionMode) -> bool:
     """ALLOW 仅在 backend 为已知隔离沙箱时可用。"""
@@ -57,12 +58,7 @@ def interrupt_on_for_mode(mode: PermissionMode) -> dict[str, Any] | None:
 
 
 def permission_mode_from_interrupt_on(interrupt_on: dict[str, Any] | None) -> PermissionMode:
-    if not interrupt_on:
-        return PermissionMode.ALLOW
-    from agent.mcp.names import is_managed_mcp_name
-
-    native = {name: rule for name, rule in interrupt_on.items() if not is_managed_mcp_name(name)}
-    return PermissionMode.ALLOW if not native else PermissionMode.ASK
+    return PermissionMode.ASK if interrupt_on else PermissionMode.ALLOW
 
 
 def parse_permission_mode(value: str) -> PermissionMode | None:
@@ -75,4 +71,4 @@ def parse_permission_mode(value: str) -> PermissionMode | None:
 def permission_mode_label(mode: PermissionMode) -> str:
     if mode is PermissionMode.ALLOW:
         return "allow (auto-approve all tools; sandbox network OPEN — SANDBOXED only, HIGH RISK)"
-    return "ask (side-effect tools, every execute and web search require approval)"
+    return "ask (side-effect tools, execute, web search and host MCP require approval)"

@@ -22,6 +22,7 @@ class MessageBlock:
     # Bumped on every mutation so the transcript renderer can tell a frozen
     # block from the one still being streamed into.
     revision: int = 0
+    styled_spans: tuple[tuple[int, int, str], ...] = ()
 
 
 @dataclass
@@ -91,8 +92,14 @@ class CliState:
         if pending and message_id:
             self.pending_user_ids[message_id] = block.id
 
-    def add_system(self, text: str, *, error: bool = False) -> None:
-        self.blocks.append(MessageBlock(kind="error" if error else "system", content=text, is_error=error))
+    def add_system(
+        self, text: str, *, error: bool = False,
+        styled_spans: tuple[tuple[int, int, str], ...] = (),
+    ) -> None:
+        self.blocks.append(MessageBlock(
+            kind="error" if error else "system", content=text,
+            is_error=error, styled_spans=styled_spans,
+        ))
 
     def clear(self, *, preserve_model_metrics: bool = False) -> None:
         self.blocks.clear()

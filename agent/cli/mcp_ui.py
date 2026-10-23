@@ -6,6 +6,8 @@ from functools import partial
 from typing import Any
 
 from agent.cli.interactions import InteractionController
+from agent.mcp.manager import ServerStatus
+from agent.permission import PermissionMode
 
 
 async def handle_mcp_command(app: Any, arg: str) -> None:
@@ -15,7 +17,7 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
         return
     text = arg.strip()
     if not text:
-        app.state.add_system(manager.describe())
+        _show_servers(app, manager)
         app.set_status("MCP servers")
         return
     command, _, rest = text.partition(" ")
@@ -156,6 +158,11 @@ def _begin_add(app: Any) -> None:
 
 
 def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
+    if app.runner.permission_mode() is PermissionMode.ALLOW:
+        app.interaction = None
+        app._mcp_draft = {}
+        _commit_add(app, draft)
+        return
     app._mcp_draft = draft
     app.interaction = InteractionController(
         kind="mcp_confirm",
@@ -254,6 +261,39 @@ def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
     finally:
         runner._operation_lock.release()
     return events
+
+
+def _show_servers(app: Any, manager: Any) -> None:
+    if manager.config_error:
+        app.state.add_system(manager.describe(), error=True)
+        return
+    rows = [
+        (
+            state.config.name,
+            "failed" if state.status is ServerStatus.ERROR else state.status.value,
+            state.tool_count if state.status is ServerStatus.CONNECTED else 0,
+        )
+        for state in manager.list_servers()
+    ]
+    rows.extend((name, "failed", 0) for name in manager.invalid_servers())
+    if not rows:
+        app.state.add_system("No MCP servers are configured.")
+        return
+    lines: list[str] = []
+    spans: list[tuple[int, int, str]] = []
+    offset = 0
+    for name, status, count in rows:
+        prefix = f"• {name}: "
+        line = f"{prefix}{status} ({count} tools)"
+        color = "green" if status == "connected" else "red"
+        status_start = offset + len(prefix)
+        spans.extend((
+            (offset, offset + 1, color),
+            (status_start, status_start + len(status), color),
+        ))
+        lines.append(line)
+        offset += len(line) + 1
+    app.state.add_system("\n".join(lines), styled_spans=tuple(spans))
 
 
 def _show_tools(app: Any, manager: Any, name: str) -> None:

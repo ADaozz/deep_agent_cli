@@ -8,6 +8,7 @@ from functools import partial
 import logging
 import os
 import time
+import warnings
 from time import monotonic
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -81,6 +82,7 @@ from agent.permission import (
     parse_permission_mode,
 )
 from agent.performance import model_metric_groups
+from agent.mcp.logging import MCPLogHandler
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
 
 # Workspace/model and execution settings on the left; git/context on the right.
@@ -397,6 +399,11 @@ class CliApplication:
         output: Any = None,
     ) -> None:
         self.runner = runner
+        manager = getattr(runner, "mcp", None)
+        mcp_config_dir = config_dir or (manager.path.parent if manager is not None else None)
+        self._mcp_log_path = (
+            mcp_config_dir / "logs" / f"mcp-{os.getpid()}.log" if mcp_config_dir is not None else None
+        )
         if config_dir is not None:
             sandbox = runner.settings.sandbox if runner.settings is not None else runner._sandbox_config
             workspace = sandbox.workspace if sandbox is not None else Path.cwd()
@@ -585,7 +592,9 @@ class CliApplication:
             ConditionalContainer(
                 Window(
                     self.interaction_control,
-                    wrap_lines=True,
+                    # Rich already wraps this content at the viewport width.
+                    # A second wrap invalidates interaction_height's row count.
+                    wrap_lines=False,
                     height=interaction_height,
                     dont_extend_height=True,
                     always_hide_cursor=True,
@@ -687,7 +696,7 @@ class CliApplication:
         self._loop = asyncio.get_running_loop()
         self._start_git_watch()
         try:
-            with self._capture_filesystem_warnings():
+            with self._capture_runtime_logs():
                 await self.sessions.start()
                 await self.application.run_async(pre_run=self._start_mcp_connections)
         finally:
@@ -702,33 +711,60 @@ class CliApplication:
             _start_operation(self, manager.connect_pending)
 
     @contextmanager
-    def _capture_filesystem_warnings(self) -> Iterator[None]:
-        """Keep backend warnings out of stderr while the full-screen UI is active."""
-        logger = logging.getLogger("deepagents.backends.filesystem")
-        previous_handlers = logger.handlers[:]
-        previous_propagate = logger.propagate
-
+    def _capture_runtime_logs(self) -> Iterator[None]:
+        """Keep MCP logs in a private background file, away from terminal/UI output."""
         class TranscriptHandler(logging.Handler):
             def emit(handler_self, record: logging.LogRecord) -> None:
                 if record.levelno < logging.WARNING:
                     return
                 message = record.getMessage()
                 if self._loop is not None and self._loop.is_running():
-                    self._loop.call_soon_threadsafe(self._show_filesystem_warning, message)
+                    self._loop.call_soon_threadsafe(self._show_runtime_log, message)
                 else:
-                    self._show_filesystem_warning(message)
+                    self._show_runtime_log(message)
 
         handler = TranscriptHandler()
-        logger.handlers = [handler]
-        logger.propagate = False
-        try:
-            yield
-        finally:
-            logger.handlers = previous_handlers
-            logger.propagate = previous_propagate
-            handler.close()
+        mcp_handler: logging.Handler = logging.NullHandler()
+        if self._mcp_log_path is not None:
+            self._mcp_log_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            self._mcp_log_path.parent.chmod(0o700)
+            mcp_handler = MCPLogHandler(
+                self._mcp_log_path, maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8",
+            )
+            mcp_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        previous_showwarning = warnings.showwarning
 
-    def _show_filesystem_warning(self, message: str) -> None:
+        def show_warning(message, category, filename, lineno, file=None, line=None):
+            if file is not None:
+                previous_showwarning(message, category, filename, lineno, file=file, line=line)
+                return
+            text = f"{category.__name__}: {str(message)[:2000]}"
+            if any(part in str(filename).replace("\\", "/").split("/") for part in ("fastmcp", "mcp", "key_value")):
+                logging.getLogger("mcp").warning(text)
+                return
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._show_runtime_log, text)
+            else:
+                self._show_runtime_log(text)
+
+        previous = []
+        for name in ("deepagents.backends.filesystem", "fastmcp", "mcp"):
+            logger = logging.getLogger(name)
+            previous.append((logger, logger.handlers[:], logger.propagate))
+            logger.handlers = [handler if name == "deepagents.backends.filesystem" else mcp_handler]
+            logger.propagate = False
+        try:
+            with warnings.catch_warnings():
+                warnings.showwarning = show_warning
+                yield
+        finally:
+            for logger, handlers, propagate in previous:
+                logger.handlers = handlers
+                logger.propagate = propagate
+            handler.close()
+            mcp_handler.close()
+
+    def _show_runtime_log(self, message: str) -> None:
         self.state.add_system(message)
         self.application.invalidate()
 

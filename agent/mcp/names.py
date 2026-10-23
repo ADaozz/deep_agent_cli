@@ -43,9 +43,9 @@ def is_managed_mcp_name(name: str) -> bool:
 def host_interrupt_on(tool_names: Iterable[str]) -> dict[str, dict[str, list[str]]]:
     """Approval rules for host MCP operations.
 
-    Every external tool requires approval. Server-supplied read-only hints are
-    not a trust decision: the process runs on the host, outside Bubblewrap.
-    ``allow`` does not inherit these entries away.
+    Applied by the factory in permission ask mode only. Every external tool
+    requires approval in ask, regardless of server-supplied read-only hints.
+    Permission allow skips these rules along with the native tool rules.
     """
     entries = {
         MCP_ADD: dict(HOST_APPROVAL),

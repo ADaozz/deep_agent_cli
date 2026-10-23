@@ -221,42 +221,66 @@ def test_restored_session_keeps_the_tool_message_and_the_reloaded_tool(
         second_manager.close()
 
 
-def test_allow_and_sandbox_switch_do_not_drop_mcp_approval(
+def test_permission_controls_mcp_calls_management_and_sandbox_switch(
     tmp_path: Path, http_mcp: HttpFixture,
 ) -> None:
     manager = MCPManager(tmp_path / "mcp.json", call_timeout=8, connect_timeout=5)
+    marker = tmp_path / "host-marker"
+    messages = [
+        AIMessage(content="", tool_calls=[{
+            "name": "mcp__local__write_marker", "args": {"path": str(marker)}, "id": "allow-host",
+        }]),
+        AIMessage(content="written"),
+        AIMessage(content="", tool_calls=[{
+            "name": "mcp__local__echo", "args": {"text": "ask"}, "id": "ask-host",
+        }]),
+        AIMessage(content="approved"),
+        AIMessage(content="", tool_calls=[{
+            "name": "mcp_add", "args": {
+                "name": "extra", "transport": "streamable_http", "url": http_mcp.url,
+            }, "id": "allow-add",
+        }]),
+        AIMessage(content="added"),
+        AIMessage(content="", tool_calls=[{
+            "name": "mcp_remove", "args": {"name": "extra"}, "id": "allow-remove",
+        }]),
+        AIMessage(content="removed"),
+    ]
     try:
         assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
         with patch(
             "agent.factory.select_backend",
             return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED),
         ):
-            prepared = create_agent(
-                model=scripted_model([AIMessage(content="done")]),
-                interrupt_on={},
-                mcp=manager,
-            )
-            assert prepared.interrupt_on is not None
-            assert "execute" not in prepared.interrupt_on
-            assert "mcp_add" in prepared.interrupt_on
-            assert "mcp__local__echo" in prepared.interrupt_on
+            prepared = create_agent(model=scripted_model(messages), interrupt_on={}, mcp=manager)
+            assert prepared.interrupt_on == {}
             runner = AgentRunner(prepared=prepared, mcp_manager=manager)
             try:
-                assert "execute" not in (runner.prepared.interrupt_on or {})
-                assert "mcp_add" in runner.prepared.interrupt_on
+                assert runner.permission_mode() is PermissionMode.ALLOW
+                assert runner.invoke("write marker").status == "completed"
+                assert marker.exists()
                 runner.request_permission_change(PermissionMode.ASK)
                 runner._apply_pending_runtime_config()
-                assert "execute" in runner.prepared.interrupt_on
-                assert "mcp__local__write_marker" in runner.prepared.interrupt_on
+                assert {"execute", "mcp_add", "mcp_remove", "mcp__local__write_marker"} <= set(runner.prepared.interrupt_on)
+                waiting = runner.invoke("echo")
+                assert waiting.status == "waiting_confirmation"
+                assert waiting.pending_tool_calls[0]["name"] == "mcp__local__echo"
+                assert runner.approve_tool("ask-host").status == "completed"
                 runner.request_permission_change(PermissionMode.ALLOW)
                 runner._apply_pending_runtime_config()
-                assert "execute" not in runner.prepared.interrupt_on
-                assert runner.prepared.interrupt_on["mcp_add"]["allowed_decisions"] == ["approve", "reject"]
+                assert runner.prepared.interrupt_on == {}
+                assert runner.invoke("add server").status == "completed"
+                assert manager.get("extra") is not None
+                assert runner.invoke("remove server").status == "completed"
+                assert manager.get("extra") is None
+                assert runner.prepared.interrupt_on == {}
                 runner.request_sandbox_mode("full-access")
                 with patch.object(runner, "_apply_sandbox_mode", lambda mode: None):
                     runner._apply_pending_runtime_config()
-                assert "mcp__local__echo" in runner.prepared.interrupt_on
-                assert "execute" not in runner.prepared.interrupt_on
+                assert runner.prepared.interrupt_on == {}
+                runner.request_permission_change(PermissionMode.ASK)
+                runner._apply_pending_runtime_config()
+                assert {"mcp_add", "mcp_remove", "mcp__local__echo"} <= set(runner.prepared.interrupt_on)
             finally:
                 runner.close()
     finally:

@@ -357,7 +357,12 @@ def test_mcp_confirm_preserves_multiline_plain_text_and_other_panels_use_markdow
     from agent.cli.rendering import render_interaction
     from types import SimpleNamespace
 
-    app = SimpleNamespace(set_status=lambda *a, **kw: None)
+    from agent.permission import PermissionMode
+
+    app = SimpleNamespace(
+        set_status=lambda *a, **kw: None,
+        runner=SimpleNamespace(permission_mode=lambda: PermissionMode.ASK),
+    )
     draft = {"name": "tui_e2e", "transport": "stdio",
              "target": "/path/to/python /tmp/mcp-e2e/server_with_[brackets].py"}
     _ask_confirm(app, draft)
@@ -374,3 +379,29 @@ def test_mcp_confirm_preserves_multiline_plain_text_and_other_panels_use_markdow
     panel.move(1)
     assert panel.option_index == 1
     assert panel.accept() and panel.values["confirm"] == "add"
+
+
+@async_test
+async def test_allow_add_wizard_saves_without_final_approval(tmp_path: Path, http_mcp: HttpFixture) -> None:
+    from unittest.mock import patch
+    from agent.factory import create_agent
+    from agent.sandbox import BackendSelection, ExecutionMode
+
+    manager = MCPManager(tmp_path / "mcp.json", call_timeout=8, connect_timeout=5)
+    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        prepared = create_agent(model=scripted_model([AIMessage(content="done")]), interrupt_on={}, mcp=manager)
+        runner = AgentRunner(prepared=prepared, mcp_manager=manager)
+        app = _App(runner)
+        try:
+            await handle_mcp_command(app, "add")
+            _advance(app, "local")
+            _advance(app)  # Streamable HTTP
+            _advance(app, http_mcp.url)
+            _advance(app)  # No authentication; final save is automatic in allow.
+            assert app.interaction is None
+            await app._mcp_operation
+            assert manager.get("local") is not None
+            assert "mcp__local__echo" in runner.prepared.model_tool_names
+            assert runner.prepared.interrupt_on == {}
+        finally:
+            runner.close()

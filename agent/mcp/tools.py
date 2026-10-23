@@ -27,12 +27,14 @@ def build_management_tools(manager: MCPManager) -> list[BaseTool]:
         token_env: str = "",
         env_passthrough: list[str] | None = None,
     ) -> str:
-        """Add a host MCP server. Requires user approval before anything is saved.
+        """Add a host MCP server. Approval follows /permission: ask prompts, allow executes.
 
         transport is streamable_http or stdio. For bearer auth pass token_env, the
         environment variable name, never the token. stdio command runs on the host,
         outside the sandbox, and argv is its argument list. A successful add does
         not make the new tools callable in this same step.
+        OAuth reuses cached credentials and refreshes them first. If they cannot
+        be renewed, browser authorization starts automatically for the user.
         """
         result = manager.add_from_fields(
             name=name,
@@ -51,7 +53,7 @@ def build_management_tools(manager: MCPManager) -> list[BaseTool]:
         return result.message + " The new tools are not available."
 
     def mcp_remove(name: str) -> str:
-        """Remove one configured MCP server. Requires user approval. Missing names do not change the file."""
+        """Remove a configured MCP server. /permission ask prompts; allow executes. Missing names do not change the file."""
         result = manager.remove(name)
         return result.message
 

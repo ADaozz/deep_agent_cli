@@ -404,8 +404,7 @@ def _mcp_tui(tmp_path, mode="call"):
     return app
 
 
-@pytest.mark.parametrize("permission", ["ask", "allow"])
-@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize(("permission", "approve"), [("ask", False), ("ask", True), ("allow", True)])
 def test_real_pty_host_mcp_arguments_visible_and_execution_unchanged(tmp_path, permission, approve):
     tui = _mcp_tui(tmp_path)
     marker = tmp_path / "host-marker"
@@ -416,26 +415,34 @@ def test_real_pty_host_mcp_arguments_visible_and_execution_unchanged(tmp_path, p
             tui.send("ALLOW\r")
             tui.wait(lambda state: state["permission"] == "allow")
         tui.send("write the host marker\r")
-        state = tui.wait(lambda state: state["interaction"] == "approval", timeout=15)
-        assert state["interrupt"] == "waiting_confirmation"
-        assert "nonce: TUI_E2E_APPROVE_002" in state["rendered_interaction"]
-        assert "Execution: Host (outside sandbox)" in state["question"]
-        assert "FAKE_TUI_API_SECRET" in state["question"]
-        assert "Bearer FAKE_TUI_BEARER" in state["question"]
-        assert not marker.exists()
-        # Existing detail view is reached without answering the pending approval.
-        tui.send("\x1b")
-        tui.wait(lambda state: state["interaction"] is None and state["interrupt"])
-        tui.send("\x0f")  # Ctrl+O
-        state = tui.wait(lambda state: state["expanded"])
-        assert "api_key: FAKE_TUI_API_SECRET" in state["rendered_transcript"]
-        assert "Authorization: Bearer FAKE_TUI_BEARER" in state["rendered_transcript"]
-        for secret in ("FAKE_TUI_API_SECRET", "FAKE_TUI_BEARER"):
-            assert secret in state["rendered_transcript"]
-        tui.send("\x1bOQ")  # F2 reopens the same approval and toolCallId
-        tui.wait(lambda state: state["interaction"] == "approval")
-        tui.send("\x1b[B\r" if approve else "\r")
-        tui.wait(lambda state: state["interrupt"] is None and state["status"] == "Ready", timeout=15)
+        if permission == "ask":
+            state = tui.wait(lambda state: state["interaction"] == "approval", timeout=15)
+            assert state["interrupt"] == "waiting_confirmation"
+            assert "nonce: TUI_E2E_APPROVE_002" in state["rendered_interaction"]
+            assert "Execution: Host (outside sandbox)" in state["question"]
+            assert "FAKE_TUI_API_SECRET" in state["question"]
+            assert "Bearer FAKE_TUI_BEARER" in state["question"]
+            assert not marker.exists()
+            # Existing detail view is reached without answering the pending approval.
+            tui.send("\x1b")
+            tui.wait(lambda state: state["interaction"] is None and state["interrupt"])
+            tui.send("\x0f")  # Ctrl+O
+            state = tui.wait(lambda state: state["expanded"])
+            assert "api_key: FAKE_TUI_API_SECRET" in state["rendered_transcript"]
+            assert "Authorization: Bearer FAKE_TUI_BEARER" in state["rendered_transcript"]
+            for secret in ("FAKE_TUI_API_SECRET", "FAKE_TUI_BEARER"):
+                assert secret in state["rendered_transcript"]
+            tui.send("\x1bOQ")  # F2 reopens the same approval and toolCallId
+            tui.wait(lambda state: state["interaction"] == "approval")
+            tui.send("\x1b[B\r" if approve else "\r")
+            tui.wait(lambda state: state["interrupt"] is None and state["status"] == "Ready", timeout=15)
+        else:
+            state = tui.wait(lambda state: marker.exists() and state["status"] == "Ready", timeout=15)
+            assert state["interaction"] is None and state["interrupt"] is None
+            tui.send("\x0f")  # Ctrl+O shows details of the auto-approved tool.
+            state = tui.wait(lambda state: state["expanded"])
+            assert "api_key: FAKE_TUI_API_SECRET" in state["rendered_transcript"]
+            assert "Authorization: Bearer FAKE_TUI_BEARER" in state["rendered_transcript"]
         if approve:
             assert marker.read_text() == "TUI_E2E_APPROVE_002"
             actual = json.loads(Path(str(marker) + ".args.json").read_text())
@@ -486,5 +493,88 @@ def test_real_pty_mcp_add_confirmation_multiline_cancel_and_save(tmp_path):
         tui.wait(lambda state: "connected" in state["transcript"].lower(), timeout=20)
         saved = json.loads((tui.workspace / "mcp.json").read_text())
         assert "tui_e2e" in str(saved)
+    finally:
+        tui.close()
+
+
+_INTERACTION_LOG_PROBE = r'''
+import asyncio, json, logging, sys, warnings
+from pathlib import Path
+from deepagents.backends import StateBackend
+from langchain_core.messages import AIMessage
+from fastmcp.client.logging import LogMessage, default_log_handler
+from agent.cli.app import CliApplication
+from agent.cli.interactions import InteractionController
+from agent.cli.rendering import render_interaction
+from agent.runner import AgentRunner
+from tests.conftest import scripted_model
+
+async def main():
+    runner = AgentRunner(model=scripted_model([AIMessage(content='done')]), backend=StateBackend())
+    app = CliApplication(runner)
+    app.interaction = InteractionController.human({'question':'这个标识是什么用途？', 'fields':[{
+        'id':'purpose', 'type':'single_select', 'options':[
+            {'value':'auth','label':'是 OAuth 授权码或标识，需要进一步操作',
+             'description':'授权流程里的 code / client_id / session_id，想检查或验证'},
+            {'value':'typo','label':'贴错了，不用理'},
+            {'value':'task','label':'是另一个任务的输入'},
+        ]}]})
+    target = Path(sys.argv[2])
+    app._mcp_log_path = target.parent / 'mcp.log'
+    def snapshot():
+        current = app.interaction
+        data = {'status':app.state.status, 'input':app.buffer.text,
+                'option':current.option_index if current else -1,
+                'custom':bool(current and current.custom_entry),
+                'rendered':render_interaction(current, 48) if current else '',
+                'mcp_logs':app._mcp_log_path.read_text() if app._mcp_log_path.exists() else '',
+                'transcript':'\n'.join(str(getattr(b,'content','')) for b in app.state.blocks)}
+        temporary = target.with_suffix('.tmp')
+        temporary.write_text(json.dumps(data))
+        temporary.replace(target)
+    async def observe():
+        while True:
+            snapshot()
+            await asyncio.sleep(.03)
+    async def server_logs():
+        await asyncio.sleep(.25)
+        await default_log_handler(LogMessage(level='critical',data='SERVER_LOG_MARKER'))
+        await asyncio.to_thread(logging.getLogger('fastmcp.client.auth.oauth').info,
+                                'OAuth callback waiting AUTH_LOG_MARKER')
+        await asyncio.to_thread(warnings.warn_explicit, 'OAuth SDK warning WARNING_MARKER', UserWarning, '/sdk/fastmcp/client/auth/oauth.py', 269)
+    observer = asyncio.create_task(observe())
+    logs = asyncio.create_task(server_logs())
+    try:
+        await app.run_async()
+    finally:
+        observer.cancel()
+        logs.cancel()
+        runner.close()
+asyncio.run(main())
+'''
+
+
+def test_mcp_logs_do_not_corrupt_choice_input_during_resize(tmp_path):
+    tui = Tui(tmp_path, probe=_INTERACTION_LOG_PROBE)
+    try:
+        state = tui.wait(lambda s: 'AUTH_LOG_MARKER' in s['mcp_logs'] and 'WARNING_MARKER' in s['mcp_logs'])
+        assert 'SERVER_LOG_MARKER' in state['mcp_logs']
+        assert 'AUTH_LOG_MARKER' not in state['transcript']
+        assert 'WARNING_MARKER' not in state['transcript']
+        assert state['option'] == 0
+        assert state['rendered'].count('→') == 1
+        fcntl.ioctl(tui.master, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 48, 0, 0))
+        os.kill(tui.process.pid, signal.SIGWINCH)
+        for option in (1, 2, 3):
+            tui.send('\x1b[B')
+            state = tui.wait(lambda s: s['option'] == option)
+            assert state['rendered'].count('→') == 1
+        tui.send('\r')
+        tui.wait(lambda s: s['custom'])
+        tui.send('custom-answer')
+        state = tui.wait(lambda s: s['input'] == 'custom-answer')
+        assert 'Other: enter your answer' in state['rendered']
+        tui.read()
+        assert b'logging.py:' not in tui.terminal
     finally:
         tui.close()

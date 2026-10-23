@@ -214,7 +214,7 @@ def test_filesystem_warning_appears_in_transcript_not_terminal(capsys) -> None:
         logger = logging.getLogger("deepagents.backends.filesystem")
         original_handlers = logger.handlers[:]
         original_propagate = logger.propagate
-        with app._capture_filesystem_warnings():
+        with app._capture_runtime_logs():
             logger.warning("Glob of '/' timed out after 5s with 0 match(es); returning partial results")
             assert "Glob of '/' timed out" in app.state.blocks[-1].content
             assert app.buffer.text == ""
@@ -4750,3 +4750,71 @@ def test_status_metrics_restore_on_restart_switch_and_clear(tmp_path):
     finally:
         runner.close()
         store.close()
+
+
+def test_mcp_logs_use_background_file_and_restore_handlers(capsys, tmp_path) -> None:
+    from fastmcp.client.logging import LogMessage, default_log_handler
+
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.buffer.text = "unfinished input"
+        app._mcp_log_path = tmp_path / "logs" / "mcp.log"
+        before = len(app.state.blocks)
+        logger = logging.getLogger("fastmcp")
+        previous = (logger.handlers[:], logger.propagate)
+        with app._capture_runtime_logs():
+            asyncio.run(default_log_handler(LogMessage(level="critical", data="server alert")))
+            logging.getLogger("fastmcp.client.auth.oauth").warning("OAuth callback waiting")
+            assert len(app.state.blocks) == before
+            logs = app._mcp_log_path.read_text()
+            assert "Received CRITICAL from server: server alert" in logs
+            assert "OAuth callback waiting" in logs
+            assert app.buffer.text == "unfinished input"
+        assert (logger.handlers, logger.propagate) == previous
+        assert capsys.readouterr().err == ""
+    runner.close()
+
+
+def test_long_chinese_choices_have_one_selected_row_and_no_second_wrap() -> None:
+    from prompt_toolkit.formatted_text import to_formatted_text
+    from prompt_toolkit import ANSI
+    from agent.cli.rendering import render_interaction
+
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.interaction = InteractionController.human({"question": "这个标识是什么用途？", "fields": [{
+            "id": "purpose", "type": "single_select", "options": [
+                {"value": "auth", "label": "是 OAuth 授权码或标识，需要进一步操作", "description": "授权流程里的 code / client_id / session_id，想检查或验证"},
+                {"value": "typo", "label": "贴错了，不用理", "description": "忽略这次粘贴，继续之前的任务"},
+                {"value": "task", "label": "是另一个任务的输入", "description": "以这个标识执行下一步任务"},
+            ],
+        }]})
+        window = next(w for w in app.application.layout.find_all_windows() if w.content is app.interaction_control)
+        assert not window.wrap_lines()
+        for index in range(4):
+            app.interaction.option_index = index
+            fragments = to_formatted_text(ANSI(render_interaction(app.interaction, 40)))
+            text = "".join(item[1] for item in fragments)
+            assert text.count("→") == 1
+            assert "Other:" in text
+            assert "Enter confirm" in text
+    runner.close()
+
+
+def test_python_warnings_do_not_overwrite_tui_input(capsys) -> None:
+    import warnings
+
+    runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.buffer.text = "keep this input"
+        previous = warnings.showwarning
+        with app._capture_runtime_logs():
+            warnings.warn("OAuth cache warning regression", UserWarning)
+            assert app.state.blocks[-1].content == "UserWarning: OAuth cache warning regression"
+            assert app.buffer.text == "keep this input"
+        assert warnings.showwarning is previous
+        assert capsys.readouterr().err == ""
+    runner.close()

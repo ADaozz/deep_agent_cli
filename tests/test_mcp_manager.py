@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+import pytest
 
 from agent.mcp.manager import MCPManager, ServerStatus
 from tests.mcp_fixture import HttpFixture, stdio_argv, text_of
@@ -129,7 +130,7 @@ def test_reload_restores_a_server_and_repeat_add_is_idempotent(tmp_path: Path, h
             manager.close()
 
 
-def test_load_only_validates_and_startup_skips_oauth(tmp_path, monkeypatch):
+def test_startup_reconnects_oauth_with_automatic_authorization_enabled(tmp_path, monkeypatch):
     import json
     from agent.mcp.adapter import LoadedServer
 
@@ -141,7 +142,7 @@ def test_load_only_validates_and_startup_skips_oauth(tmp_path, monkeypatch):
     }}))
     opened = []
     monkeypatch.setattr("agent.mcp.manager.open_server",
-                        lambda config, *a, **kw: opened.append(config.name) or LoadedServer(None, [], []))
+                        lambda config, *a, **kw: opened.append((config.name, kw["allow_oauth_browser"])) or LoadedServer(None, [], []))
     manager = MCPManager(path)
     try:
         manager.load()
@@ -151,9 +152,9 @@ def test_load_only_validates_and_startup_skips_oauth(tmp_path, monkeypatch):
         assert tools == []
         manager.discard(revision)
         assert manager.connect_pending().ok
-        assert opened == ["plain"]
+        assert opened == [("plain", True), ("oauth", True)]
         manager.test("oauth")
-        assert opened == ["plain", "oauth"]
+        assert opened == [("plain", True), ("oauth", True), ("oauth", True)]
     finally:
         manager.close()
 
@@ -210,7 +211,8 @@ def test_connection_results_cannot_resurrect_removed_or_reloaded_server(tmp_path
             manager.close()
 
 
-def test_latest_concurrent_test_wins_and_closes_stale_client(tmp_path, monkeypatch):
+@pytest.mark.parametrize("operation", ["test", "add"])
+def test_concurrent_connections_share_one_attempt(tmp_path, monkeypatch, operation):
     from concurrent.futures import ThreadPoolExecutor
     import threading
     from agent.mcp.adapter import LoadedServer
@@ -239,17 +241,21 @@ def test_latest_concurrent_test_wins_and_closes_stale_client(tmp_path, monkeypat
     manager.load()
     try:
         with ThreadPoolExecutor() as pool:
-            first = pool.submit(manager.test, "local")
+            first = pool.submit(manager.connect_pending)
             assert first_started.wait(5)
-            assert manager.test("local").ok
+            second = pool.submit(manager.test, "local") if operation == "test" else pool.submit(manager.add, config)
+            time.sleep(.05)
+            assert not second.done()
             release_first.set()
-            assert not first.result(5).ok
-        assert closed == [clients[0]]
-        assert manager._states["local"].client is clients[1]
+            assert first.result(5).ok
+            assert second.result(5).ok
+        assert len(clients) == 1
+        assert closed == []
+        assert manager._states["local"].client is clients[0]
     finally:
         release_first.set()
         manager.close()
-    assert closed.count(clients[0]) == closed.count(clients[1]) == 1
+    assert closed.count(clients[0]) == 1
 
 
 def test_reload_and_remove_serialize_disk_catalog(tmp_path, monkeypatch):

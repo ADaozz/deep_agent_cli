@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import partial
+from pathlib import Path
+import asyncio
 import os
 import re
 import warnings
@@ -17,6 +19,7 @@ from langchain.mcp import MCPAdapter  # noqa: E402
 from agent.cancel import get_cancel_context
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import MCPAuthError, MCPServerConfig
+from agent.mcp.content import preserve_generic_resources
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -48,11 +51,19 @@ def open_server(
     connect_timeout: float,
     oauth_callback_timeout: float,
     trust_env: bool = False,
+    oauth_storage_dir: Path | None = None,
+    allow_oauth_browser: bool = True,
+    oauth_browser_attempts: dict[str, float] | None = None,
 ) -> LoadedServer:
     """Connect on the bridge loop and return synchronous LangChain tools."""
     secrets: list[str] = []
     try:
-        transport = build_transport(server, secrets, oauth_callback_timeout=oauth_callback_timeout, trust_env=trust_env)
+        transport = build_transport(
+            server, secrets, oauth_callback_timeout=oauth_callback_timeout,
+            trust_env=trust_env, oauth_storage_dir=oauth_storage_dir,
+            allow_oauth_browser=allow_oauth_browser,
+            oauth_browser_attempts=oauth_browser_attempts,
+        )
         timeout = connect_timeout
         if server.auth is not None and server.auth.type == "oauth":
             timeout = oauth_callback_timeout + 5
@@ -82,9 +93,12 @@ def build_transport(
     *,
     oauth_callback_timeout: float,
     trust_env: bool = False,
+    oauth_storage_dir: Path | None = None,
+    allow_oauth_browser: bool = True,
+    oauth_browser_attempts: dict[str, float] | None = None,
 ) -> Any:
     if server.transport == "streamable_http":
-        from fastmcp.client.auth import BearerAuth, OAuth
+        from fastmcp.client.auth import BearerAuth
         from fastmcp.client.transports import StreamableHttpTransport
 
         auth: Any = None
@@ -96,10 +110,17 @@ def build_transport(
             secrets.append(token)
             auth = BearerAuth(token)
         elif server.auth is not None and server.auth.type == "oauth":
-            auth = OAuth(
+            from agent.mcp.oauth_storage import oauth_token_storage
+            from agent.mcp.oauth import ManagedOAuth
+
+            auth = ManagedOAuth(
                 server.url,
                 callback_timeout=oauth_callback_timeout,
                 client_name="deep-agent",
+                token_storage=oauth_token_storage(oauth_storage_dir) if oauth_storage_dir is not None else None,
+                server_name=server.name,
+                allow_browser=allow_oauth_browser,
+                browser_attempts=oauth_browser_attempts,
             )
         return StreamableHttpTransport(
             server.url or "",
@@ -142,6 +163,12 @@ async def _load(
     call_timeout: float,
     secrets: list[str],
 ) -> LoadedServer:
+    from agent.mcp.oauth import ManagedOAuth
+
+    auth = getattr(transport, "auth", None)
+    if isinstance(auth, ManagedOAuth) and not auth.allow_browser:
+        if await auth.token_storage_adapter.get_tokens() is None:
+            raise auth.authorization_required()
     adapter = MCPAdapter(transport)
     client = adapter.client
     try:
@@ -150,6 +177,7 @@ async def _load(
         tools: list[BaseTool] = []
         notes: list[str] = []
         seen: set[str] = set()
+        call_lock = asyncio.Lock()
         for remote in remote_tools:
             try:
                 local_name = external_tool_name(server.name, remote.name)
@@ -170,6 +198,8 @@ async def _load(
                 server=server.name,
                 remote_name=remote.name,
                 secrets=list(secrets),
+                client=client,
+                call_lock=call_lock,
             ))
         return LoadedServer(client, tools, notes)
     except BaseException:
@@ -186,11 +216,36 @@ def _bridge_tool(
     server: str,
     remote_name: str,
     secrets: list[str],
+    client: Any = None,
+    call_lock: asyncio.Lock | None = None,
 ) -> BaseTool:
     coroutine = remote.coroutine
     if coroutine is None:
         raise RuntimeError(f"MCP tool {remote_name} has no async implementation")
     original_handler = remote.handle_tool_error
+
+    async def invoke_remote(**kwargs: Any) -> Any:
+        async def run() -> Any:
+            if client is not None and not client.is_connected():
+                # A failed SDK session can retain the manager's outer context
+                # count. Public close() resets it before opening a fresh session.
+                await client.close()
+                await client.__aenter__()
+            try:
+                return await coroutine(**kwargs)
+            except Exception:
+                if client is not None and not client.is_connected():
+                    await client.close()
+                # Never replay a failed tool: its remote side effects are unknown.
+                raise
+
+        if call_lock is None:
+            return await run()
+        # All tools on this client share one gate, on the owning bridge loop.
+        # Construct the remote coroutine only after acquiring it so cancelling
+        # a queued request cannot execute it or leak an unawaited coroutine.
+        async with call_lock:
+            return await run()
 
     @contextmanager
     def _tool_errors():
@@ -209,14 +264,14 @@ def _bridge_tool(
         with _tool_errors():
             event = _cancel_event()
             return _redact_value(
-                bridge.call(coroutine(**kwargs), timeout=timeout, cancel_event=event), secrets,
+                preserve_generic_resources(bridge.call(invoke_remote(**kwargs), timeout=timeout, cancel_event=event)), secrets,
             )
 
     async def _acall(**kwargs: Any) -> Any:
         with _tool_errors():
             event = _cancel_event()
             return _redact_value(
-                await bridge.acall(coroutine(**kwargs), timeout=timeout, cancel_event=event), secrets,
+                preserve_generic_resources(await bridge.acall(invoke_remote(**kwargs), timeout=timeout, cancel_event=event)), secrets,
             )
 
     def _handle(error: ToolException) -> Any:
@@ -224,7 +279,7 @@ def _bridge_tool(
             return redact(str(error), secrets)[:400]
         if not callable(original_handler):
             raise error
-        return _redact_value(original_handler(error), secrets)
+        return _redact_value(preserve_generic_resources(original_handler(error)), secrets)
 
     description = remote.description or f"MCP tool {remote_name} from server {server}."
     description = (

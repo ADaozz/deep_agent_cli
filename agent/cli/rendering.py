@@ -535,7 +535,10 @@ def _message(
     elif block.kind == "error":
         items.append(Padding(Text(f"Error: {block.content}", style="red"), (1, 1, 0, 1)))
     else:
-        items.append(Padding(Text(block.content, style="yellow"), (1, 1, 0, 1)))
+        text = Text(block.content, style="white" if block.styled_spans else "yellow")
+        for start, end, style in block.styled_spans:
+            text.stylize(style, start, end)
+        items.append(Padding(text, (1, 1, 0, 1)))
     return items
 
 

@@ -52,7 +52,11 @@ MCP 目录与模型配置分开，默认是 `~/.deep-agent/mcp.json`。CLI 把�
 
 使用 `node` / `npx` 启动 stdio MCP 服务时，推荐 Node.js 24（使用最新的 24.x 补丁版本），具体兼容范围以服务自身要求为准。HTTP MCP 客户端由 Python 运行，不依赖本机 Node 版本。
 
-MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不受沙箱的文件系统或网络限制。`allow` 不会把它们当成可信工具。stdio 的命令直接在宿主运行。Bearer token 只记录环境变量名，文件里不写明文。OAuth 由 FastMCP 打开浏览器，Agent 不能代替用户确认。
+启动时自动连接所有已启用的服务。无需鉴权的服务直接连接；Bearer 服务从 `token_env` 指定的环境变量读取密钥；OAuth 服务优先复用缓存凭证，访问令牌过期时先自动刷新，首次授权或凭证无法刷新时自动打开浏览器，等待用户完成授权。后续请求也按此流程处理凭证失效。
+
+OAuth 令牌、刷新令牌和客户端注册信息加密保存在 `mcp.json` 同目录下的 `oauth/` 中，默认路径为 `~/.deep-agent/oauth/`。缓存目录权限为 `0700`，本地加密密钥权限为 `0600`，不写入 `mcp.json`。同一进程中每个服务 60 秒内最多打开一次授权页，防止并发请求或失败重试连续弹窗；这不是定时重新授权，凭证有效期间不会打开浏览器。授权取消或超时后不循环重试，可稍后执行 `/mcp test <name>` 重试。此限制只针对 OAuth，不影响无需鉴权的服务。
+
+MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不受沙箱的文件系统或网络限制。工具审批统一受 `/permission` 控制：`ask` 需批准，`allow` 自动执行，包括添加和删除服务。stdio 的命令直接在宿主运行。Bearer token 只记录环境变量名，文件里不写明文。OAuth 由 FastMCP 打开浏览器，Agent 不能代替用户确认。
 
 ```json
 {
@@ -67,12 +71,26 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
       "url": "https://example.com/mcp",
       "auth": {"type": "bearer", "token_env": "INTERNAL_MCP_TOKEN"},
       "enabled": true
+    },
+    "oauth-service": {
+      "transport": "streamable_http",
+      "url": "https://example.com/oauth-mcp",
+      "auth": {"type": "oauth"},
+      "enabled": true
     }
   }
 }
 ```
 
-MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；这两项都要用户确认。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_add` / `mcp_remove` 修改；Agent 调用这两项时，`ask` 需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+
+同一服务的并发连接请求合并为一次，避免启动连接、`/mcp test` 和 `mcp_add` 相互覆盖。同一 MCP 客户端连接上的工具调用由宿主排队执行，模型可一次提交多个工具，宿主会自动串行发送；不同 MCP 连接仍可并行。排队时间计入调用超时，排队期间取消的调用不会发送。会话关闭后，下一次调用会先通过 SDK 公共接口重建连接；已失败的工具不会自动重放。同名 `mcp_add` 会检查客户端实际连接状态，坏连接可直接重建，无需先删除服务。
+
+`application/octet-stream` 内嵌资源会在模型媒体过滤前转换为文本：可读 UTF-8 数据直接提供内容，其他二进制数据以可还原的 Base64 文本提供。图片、其他已声明的媒体类型、资源 URI 和结构化结果保持原有处理方式；这不代表模型获得了任意二进制文件的原生理解能力。大结果仍使用现有工具输出卸载机制。
+
+MCP / OAuth 日志及相关 SDK 警告只写后台日志，不显示在 TUI 消息区。日志位于 `mcp.json` 同目录下的 `logs/mcp-<进程号>.log`，每个文件最多 2 MiB，保留两份轮转文件。日志目录权限为 `0700`，日志文件权限为 `0600`。
+
+当前不实现 Sampling 回调、旧式服务端 Elicitation 或 MCP Apps UI。依赖这些能力的示例工具可能超时或失败；MCP Apps 仅显示服务提供的兜底内容。
 
 ## 工具可见性（`tools.hidden`）
 

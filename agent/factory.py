@@ -182,7 +182,8 @@ def build_agent(
         from agent.mcp.names import host_interrupt_on
 
         mcp_revision, mcp_tools = mcp.snapshot()
-        hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
+        if permission is PermissionMode.ASK:
+            hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
         prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
     try:
         graph = create_deep_agent(

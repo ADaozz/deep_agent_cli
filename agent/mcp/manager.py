@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import atexit
-from dataclasses import dataclass, field
+from concurrent.futures import Future
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 import threading
@@ -83,6 +84,8 @@ class MCPManager:
         self._retired: list[Any] = []
         self._published_clients: list[Any] = []
         self._versions: dict[str, int] = {}
+        self._connecting: dict[int, Future[ServerState]] = {}
+        self._oauth_browser_attempts: dict[str, float] = {}
         self._snapshots: dict[int, tuple[list[Any], int]] = {}
         self._revision = 0
         self._published_revision = 0
@@ -122,30 +125,23 @@ class MCPManager:
         self._close_unpublished()
 
     def connect_pending(self) -> MCPResult:
-        """Startup connections never initiate interactive OAuth authorization."""
+        """Connect at startup using cached credentials, refreshing or authorizing as needed."""
         with self._lock:
             names = [
                 name for name, state in self._states.items()
                 if state.config.enabled and state.status is ServerStatus.DISCONNECTED
-                and not (state.config.auth and state.config.auth.type == "oauth")
             ]
         results = [self.test(name) for name in names]
         return MCPResult(
             all(result.ok for result in results), False,
             "\n".join(result.message for result in results) or
-            "MCP catalog loaded. Use /mcp test <name> to authorize OAuth servers.",
+            "MCP catalog loaded.",
         )
 
     def list_servers(self) -> list[ServerState]:
         with self._lock:
             return [
-                ServerState(
-                    config=state.config,
-                    status=state.status,
-                    error=state.error,
-                    tools=list(state.tools),
-                    warnings=list(state.warnings),
-                )
+                replace(state, client=None, tools=list(state.tools), warnings=list(state.warnings))
                 for state in self._states.values()
             ]
 
@@ -154,25 +150,22 @@ class MCPManager:
             state = self._states.get(name)
             if state is None:
                 return None
-            return ServerState(
-                config=state.config,
-                status=state.status,
-                error=state.error,
-                tools=list(state.tools),
-                warnings=list(state.warnings),
-            )
+            return replace(state, client=None, tools=list(state.tools), warnings=list(state.warnings))
 
     def invalid_message(self, name: str) -> str | None:
         with self._lock:
             item = self._document.invalid.get(name)
         return None if item is None else item[1]
 
+    def invalid_servers(self) -> dict[str, str]:
+        with self._lock:
+            return {name: error for name, (_raw, error) in self._document.invalid.items()}
+
     def describe(self) -> str:
         if self._config_error:
             return f"MCP config error: {self._config_error}\nThe file was not modified."
         rows = self.list_servers()
-        with self._lock:
-            invalid = dict(self._document.invalid)
+        invalid = self.invalid_servers()
         if not rows and not invalid:
             return "No MCP servers are configured."
         lines = ["MCP servers run on the host, outside the sandbox."]
@@ -185,18 +178,18 @@ class MCPManager:
             )
             for warning in state.warnings:
                 lines.append(f"  Warning: {warning}")
-        for name, (_raw, error) in invalid.items():
+        for name, error in invalid.items():
             lines.append(f"{name}  invalid  {error}")
         return "\n".join(lines)
 
-    def add_from_fields(self, **fields: Any) -> MCPResult:
+    def add_from_fields(self, *, allow_oauth_browser: bool = True, **fields: Any) -> MCPResult:
         try:
             server = server_from_fields(**fields)
         except MCPConfigError as exc:
             return MCPResult(False, False, str(exc))
-        return self.add(server)
+        return self.add(server, allow_oauth_browser=allow_oauth_browser)
 
-    def add(self, server: MCPServerConfig) -> MCPResult:
+    def add(self, server: MCPServerConfig, *, allow_oauth_browser: bool = True) -> MCPResult:
         """Save a server and try to connect. Identical repeats are a no-op."""
         try:
             server = parse_server(server.name, server.to_json())
@@ -218,7 +211,10 @@ class MCPManager:
             if already:
                 server = current
             existing = self._states.get(server.name)
-            if already and existing is not None and existing.status is ServerStatus.CONNECTED:
+            if (
+                already and existing is not None and existing.status is ServerStatus.CONNECTED
+                and _client_connected(existing.client)
+            ):
                 names = ", ".join(tool.name for tool in existing.tools) or "(none)"
                 return MCPResult(
                     True, False,
@@ -231,7 +227,7 @@ class MCPManager:
                 except OSError as exc:
                     self._document.servers.pop(server.name, None)
                     return MCPResult(False, False, f"Could not save MCP config: {exc.strerror or exc}")
-        state = self._activate(server, bump=True)
+        state = self._activate(server, allow_oauth_browser=allow_oauth_browser)
         if state.status is ServerStatus.DISABLED:
             return MCPResult(True, not already, f"Saved MCP server {server.name} as disabled. It exposes no tools.", pending=True)
         if state.status is ServerStatus.CONNECTED:
@@ -284,7 +280,7 @@ class MCPManager:
             "A graph that already started this call keeps its current tools until then.",
         )
 
-    def test(self, name: str) -> MCPResult:
+    def test(self, name: str, *, allow_oauth_browser: bool = True) -> MCPResult:
         with self._lock:
             if self._config_error:
                 return MCPResult(False, False, f"MCP config error: {self._config_error}")
@@ -296,7 +292,7 @@ class MCPManager:
             return MCPResult(False, False, f"No MCP server named {name}.")
         if not server.enabled:
             return MCPResult(True, False, f"{name} is disabled.")
-        state = self._activate(server, bump=True)
+        state = self._activate(server, allow_oauth_browser=allow_oauth_browser)
         if state.status is ServerStatus.CONNECTED:
             names = ", ".join(tool.name for tool in state.tools) or "(none)"
             return MCPResult(True, False, f"{name} connected. {state.tool_count} tools: {names}." + _warning_summary(state))
@@ -366,7 +362,31 @@ class MCPManager:
         self._close_clients(clients)
         self._bridge.shutdown()
 
-    def _activate(self, server: MCPServerConfig, *, bump: bool) -> ServerState:
+    def _activate(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
+        # Startup, /mcp test and mcp_add share an in-flight connection for the
+        # same catalog entry. Removal/reload still invalidate the old attempt.
+        key = id(server)
+        with self._lock:
+            attempt = self._connecting.get(key)
+            owner = attempt is None
+            if owner:
+                attempt = Future()
+                self._connecting[key] = attempt
+        if not owner:
+            return attempt.result()
+        try:
+            state = self._activate_once(server, allow_oauth_browser=allow_oauth_browser)
+        except BaseException as exc:
+            attempt.set_exception(exc)
+            raise
+        else:
+            attempt.set_result(state)
+            return state
+        finally:
+            with self._lock:
+                self._connecting.pop(key, None)
+
+    def _activate_once(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
         with self._lock:
             if self._closed or self._document.servers.get(server.name) is not server:
                 return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
@@ -383,6 +403,9 @@ class MCPManager:
                     connect_timeout=self._connect_timeout,
                     oauth_callback_timeout=self._oauth_callback_timeout,
                     trust_env=self._trust_env,
+                    oauth_storage_dir=self.path.parent / "oauth",
+                    allow_oauth_browser=allow_oauth_browser,
+                    oauth_browser_attempts=self._oauth_browser_attempts,
                 )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))
@@ -421,8 +444,7 @@ class MCPManager:
                 if previous is not None and previous.client is not None and previous.client is not state.client:
                     self._retired.append(previous.client)
                 self._states[server.name] = state
-                if bump:
-                    self._revision += 1
+                self._revision += 1
         if not valid:
             self._close_clients([state.client])
             return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
@@ -458,6 +480,11 @@ def _warning_summary(state: ServerState) -> str:
 
 def _command_line(server: MCPServerConfig) -> str:
     return " ".join((server.command or "", *server.args)).strip()
+
+
+def _client_connected(client: Any) -> bool:
+    check = getattr(client, "is_connected", None)
+    return bool(check()) if callable(check) else True
 
 
 def _public_error(exc: BaseException) -> str:

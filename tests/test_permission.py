@@ -29,6 +29,7 @@ from agent.permission import (
     interrupt_on_for_mode,
     parse_permission_mode,
     permission_mode_label,
+    permission_mode_from_interrupt_on,
 )
 from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableError, select_backend
@@ -51,6 +52,12 @@ def test_interrupt_on_for_modes() -> None:
     assert ask["web_search"] == {"allowed_decisions": ["approve", "reject"]}
     assert "when" not in ask["execute"]
     assert interrupt_on_for_mode(PermissionMode.ALLOW) == {}
+
+
+def test_mcp_approval_rules_are_part_of_the_global_permission_mode() -> None:
+    assert permission_mode_from_interrupt_on({"mcp_add": True}) is PermissionMode.ASK
+    assert permission_mode_from_interrupt_on({"mcp__local__echo": True}) is PermissionMode.ASK
+    assert permission_mode_from_interrupt_on({}) is PermissionMode.ALLOW
 
 
 def test_allow_only_for_sandboxed() -> None:

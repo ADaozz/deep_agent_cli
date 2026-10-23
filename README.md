@@ -161,10 +161,12 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 
 | 模式 | 审批 | 命令网络 |
 |---|---|---|
-| **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
-| 沙箱 + `allow` | 原生工具免审批；宿主 MCP 工具、`mcp_add`、`mcp_remove` 仍需批准 | 所有 execute 共享宿主网络 |
+| **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
+| 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
-只读文件工具免审批；`allow` 仅限沙箱模式，且不会把宿主 MCP 服务视为可信。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，用 `/mcp` 或 `mcp_add` 管理。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
+只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，用 `/mcp` 或 `mcp_add` 管理。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
+
+启动时自动连接已启用的 MCP 服务。OAuth 优先使用加密缓存并刷新令牌，无法刷新时打开浏览器授权；无需鉴权的服务直接连接。`/mcp` 以 `• 服务名: connected (N tools)` 显示列表，圆点和状态文字按连接状态显示为绿色或红色。连接恢复、附件处理和后台日志见 [MCP 配置](docs/configuration.md#mcpmcpjson)，命令和状态说明见 [TUI 文档](docs/tui.md#mcp-服务)。
 
 <details>
 <summary>更多边界与当前限制</summary>
@@ -172,7 +174,7 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。会话切换及关闭时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
 - **本地状态**：同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 只支持 Streamable HTTP 和 stdio 工具调用，在宿主执行；不提供 Resources、Prompts、Sampling 或子 Agent。
+- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI 或子 Agent。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。
 

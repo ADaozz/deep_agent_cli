@@ -184,11 +184,11 @@ CUSTOM backend 保留调用方自己的规则。
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete` | 所有执行模式 |
-| `allow` | 原生工具自动批准，所有 `execute` 开放宿主网络。宿主 MCP 工具、`mcp_add` 和 `mcp_remove` 仍需批准 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
+| `ask`（默认） | `execute`、`web_search`、`write_file`、`edit_file`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove` | 所有执行模式 |
+| `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
-- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，也不取消宿主 MCP 工具的审批，也不写入会话目录。
+- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，工具审批仍统一由 `/permission` 决定，也不写入会话目录。
 - 正在输入 `ALLOW` 时，新的工具审批、提问或暂停不会替换确认栏。提交或取消确认后才打开该面板；`F2` 可先查看，`Esc` 回到确认栏。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。
