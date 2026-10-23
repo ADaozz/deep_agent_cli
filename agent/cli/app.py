@@ -82,6 +82,7 @@ from agent.permission import (
     parse_permission_mode,
 )
 from agent.cli.lifecycle import AppLifecycle, TaskStop
+from agent.cli.mcp_controller import MCPController
 from agent.cli.input_actions import (
     EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
     InputAction,
@@ -442,6 +443,7 @@ class CliApplication:
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
         self.lifecycle = AppLifecycle(self)
+        self.mcp_controller = MCPController()
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
@@ -1484,7 +1486,7 @@ class CliApplication:
             compacting=self._compacting,
             running=self.state.running,
             cancel_sent=self._cancel_sent,
-            mcp_busy=getattr(self, "_mcp_busy", False),
+            mcp_busy=self.mcp_controller.busy,
             buffer_empty=not text,
             exiting=self._exiting,
         )

@@ -383,7 +383,7 @@ _MCP_TUI_PROBE = _PROBE.replace(
 ).replace(
     "'status':app.state.status,",
     """'status':app.state.status,
-                'mcp_settled':bool(getattr(app, '_mcp_quiet_settled', False)),
+                'mcp_settled':app.mcp_controller.quiet_settled,
                 'expanded':app.state.tools_expanded,
                 'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
                 'rendered_transcript':render_transcript(app.state, 60),""",

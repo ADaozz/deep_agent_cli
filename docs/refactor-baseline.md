@@ -82,4 +82,4 @@
 | TUI 退出本身不释放租约；`Runner.close()` 成功后才释放 | `test_ui_exit_keeps_the_session_lease` |
 | 一个 Session 的取消不影响另一个 Session 的模型流 | `test_cancelling_one_session_leaves_concurrent_streams_intact` |
 
-会话恢复只加载已有消息和待处理交互，不自动调用模型。快照展示只在 `SessionController.apply_snapshot`。`CliApplication._apply_session_snapshot` 只转发给它。恢复、等待和租约见 `tests/test_session_switch.py`、`tests/test_session_lock.py` 和 `tests/test_cli.py` 中的 resume 用例。模型、权限、沙箱和 MCP 工具表的空闲应用走 `AgentRunner.apply_pending_config_if_idle()`，CLI 不再自己拿运行锁。
+会话恢复只加载已有消息和待处理交互，不自动调用模型。快照展示只在 `SessionController.apply_snapshot`。`CliApplication._apply_session_snapshot` 只转发给它。恢复、等待和租约见 `tests/test_session_switch.py`、`tests/test_session_lock.py` 和 `tests/test_cli.py` 中的 resume 用例。模型、权限、沙箱和 MCP 工具表的空闲应用走 `AgentRunner.apply_pending_config_if_idle()`，CLI 不再自己拿运行锁。MCP 操作是否进行中、操作代号和开关锁在 `MCPController`，不再挂在临时属性上。

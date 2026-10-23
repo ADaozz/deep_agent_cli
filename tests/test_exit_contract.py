@@ -282,7 +282,7 @@ def test_session_wait_ctrl_c_uses_the_shared_exit_window(
 
 
 def test_escape_during_mcp_background_does_not_cancel_a_run(cli: Harness) -> None:
-    cli.app._mcp_busy = True
+    cli.app.mcp_controller.busy = True
     cli.press(("escape",))
     assert cli.cancels == []
     assert "background" in cli.app.state.status

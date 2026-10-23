@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.cli.interactions import InteractionController
 from agent.cli.lifecycle import TaskStop
+from agent.cli.mcp_controller import MCPController
 from agent.mcp.manager import ServerStatus
 from agent.permission import PermissionMode
 from agent.runner import InterruptKind
@@ -49,7 +50,7 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
         if rest:
             app.state.add_system("Usage: /mcp add", error=True)
             return
-        if getattr(app, "_mcp_busy", False):
+        if app.mcp_controller.busy:
             app.set_status("MCP operation still running")
             return
         _begin_add(app)
@@ -237,12 +238,11 @@ def _start_operation(
     # Reserve before scheduling: two Enter events must not launch two workers.
     # /mcp disable does not use this gate, so it can cancel an OAuth wait.
     # A new enable round may force its own connect without waiting for that work.
-    if getattr(app, "_mcp_busy", False) and not force:
+    controller: MCPController = app.mcp_controller
+    op_id = controller.try_begin(force=force)
+    if op_id is None:
         app.set_status("MCP operation still running")
         return None
-    app._mcp_busy = True
-    op_id = getattr(app, "_mcp_op_id", 0) + 1
-    app._mcp_op_id = op_id
     app.set_status(_MCP_OPERATION_RUNNING, transient=False)
     epoch = app.runner.mcp.switch_epoch
 
@@ -281,17 +281,16 @@ def _start_operation(
             app.state.add_system(f"MCP operation failed: {str(exc)[:400]}", error=True)
             app.set_status("MCP operation failed; you can retry", transient=False)
         finally:
-            if getattr(app, "_mcp_op_id", 0) == op_id:
-                app._mcp_busy = False
+            controller.finish(op_id)
             app.application.invalidate()
 
     lifecycle = getattr(app, "lifecycle", None)
     if lifecycle is None:
         # Test doubles construct only the MCP surface. The real CLI always has a lifecycle.
-        app._mcp_operation = asyncio.create_task(run())
+        controller.operation = asyncio.create_task(run())
     else:
-        app._mcp_operation = lifecycle.spawn(run(), stop=TaskStop.OBSERVE, name="mcp-operation")
-    return app._mcp_operation
+        controller.operation = lifecycle.spawn(run(), stop=TaskStop.OBSERVE, name="mcp-operation")
+    return controller.operation
 
 
 async def _wait_operation(app: Any, task: asyncio.Task | None) -> None:
@@ -350,11 +349,7 @@ def _switch_block_reason(app: Any) -> str | None:
 
 def _mcp_switch_lock(app: Any) -> asyncio.Lock:
     """Serialize global switch commands without covering OAuth or connect_pending."""
-    lock = getattr(app, "_mcp_switch_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        app._mcp_switch_lock = lock
-    return lock
+    return app.mcp_controller.switch_lock
 
 
 async def _set_mcp_enabled(app: Any, enabled: bool) -> None:
@@ -408,14 +403,14 @@ def _shown_status(app: Any) -> str:
 
 def _finish_quiet_success(app: Any, op_id: int, epoch: int) -> None:
     """Return the status line to idle after an automatic connect, unless a switch owns it."""
-    if getattr(app, "_mcp_op_id", 0) != op_id:
+    if not app.mcp_controller.owns(op_id):
         return
     manager = getattr(app.runner, "mcp", None)
     if manager is None or manager.switch_epoch != epoch:
         return
     if getattr(app.state, "running", False):
         return
-    app._mcp_quiet_settled = True
+    app.mcp_controller.quiet_settled = True
     if _shown_status(app) != _MCP_OPERATION_RUNNING:
         return
     app.set_status("Ready", transient=False)
