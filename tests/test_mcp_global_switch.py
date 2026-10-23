@@ -24,7 +24,7 @@ from agent.permission import PermissionMode
 from agent.runner import AgentRunner, InterruptKind
 from agent.sandbox import BackendSelection, ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
-from tests.mcp_fixture import HttpFixture, stdio_argv
+from tests.mcp_fixture import HttpFixture, stdio_argv, text_of
 
 
 def async_test(func):
@@ -424,6 +424,381 @@ async def test_mcp_commands_queue_disable_and_restore_on_enable(tmp_path: Path, 
         assert manager.path.read_bytes() == saved
     finally:
         runner.close()
+
+
+def test_new_epoch_does_not_reuse_or_erase_the_next_connection(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "local": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+    release_a, release_b = threading.Event(), threading.Event()
+    entered_b = threading.Event()
+    handshakes: list[str] = []
+    closed: list[str] = []
+
+    class Client:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        async def close(self) -> None:
+            closed.append(self.label)
+
+    def connect(_config, _bridge, **kwargs):
+        label = "A" if "A" not in handshakes else "B"
+        if label == "B" and "B" in handshakes:
+            handshakes.append("extra")
+            return LoadedServer(Client("extra"), [], [])
+        handshakes.append(label)
+        client = Client(label)
+        if label == "A":
+            assert kwargs["cancel_event"].wait(5)
+            assert release_a.wait(5)
+            return LoadedServer(client, [], [])
+        from langchain_core.tools import StructuredTool
+
+        def echo() -> str:
+            """Return the new connection marker."""
+            return "from-b"
+
+        entered_b.set()
+        assert release_b.wait(5)
+        tool = StructuredTool.from_function(echo, name="mcp__local__echo")
+        return LoadedServer(client, [tool], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path, connect_timeout=5)
+    manager.load()
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(manager.connect_pending)
+            _wait_until(lambda: handshakes == ["A"])
+            assert manager.set_enabled(False).ok
+            assert manager.set_enabled(True).ok
+            second = pool.submit(manager.connect_pending)
+            assert entered_b.wait(5)
+            b_key = next(key for key in manager._connecting if key[1] == manager._activation_epoch)
+            assert any(key[1] != manager._activation_epoch for key in manager._connecting)
+            joined = threading.Event()
+            future = manager._connecting[b_key]
+            original_result = future.result
+
+            def result_and_signal(*args, **kwargs):
+                joined.set()
+                return original_result(*args, **kwargs)
+
+            future.result = result_and_signal  # type: ignore[method-assign]
+            third = pool.submit(manager.test, "local")
+            assert joined.wait(5)
+            assert handshakes == ["A", "B"]
+            assert not third.done()
+            release_a.set()
+            assert not first.result(5).ok
+            assert b_key in manager._connecting
+            assert not any(key[1] != manager._activation_epoch for key in manager._connecting)
+            release_b.set()
+            assert second.result(5).ok
+            assert third.result(5).ok
+        state = manager.get("local")
+        assert state is not None and state.status is ServerStatus.CONNECTED
+        live = manager._states["local"].client
+        assert live.label == "B"
+        assert "from-b" in text_of(state.tools[0].invoke({}))
+        assert closed == ["A"]
+        runner = _runner(manager)
+        try:
+            native = _native(runner.prepared.graph)
+            assert "mcp__local__echo" in graph_tool_names(runner.prepared.graph)
+            assert not manager.toolset_dirty()
+            assert manager.set_enabled(False).ok
+            runner._apply_pending_runtime_config()
+            assert not any(name.startswith("mcp") for name in graph_tool_names(runner.prepared.graph))
+            assert _native(runner.prepared.graph) == native
+            assert not manager.toolset_dirty()
+        finally:
+            runner.close()
+    finally:
+        release_a.set()
+        release_b.set()
+        manager.close()
+
+
+def test_final_switch_determines_the_graph(tmp_path: Path, http_mcp: HttpFixture) -> None:
+    manager = MCPManager(tmp_path / "mcp.json", call_timeout=8, connect_timeout=5)
+    try:
+        assert manager.add_from_fields(
+            name="local", transport="streamable_http", url=http_mcp.url,
+        ).ok
+        runner = _runner(manager)
+        try:
+            native = _native(runner.prepared.graph)
+            assert "mcp__local__echo" in graph_tool_names(runner.prepared.graph)
+            assert manager.set_enabled(False).ok
+            assert manager.set_enabled(True).ok
+            assert manager.connect_pending().ok
+            assert manager.set_enabled(False).ok
+            runner._apply_pending_runtime_config()
+            assert manager.enabled is False
+            assert not any(name.startswith("mcp") for name in graph_tool_names(runner.prepared.graph))
+            assert _native(runner.prepared.graph) == native
+            assert not manager.toolset_dirty()
+            assert manager.set_enabled(True).ok
+            assert manager.connect_pending().ok
+            runner._apply_pending_runtime_config()
+            assert {"mcp_add", "mcp_list", "mcp_remove", "mcp__local__echo"} <= graph_tool_names(runner.prepared.graph)
+            assert _native(runner.prepared.graph) == native
+            assert not manager.toolset_dirty()
+        finally:
+            runner.close()
+    finally:
+        manager.close()
+
+
+@async_test
+async def test_switch_commands_keep_submission_order_and_latest_status(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    manager = MCPManager(path)
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    try:
+        await _overlap_switches(app, "disable", "enable")
+        operation = getattr(app, "_mcp_operation", None)
+        if operation is not None:
+            await operation
+        assert manager.enabled is True
+        assert app.status != "MCP: Disabled"
+        enabled_at = max(
+            index for index, block in enumerate(app.state.blocks)
+            if block.content.startswith("MCP: Enabled")
+        )
+        assert not any(
+            block.content.startswith("MCP: Disabled") for block in app.state.blocks[enabled_at + 1:]
+        )
+        assert json.loads(path.read_text(encoding="utf-8"))["enabled"] is True
+
+        await _overlap_switches(app, "enable", "disable")
+        assert manager.enabled is False
+        assert app.status == "MCP: Disabled"
+
+        await _overlap_switches(app, "disable", "enable", "disable")
+        assert manager.enabled is False
+        assert app.status == "MCP: Disabled"
+        saved = path.read_bytes()
+        stamp = path.stat().st_mtime_ns
+        await handle_mcp_command(app, "disable")
+        assert path.read_bytes() == saved
+        assert path.stat().st_mtime_ns == stamp
+
+        path.write_text(json.dumps({
+            "enabled": False,
+            "servers": {"local": {"transport": "stdio", "command": "fixture", "enabled": True}},
+        }), encoding="utf-8")
+        manager.load()
+        opened: list[str] = []
+
+        def connect(config, _bridge, **_kwargs):
+            opened.append(config.name)
+            return LoadedServer(None, [], [])
+
+        monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+        await handle_mcp_command(app, "enable")
+        operation = getattr(app, "_mcp_operation", None)
+        if operation is not None:
+            await operation
+        await handle_mcp_command(app, "enable")
+        assert opened == ["local"]
+    finally:
+        runner.close()
+        manager.close()
+
+
+@async_test
+async def test_failed_switch_preserves_state_and_a_later_command_wins(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    manager = MCPManager(path)
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    real = atomic_write_text
+    calls = {"n": 0}
+
+    def flaky(target, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        real(target, text)
+
+    monkeypatch.setattr("agent.mcp.manager.atomic_write_text", flaky)
+    try:
+        await handle_mcp_command(app, "disable")
+        assert manager.enabled is True
+        assert app.status == "MCP update failed"
+        assert not path.exists()
+        await handle_mcp_command(app, "disable")
+        assert manager.enabled is False
+        assert json.loads(path.read_text(encoding="utf-8"))["enabled"] is False
+        assert app.status == "MCP: Disabled"
+    finally:
+        runner.close()
+        manager.close()
+
+
+def test_disable_cancels_oauth_wait_and_enable_starts_a_new_attempt(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from fastmcp.client.auth import OAuth
+    from fastmcp.server.auth.auth import ClientRegistrationOptions
+    from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+
+    from agent.mcp.oauth import ManagedOAuth
+
+    started, cancelled = threading.Event(), threading.Event()
+    opened: list[str] = []
+    managed_calls: list[str] = []
+    original = ManagedOAuth.redirect_handler
+
+    async def count_managed(self, url: str) -> None:
+        managed_calls.append(url)
+        await original(self, url)
+
+    async def delayed_redirect(self, url: str) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+            opened.append(url)
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(ManagedOAuth, "redirect_handler", count_managed)
+    monkeypatch.setattr(OAuth, "redirect_handler", delayed_redirect)
+    protected = HttpFixture(auth_factory=lambda base: InMemoryOAuthProvider(
+        base_url=base, client_registration_options=ClientRegistrationOptions(enabled=True),
+    ))
+    manager = MCPManager(tmp_path / "mcp.json", oauth_callback_timeout=120)
+    manager.path.write_text(json.dumps({"servers": {"oauth": {
+        "transport": "streamable_http", "url": protected.url, "auth": {"type": "oauth"},
+    }}}))
+    manager.load()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(manager.connect_pending)
+            assert started.wait(5)
+            assert manager.set_enabled(False).ok
+            assert manager.set_enabled(True).ok
+            begun = time.monotonic()
+            second = pool.submit(manager.connect_pending)
+            second_result = second.result(5)
+            assert time.monotonic() - begun < 5
+            assert not second_result.ok
+            assert "already attempted" in second_result.message
+            assert not first.result(5).ok
+            assert cancelled.wait(3)
+        assert len(managed_calls) >= 2
+        assert opened == []
+        assert manager._oauth_browser_attempts.get("oauth") is not None
+    finally:
+        manager.close()
+        protected.close()
+
+
+def test_oauth_enable_after_disable_reuses_cached_authorization_and_releases_tools(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import threading
+    import urllib.request
+    from fastmcp.server.auth.auth import ClientRegistrationOptions
+    from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
+
+    browsers: list[threading.Thread] = []
+    errors: list[BaseException] = []
+
+    def browser(url, *_args, **_kwargs):
+        def follow() -> None:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        response.read()
+                    return
+                except Exception as exc:
+                    if time.monotonic() >= deadline:
+                        errors.append(exc)
+                        return
+                    time.sleep(0.05)
+
+        thread = threading.Thread(target=follow, daemon=True)
+        browsers.append(thread)
+        thread.start()
+        return True
+
+    monkeypatch.setattr("webbrowser.open", browser)
+    protected = HttpFixture(auth_factory=lambda base: InMemoryOAuthProvider(
+        base_url=base, client_registration_options=ClientRegistrationOptions(enabled=True),
+    ))
+    manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5, oauth_callback_timeout=10)
+    manager.path.write_text(json.dumps({"servers": {"oauth": {
+        "transport": "streamable_http", "url": protected.url, "auth": {"type": "oauth"},
+    }}}))
+    manager.load()
+    try:
+        assert manager.connect_pending().ok, errors
+        check = next(tool for tool in manager.get("oauth").tools if tool.name == "mcp__oauth__auth_check")
+        assert "subject:" in text_of(check.invoke({}))
+        assert browsers
+        browser_count = len(browsers)
+        assert manager.set_enabled(False).ok
+        assert manager.get("oauth").tools == []
+        assert manager.set_enabled(True).ok
+        assert manager.connect_pending().ok, errors
+        check = next(tool for tool in manager.get("oauth").tools if tool.name == "mcp__oauth__auth_check")
+        assert "subject:" in text_of(check.invoke({}))
+        assert len(browsers) == browser_count
+        assert manager.set_enabled(False).ok
+        assert manager.snapshot()[1] == []
+        assert not manager.get("oauth").tools
+        for thread in browsers:
+            thread.join(3)
+        assert not errors
+    finally:
+        manager.close()
+        protected.close()
+
+
+def _wait_until(predicate, *, steps: int = 1000) -> None:
+    for _ in range(steps):
+        if predicate():
+            return
+        time.sleep(0.001)
+    raise AssertionError("condition not met")
+
+
+async def _overlap_switches(app: _App, *commands: str) -> None:
+    """Run switch commands that overlap inside set_enabled, in submission order."""
+    manager = app.runner.mcp
+    original = manager.set_enabled
+    entered, release = threading.Event(), threading.Event()
+    seen = {"n": 0}
+
+    def wrapped(enabled: bool):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            entered.set()
+            assert release.wait(5)
+        return original(enabled)
+
+    manager.set_enabled = wrapped  # type: ignore[method-assign]
+    try:
+        tasks = [asyncio.create_task(handle_mcp_command(app, command)) for command in commands]
+        assert await asyncio.to_thread(entered.wait, 5)
+        for _ in range(50):
+            lock = getattr(app, "_mcp_switch_lock", None)
+            if lock is not None and lock.locked():
+                break
+            await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(*tasks)
+    finally:
+        release.set()
+        manager.set_enabled = original  # type: ignore[method-assign]
 
 
 def _children(parent: int) -> set[int]:

@@ -90,10 +90,10 @@ class MCPManager:
         self._retired: list[Any] = []
         self._published_clients: list[Any] = []
         self._versions: dict[str, int] = {}
-        self._connecting: dict[int, Future[ServerState]] = {}
+        self._connecting: dict[tuple[int, int], Future[ServerState]] = {}
         self._oauth_browser_attempts: dict[str, float] = {}
         self._connection_cancel = threading.Event()
-        self._attempt_cancels: dict[int, threading.Event] = {}
+        self._attempt_cancels: dict[tuple[int, int], threading.Event] = {}
         self._activation_epoch = 0
         self._switch_epoch = 0
         self._switch_notice: str | None = None
@@ -496,13 +496,14 @@ class MCPManager:
 
     def _activate(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
         # Startup, /mcp test and mcp_add share an in-flight connection for the
-        # same catalog entry. Removal/reload still invalidate the old attempt.
-        key = id(server)
+        # same catalog entry and the same activation epoch. Disable advances
+        # the epoch, so a new enable cannot wait on the cancelled attempt.
         with self._lock:
             if self._closed or self._connection_cancel.is_set():
                 return ServerState(server, ServerStatus.DISCONNECTED, "MCP connections are shutting down")
             if not self._document.enabled:
                 return ServerState(server, ServerStatus.DISCONNECTED, "MCP is disabled")
+            key = (id(server), self._activation_epoch)
             attempt = self._connecting.get(key)
             owner = attempt is None
             if owner:
@@ -524,8 +525,10 @@ class MCPManager:
             return state
         finally:
             with self._lock:
-                self._connecting.pop(key, None)
-                self._attempt_cancels.pop(key, None)
+                if self._connecting.get(key) is attempt:
+                    self._connecting.pop(key, None)
+                if self._attempt_cancels.get(key) is cancel:
+                    self._attempt_cancels.pop(key, None)
 
     def _activate_once(
         self,

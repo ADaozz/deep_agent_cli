@@ -341,26 +341,93 @@ def _switch_block_reason(app: Any) -> str | None:
     return "busy"
 
 
+def _mcp_switch_lock(app: Any) -> asyncio.Lock:
+    """Serialize global switch commands without covering OAuth or connect_pending."""
+    lock = getattr(app, "_mcp_switch_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        app._mcp_switch_lock = lock
+    return lock
+
+
 async def _set_mcp_enabled(app: Any, enabled: bool) -> None:
-    manager = app.runner.mcp
-    if manager.config_error:
-        app.state.add_system(manager.describe(), error=True)
+    async with _mcp_switch_lock(app):
+        manager = app.runner.mcp
+        if manager.config_error:
+            app.state.add_system(manager.describe(), error=True)
+            return
+        # Read the switch only after the lock is held, so an earlier command
+        # cannot be overtaken by a later one that sampled a stale value.
+        if manager.enabled is enabled:
+            epoch = manager.switch_epoch
+            changed = False
+        else:
+            result = await app._run_blocking(partial(manager.set_enabled, enabled))
+            if not result.ok:
+                app.state.add_system(result.message, error=True)
+                app.set_status("MCP update failed", transient=False)
+                return
+            epoch = manager.switch_epoch
+            changed = True
+    if manager.switch_epoch != epoch:
         return
-    if manager.enabled is enabled:
+    if not changed:
         _show_mcp_status(app, manager)
         return
-    result = await app._run_blocking(partial(manager.set_enabled, enabled))
-    if not result.ok:
-        app.state.add_system(result.message, error=True)
-        app.set_status("MCP update failed", transient=False)
-        return
     if enabled:
-        # A disable issued during OAuth may still be winding the previous task down.
+        await _connect_after_enable(app, epoch)
+        if manager.switch_epoch != epoch:
+            return
+    await _report_switch(app, enabled, epoch)
+
+
+async def _connect_after_enable(app: Any, epoch: int) -> None:
+    """Start a new connection round after the previous operation unwinds.
+
+    Disable has already signalled cancellation. Waiting here stays on the
+    event loop, and a cancelled or failed wait still starts this round when
+    it is the latest switch. The old task's result is not shown as this one.
+    """
+    manager = app.runner.mcp
+    existing = getattr(app, "_mcp_operation", None)
+    cancelled = False
+    if getattr(app, "_mcp_busy", False) and existing is not None:
+        try:
+            await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            pass
+    if manager.switch_epoch != epoch:
+        if cancelled:
+            raise asyncio.CancelledError
+        return
+    started = _start_operation(app, manager.connect_pending)
+    if started is None:
         existing = getattr(app, "_mcp_operation", None)
-        if getattr(app, "_mcp_busy", False) and existing is not None:
-            await _wait_operation(app, existing)
+        if existing is not None and existing.done():
+            app._mcp_busy = False
+            _start_operation(app, manager.connect_pending)
+        elif existing is not None:
+            _start_connect_when_idle(app, existing, epoch)
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+def _start_connect_when_idle(app: Any, existing: asyncio.Task, epoch: int) -> None:
+    async def follow() -> None:
+        try:
+            await asyncio.shield(existing)
+        except Exception:
+            pass
+        manager = app.runner.mcp
+        if manager.switch_epoch != epoch:
+            return
+        if getattr(app, "_mcp_busy", False):
+            app._mcp_busy = False
         _start_operation(app, manager.connect_pending)
-    await _report_switch(app, enabled)
+
+    asyncio.create_task(follow())
 
 
 async def _publish_mcp_toolset(app: Any) -> str:
@@ -369,7 +436,9 @@ async def _publish_mcp_toolset(app: Any) -> str:
         return "queued"
     events = await app._run_blocking(_apply_when_idle_worker, app.runner)
     if events is None:
-        return "queued"
+        if _switch_block_reason(app) is not None:
+            return "queued"
+        return "busy"
     for event in events:
         app._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
@@ -379,13 +448,19 @@ async def _publish_mcp_toolset(app: Any) -> str:
     return "applied"
 
 
-async def _report_switch(app: Any, enabled: bool) -> None:
+async def _report_switch(app: Any, enabled: bool, epoch: int) -> None:
     manager = app.runner.mcp
+    if manager.switch_epoch != epoch:
+        return
     outcome = "queued"
-    for _ in range(3):
+    for _ in range(20):
         outcome = await _publish_mcp_toolset(app)
-        if outcome != "failed":
+        if manager.switch_epoch != epoch:
+            return
+        if outcome not in {"failed", "busy"}:
             break
+    if manager.switch_epoch != epoch:
+        return
     if outcome == "queued":
         reason = _switch_block_reason(app)
         app.state.add_system(_queued_switch_text(enabled, approval=reason == "approval"))
@@ -395,7 +470,11 @@ async def _report_switch(app: Any, enabled: bool) -> None:
     if outcome == "failed" or manager.toolset_dirty():
         app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
         return
+    if manager.switch_epoch != epoch:
+        return
     manager.consume_switch_notice()
+    if manager.switch_epoch != epoch:
+        return
     _show_mcp_status(app, manager)
 
 
