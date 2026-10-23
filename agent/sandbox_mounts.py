@@ -80,7 +80,8 @@ def render_launch_manifest(
     if rg:
         lines.append(f"  RO  {SEARCH_BINARY_PATH}  <- {rg} [internal]")
     lines.append("  --  /proc  [private]")
-    lines.append("  --  /dev  [host dev-bind]" if host_dev else "  --  /dev  [private]")
+    if not host_dev:
+        lines.append("  --  /dev  [private]")
     lines.extend(["", "User mounts:"])
     user = [*read_only, *read_write]
     if user:
