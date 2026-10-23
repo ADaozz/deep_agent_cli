@@ -444,6 +444,7 @@ class CliApplication:
         self._status_notice: str | None = None
         self.lifecycle = AppLifecycle(self)
         self.mcp_controller = MCPController()
+        self._mcp_draft: dict[str, str] = {}
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None

@@ -74,12 +74,13 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
 
 
 def finish_mcp_interaction(app: Any, interaction: InteractionController, *, cancelled: bool) -> None:
+    """The add-wizard draft stays on the app. It is form state, not a live connection."""
     if cancelled or str(interaction.values.get("confirm") or "") == "cancel":
         app.interaction = None
         app._mcp_draft = {}
         app.set_status("MCP add cancelled")
         return
-    draft = dict(getattr(app, "_mcp_draft", {}))
+    draft = dict(app._mcp_draft)
     kind = interaction.kind
     if kind == "mcp_name":
         draft["name"] = str(interaction.values.get("name") or "").strip()
@@ -437,38 +438,22 @@ def _announce_published_switch(app: Any) -> None:
     _show_mcp_status(app, manager)
 
 
-def _publish_lock(app: Any) -> asyncio.Lock:
-    lock = getattr(app, "_mcp_publish_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        app._mcp_publish_lock = lock
-    return lock
-
-
 async def _coalesced_publish(app: Any) -> str:
     """Publish one toolset revision once. A second caller joins or skips it.
 
     A later revision, such as tools discovered after connect, still publishes.
     A failed attempt is not repeated for that same revision.
     """
-    async with _publish_lock(app):
+    async with app.mcp_controller.publish_lock:
         manager = app.runner.mcp
         revision = manager.toolset_revision
-        if (
-            getattr(app, "_mcp_publish_revision", None) == revision
-            and getattr(app, "_mcp_publish_outcome", None) == "failed"
-        ):
-            return "failed"
-        if (
-            getattr(app, "_mcp_publish_revision", None) == revision
-            and getattr(app, "_mcp_publish_outcome", None) == "applied"
-            and not manager.toolset_dirty()
-        ):
-            return "applied"
+        cached = app.mcp_controller.cached_publish(revision, dirty=manager.toolset_dirty())
+        if cached is not None:
+            return cached
         outcome = await _publish_mcp_toolset(app)
-        if manager.toolset_revision == revision:
-            app._mcp_publish_revision = revision
-            app._mcp_publish_outcome = outcome
+        app.mcp_controller.remember_publish(
+            revision, outcome, current_revision=manager.toolset_revision,
+        )
         return outcome
 
 
