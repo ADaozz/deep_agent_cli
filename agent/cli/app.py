@@ -714,7 +714,7 @@ class CliApplication:
         if manager is None or not manager.enabled or not manager.list_servers():
             return
         from agent.cli.mcp_ui import _start_operation
-        _start_operation(self, manager.connect_pending)
+        _start_operation(self, manager.connect_pending, quiet_success=True)
 
     @contextmanager
     def _capture_runtime_logs(self) -> Iterator[None]:
@@ -2449,7 +2449,7 @@ class CliApplication:
                 changes.append(f"permission: {event.result['permission_mode']}")
             if event.result.get("sandbox_changed"):
                 changes.append(f"sandbox: {event.result['sandbox_mode']}")
-            if announce and event.result.get("mcp_changed"):
+            if event.result.get("mcp_changed"):
                 self._announce_mcp_switch()
             if announce:
                 if event.result.get("model_changed") or event.result.get("reasoning_changed"):
@@ -2464,18 +2464,11 @@ class CliApplication:
 
     def _announce_mcp_switch(self) -> None:
         """Show the global MCP state only after the rebuilt graph has published it."""
-        manager = getattr(self.runner, "mcp", None)
-        if manager is None:
-            return
-        notice = manager.consume_switch_notice()
-        if notice == "disabled":
-            from agent.cli.mcp_ui import disabled_status_text
+        from agent.cli.mcp_ui import _announce_published_switch
 
-            self.state.add_system(disabled_status_text(manager))
-            self.set_status("MCP: Disabled", transient=False)
-        elif notice == "enabled":
-            self.state.add_system("MCP: Enabled")
-            self.set_status("MCP: Enabled", transient=False)
+        if getattr(self.runner, "mcp", None) is None:
+            return
+        _announce_published_switch(self)
 
     def _handle_result(self, result: RunResult) -> None:
         if result.status == "cancelled":

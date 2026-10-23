@@ -233,7 +233,7 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
     _start_operation(app, partial(manager.add_from_fields, **fields))
 
 
-def _start_operation(app: Any, operation: Any) -> asyncio.Task | None:
+def _start_operation(app: Any, operation: Any, *, quiet_success: bool = False) -> asyncio.Task | None:
     # Reserve before scheduling: two Enter events must not launch two workers.
     # /mcp disable does not use this gate, so it can cancel an OAuth wait.
     if getattr(app, "_mcp_busy", False):
@@ -252,10 +252,15 @@ def _start_operation(app: Any, operation: Any) -> asyncio.Task | None:
                 if app.runner.mcp.toolset_dirty():
                     await _apply_when_idle(app, announce_status=False)
                 return
-            app.state.add_system(result.message, error=not result.ok)
-            app.set_status("MCP operation finished" if result.ok else "MCP operation failed; you can retry", transient=False)
+            if not (quiet_success and result.ok):
+                app.state.add_system(result.message, error=not result.ok)
+            if not _switch_status_visible(app):
+                app.set_status(
+                    "MCP operation finished" if result.ok else "MCP operation failed; you can retry",
+                    transient=False,
+                )
             if app.runner.mcp.toolset_dirty():
-                await _apply_when_idle(app)
+                await _apply_when_idle(app, announce_status=not _switch_status_visible(app))
         except Exception as exc:
             if app.runner.mcp.switch_epoch != epoch:
                 return
@@ -281,9 +286,11 @@ async def _wait_operation(app: Any, task: asyncio.Task | None) -> None:
 
 
 def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
-    # Only the graph build runs on the worker. UI updates return through the loop.
+    # Only the graph build runs on the worker. The caller already skips this
+    # while an agent run is active. Wait out another idle publish instead of
+    # treating that brief lock as a failed toolset update.
     events: list[Any] = []
-    if not runner._operation_lock.acquire(blocking=False):
+    if not runner._operation_lock.acquire(timeout=5):
         return None
     try:
         if runner.current_interrupt() is not None:
@@ -402,12 +409,12 @@ async def _connect_after_enable(app: Any, epoch: int) -> None:
         if cancelled:
             raise asyncio.CancelledError
         return
-    started = _start_operation(app, manager.connect_pending)
+    started = _start_operation(app, manager.connect_pending, quiet_success=True)
     if started is None:
         existing = getattr(app, "_mcp_operation", None)
         if existing is not None and existing.done():
             app._mcp_busy = False
-            _start_operation(app, manager.connect_pending)
+            _start_operation(app, manager.connect_pending, quiet_success=True)
         elif existing is not None:
             _start_connect_when_idle(app, existing, epoch)
     if cancelled:
@@ -425,26 +432,45 @@ def _start_connect_when_idle(app: Any, existing: asyncio.Task, epoch: int) -> No
             return
         if getattr(app, "_mcp_busy", False):
             app._mcp_busy = False
-        _start_operation(app, manager.connect_pending)
+        _start_operation(app, manager.connect_pending, quiet_success=True)
 
     asyncio.create_task(follow())
 
 
+def _switch_status_visible(app: Any) -> bool:
+    """True when the status line is already showing a global MCP switch."""
+    texts = [getattr(app, "status", "") or ""]
+    state = getattr(app, "state", None)
+    if state is not None:
+        texts.append(getattr(state, "status", "") or "")
+    return any(
+        text.startswith("MCP:") or text.startswith("MCP enable") or text.startswith("MCP disable")
+        or text.startswith("MCP update failed") or text.startswith("MCP tool update")
+        for text in texts
+    )
+
+
+def _announce_published_switch(app: Any) -> None:
+    """Show the switch once the latest toolset revision is the published one."""
+    manager = app.runner.mcp
+    if manager.consume_switch_notice() is None:
+        return
+    _show_mcp_status(app, manager)
+
+
 async def _publish_mcp_toolset(app: Any) -> str:
-    """Apply a pending MCP toolset now. Returns applied, queued, or failed."""
+    """Apply a pending MCP toolset once. Returns applied, queued, or failed."""
     if _switch_block_reason(app) is not None:
         return "queued"
     events = await app._run_blocking(_apply_when_idle_worker, app.runner)
     if events is None:
-        if _switch_block_reason(app) is not None:
-            return "queued"
-        return "busy"
+        return "queued"
     for event in events:
         app._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
         return "failed"
     if app.runner.mcp.toolset_dirty():
-        return "failed"
+        return "queued"
     return "applied"
 
 
@@ -452,30 +478,23 @@ async def _report_switch(app: Any, enabled: bool, epoch: int) -> None:
     manager = app.runner.mcp
     if manager.switch_epoch != epoch:
         return
-    outcome = "queued"
-    for _ in range(20):
-        outcome = await _publish_mcp_toolset(app)
-        if manager.switch_epoch != epoch:
-            return
-        if outcome not in {"failed", "busy"}:
-            break
+    outcome = await _publish_mcp_toolset(app)
     if manager.switch_epoch != epoch:
         return
-    if outcome == "queued":
+    if outcome == "failed":
+        app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
+        return
+    if outcome != "applied":
         reason = _switch_block_reason(app)
         app.state.add_system(_queued_switch_text(enabled, approval=reason == "approval"))
         action = "enable" if enabled else "disable"
         app.set_status(f"MCP {action} queued", transient=False)
         return
-    if outcome == "failed" or manager.toolset_dirty():
-        app.set_status("MCP tool update failed; retry at the next safe point", transient=False)
-        return
     if manager.switch_epoch != epoch:
         return
-    manager.consume_switch_notice()
-    if manager.switch_epoch != epoch:
-        return
-    _show_mcp_status(app, manager)
+    # runtime_config_applied announces this when the app handles the event.
+    # A caller that ignores the event still notifies from the published revision.
+    _announce_published_switch(app)
 
 
 def _show_mcp_status(app: Any, manager: Any) -> None:

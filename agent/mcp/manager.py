@@ -201,17 +201,32 @@ class MCPManager:
             return notice
 
     def connect_pending(self) -> MCPResult:
-        """Connect at startup using cached credentials, refreshing or authorizing as needed."""
+        """Connect at startup using cached credentials, refreshing or authorizing as needed.
+
+        The activation epoch is fixed for the whole batch. A later disable/enable
+        starts a new round; this batch stops instead of connecting the rest.
+        """
         with self._lock:
             if self._closed or self._connection_cancel.is_set():
                 return MCPResult(False, False, "MCP connections are shutting down")
             if not self._document.enabled:
                 return MCPResult(True, False, "MCP is disabled.")
+            epoch = self._activation_epoch
             names = [
                 name for name, state in self._states.items()
                 if state.config.enabled and state.status is ServerStatus.DISCONNECTED
             ]
-        results = [self.test(name) for name in names]
+        results: list[MCPResult] = []
+        for name in names:
+            with self._lock:
+                if (
+                    self._closed or self._connection_cancel.is_set()
+                    or not self._document.enabled or self._activation_epoch != epoch
+                ):
+                    break
+            results.append(self.test(name, expected_epoch=epoch))
+        if names and not results:
+            return MCPResult(False, False, "MCP connection round was superseded.")
         return MCPResult(
             all(result.ok for result in results), False,
             "\n".join(result.message for result in results) or
@@ -365,10 +380,14 @@ class MCPManager:
             "A graph that already started this call keeps its current tools until then.",
         )
 
-    def test(self, name: str, *, allow_oauth_browser: bool = True) -> MCPResult:
+    def test(
+        self, name: str, *, allow_oauth_browser: bool = True, expected_epoch: int | None = None,
+    ) -> MCPResult:
         with self._lock:
             if self._config_error:
                 return MCPResult(False, False, f"MCP config error: {self._config_error}")
+            if expected_epoch is not None and expected_epoch != self._activation_epoch:
+                return MCPResult(False, False, "Connection superseded by a catalog change")
             if not self._document.enabled:
                 return MCPResult(False, False, "MCP is disabled. Run /mcp enable first.")
             server = self._document.servers.get(name)
@@ -379,7 +398,9 @@ class MCPManager:
             return MCPResult(False, False, f"No MCP server named {name}.")
         if not server.enabled:
             return MCPResult(True, False, f"{name} is disabled.")
-        state = self._activate(server, allow_oauth_browser=allow_oauth_browser)
+        state = self._activate(
+            server, allow_oauth_browser=allow_oauth_browser, expected_epoch=expected_epoch,
+        )
         if state.status is ServerStatus.CONNECTED:
             names = ", ".join(tool.name for tool in state.tools) or "(none)"
             return MCPResult(True, False, f"{name} connected. {state.tool_count} tools: {names}." + _warning_summary(state))
@@ -494,7 +515,13 @@ class MCPManager:
                 state.error = ""
         self._revision += 1
 
-    def _activate(self, server: MCPServerConfig, *, allow_oauth_browser: bool) -> ServerState:
+    def _activate(
+        self,
+        server: MCPServerConfig,
+        *,
+        allow_oauth_browser: bool,
+        expected_epoch: int | None = None,
+    ) -> ServerState:
         # Startup, /mcp test and mcp_add share an in-flight connection for the
         # same catalog entry and the same activation epoch. Disable advances
         # the epoch, so a new enable cannot wait on the cancelled attempt.
@@ -503,7 +530,12 @@ class MCPManager:
                 return ServerState(server, ServerStatus.DISCONNECTED, "MCP connections are shutting down")
             if not self._document.enabled:
                 return ServerState(server, ServerStatus.DISCONNECTED, "MCP is disabled")
-            key = (id(server), self._activation_epoch)
+            if expected_epoch is not None and expected_epoch != self._activation_epoch:
+                return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
+            epoch = self._activation_epoch if expected_epoch is None else expected_epoch
+            if epoch != self._activation_epoch:
+                return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
+            key = (id(server), epoch)
             attempt = self._connecting.get(key)
             owner = attempt is None
             if owner:
@@ -515,7 +547,10 @@ class MCPManager:
             return attempt.result()
         try:
             state = self._activate_once(
-                server, allow_oauth_browser=allow_oauth_browser, cancel_event=cancel,
+                server,
+                allow_oauth_browser=allow_oauth_browser,
+                cancel_event=cancel,
+                expected_epoch=epoch,
             )
         except BaseException as exc:
             attempt.set_exception(exc)
@@ -536,16 +571,19 @@ class MCPManager:
         *,
         allow_oauth_browser: bool,
         cancel_event: threading.Event,
+        expected_epoch: int,
     ) -> ServerState:
         with self._lock:
             if (
                 self._closed or self._connection_cancel.is_set() or not self._document.enabled
+                or cancel_event.is_set() or self._activation_epoch != expected_epoch
                 or self._document.servers.get(server.name) is not server
             ):
                 return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
-            epoch = self._activation_epoch
             version = self._versions.get(server.name, 0) + 1
             self._versions[server.name] = version
+        if cancel_event.is_set():
+            return ServerState(server, ServerStatus.DISCONNECTED, "Connection superseded by a catalog change")
         try:
             if not server.enabled:
                 loaded = None
@@ -592,7 +630,8 @@ class MCPManager:
         with self._lock:
             valid = (
                 not self._closed and not self._connection_cancel.is_set()
-                and self._document.enabled and self._activation_epoch == epoch
+                and not cancel_event.is_set()
+                and self._document.enabled and self._activation_epoch == expected_epoch
                 and self._versions.get(server.name) == version
                 and self._document.servers.get(server.name) is server
             )

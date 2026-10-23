@@ -566,7 +566,7 @@ async def test_switch_commands_keep_submission_order_and_latest_status(tmp_path:
         if operation is not None:
             await operation
         assert manager.enabled is True
-        assert app.status != "MCP: Disabled"
+        assert app.status == "MCP: Enabled"
         enabled_at = max(
             index for index, block in enumerate(app.state.blocks)
             if block.content.startswith("MCP: Enabled")
@@ -761,6 +761,144 @@ def test_oauth_enable_after_disable_reuses_cached_authorization_and_releases_too
     finally:
         manager.close()
         protected.close()
+
+
+def test_future_keeps_the_epoch_captured_before_connect_starts(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "local": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+    entered, release = threading.Event(), threading.Event()
+    opened: list[str] = []
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    def connect(config, _bridge, **_kwargs):
+        opened.append(config.name)
+        return LoadedServer(Client(), [], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    original = manager._activate_once
+
+    def paused(server, *, allow_oauth_browser, cancel_event, expected_epoch):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(
+            server,
+            allow_oauth_browser=allow_oauth_browser,
+            cancel_event=cancel_event,
+            expected_epoch=expected_epoch,
+        )
+
+    monkeypatch.setattr(manager, "_activate_once", paused)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            old = pool.submit(manager.connect_pending)
+            assert entered.wait(5)
+            assert manager._connecting
+            assert opened == []
+            assert manager.set_enabled(False).ok
+            assert manager.set_enabled(True).ok
+            fresh = pool.submit(manager.connect_pending)
+            assert fresh.result(5).ok
+            assert opened == ["local"]
+            kept = manager._states["local"].client
+            release.set()
+            assert not old.result(5).ok
+            assert opened == ["local"]
+            assert manager._states["local"].client is kept
+    finally:
+        release.set()
+        manager.close()
+
+
+def test_old_connect_batch_stops_for_a_new_enable_round(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "alpha": {"transport": "stdio", "command": "fixture"},
+        "beta": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+    entered, release = threading.Event(), threading.Event()
+    opened: list[str] = []
+
+    class Client:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def close(self) -> None:
+            return None
+
+    def connect(config, _bridge, **_kwargs):
+        opened.append(config.name)
+        if config.name == "alpha" and opened.count("alpha") == 1:
+            entered.set()
+            assert release.wait(5)
+        return LoadedServer(Client(config.name), [], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            old = pool.submit(manager.connect_pending)
+            assert entered.wait(5)
+            assert manager.set_enabled(False).ok
+            assert manager.set_enabled(True).ok
+            fresh = pool.submit(manager.connect_pending)
+            assert fresh.result(5).ok
+            assert opened.count("beta") == 1
+            assert opened.count("alpha") == 2
+            alpha = manager._states["alpha"].client
+            beta = manager._states["beta"].client
+            release.set()
+            assert not old.result(5).ok
+            assert opened.count("beta") == 1
+            assert manager._states["alpha"].client is alpha
+            assert manager._states["beta"].client is beta
+            assert alpha.name == "alpha" and beta.name == "beta"
+    finally:
+        release.set()
+        manager.close()
+
+
+@async_test
+async def test_switch_publish_queues_when_busy_and_does_not_retry_failure(tmp_path: Path, monkeypatch) -> None:
+    from agent.runner import RunEvent
+
+    manager = MCPManager(tmp_path / "mcp.json")
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    calls = {"n": 0}
+
+    def busy(_runner):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr("agent.cli.mcp_ui._apply_when_idle_worker", busy)
+    try:
+        await handle_mcp_command(app, "disable")
+        assert calls["n"] == 1
+        assert "queued" in app.state.blocks[-1].content
+        assert "failed" not in app.status
+        calls["n"] = 0
+
+        def failed(_runner):
+            calls["n"] += 1
+            return [RunEvent(type="runtime_config_failed", content="boom", is_error=True)]
+
+        monkeypatch.setattr("agent.cli.mcp_ui._apply_when_idle_worker", failed)
+        await handle_mcp_command(app, "enable")
+        assert calls["n"] == 1
+        assert app.status == "MCP tool update failed; retry at the next safe point"
+    finally:
+        runner.close()
+        manager.close()
 
 
 def _wait_until(predicate, *, steps: int = 1000) -> None:
