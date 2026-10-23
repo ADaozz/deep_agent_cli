@@ -11,6 +11,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar, cast
+import weakref
 
 
 if TYPE_CHECKING:
@@ -64,7 +65,9 @@ class AppLifecycle:
         self.phase = ExitPhase.ACTIVE
         self._tracked: list[tuple[asyncio.Task[object], TaskStop]] = []
         self._owners_signalled = False
-        self._captured_tasks: set[int] = set()
+        # Object identity, not id(). A finished task can be collected and its
+        # address reused by the next task; a WeakSet drops the dead one.
+        self._captured_tasks: weakref.WeakSet[asyncio.Task[object]] = weakref.WeakSet()
         self._failure_log: list[TaskCleanupFailure] = []
         self.unfinished: tuple[str, ...] = ()
         self.failures: tuple[TaskCleanupFailure, ...] = ()
@@ -94,9 +97,9 @@ class AppLifecycle:
 
     def _capture_done(self, task: asyncio.Task[object]) -> None:
         """Record one terminal exception. Cancellation is not a failure."""
-        if id(task) in self._captured_tasks or not task.done():
+        if task in self._captured_tasks or not task.done():
             return
-        self._captured_tasks.add(id(task))
+        self._captured_tasks.add(task)
         if task.cancelled():
             return
         try:

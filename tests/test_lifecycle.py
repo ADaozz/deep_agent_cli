@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import warnings
 from types import SimpleNamespace
@@ -648,6 +649,56 @@ def test_failure_before_shutdown_is_recorded_once() -> None:
         await app.lifecycle.shutdown()
         assert app.lifecycle.failures == before
         assert app.lifecycle.phase is ExitPhase.STOPPED
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pipe.__exit__(None, None, None)
+        runner.close()
+
+
+def test_recycled_task_id_still_records_the_next_failure() -> None:
+    runner = _runner()
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        async def boom(label: str) -> None:
+            raise RuntimeError(label)
+
+        first = app.lifecycle.spawn(boom("first-failure"), stop=TaskStop.CANCEL, name="recycled-fail")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert first in app.lifecycle._captured_tasks
+        assert any(
+            item.error is not None and "first-failure" in str(item.error)
+            for item in app.lifecycle._failure_log
+        )
+        # Drop the only strong reference. A WeakSet forgets the task; an id()
+        # set would keep the address and hide the next failure that reuses it.
+        del first
+        gc.collect()
+        assert len(app.lifecycle._captured_tasks) == 0
+
+        second = app.lifecycle.spawn(boom("later-failure"), stop=TaskStop.CANCEL, name="recycled-fail")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        matches = [
+            item for item in app.lifecycle._failure_log
+            if item.error is not None and "later-failure" in str(item.error)
+        ]
+        assert len(matches) == 1
+        del second
+        gc.collect()
+        app.exit()
+        await app.lifecycle.shutdown(task_timeout=0.2)
+        assert len([
+            item for item in app.lifecycle.failures
+            if item.error is not None and "later-failure" in str(item.error)
+        ]) == 1
 
     try:
         asyncio.run(scenario())
