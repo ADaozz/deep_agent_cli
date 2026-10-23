@@ -494,6 +494,80 @@ def test_cleanup_timeout_is_bounded_and_keeps_the_lease(tmp_path) -> None:
         store.close()
 
 
+def test_exit_during_a_blocked_run_keeps_the_queue_and_the_thread() -> None:
+    runner = _runner()
+    started, release = threading.Event(), threading.Event()
+    finished = threading.Event()
+
+    def block(*_args: object, **_kwargs: object) -> RunResult:
+        started.set()
+        release.wait(3)
+        finished.set()
+        return RunResult(status="completed", output="late")
+
+    runner.invoke_with_attachment_refs = block  # type: ignore[method-assign]
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        runner.follow_up("after this")
+        app._start_run("hello")
+        assert await asyncio.to_thread(started.wait, 2)
+        app.exit()
+        await app.lifecycle.shutdown(task_timeout=0.15)
+        assert not finished.is_set()
+        assert "agent-run" in app.lifecycle.unfinished
+        assert runner.control.pending_message_texts() == ["after this"]
+        assert runner._runtime.lease is not None
+        assert app.lifecycle.phase is ExitPhase.STOPPED
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+        assert finished.wait(3)
+        pipe.__exit__(None, None, None)
+        runner.close()
+
+
+def test_shutdown_timeout_does_not_stop_a_default_executor_thread() -> None:
+    runner = _runner()
+    started, release = threading.Event(), threading.Event()
+    finished = threading.Event()
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+        def block() -> None:
+            started.set()
+            release.wait(3)
+            finished.set()
+
+        async def observe() -> None:
+            await asyncio.to_thread(block)
+
+        app.lifecycle.spawn(observe(), stop=TaskStop.OBSERVE, name="default-executor")
+        assert await asyncio.to_thread(started.wait, 2)
+        app.exit()
+        await app.lifecycle.shutdown(task_timeout=0.1)
+        assert not finished.is_set()
+        assert "default-executor" in app.lifecycle.unfinished
+        assert any(item.name == "default-executor" and item.stage == "timeout" for item in app.lifecycle.failures)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+        assert finished.wait(3)
+        pipe.__exit__(None, None, None)
+        runner.close()
+
+
 def test_exit_refuses_a_new_mcp_operation_and_ignores_its_late_result() -> None:
     from agent.cli.mcp_ui import _start_operation
 
