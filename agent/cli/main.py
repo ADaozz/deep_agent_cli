@@ -105,8 +105,6 @@ def main(argv: list[str] | None = None) -> None:
         try:
             app.run()
         finally:
-            # run() already asked UI tasks to stop. That does not release the
-            # session lease; close() still decides after the loop is gone.
             message = app.continue_session_message()
             try:
                 runner.close()

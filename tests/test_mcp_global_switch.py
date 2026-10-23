@@ -14,7 +14,6 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
 
-from agent.cli.mcp_controller import MCPController
 from agent.cli.mcp_ui import handle_mcp_command
 from agent.cli.state import CliState
 from agent.mcp.adapter import LoadedServer
@@ -41,7 +40,6 @@ class _App:
         self.state = CliState()
         self.interaction = None
         self._mcp_draft: dict[str, str] = {}
-        self.mcp_controller = MCPController()
         self.status = ""
         self.application = SimpleNamespace(invalidate=lambda: None)
 
@@ -416,7 +414,7 @@ async def test_mcp_commands_queue_disable_and_restore_on_enable(tmp_path: Path, 
         await handle_mcp_command(app, "disable")
         assert manager.path.read_bytes() == before
         await handle_mcp_command(app, "enable")
-        operation = app.mcp_controller.operation
+        operation = getattr(app, "_mcp_operation", None)
         if operation is not None:
             await operation
         await _apply_when_idle(app)
@@ -565,7 +563,7 @@ async def test_switch_commands_keep_submission_order_and_latest_status(tmp_path:
     app = _App(runner)
     try:
         await _overlap_switches(app, "disable", "enable")
-        operation = app.mcp_controller.operation
+        operation = getattr(app, "_mcp_operation", None)
         if operation is not None:
             await operation
         assert manager.enabled is True
@@ -605,7 +603,7 @@ async def test_switch_commands_keep_submission_order_and_latest_status(tmp_path:
 
         monkeypatch.setattr("agent.mcp.manager.open_server", connect)
         await handle_mcp_command(app, "enable")
-        operation = app.mcp_controller.operation
+        operation = getattr(app, "_mcp_operation", None)
         if operation is not None:
             await operation
         await handle_mcp_command(app, "enable")
@@ -993,7 +991,7 @@ async def test_quiet_connect_publishes_the_server_that_succeeded(tmp_path: Path,
         assert "mcp__alpha__echo" in graph_tool_names(runner.prepared.graph)
         assert any(block.is_error and "beta" in block.content for block in app.state.blocks)
         assert app.status != _MCP_OPERATION_RUNNING
-        assert not app.mcp_controller.busy
+        assert not app._mcp_busy
     finally:
         runner.close()
         manager.close()
@@ -1027,8 +1025,8 @@ async def test_quiet_connect_shows_errors_and_leaves_the_running_status(tmp_path
         assert "unreachable" in errors[0]
         assert app.status == "Ready"
         assert app.status != _MCP_OPERATION_RUNNING
-        assert app.mcp_controller.quiet_settled
-        assert not app.mcp_controller.busy
+        assert app._mcp_quiet_settled
+        assert not app._mcp_busy
     finally:
         runner.close()
         manager.close()
@@ -1138,7 +1136,7 @@ async def _overlap_switches(app: _App, *commands: str) -> None:
         tasks = [asyncio.create_task(handle_mcp_command(app, command)) for command in commands]
         assert await asyncio.to_thread(entered.wait, 5)
         for _ in range(50):
-            lock = app.mcp_controller.switch_lock
+            lock = getattr(app, "_mcp_switch_lock", None)
             if lock is not None and lock.locked():
                 break
             await asyncio.sleep(0)

@@ -10,7 +10,6 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from agent.cli.interactions import InteractionController
-from agent.cli.lifecycle import TaskStop
 
 if TYPE_CHECKING:
     from agent.cli.app import CliApplication
@@ -65,10 +64,16 @@ class SessionController:
         except RuntimeError as exc:
             app.state.add_system(str(exc), error=True)
             return
-        app.reset_session_view()
+        app._clear_skill_draft()
+        app.clear_transcript_selection()
         app.state.clear()
         app.state.context_pristine = True
         app.state.attachments.clear()
+        app.interaction = None
+        app._deferred_config_interaction = None
+        app._reviewing = False
+        app._transcript_anchor = None
+        app._renderer.clear()
         app.state.add_system(f"Started session {info.id}")
         app.set_status("Ready", transient=False)
 
@@ -132,9 +137,13 @@ class SessionController:
 
     def apply_snapshot(self, snapshot: Any) -> None:
         app = self._app
-        app.reset_session_view()
+        app._clear_skill_draft()
+        app.clear_transcript_selection()
         app.state.load_transcript(snapshot.transcript)
         app.state.load_model_metrics(snapshot.model_metrics_history)
+        app.interaction = None
+        app._deferred_config_interaction = None
+        app._reviewing = False
         app.state.add_system(
             f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
         )
@@ -142,6 +151,8 @@ class SessionController:
             app.state.add_system(notice)
         if not app._reopen_pending_interaction(notify_missing=False):
             app.set_status("Ready", transient=False)
+        app._transcript_anchor = None
+        app._renderer.clear()
         app.state.usage = dict(app.runner.latest_usage())
         app.application.invalidate()
 
@@ -176,9 +187,7 @@ class SessionController:
             f"Session {target_id[:8]} is open in another window; waiting for it to be released."
         )
         app.set_status(self.wait_status(), transient=False)
-        self._wait_task = self._app.lifecycle.spawn(
-            self._wait_for_session(target_id), stop=TaskStop.OBSERVE, name="session-wait",
-        )
+        self._wait_task = asyncio.create_task(self._wait_for_session(target_id))
         app.application.invalidate()
 
     async def _wait_for_session(self, target_id: str) -> None:

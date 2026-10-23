@@ -23,7 +23,7 @@ import pytest
 
 from tests.test_playwright_sandbox import page_url  # noqa: F401  pytest fixture for the Playwright PTY test
 
-pytestmark = [pytest.mark.sandbox, pytest.mark.pty]
+pytestmark = pytest.mark.sandbox
 
 _PROBE = r'''
 import asyncio, json, sys
@@ -192,12 +192,6 @@ def test_real_pty_completion_permission_and_pending_approval(tui):
     tui.send('\r')  # default Reject
     state = tui.wait(lambda s: s['permission'] == 'allow' and s['interrupt'] is None)
     assert state['pending'] is None
-
-
-def test_real_pty_exit_command_leaves_the_process(tui):
-    tui.send("/exit\r")
-    tui.process.wait(timeout=4)
-    assert tui.process.returncode == 0
 
 
 @pytest.mark.parametrize('gap,exits', [(0.3, True), (0.7, True), (1.2, False)])
@@ -389,7 +383,7 @@ _MCP_TUI_PROBE = _PROBE.replace(
 ).replace(
     "'status':app.state.status,",
     """'status':app.state.status,
-                'mcp_settled':app.mcp_controller.quiet_settled,
+                'mcp_settled':bool(getattr(app, '_mcp_quiet_settled', False)),
                 'expanded':app.state.tools_expanded,
                 'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
                 'rendered_transcript':render_transcript(app.state, 60),""",

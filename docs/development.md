@@ -18,16 +18,12 @@ pip install -e ".[dev]"
 
 ```bash
 pytest -q                          # 全部自动测试，不调用真实模型
-pytest -m "not sandbox"            # 进程内契约与逻辑测试，不启动 Bubblewrap
 pytest -m integration              # 只跑本地模拟模型端点的集成测试，需要能监听 127.0.0.1
-pytest -m pty                      # 真实 PTY 快捷键；这些测试同时带 sandbox 标记
 REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，而不是跳过
 ```
 
-- 未标记的测试在进程内使用脚本模型和内存 Backend，不代表真实终端或沙箱。
 - `integration` 测试启动一个本地模拟的 OpenAI Chat Completions 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。
 - `sandbox` 标记的测试需要真实可用的 Bubblewrap；不可用时默认跳过。跳过不代表当前环境兼容。
-- `pty` 标记的测试通过真实伪终端发送按键。输入、取消、退出和会话租约的当前契约见 [重构基线](refactor-baseline.md)。
 
 默认挂载模板的验证分为两个目标：配置在可选目录缺失、HOME 不同的机器上仍可加载；指定 PATH 后，已挂载的工具能在真实沙箱中运行。修改模板时运行 `pytest tests/test_config.py tests/test_bootstrap.py -q`，并用临时安装目录验证多版本 Node 的手动选择、Rustup 路径、只读工具目录与读写缓存。启动时的 `true` 预检只验证沙箱本身，不替代工具运行验证。
 

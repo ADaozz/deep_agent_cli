@@ -465,31 +465,6 @@ class AgentRunner:
             self._save_pending_config()
         return mode
 
-    def apply_pending_config_if_idle(
-        self,
-        handler: RunEventHandler | None = None,
-        *,
-        lock_timeout: float = 0,
-    ) -> bool:
-        """Apply a queued model, permission, sandbox, or MCP toolset change.
-
-        The operation lock is taken here, so callers do not touch it. Returns
-        False when a run holds the lock or an interrupt is still pending; the
-        queued change stays in place for the next safe point. A closed runner
-        raises instead of applying.
-        """
-        if self._closed:
-            raise RuntimeError("Runner is closed")
-        if not self._operation_lock.acquire(timeout=lock_timeout):
-            return False
-        try:
-            if self.current_interrupt() is not None:
-                return False
-            self._apply_pending_runtime_config(handler)
-            return True
-        finally:
-            self._operation_lock.release()
-
     def _apply_pending_runtime_config(self, handler: RunEventHandler | None = None) -> None:
         failures: list[str] = []
         applied_sandbox = None
