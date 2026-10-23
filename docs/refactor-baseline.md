@@ -23,14 +23,14 @@
 |---|---|---|---|
 | Run Cancel | `Esc` 在运行中，或 `AgentRunner.request_cancel()` | 取消当前 Run 的模型流、可取消工具和图 | 不退出 TUI，不释放 Session 租约，不回滚已发生的副作用 |
 | UI Exit | `CliApplication.exit()` → `AppLifecycle.request_exit()` | 忽略重复调用；停掉鼠标、状态计时和选择滚动；通知一次 Session 等待、待连接的 MCP 和运行中的 Run；然后离开全屏 | 不关闭 Executor，不调用 `Runner.close()`，不释放租约 |
-| UI Shutdown | `AppLifecycle.shutdown()`，在 TUI 循环的 `finally` 中 | 用同一个期限取消并等待界面辅助任务，并等待已经通知过的 Run、MCP 和 Session 操作自己结束；超时记下任务名和阶段；最后才关闭 Executor | 不取消 OBSERVE 任务，不把“Executor 已关闭”当成线程里的操作已经停止，不释放租约。循环结束后仍未完成的 Task 会被事件循环取消，不能假定它们还活着 |
+| UI Shutdown | `AppLifecycle.shutdown()`，在 TUI 循环的 `finally` 中 | 用同一个期限取消并等待界面辅助任务，并等待已经通知过的 Run、MCP 和 Session 操作自己结束；超时记下任务名和阶段；已经失败的任务进入一次失败摘要；最后才关闭 Executor | 不取消 OBSERVE 任务，不把“Executor 已关闭”或“Task 已超时”当成底层线程已经停止，不释放租约。循环结束后仍未完成的 Task 会被事件循环取消，不能假定它们还活着 |
 | 进程 Shutdown | `main()` 在 `app.run()` 返回后调用 `Runner.close()` | 禁止新操作，排空或取消仍在进行的 Run，确认模型流关闭后释放租约并关闭 MCP 与沙箱 | Run 未排空或模型流未确认关闭时保留租约并抛出错误 |
 
 `Ctrl+D` 在输入为空时，以及 `/exit`，都进入 `CliApplication.exit()`。`Ctrl+D` 在输入非空时删除光标后面的字符；光标已经在末尾时文本不变，也不会退出。审批界面开着时同样如此。
 
 ## 输入决策的当前优先级
 
-按键映射在 `agent/cli/input.py` 的 `Keymap`。`Esc`、`Ctrl+C`、`Ctrl+D` 和 `/exit` 的优先级只在 `InputActionRouter` 决定；`CliApplication.apply_input_action()` 执行界面操作。双击退出窗口只有路由器的 `last_ctrl_c` 一处，长度是 `EXIT_WINDOW_SECONDS`（1 秒），`CliApplication._last_ctrl_c` 只是它的只读视图。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。退出请求已经发出后，不再创建剪贴板、斜杠命令这类界面辅助任务；重复的退出请求不会再走一遍资源通知。此时 `Esc` 仍按原来的优先级处理，运行标记还在时可以再请求一次 Run Cancel。
+按键映射在 `agent/cli/input.py` 的 `Keymap`。`Esc`、`Ctrl+C`、`Ctrl+D` 和 `/exit` 的优先级只在 `InputActionRouter` 决定；`CliApplication.apply_input_action()` 执行界面操作。双击退出窗口只有路由器的 `last_ctrl_c` 一处，长度是 `EXIT_WINDOW_SECONDS`（1 秒），`CliApplication._last_ctrl_c` 只是它的只读视图。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。退出请求已经发出后，不再创建剪贴板、斜杠命令这类界面辅助任务，也不再调度新的 Run、Session 等待或 MCP 操作；重复的退出请求不会再走一遍资源通知。此时 `Esc` 仍按原来的优先级处理，运行标记还在时可以再请求一次 Run Cancel。
 
 `Ctrl+C`（`clear_or_exit`）：
 
@@ -67,6 +67,20 @@
 | 正在退出 | 重复退出被忽略 | 运行标记仍在时会再请求一次取消 | `test_repeated_exit_is_ignored`，`test_escape_after_exit_requests_cancel_again_while_running` |
 | 空输入 Ctrl+D、`/exit` | — | — | `test_ctrl_d_edits_nonempty_input_and_exits_when_empty`，`test_slash_exit_uses_exit_entry` |
 
+## 退出后的准入
+
+`AppLifecycle` 的阶段是 `ACTIVE → EXIT_REQUESTED → SHUTTING_DOWN → STOPPED`。离开 `ACTIVE` 之后：
+
+- 新的界面辅助任务（`CANCEL`）被拒绝，协程会关掉，不进入关闭快照。
+- 新的 Run、Session 等待和 MCP 操作（`OBSERVE`）被拒绝。`spawn()` 关掉协程并抛出错误，不用一个已完成的空任务假装操作已经成功。
+- `_start_queued_run()` 在 `pop_steering()` / `pop_follow_up()` 之前返回，所以退出不会消费或标成已执行尚未运行的队列。`_start_run()` 在 `state.running`、`reserve_run()` 和任何可见状态变化之前返回。
+- 已经开始的 Run 仍由 `RunController` 取消并收尾。未退出时，完成后仍先取 steering，再取 follow-up。
+- Session 等待被 `Esc` 取消时回到选择器。被 CLI Exit 取消时不打开选择器，也不在底层切换晚到之后改写界面。已经拿到的租约仍由 Runner / SessionRuntime 持有。
+- 新的 MCP 操作在 `MCPController.try_begin()` 之前被拒绝。已经开始的操作仍按原取消路径收尾；它的 `finally` 只清自己的 `operation_id`。退出后的完成回调不发布工具表，也不写转录。
+- 任务在关闭前就以异常结束时，失败摘要记一次。取消成功的界面辅助任务不是失败。再次 `shutdown()` 在 `STOPPED` 直接返回。
+
+`asyncio.to_thread()` 用的是事件循环默认 Executor，和 CLI 的 `_io_executor` 不是同一个。Shutdown 超时只说明等待结束，不说明那条阻塞线程已经退出。`Runner.close()` 仍是租约、模型流、MCP 和沙箱的最终所有者。
+
 ## 模型流、工具取消和 Session 租约
 
 这些行为已有测试，重构时继续以它们为准：
@@ -83,3 +97,7 @@
 | 一个 Session 的取消不影响另一个 Session 的模型流 | `test_cancelling_one_session_leaves_concurrent_streams_intact` |
 
 会话恢复只加载已有消息和待处理交互，不自动调用模型。快照展示只在 `SessionController.apply_snapshot`。`CliApplication._apply_session_snapshot` 只转发给它。恢复、等待和租约见 `tests/test_session_switch.py`、`tests/test_session_lock.py` 和 `tests/test_cli.py` 中的 resume 用例。模型、权限、沙箱和 MCP 工具表的空闲应用走 `AgentRunner.apply_pending_config_if_idle()`，CLI 不再自己拿运行锁。MCP 操作是否进行中、操作代号、开关锁，以及工具表发布的 revision 和结果都在 `MCPController`。添加服务的草稿仍留在界面上。同一 revision 失败或已经发布后不会自动再发；更新的 revision 可以再发。
+
+中断分类、工具事件、usage 和终态 `RunResult` 在 `agent/run_events.py`。`RunEvent` 与 `RunResult` 仍从 `agent.runner` 导入。图循环、取消和租约仍在 `AgentRunner`。同一 tool call id 只发一次 `tool_started`。`ToolMessage.artifact` 原样进入 `tool_completed`。只有带 `input_tokens` 的 usage 才算一次输入用量。当前 Run 没有请求取消时，`ModelStreamCancelled` 是失败，不是取消。最终回答已经进入 checkpoint 后，迟到的取消不改写完成结果。
+
+沙箱没有再拆。`agent/sandbox.py` 拥有路径、挂载参数、文件工具路由和单次命令的收集与取消。`agent/sandbox_pool.py` 拥有有网/无网实例的复用和 Runner 关闭时的清理。`agent/sandbox_worker.py` 拥有沙箱内按 request id 执行的一条命令；`kill` 只作用于该命令。这三处的回归仍是 `tests/test_sandbox.py` 和 `tests/test_persistent_sandbox.py`。权限模型、默认挂载模板和工作区路径没有在这一轮改动。

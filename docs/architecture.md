@@ -142,7 +142,7 @@ sequenceDiagram
 
 `AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。中断分类、消息文本和 `RunEvent` 的构造在 `agent/run_events.py`；`RunResult` 与 `RunEvent` 仍从 `agent.runner` 导入。Runner 负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。`RunController` 仍是取消当前 Run 的唯一入口。
 
-终端侧的所有者也是分开的：`Keymap` 只做按键映射，`InputActionRouter` 决定 Ctrl+C、Esc、Ctrl+D 和 `/exit`，`CliApplication` 执行界面动作，`AppLifecycle` 在离开全屏之后收尾界面任务，`Runner.close()` 才释放 Session 租约。MCP 的忙闲和工具表发布状态在 `MCPController`，连接和宿主执行仍在 `MCPManager`。
+终端侧的所有者也是分开的：`Keymap` 只做按键映射，`InputActionRouter` 决定 Ctrl+C、Esc、Ctrl+D 和 `/exit`，`CliApplication` 执行界面动作，`AppLifecycle` 在离开全屏之后收尾界面任务，`Runner.close()` 才释放 Session 租约。离开 `ACTIVE` 之后不再登记新的 Run、Session 等待或 MCP 操作；已经在跑的工作仍由各自的所有者取消。MCP 的忙闲和工具表发布状态在 `MCPController`，连接和宿主执行仍在 `MCPManager`。`Esc` 取消 Session 等待会回到选择器；CLI 退出只取消等待，不打开选择器。
 
 `RunResult` 的状态包括 `completed`、`failed`、`cancelled`、`waiting_confirmation`、`waiting_human`、`paused` 和 `runtime_config_boundary`。几类中断含义不同：审批是执行前授权；人工输入是 Agent 提问；暂停是用户请求；配置边界用于安全切换模型或权限。它们借助 checkpoint 恢复，但不能互相替代。
 
