@@ -1,11 +1,11 @@
+"""Transcript, tool card, and diff rendering."""
+
 from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
 from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.completion import Completion
 from prompt_toolkit.application.current import set_app
-from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.layout.containers import WindowAlign
 
@@ -14,19 +14,12 @@ import logging
 import re
 import pytest
 from rich.cells import cell_len
-from collections.abc import Callable
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from agent.cli.gitinfo import GitSummary, parse_status
 from agent.cli.interactions import InteractionController
-from agent.cli.clipboard import ClipboardImage, ClipboardText
 from agent.cli.app import (
-    FOOTER_LINES,
     CliApplication,
-    format_context_usage,
-    format_context_window,
-    format_workspace_path,
 )
 from agent.cli.previews import (
     CommandExecutionPreview,
@@ -47,26 +40,20 @@ from agent.cli.rendering import (
     render_review,
     render_transcript,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock, touch
-from agent.cli.pasted_content import PASTED_CONTENT_MIN_CHARS
+from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.config import Settings
-from agent.config import ModelProfile
 from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
 from agent.session import SessionStore, TranscriptBlock, messages_to_transcript
 from agent.tools.examples import build_example_tools
 from agent.factory import DEFAULT_FS_TOOLS, create_agent
 from tests.cli_support import (
-    await_cli_io as _await_cli_io,
-    escape as _escape,
     paint as _paint,
     plain as _plain,
-    wheel as _wheel,
     with_painted_app as _with_painted_app,
     without_diff_number as _without_diff_number,
 )
 from tests.conftest import scripted_model
 
-"""Transcript, tool card, and diff rendering."""
 
 def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)

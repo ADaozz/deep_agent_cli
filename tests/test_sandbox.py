@@ -17,7 +17,6 @@ from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import (
     BubblewrapBackend,
-    ExecutionMode,
     SandboxUnavailableError,
     WorkspaceCompositeBackend,
     ensure_sandbox_state_dirs,

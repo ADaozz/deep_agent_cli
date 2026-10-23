@@ -83,7 +83,7 @@ asyncio.run(main())
 
 
 class Tui:
-    def __init__(self, tmp_path: Path, playwright=False, page_url="", probe=None, extra_args=()):
+    def __init__(self, tmp_path: Path, playwright=False, page_url="", probe=None, extra_args=()):  # noqa: F811  constructor arg, not the fixture
         # Read the module global at call time: other suites patch _PROBE.
         probe = probe or _PROBE
         self.state = tmp_path / 'state.json'
@@ -217,7 +217,7 @@ def test_real_pty_ctrl_c_window(tui, gap, exits):
 
 
 @pytest.mark.playwright
-def test_real_pty_allow_playwright_flow(tmp_path, page_url):
+def test_real_pty_allow_playwright_flow(tmp_path, page_url):  # noqa: F811  pytest fixture parameter
     from tests.test_playwright_sandbox import _prerequisites
     _prerequisites(tmp_path)  # Explicit prerequisite skip occurs in parent, never after launch failure.
     tui = Tui(tmp_path, playwright=True, page_url=page_url)
@@ -581,7 +581,7 @@ def test_mcp_logs_do_not_corrupt_choice_input_during_resize(tmp_path):
         os.kill(tui.process.pid, signal.SIGWINCH)
         for option in (1, 2, 3):
             tui.send('\x1b[B')
-            state = tui.wait(lambda s: s['option'] == option)
+            state = tui.wait(lambda s, option=option: s['option'] == option)
             assert state['rendered'].count('→') == 1
         tui.send('\r')
         tui.wait(lambda s: s['custom'])
