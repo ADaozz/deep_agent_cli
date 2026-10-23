@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage
 from prompt_toolkit.input.defaults import create_pipe_input
@@ -123,7 +124,9 @@ def test_shutdown_stops_pending_mcp_connections(tmp_path) -> None:
         app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
         app.exit()
         await app.lifecycle.shutdown()
-        assert calls == ["cancel", "cancel"]
+        assert calls == ["cancel"]
+        with pytest.raises(RuntimeError):
+            app._io_executor.submit(lambda: None)
 
     try:
         asyncio.run(scenario())

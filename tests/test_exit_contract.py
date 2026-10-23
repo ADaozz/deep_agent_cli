@@ -37,8 +37,7 @@ class Harness:
         binding.handler(SimpleNamespace(current_buffer=self.app.buffer))
 
     def close(self) -> None:
-        if not self.app._exiting:
-            self.app._io_executor.shutdown(wait=False, cancel_futures=True)
+        self.app._io_executor.shutdown(wait=False, cancel_futures=True)
         self.runner.close()
 
 
