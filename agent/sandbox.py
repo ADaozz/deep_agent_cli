@@ -532,6 +532,19 @@ class _DeniedBackend(BackendProtocol):
         return [FileDownloadResponse(path=path, error=CONFIG_DENIED) for path in paths]
 
 
+@dataclass(frozen=True)
+class _RouteState:
+    """Candidate file-tool routes. Building one must not publish it."""
+
+    default: BackendProtocol
+    routes: dict[str, BackendProtocol]
+    points: tuple[_MountPoint, ...]
+    files: dict[str, _MountPoint]
+    directories: tuple[str, ...]
+    hidden_roots: tuple[Path, ...]
+    install_roots: tuple[Path, ...]
+
+
 class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     """按启动时固定的挂载表路由文件工具，执行仍委托给底层 executor。"""
 
@@ -544,13 +557,13 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.skills_dir = skills_dir
         self._hidden_roots: tuple[Path, ...] = ()
         self._install_roots: tuple[Path, ...] = ()
-        default, routes, points, files, directories = self._route_state()
+        state = self._route_state()
         super().__init__(
-            default=default,
-            routes=routes,
+            default=state.default,
+            routes=state.routes,
             artifacts_root=f"{self.workspace_root}/.deepagents",
         )
-        self._remember_routes(points, files, directories, default)
+        self._publish_route_state(state)
 
     def apply_sandbox_mode(self, mode: SandboxMode) -> None:
         """Switch filesystem mounts on the existing sandbox and drop its processes."""
@@ -562,8 +575,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         skills = _validated_skills_dir(updated.workspace)
         env = sandbox_environment(updated)
         # Build the next file routes before publishing. A failure here leaves
-        # the live config and the current pool alone.
-        default, routes, points, files, directories = self._route_state(config=updated, skills_dir=skills)
+        # the live config, protection cache, and current pool alone.
+        state = self._route_state(config=updated, skills_dir=skills)
         try:
             self.executor.pool.shutdown("sandbox mode changed")
         except Exception as exc:
@@ -574,10 +587,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.executor.skills_dir = skills
         self.skills_dir = skills
         self.executor._env = env
-        self.default = default
-        self.routes = routes
-        self.sorted_routes = sorted(routes.items(), key=lambda item: len(item[0]), reverse=True)
-        self._remember_routes(points, files, directories, default)
+        self._publish_route_state(state)
 
     def _remember_routes(
         self,
@@ -592,11 +602,19 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.exact_file_mounts = frozenset(files)
         self._denied = getattr(default, "denied", CONFIG_DENIED)
 
+    def _publish_route_state(self, state: _RouteState) -> None:
+        self.default = state.default
+        self.routes = state.routes
+        self.sorted_routes = sorted(state.routes.items(), key=lambda item: len(item[0]), reverse=True)
+        self._remember_routes(state.points, state.files, list(state.directories), state.default)
+        self._hidden_roots = state.hidden_roots
+        self._install_roots = state.install_roots
+
     def _route_state(
         self,
         config: SandboxConfig | None = None,
         skills_dir: Path | None = None,
-    ) -> tuple[BackendProtocol, dict[str, BackendProtocol], tuple[_MountPoint, ...], dict[str, _MountPoint], list[str]]:
+    ) -> _RouteState:
         executor = self.executor
         if config is None:
             config = getattr(executor, "config", None)
@@ -627,14 +645,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                     root_dir=skills_dir, virtual_mode=True, max_file_size_mb=10,
                 )
                 directories.append(SKILLS_ROOT)
-        self._hidden_roots = ()
-        self._install_roots = ()
+        hidden_roots: tuple[Path, ...] = ()
+        install_roots: tuple[Path, ...] = ()
         if full_access and isinstance(config, SandboxConfig):
-            self._install_roots = agent_install_paths()
+            install_roots = agent_install_paths()
             hidden = [sandbox_config_dir(config)]
             hidden.extend(path for path in config.protected_files if path.is_dir())
-            self._hidden_roots = tuple(dict.fromkeys(hidden))
-            for root in self._install_roots:
+            hidden_roots = tuple(dict.fromkeys(hidden))
+            for root in install_roots:
                 if root.is_dir():
                     routes[f"{root.as_posix()}/"] = _ReadOnlyFilesystemBackend(root, reason=INSTALL_READ_ONLY)
                     directories.append(root.as_posix())
@@ -644,7 +662,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                         PurePosixPath(root.as_posix()), root, True, True,
                     )
             denied = _DeniedBackend()
-            for root in self._hidden_roots:
+            for root in hidden_roots:
                 routes[f"{root.as_posix()}/"] = denied
                 directories.append(root.as_posix())
             for path in config.protected_files:
@@ -655,7 +673,15 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             default: BackendProtocol = FilesystemBackend(root_dir=Path("/"), virtual_mode=True, max_file_size_mb=10)
         else:
             default = _OutsideWorkspaceBackend(tuple(directories), tuple(files))
-        return default, routes, active_points, files, directories
+        return _RouteState(
+            default=default,
+            routes=routes,
+            points=active_points,
+            files=files,
+            directories=tuple(directories),
+            hidden_roots=hidden_roots,
+            install_roots=install_roots,
+        )
 
     @property
     def supports_regex_search(self) -> bool:

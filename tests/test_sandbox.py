@@ -1551,6 +1551,214 @@ def test_mode_switch_does_not_publish_when_preparation_fails(
     assert composite.executor.config.mode == original
 
 
+def _full_access_composite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[WorkspaceCompositeBackend, Path, Path, Path]:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    config_dir = home / ".deep-agent"
+    (config_dir / "sandbox").mkdir(parents=True)
+    secret = config_dir / "config.yaml"
+    secret.write_text("api-key")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = outside / "secret-link"
+    link.symlink_to(secret)
+    escaped = workspace / "secret-link"
+    escaped.symlink_to(secret)
+    config = replace(config_for(workspace), bwrap_path="/bin/true", mode="full-access")
+    composite = select_backend(config, check=False).backend
+    assert isinstance(composite, WorkspaceCompositeBackend)
+    return composite, secret, link, escaped
+
+
+def test_failed_switch_to_restricted_keeps_full_access_protections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composite, secret, link, escaped = _full_access_composite(tmp_path, monkeypatch)
+    assert "not accessible" in (composite.read(str(secret)).error or "")
+    assert "not accessible" in (composite.read(str(link)).error or "")
+    assert "escapes" in (composite.read(str(escaped)).error or "")
+    install = composite._install_roots[0]
+    probe = install / "_sandbox_mode_probe.py"
+    try:
+        assert composite.write(str(probe), "nope").error
+        assert not probe.exists()
+        routes, default = composite.routes, composite.default
+        hidden, installs = composite._hidden_roots, composite._install_roots
+        assert hidden and installs
+
+        def stuck(_reason: str) -> None:
+            raise RuntimeError("pool stuck")
+
+        monkeypatch.setattr(composite.executor.pool, "shutdown", stuck)
+        with pytest.raises(RuntimeError, match="did not stop"):
+            composite.apply_sandbox_mode("restricted")
+        assert composite.executor.config.mode == "full-access"
+        assert composite.routes is routes and composite.default is default
+        assert composite._hidden_roots == hidden and composite._install_roots == installs
+        assert "not accessible" in (composite.read(str(secret)).error or "")
+        assert "not accessible" in (composite.read(str(link)).error or "")
+        assert "escapes" in (composite.read(str(escaped)).error or "")
+        assert composite.write(str(probe), "nope").error
+        assert not probe.exists()
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def test_route_build_failure_leaves_protections_and_does_not_stop_the_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    composite, secret, _link, _escaped = _full_access_composite(tmp_path, monkeypatch)
+    hidden, installs = composite._hidden_roots, composite._install_roots
+    routes = composite.routes
+    stops: list[str] = []
+
+    def mid(_point, _executor):  # type: ignore[no-untyped-def]
+        raise RuntimeError("route failed mid-build")
+
+    def stopped(reason: str) -> None:
+        stops.append(reason)
+
+    monkeypatch.setattr("agent.sandbox._directory_backend", mid)
+    monkeypatch.setattr(composite.executor.pool, "shutdown", stopped)
+    with pytest.raises(RuntimeError, match="route failed mid-build"):
+        composite.apply_sandbox_mode("restricted")
+    assert stops == []
+    assert composite.executor.config.mode == "full-access"
+    assert composite.routes is routes
+    assert composite._hidden_roots == hidden and composite._install_roots == installs
+    assert composite.read(str(secret)).error
+
+
+def test_failed_switch_to_full_access_does_not_open_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.sandbox_mounts import render_launch_manifest
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    composite = select_backend(
+        replace(config_for(workspace), bwrap_path="/bin/true", mode="restricted"), check=False,
+    ).backend
+    assert isinstance(composite, WorkspaceCompositeBackend)
+    assert composite.write(str(outside / "marker.txt"), "no").error
+    routes = composite.routes
+    assert composite._hidden_roots == () and composite._install_roots == ()
+
+    def stuck(_reason: str) -> None:
+        raise RuntimeError("pool stuck")
+
+    monkeypatch.setattr(composite.executor.pool, "shutdown", stuck)
+    with pytest.raises(RuntimeError, match="did not stop"):
+        composite.apply_sandbox_mode("full-access")
+    assert composite.executor.config.mode == "restricted"
+    assert composite.routes is routes
+    assert composite._hidden_roots == () and composite._install_roots == ()
+    assert composite.write(str(outside / "marker.txt"), "no").error
+    manifest = render_launch_manifest(composite.executor.config, skills_dir=composite.skills_dir, rg_path=None)
+    assert "Sandbox filesystem: restricted" in manifest
+    assert not (outside / "marker.txt").exists()
+
+
+def test_successful_mode_round_trip_publishes_matching_protections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.sandbox_mounts import render_launch_manifest
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = home / ".deep-agent" / "config.yaml"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("api-key")
+    composite = select_backend(
+        replace(config_for(workspace), bwrap_path="/bin/true", mode="restricted"), check=False,
+    ).backend
+    assert isinstance(composite, WorkspaceCompositeBackend)
+    composite.apply_sandbox_mode("full-access")
+    assert composite.executor.config.mode == "full-access"
+    assert composite._hidden_roots and composite._install_roots
+    assert composite.write(str(outside / "marker.txt"), "yes").error is None
+    assert composite.read(str(secret)).error
+    full = render_launch_manifest(composite.executor.config, skills_dir=composite.skills_dir, rg_path=None)
+    assert "Sandbox filesystem: full-access" in full
+    composite.apply_sandbox_mode("restricted")
+    assert composite.executor.config.mode == "restricted"
+    assert composite._hidden_roots == () and composite._install_roots == ()
+    assert composite.write(str(outside / "again.txt"), "no").error
+    restricted = render_launch_manifest(composite.executor.config, skills_dir=composite.skills_dir, rg_path=None)
+    assert "Sandbox filesystem: restricted" in restricted
+    assert not (outside / "again.txt").exists()
+
+
+def test_runner_reports_sandbox_switch_failure_without_applying_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from langchain_core.messages import AIMessage
+
+    from agent.control import RunController
+    from agent.factory import AgentSpec, build_agent
+    from agent.permission import PermissionMode
+    from tests.conftest import scripted_model
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    config = replace(config_for(workspace), bwrap_path="/bin/true")
+    prepared = build_agent(
+        AgentSpec(sandbox=config, skills=()),
+        scripted_model([AIMessage(content="done")]),
+        PermissionMode.ASK,
+        None,
+        RunController(),
+        lambda: False,
+        backend_selection=select_backend(config, check=False),
+    )
+    runner = AgentRunner(prepared=prepared, thread_id="sandbox-switch-fail")
+    events: list[RunEvent] = []
+
+    def stuck(_reason: str) -> None:
+        raise RuntimeError("pool stuck")
+
+    monkeypatch.setattr(runner.prepared.backend.executor.pool, "shutdown", stuck)
+    runner.request_sandbox_mode("full-access")
+    runner._apply_pending_runtime_config(events.append)
+    assert runner.sandbox_mode() == "restricted"
+    assert runner.pending_sandbox_mode() is None
+    assert [event.type for event in events] == ["runtime_config_failed"]
+    assert "did not stop" in events[0].content
+    assert runner.prepared.backend.write(str(outside), "opened").error
+    assert not outside.exists()
+
+
+def test_sandbox_mode_publish_stays_on_the_runner_operation() -> None:
+    """File tools and route publish are not overlapped by the runner.
+
+    ``_apply_sandbox_mode`` runs inside ``_apply_pending_runtime_config`` on the
+    graph thread between steps, or while the idle operation lock is held, and
+    inside session restore on that same operation. Publishing the route tuple
+    is therefore not concurrent with a file-tool call from this runner.
+    """
+    import inspect
+
+    from agent.runner import AgentRunner as Runner
+
+    assert "_apply_sandbox_mode" in inspect.getsource(Runner._apply_pending_runtime_config)
+    assert "apply_sandbox_mode" in inspect.getsource(Runner._restore_configured_sandbox_mode)
+
+
 def test_dev_bind_rejected_on_read_only_mounts(tmp_path: Path) -> None:
     config = replace(
         config_for(tmp_path),
