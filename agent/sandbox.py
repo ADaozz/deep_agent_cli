@@ -46,6 +46,7 @@ from deepagents.backends.protocol import (
 )
 
 from agent.config import SAFE_INHERITED_ENV, BindMount, SandboxConfig, SandboxMode, default_skills_dir
+from agent.sandbox_mounts import effective_user_mounts
 from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxPool, SandboxStartError
 
 
@@ -260,9 +261,10 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
     also be mounted at several paths with different permissions; file tools
     then judge read-only versus read-write by the path the caller used.
     """
+    read_only, read_write = effective_user_mounts(config)
     ordered: list[tuple[Path, str, bool]] = [(config.workspace, sandbox_workspace_root(config.workspace), False)]
-    ordered.extend((mount.source, mount.destination, True) for mount in config.extra_read_only_mounts)
-    ordered.extend((mount.source, mount.destination, False) for mount in config.extra_read_write_mounts)
+    ordered.extend((mount.source, mount.destination, True) for mount in read_only)
+    ordered.extend((mount.source, mount.destination, False) for mount in read_write)
     if skills_dir is not None:
         ordered.append((skills_dir, SKILLS_ROOT, False))
 
@@ -557,12 +559,21 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
         updated = replace(config, mode=mode)
         _validate_config(updated)
+        skills = _validated_skills_dir(updated.workspace)
+        env = sandbox_environment(updated)
+        # Build the next file routes before publishing. A failure here leaves
+        # the live config and the current pool alone.
+        default, routes, points, files, directories = self._route_state(config=updated, skills_dir=skills)
+        try:
+            self.executor.pool.shutdown("sandbox mode changed")
+        except Exception as exc:
+            raise RuntimeError(
+                f"sandbox mode was not changed; the current sandbox did not stop: {exc}"
+            ) from exc
         self.executor.config = updated
-        self.executor.skills_dir = _validated_skills_dir(updated.workspace)
-        self.skills_dir = self.executor.skills_dir
-        self.executor._env = sandbox_environment(updated)
-        self.executor.pool.shutdown("sandbox mode changed")
-        default, routes, points, files, directories = self._route_state()
+        self.executor.skills_dir = skills
+        self.skills_dir = skills
+        self.executor._env = env
         self.default = default
         self.routes = routes
         self.sorted_routes = sorted(routes.items(), key=lambda item: len(item[0]), reverse=True)
@@ -583,10 +594,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
 
     def _route_state(
         self,
+        config: SandboxConfig | None = None,
+        skills_dir: Path | None = None,
     ) -> tuple[BackendProtocol, dict[str, BackendProtocol], tuple[_MountPoint, ...], dict[str, _MountPoint], list[str]]:
         executor = self.executor
-        config = getattr(executor, "config", None)
-        skills_dir = self.skills_dir
+        if config is None:
+            config = getattr(executor, "config", None)
+        if skills_dir is None:
+            skills_dir = self.skills_dir
         points = _mount_points(config, skills_dir) if isinstance(config, SandboxConfig) else ()
         expose_mounts = isinstance(executor, BubblewrapBackend)
         full_access = expose_mounts and isinstance(config, SandboxConfig) and config.mode == "full-access"
@@ -1175,9 +1190,10 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         # After runtime mounts so a workspace under /usr or /tmp stays reachable
         # at its real path and remains writable.
         args += ["--bind", str(self.config.workspace.expanduser().resolve()), self.workspace_root]
-        for mount in self.config.extra_read_only_mounts:
+        read_only, read_write = effective_user_mounts(self.config)
+        for mount in read_only:
             args += _mount_args("--ro-bind", mount, workspace_root=self.workspace_root)
-        for mount in self.config.extra_read_write_mounts:
+        for mount in read_write:
             flag = "--dev-bind" if mount.dev_bind else "--bind"
             args += _mount_args(flag, mount, workspace_root=self.workspace_root)
         if self.skills_dir is not None:
@@ -1333,7 +1349,8 @@ def _full_access_created_dirs(
     if skills_dir is not None:
         _mark_missing_mount(SKILLS_ROOT, created)
     created.add("/run/deep-agent")
-    for mount in (*config.extra_read_only_mounts, *config.extra_read_write_mounts):
+    read_only, read_write = effective_user_mounts(config)
+    for mount in (*read_only, *read_write):
         destination = str(PurePosixPath(mount.destination))
         if Path(destination).exists():
             continue
@@ -1461,10 +1478,11 @@ def _validate_full_access(config: SandboxConfig, workspace: Path, skills: Path |
     for path in installs:
         if path == Path("/") or path == workspace or _is_within(path, workspace):
             raise ValueError("full-access cannot protect an install path that contains the workspace")
-    for mount in (*config.extra_read_only_mounts, *config.extra_read_write_mounts):
+    read_only, read_write = effective_user_mounts(config)
+    for mount in (*read_only, *read_write):
         source = mount.source.expanduser().resolve()
         destination = PurePosixPath(mount.destination)
-        writable = mount in config.extra_read_write_mounts
+        writable = mount in read_write
         if _path_inside_config(source, config_dir, skills):
             raise ValueError(f"extra mount cannot expose the agent configuration directory: {source}")
         if any(destination == PurePosixPath(path.as_posix()) for path in (config_dir, *config.protected_files)):
@@ -1500,9 +1518,10 @@ def _validate_config(config: SandboxConfig) -> Path:
         raise ValueError("sandbox state directories must be outside the workspace")
     if config.mode == "full-access":
         _validate_full_access(config, workspace, skills)
-    for mount in config.extra_read_only_mounts:
+    read_only, read_write = effective_user_mounts(config)
+    for mount in read_only:
         _mount_args("--ro-bind", mount, workspace_root=sandbox_workspace_root(workspace))
-    for mount in config.extra_read_write_mounts:
+    for mount in read_write:
         _mount_args("--bind", mount, workspace_root=sandbox_workspace_root(workspace))
     _mount_points(replace(config, workspace=workspace), skills)
     for name in (*config.env_allowlist, *config.env_set):

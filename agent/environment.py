@@ -115,11 +115,14 @@ class EnvironmentFingerprint:
 
 
 def environment_fingerprint(config: SandboxConfig) -> EnvironmentFingerprint:
+    from agent.sandbox_mounts import effective_user_mounts
+
     env = sandbox_environment(config)
+    read_only, read_write = effective_user_mounts(config)
     mounts = tuple(
-        (str(mount.source), mount.destination, "ro") for mount in config.extra_read_only_mounts
+        (str(mount.source), mount.destination, "ro") for mount in read_only
     ) + tuple(
-        (str(mount.source), mount.destination, "rw") for mount in config.extra_read_write_mounts
+        (str(mount.source), mount.destination, "rw") for mount in read_write
     )
     return EnvironmentFingerprint(
         mode=config.mode,

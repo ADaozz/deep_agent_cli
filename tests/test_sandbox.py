@@ -1480,6 +1480,77 @@ def test_dev_bind_extra_mount_overlays_sandbox_dev(
     assert args.index("--dev") < args.index("--dev-bind")
 
 
+def test_mode_scoped_dev_bind_is_absent_from_restricted_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    scoped = BindMount(Path("/dev"), "/dev", dev_bind=True, modes=("full-access",))
+    restricted = replace(config_for(workspace), bwrap_path="/bin/true", mode="restricted", extra_read_write_mounts=(scoped,))
+    opened = replace(restricted, mode="full-access")
+    legacy = replace(restricted, extra_read_write_mounts=(BindMount(Path("/dev"), "/dev", dev_bind=True),))
+    restricted_args = select_backend(restricted, check=False).backend.executor.sandbox_args()
+    opened_args = select_backend(opened, check=False).backend.executor.sandbox_args()
+    legacy_args = select_backend(legacy, check=False).backend.executor.sandbox_args()
+    assert ("--dev-bind", "/dev", "/dev") not in list(zip(restricted_args, restricted_args[1:], restricted_args[2:]))
+    assert ("--dev-bind", "/dev", "/dev") in list(zip(opened_args, opened_args[1:], opened_args[2:]))
+    assert ("--dev-bind", "/dev", "/dev") in list(zip(legacy_args, legacy_args[1:], legacy_args[2:]))
+
+
+def test_launch_manifest_names_policy_not_a_live_mount_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.sandbox_mounts import render_launch_manifest
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    config = replace(
+        config_for(workspace),
+        mode="restricted",
+        extra_read_write_mounts=(BindMount(Path("/dev"), "/dev", dev_bind=True, modes=("full-access",)),),
+    )
+    text = render_launch_manifest(config, skills_dir=None, pending_mode="full-access", rg_path=None)
+    assert "Sandbox filesystem: restricted" in text
+    assert "Pending mode: full-access" in text
+    assert "effective launch policy" in text
+    assert "[private]" in text
+    assert "host dev-bind" not in text
+    full = render_launch_manifest(replace(config, mode="full-access"), skills_dir=None, rg_path=None)
+    assert "Sandbox filesystem: full-access" in full
+    assert "host dev-bind" in full
+    assert "Pending mode: none" in full
+
+
+def test_mode_switch_does_not_publish_when_preparation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    composite = select_backend(replace(config_for(workspace), bwrap_path="/bin/true"), check=False).backend
+    assert isinstance(composite, WorkspaceCompositeBackend)
+    original = composite.executor.config.mode
+    original_route = composite._route_state
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("route failed")
+
+    monkeypatch.setattr(composite, "_route_state", explode)
+    with pytest.raises(RuntimeError, match="route failed"):
+        composite.apply_sandbox_mode("full-access")
+    assert composite.executor.config.mode == original
+
+    def stuck(_reason: str) -> None:
+        raise RuntimeError("pool stuck")
+
+    monkeypatch.setattr(composite, "_route_state", original_route)
+    monkeypatch.setattr(composite.executor.pool, "shutdown", stuck)
+    with pytest.raises(RuntimeError, match="did not stop"):
+        composite.apply_sandbox_mode("full-access")
+    assert composite.executor.config.mode == original
+
+
 def test_dev_bind_rejected_on_read_only_mounts(tmp_path: Path) -> None:
     config = replace(
         config_for(tmp_path),
