@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import warnings
+from types import SimpleNamespace
 
 import pytest
 from deepagents.backends import StateBackend
@@ -304,6 +305,84 @@ def test_mcp_connect_exit_clears_busy_once(tmp_path) -> None:
         runner.close()
 
 
+def test_session_wait_exit_ignores_a_late_switch_result(tmp_path) -> None:
+    store = SessionStore(tmp_path / "late-wait.sqlite3")
+    holder = _runner(store)
+    holder.invoke("held")
+    target = holder.thread_id
+    waiter = _runner(store)
+    started, release = threading.Event(), threading.Event()
+
+    def late(session_id: str, *, cancelled: object = None) -> object:
+        started.set()
+        release.wait(3)
+        return SimpleNamespace(
+            transcript=[],
+            model_metrics_history=[],
+            notices=[],
+            info=SimpleNamespace(id=session_id, last_run_status=SimpleNamespace(value="stop")),
+        )
+
+    waiter.complete_session_switch = late  # type: ignore[method-assign]
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(waiter, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        await app.resume_session(target[:8])
+        assert app.sessions.waiting
+        assert await asyncio.to_thread(started.wait, 2)
+        app.exit()
+        release.set()
+        task = app.sessions.wait_task
+        assert task is not None
+        await asyncio.wait_for(task, 2)
+        assert not app.sessions.waiting
+        assert app.interaction is None
+        assert all("Resumed session" not in getattr(block, "content", "") for block in app.state.blocks)
+        assert store.try_acquire_session(target) is None
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+        pipe.__exit__(None, None, None)
+        holder.close()
+        waiter.close()
+        store.close()
+
+
+def test_session_wait_escape_reopens_the_picker(tmp_path) -> None:
+    store = SessionStore(tmp_path / "esc-wait.sqlite3")
+    holder = _runner(store)
+    holder.invoke("held")
+    target = holder.thread_id
+    waiter = _runner(store)
+    pipe = create_pipe_input()
+    pipe.__enter__()
+
+    async def scenario() -> None:
+        app = CliApplication(waiter, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        await app.resume_session(target[:8])
+        assert app.sessions.waiting
+        app.sessions.cancel_wait()
+        await asyncio.wait_for(app.sessions.wait_task, 2)
+        assert not app.sessions.waiting
+        assert app.lifecycle.phase is ExitPhase.ACTIVE
+        assert app.interaction is not None and app.interaction.kind == "resume"
+        assert store.try_acquire_session(target) is None
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pipe.__exit__(None, None, None)
+        holder.close()
+        waiter.close()
+        store.close()
+
+
 def test_session_wait_exit_cancels_the_wait_and_keeps_the_holder(tmp_path) -> None:
     store = SessionStore(tmp_path / "wait.sqlite3")
     holder = _runner(store)
@@ -321,7 +400,7 @@ def test_session_wait_exit_cancels_the_wait_and_keeps_the_holder(tmp_path) -> No
         app.exit()
         await app.lifecycle.shutdown(task_timeout=2)
         assert not app.sessions.waiting
-        assert app.interaction is not None and app.interaction.kind == "resume"
+        assert app.interaction is None
         assert waiter._runtime.lease is None
         assert store.try_acquire_session(target) is None
 

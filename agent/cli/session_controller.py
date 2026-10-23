@@ -74,6 +74,8 @@ class SessionController:
 
     async def resume(self, arg: str = "") -> None:
         app = self._app
+        if app.lifecycle.exiting:
+            return
         if app.state.running:
             app.set_status("Cancel the active run before switching sessions")
             return
@@ -87,6 +89,8 @@ class SessionController:
         if arg.strip():
             app._restore_queued_to_editor(app.buffer)
             await self._switch_with_wait(arg.strip())
+            return
+        if app.lifecycle.exiting:
             return
         sessions = self._sessions_with_content(limit=50)
         if not sessions:
@@ -157,7 +161,10 @@ class SessionController:
         try:
             result = await app._run_blocking(app.runner.begin_session_switch, session_id)
         except (KeyError, RuntimeError) as exc:
-            app.state.add_system(str(exc), error=True)
+            if not app.lifecycle.exiting:
+                app.state.add_system(str(exc), error=True)
+            return
+        if app.lifecycle.exiting:
             return
         if result.busy:
             self._enter_wait(result.target_id)
@@ -168,6 +175,8 @@ class SessionController:
     def _enter_wait(self, target_id: str) -> None:
         """Detach into a visible wait for a session busy in another window."""
         app = self._app
+        if app.lifecycle.exiting:
+            return
         self._wait_target = target_id
         self._wait_cancelled = False
         app.interaction = None
@@ -190,10 +199,15 @@ class SessionController:
             )
         except (KeyError, RuntimeError) as exc:
             self._wait_target = None
-            app.state.add_system(str(exc), error=True)
-            app.set_status("Session switch failed")
+            if not app.lifecycle.exiting:
+                app.state.add_system(str(exc), error=True)
+                app.set_status("Session switch failed")
             return
         self._wait_target = None
+        if app.lifecycle.exiting:
+            # Exit cancelled the wait. Esc is the only path that reopens the picker.
+            # A switch that already took the lease stays with the runner.
+            return
         if snapshot is None:
             # Cancelled: the runner stays detached, so the picker (or /new) must
             # choose the next session explicitly.
