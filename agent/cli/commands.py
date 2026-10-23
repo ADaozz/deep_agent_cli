@@ -116,4 +116,4 @@ async def _mcp(app: "CliApplication", arg: str) -> None:
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:
-    app.exit()
+    app.request_command_exit()

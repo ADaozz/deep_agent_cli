@@ -29,7 +29,7 @@
 
 ## 输入决策的当前优先级
 
-按键映射在 `agent/cli/input.py` 的 `Keymap`。决策仍写在 `CliApplication._build_bindings()`。双击退出窗口只有 `CliApplication._last_ctrl_c` 一处，长度是 `CTRL_C_EXIT_WINDOW_SECONDS`（1 秒）。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。
+按键映射在 `agent/cli/input.py` 的 `Keymap`。`Esc`、`Ctrl+C`、`Ctrl+D` 和 `/exit` 的优先级只在 `InputActionRouter` 决定；`CliApplication.apply_input_action()` 执行界面操作。双击退出窗口只有路由器的 `last_ctrl_c` 一处，长度是 `EXIT_WINDOW_SECONDS`（1 秒），`CliApplication._last_ctrl_c` 只是它的只读视图。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。
 
 `Ctrl+C`（`clear_or_exit`）：
 

@@ -81,6 +81,12 @@ from agent.permission import (
     allow_mode_unavailable_reason,
     parse_permission_mode,
 )
+from agent.cli.input_actions import (
+    EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
+    InputAction,
+    InputActionRouter,
+    InputView,
+)
 from agent.performance import model_metric_groups
 from agent.mcp.logging import MCPLogHandler
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
@@ -88,7 +94,6 @@ from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, Unknow
 # Workspace/model and execution settings on the left; git/context on the right.
 FOOTER_LINES = 2
 INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
-CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 STATUS_NOTICE_SECONDS = 1.0
 
 _RUN_EPOCH: ContextVar[int | None] = ContextVar("deep_agent_tui_run_epoch", default=None)
@@ -431,7 +436,7 @@ class CliApplication:
         self._run_epoch = 0
         self._cancel_sent = False
         self._compacting = False
-        self._last_ctrl_c: float | None = None
+        self._input_actions = InputActionRouter()
         self._status_notice_handle: asyncio.TimerHandle | None = None
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
@@ -1476,6 +1481,113 @@ class CliApplication:
         self.state.usage = dict(self.runner.latest_usage())
         self.application.invalidate()
 
+    @property
+    def _last_ctrl_c(self) -> float | None:
+        """Double-press clock. Owned by InputActionRouter; exposed for existing checks."""
+        return self._input_actions.last_ctrl_c
+
+    def _input_view(self, buffer: Buffer) -> InputView:
+        text = buffer.text
+        interaction = self.interaction
+        return InputView(
+            has_interaction=interaction is not None,
+            custom_entry=bool(interaction is not None and interaction.custom_entry),
+            completion_open=buffer.complete_state is not None,
+            slash_line=text.startswith("/") and "\n" not in text,
+            transcript_away=self.transcript_away_from_bottom(),
+            session_waiting=self.sessions.waiting,
+            reviewing=self._reviewing,
+            compacting=self._compacting,
+            running=self.state.running,
+            cancel_sent=self._cancel_sent,
+            mcp_busy=getattr(self, "_mcp_busy", False),
+            buffer_empty=not text,
+            exiting=self._exiting,
+        )
+
+    def apply_input_action(self, action: InputAction, buffer: Buffer) -> None:
+        """Perform one decision from InputActionRouter. Does not choose another."""
+        if action is InputAction.NONE:
+            return
+        if action is InputAction.DISMISS_COMPLETION:
+            # Dismiss the menu without cancel_completion restoring its pre-selection document.
+            buffer.complete_state = None
+            self.application.invalidate()
+            return
+        if action is InputAction.CLEAR_SLASH_LINE:
+            self.slash_completer.accepted_text = None
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.application.invalidate()
+            return
+        if action is InputAction.FOLLOW_TRANSCRIPT:
+            self.follow_transcript()
+            return
+        if action is InputAction.CANCEL_COMPLETION:
+            buffer.cancel_completion()
+            return
+        if action is InputAction.CANCEL_SESSION_WAIT:
+            self.sessions.cancel_wait()
+            return
+        if action is InputAction.CLOSE_REVIEW:
+            self._close_review()
+            return
+        if action is InputAction.EXIT_CUSTOM_ENTRY:
+            assert self.interaction is not None
+            self.interaction.custom_entry = False
+            self.interaction.error = ""
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.application.invalidate()
+            return
+        if action is InputAction.CANCEL_INTERACTION:
+            self._finish_interaction(cancelled=True)
+            return
+        if action is InputAction.WAIT_FOR_COMPACTION:
+            self.set_status("Wait for compaction to finish")
+            return
+        if action is InputAction.CANCEL_ALREADY_SENT:
+            self.set_status("Cancelling… waiting for the run to stop", transient=False)
+            self.application.invalidate()
+            return
+        if action is InputAction.CANCEL_RUN:
+            restored = self._restore_queued_to_editor(buffer)
+            self._cancel_sent = True
+            self.runner.request_cancel()
+            if restored:
+                self.set_status("Cancelling… · queued messages restored", transient=False)
+            else:
+                self.set_status("Cancelling…", transient=False)
+            self.application.invalidate()
+            return
+        if action is InputAction.MCP_STILL_RUNNING:
+            self.set_status(
+                "MCP is still running in the background; wait for completion or timeout",
+                transient=False,
+            )
+            self.application.invalidate()
+            return
+        if action is InputAction.CLEAR_INPUT:
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.state.attachments.clear()
+            self._show_input_cleared_hint()
+            return
+        if action is InputAction.REQUEST_EXIT:
+            self.exit()
+            return
+        if action is InputAction.DELETE_AFTER_CURSOR:
+            buffer.delete()
+            return
+        raise AssertionError(f"Unhandled input action: {action}")
+
+    def request_command_exit(self) -> None:
+        """`/exit` uses the same exit action as an empty Ctrl+D."""
+        self.apply_input_action(self._input_actions.decide_exit_command(), self.buffer)
+
     def exit(self) -> None:
         if self._exiting:
             return
@@ -2010,78 +2122,24 @@ class CliApplication:
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
-            if self.interaction is None and event.current_buffer.complete_state is not None:
-                # Dismiss the menu without cancel_completion restoring its pre-selection document.
-                event.current_buffer.complete_state = None
-                self.application.invalidate()
-            elif self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
-                self.slash_completer.accepted_text = None
-                event.current_buffer.reset()
-                self._pasted_content.clear()
-                self._skill_draft.clear()
-                self.application.invalidate()
-            elif self.transcript_away_from_bottom():
-                self.follow_transcript()
-            elif event.current_buffer.complete_state is not None:
-                event.current_buffer.cancel_completion()
-            elif self.sessions.waiting:
-                self.sessions.cancel_wait()
-            elif self._reviewing:
-                self._close_review()
-            elif self.interaction is not None and self.interaction.custom_entry:
-                self.interaction.custom_entry = False
-                self.interaction.error = ""
-                event.current_buffer.reset()
-                self._pasted_content.clear()
-                self._skill_draft.clear()
-                self.application.invalidate()
-            elif self.interaction is not None:
-                self._finish_interaction(cancelled=True)
-            elif self._compacting:
-                self.set_status("Wait for compaction to finish")
-            elif self.state.running:
-                restored = self._restore_queued_to_editor(event.current_buffer)
-                if self._cancel_sent:
-                    self.set_status("Cancelling… waiting for the run to stop", transient=False)
-                    self.application.invalidate()
-                    return
-                self._cancel_sent = True
-                self.runner.request_cancel()
-                if restored:
-                    self.set_status("Cancelling… · queued messages restored", transient=False)
-                else:
-                    self.set_status("Cancelling…", transient=False)
-                self.application.invalidate()
-
-            elif getattr(self, "_mcp_busy", False):
-                self.set_status(
-                    "MCP is still running in the background; wait for completion or timeout",
-                    transient=False,
-                )
-                self.application.invalidate()
+            buffer = event.current_buffer
+            action = self._input_actions.decide_interrupt(self._input_view(buffer))
+            self.apply_input_action(action, buffer)
 
         @bind("clear_or_exit")
         def ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
-            if self.interaction is not None:
-                self._finish_interaction(cancelled=True)
-                return
+            buffer = event.current_buffer
             now = time.monotonic()
-            if self._last_ctrl_c is not None and now - self._last_ctrl_c < CTRL_C_EXIT_WINDOW_SECONDS:
-                self.exit()
-                return
-            event.current_buffer.reset()
-            self._pasted_content.clear()
-            self._skill_draft.clear()
-            self.state.attachments.clear()
-            self._last_ctrl_c = now
-            self._show_input_cleared_hint()
+            action = self._input_actions.decide_clear_or_exit(self._input_view(buffer), now)
+            self.apply_input_action(action, buffer)
+            if action is InputAction.CLEAR_INPUT:
+                self._input_actions.arm_clear(now)
 
         @bind("exit")
         def ctrl_d(event) -> None:  # type: ignore[no-untyped-def]
-            if not event.current_buffer.text:
-                self.exit()
-            else:
-                event.current_buffer.delete()
+            buffer = event.current_buffer
+            action = self._input_actions.decide_ctrl_d(self._input_view(buffer))
+            self.apply_input_action(action, buffer)
 
         @bind("tools_expand")
         def tools_expand(event) -> None:  # type: ignore[no-untyped-def]
