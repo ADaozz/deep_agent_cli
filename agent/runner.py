@@ -1,4 +1,5 @@
-# Stream the compiled graph, classify LangGraph interrupts, resume with Command.
+# Stream the compiled graph and resume with Command.
+# Interrupt classification and terminal RunResult / RunEvent construction live in run_events.
 # Token-level reasoning/assistant deltas use LangChain callbacks (ChatOpenAI streaming=True).
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphDrained
 from langgraph.types import Command
@@ -30,7 +31,7 @@ from agent.attachments import (
     ImageAttachmentRef,
     refs_to_dicts,
 )
-from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, parse_sandbox_mode
+from agent.config import InputKind, ModelProfile, SandboxConfig, SandboxMode, Settings, parse_sandbox_mode
 from agent.control import RunController
 from agent.environment import (
     EnvironmentCache, bubblewrap_backend, probe_sandbox, reset_environment_cache, set_environment_cache,
@@ -39,7 +40,7 @@ from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.sandbox import WorkspaceCompositeBackend
 from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
-from agent.llm_stream import ModelStreamCancelled, reset_stream_owner, set_stream_owner
+from agent.llm_stream import reset_stream_owner, set_stream_owner
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
 from agent.run_events import (
@@ -50,7 +51,7 @@ from agent.run_events import (
     RunEventHandler,
     RunResult,
     TurnTiming,
-    UnknownInterruptError,
+    UnknownInterruptError as UnknownInterruptError,
     _emit,
     _final_output,
     _last_message_id,
@@ -66,8 +67,7 @@ from agent.run_events import (
     update_tool_events,
     interrupt_kind_from_state,
     interrupt_payloads,
-    is_valid_hitl_interrupt,
-    resolve_pending_tool_calls,
+    is_valid_hitl_interrupt as is_valid_hitl_interrupt,
 )
 from agent.permission import (
     PermissionMode,
@@ -191,10 +191,12 @@ class AgentRunner:
         self._pending_reasoning_effort: str | None = None
         self._pending_model_id: str | None = None
         self._pending_permission_mode: PermissionMode | None = None
-        configured_mode = self._sandbox_config.mode if self._sandbox_config is not None else "restricted"
+        configured_mode: SandboxMode = (
+            self._sandbox_config.mode if self._sandbox_config is not None else "restricted"
+        )
         self._configured_sandbox_mode = configured_mode
         self._sandbox_mode = configured_mode
-        self._pending_sandbox_mode: str | None = None
+        self._pending_sandbox_mode: SandboxMode | None = None
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._environment = EnvironmentCache()
@@ -347,14 +349,14 @@ class AgentRunner:
         with self._pending_config_lock:
             return self._pending_permission_mode
 
-    def sandbox_mode(self) -> str:
+    def sandbox_mode(self) -> SandboxMode:
         return self._sandbox_mode
 
-    def pending_sandbox_mode(self) -> str | None:
+    def pending_sandbox_mode(self) -> SandboxMode | None:
         with self._pending_config_lock:
             return self._pending_sandbox_mode
 
-    def request_sandbox_mode(self, mode: str) -> str:
+    def request_sandbox_mode(self, mode: str) -> SandboxMode:
         if self._closed:
             raise RuntimeError("Runner is closed")
         self._require_active_session()
@@ -541,15 +543,15 @@ class AgentRunner:
                         "mcp_changed": applied_mcp},
             ))
 
-    def _apply_sandbox_mode(self, mode: str) -> None:
+    def _apply_sandbox_mode(self, mode: SandboxMode) -> None:
         backend = self.prepared.backend
         if not isinstance(backend, WorkspaceCompositeBackend):
             raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
-        backend.apply_sandbox_mode(mode)  # type: ignore[arg-type]
+        backend.apply_sandbox_mode(mode)
         if self._sandbox_config is not None:
-            self._sandbox_config = replace(self._sandbox_config, mode=mode)  # type: ignore[arg-type]
+            self._sandbox_config = replace(self._sandbox_config, mode=mode)
         if self._spec.sandbox is not None:
-            self._spec = replace(self._spec, sandbox=replace(self._spec.sandbox, mode=mode))  # type: ignore[arg-type]
+            self._spec = replace(self._spec, sandbox=replace(self._spec.sandbox, mode=mode))
 
     def supports_input(self, kind: InputKind) -> bool:
         profile = self.current_model()
@@ -949,7 +951,7 @@ class AgentRunner:
             return
         backend = self.prepared.backend
         if isinstance(backend, WorkspaceCompositeBackend):
-            backend.apply_sandbox_mode(self._configured_sandbox_mode)  # type: ignore[arg-type]
+            backend.apply_sandbox_mode(self._configured_sandbox_mode)
         self._sandbox_mode = self._configured_sandbox_mode
 
     def _apply_restore_plan(self, plan: RestorePlan) -> None:

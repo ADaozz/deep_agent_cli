@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sysconfig
 import time
+from typing import cast
 import uuid
 
 from agent.cancel import emit_tool_output, get_cancel_context
@@ -34,6 +35,7 @@ from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
     FileDownloadResponse,
+    FileInfo,
     FileUploadResponse,
     GlobResult,
     GrepResult,
@@ -676,8 +678,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         return any(_component_within(destination, root) and destination.rstrip("/") != root.rstrip("/")
                    for root in self._directory_roots)
 
-    def _file_info(self, point: _MountPoint) -> dict[str, object]:
-        info: dict[str, object] = {"path": point.virtual, "is_dir": False}
+    def _file_info(self, point: _MountPoint) -> FileInfo:
+        info: FileInfo = {"path": point.virtual, "is_dir": False}
         try:
             stat_result = point.source.stat()
         except OSError:
@@ -689,18 +691,18 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     def _present_ls(self, path: str, result: LsResult) -> LsResult:
         if path != "/" or result.error or not result.entries or not self._file_mounts:
             return result
-        entries: list[dict[str, object]] = []
+        entries: list[FileInfo] = []
         for entry in result.entries:
             route = str(entry.get("path", "")).rstrip("/")
             point = self._file_mounts.get(route)
             if point is None:
-                entries.append(dict(entry))
+                entries.append(cast(FileInfo, dict(entry)))
                 continue
             if self._covered_by_directory(route):
                 continue
             entries.append(self._file_info(point))
         entries.sort(key=lambda item: str(item.get("path", "")))
-        return LsResult(entries=entries)  # type: ignore[arg-type]
+        return LsResult(entries=entries)
 
     def ls(self, path: str) -> LsResult:
         normalized = path.rstrip("/") or "/"
@@ -725,14 +727,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             return destination[len(base):].lstrip("/")
         return None
 
-    def _uncovered_file_matches(self, pattern: str, path: str | None) -> list[dict[str, object]]:
+    def _uncovered_file_matches(self, pattern: str, path: str | None) -> list[FileInfo]:
         if not self._file_mounts:
             return []
         try:
             matcher = compile_grep_include_glob(pattern)
         except InvalidGlobPatternError:
             return []
-        matches: list[dict[str, object]] = []
+        matches: list[FileInfo] = []
         for destination, point in self._file_mounts.items():
             if self._covered_by_directory(destination):
                 continue
@@ -755,7 +757,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         matches = [*(result.matches or []), *extra]
         matches.sort(key=lambda item: str(item.get("path", "")))
         return GlobResult(
-            matches=matches,  # type: ignore[arg-type]
+            matches=matches,
             truncated=result.truncated,
             truncation_reason=result.truncation_reason,
         )
@@ -802,7 +804,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         result = host.ls("/")
         if result.error:
             return result
-        entries = [dict(entry) for entry in result.entries or []]
+        entries: list[FileInfo] = [cast(FileInfo, dict(entry)) for entry in result.entries or []]
         seen = {str(entry.get("path", "")).rstrip("/") or "/" for entry in entries}
         for route in self.routes:
             prefix = route.rstrip("/") or "/"
@@ -813,7 +815,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             entries.append({"path": prefix, "is_dir": True, "size": 0, "modified_at": ""})
             seen.add(prefix)
         entries.sort(key=lambda item: str(item.get("path", "")))
-        return LsResult(entries=entries)  # type: ignore[arg-type]
+        return LsResult(entries=entries)
 
     def _hidden_roots_text(self) -> tuple[str, ...]:
         return tuple(path.as_posix() for path in self._hidden_roots)

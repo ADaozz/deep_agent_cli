@@ -72,8 +72,10 @@ _SANDBOX_MODES = frozenset({"restricted", "full-access"})
 
 def parse_sandbox_mode(value: str) -> SandboxMode | None:
     key = value.strip().lower()
-    if key in _SANDBOX_MODES:
-        return key  # type: ignore[return-value]
+    if key == "restricted":
+        return "restricted"
+    if key == "full-access":
+        return "full-access"
     return None
 
 
@@ -504,7 +506,11 @@ def _grouped_llm_profiles(
             field = f"llm.models.{source}.models.{name}"
             if not isinstance(item, Mapping):
                 raise ValueError(f"{field} must be a mapping")
-            def inherited(key: str) -> Any:
+            def inherited(
+                key: str,
+                item: Mapping[Any, Any] = item,
+                group: Mapping[Any, Any] = group,
+            ) -> Any:
                 return item.get(key, group.get(key))
             model_name = item.get("model", name)
             if not isinstance(model_name, str) or not model_name.strip():
@@ -574,7 +580,15 @@ def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:
         raise ValueError(f"{field_name} contains unsupported input kinds: {', '.join(unknown)}")
     if "text" not in result:
         raise ValueError(f"{field_name} must include text")
-    return result  # type: ignore[return-value]
+    kinds: list[InputKind] = []
+    for item in result:
+        if item == "text":
+            kinds.append("text")
+        elif item == "image":
+            kinds.append("image")
+        else:
+            raise ValueError(f"{field_name} contains unsupported input kinds: {item}")
+    return tuple(kinds)
 
 
 def _reject_removed_protocol_fields(mapping: Mapping[str, Any], *, field_name: str) -> None:
@@ -634,9 +648,12 @@ def _model_context_window(value: Any, *, field_name: str) -> int:
 def _sandbox_mode(value: Any) -> SandboxMode:
     if value is None:
         return "restricted"
-    if not isinstance(value, str) or value.strip().lower() not in _SANDBOX_MODES:
+    if not isinstance(value, str):
         raise ValueError("sandbox.mode must be restricted or full-access")
-    return value.strip().lower()  # type: ignore[return-value]
+    parsed = parse_sandbox_mode(value)
+    if parsed is None:
+        raise ValueError("sandbox.mode must be restricted or full-access")
+    return parsed
 
 
 def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> SandboxConfig:

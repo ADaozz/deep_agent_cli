@@ -10,6 +10,7 @@ import atexit
 import base64
 from collections import deque
 from concurrent.futures import Future
+import io
 import itertools
 import json
 import logging
@@ -296,9 +297,11 @@ class PersistentSandbox:
             _killpg(self.process.pid)
 
     def _read_stderr(self) -> None:
-        assert self.process is not None and self.process.stderr is not None
+        assert self.process is not None
+        stderr = self.process.stderr
+        assert isinstance(stderr, io.BufferedReader)
         try:
-            for chunk in iter(lambda: self.process.stderr.read1(4096), b""):  # type: ignore[union-attr]
+            for chunk in iter(lambda: stderr.read1(4096), b""):
                 self._stderr.append(chunk)
                 self._stderr_size += len(chunk)
                 while self._stderr_size > _STDERR_LIMIT and len(self._stderr) > 1:

@@ -7,9 +7,10 @@ session lease, model streams, MCP clients, and sandboxes; nothing here calls it.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
@@ -68,13 +69,11 @@ class AppLifecycle:
     def exiting(self) -> bool:
         return self.phase is not ExitPhase.ACTIVE
 
-    def spawn(self, coro: object, *, stop: TaskStop, name: str) -> asyncio.Task[object]:
+    def spawn(self, coro: Coroutine[Any, Any, object], *, stop: TaskStop, name: str) -> asyncio.Task[object]:
         if stop is TaskStop.CANCEL and self.phase is not ExitPhase.ACTIVE:
-            close = getattr(coro, "close", None)
-            if close is not None:
-                close()
+            coro.close()
             return asyncio.create_task(_refuse_ui_task(), name=name)
-        task = asyncio.create_task(coro, name=name)  # type: ignore[arg-type]
+        task = asyncio.create_task(coro, name=name)
         self._tracked.append((task, stop))
         task.add_done_callback(self._forget)
         return task

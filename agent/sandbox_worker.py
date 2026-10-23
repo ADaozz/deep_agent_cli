@@ -31,8 +31,8 @@ POST_EXIT_DRAIN_SECONDS = 0.1
 
 _send_lock = threading.Lock()
 _running_lock = threading.Lock()
-_running = {}
-_killed_before_start = set()
+_running: dict[int, subprocess.Popen[bytes]] = {}
+_killed_before_start: set[int] = set()
 _control_out = -1
 
 

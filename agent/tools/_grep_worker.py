@@ -9,6 +9,7 @@ O_NOFOLLOW, so swapping a directory for a symlink cannot escape the mount.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
@@ -278,9 +279,14 @@ def search_file(fd: int, virtual: str, payload: dict, matcher) -> None:
 
 
 def run(payload: dict) -> None:
+    matcher: Callable[[str], object]
     if payload["fixed_string"]:
         literal = payload["pattern"]
-        matcher = lambda line: literal in line  # noqa: E731
+
+        def contains(line: str) -> bool:
+            return literal in line
+
+        matcher = contains
     else:
         matcher = re.compile(payload["pattern"]).search
     rules = parse_globs(payload["globs"])

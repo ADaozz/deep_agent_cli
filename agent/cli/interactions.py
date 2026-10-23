@@ -150,15 +150,16 @@ class InteractionController:
         fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
         if not fields:
             fields = [{"id": "text", "type": "textarea", "label": "Reply", "required": True, "options": []}]
-        fields = [dict(field) for field in fields]
-        for field in fields:
-            if field.get("type") == "boolean" and not field.get("options"):
-                field["options"] = [
+        fields = [dict(item) for item in fields]
+        for item in fields:
+            if item.get("type") == "boolean" and not item.get("options"):
+                item["options"] = [
                     {"value": False, "label": "No", "description": ""},
                     {"value": True, "label": "Yes", "description": ""},
                 ]
-            elif field.get("type") in {"single_select", "multi_select"}:
-                field["options"] = ensure_other_option(field.get("options") or [])
+            elif item.get("type") in {"single_select", "multi_select"}:
+                item["options"] = ensure_other_option(item.get("options") or [])
+        raw_recommendation = payload.get("recommendation")
         return cls(
             kind="human",
             title=str(payload.get("title") or "Input required"),
@@ -166,7 +167,7 @@ class InteractionController:
             reason=str(payload.get("reason") or ""),
             fields=fields,
             interaction_id=str(payload.get("interactionId") or ""),
-            recommendation=payload.get("recommendation") if isinstance(payload.get("recommendation"), dict) else {},
+            recommendation=raw_recommendation if isinstance(raw_recommendation, dict) else {},
             impact=[str(item) for item in payload.get("impact", [])],
         )
 
@@ -177,7 +178,8 @@ class InteractionController:
         details: list[str] = []
         for call in calls:
             name = " ".join(str(call.get("name") or "tool").split())[:80]
-            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            raw_args = call.get("args")
+            args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
             details.append(f"Tool: {name}")
             if name == "execute":
                 if network_requested(args):
@@ -285,6 +287,7 @@ class InteractionController:
         field_id = str(field.get("id") or f"field_{self.index}")
         field_type = str(field.get("type") or "text")
         options = field.get("options") or []
+        value: Any
         if self.custom_entry:
             custom = text.strip()
             if not custom:
@@ -298,9 +301,9 @@ class InteractionController:
                 selected.append(custom)
                 self.values[field_id] = selected
                 return False
-            value: Any = custom
+            value = custom
         elif field_type in {"text", "textarea"}:
-            value: Any = text.strip()
+            value = text.strip()
         elif field_type == "multi_select":
             if options and options[self.option_index].get("allowsCustomText") and field_id not in self.custom_values:
                 self.custom_entry = True

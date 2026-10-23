@@ -103,8 +103,9 @@ def model_metric_groups(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key = (str(metrics.get("model") or "unknown"), str(metrics.get("reasoning_effort") or "default"))
         group = groups.setdefault(key, {"model": key[0], "reasoning_effort": key[1], "samples": []})
         value = metrics.get("tps")
-        if type(value) in {int, float} and isfinite(value) and value >= 0:
-            group["samples"].append(float(value))
+        if type(value) is int or type(value) is float:
+            if isfinite(value) and value >= 0:
+                group["samples"].append(float(value))
     for group in groups.values():
         samples = sorted(group.pop("samples"))
         count = (len(samples) + 19) // 20

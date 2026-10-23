@@ -277,7 +277,7 @@ def _http_url(name: str, value: Any) -> str:
     url = value.strip()
     try:
         parsed = urlparse(url)
-        parsed.port  # Validate malformed authority/ports without echoing the URL.
+        _ = parsed.port  # Validate malformed authority/ports without echoing the URL.
     except ValueError:
         raise MCPConfigError(f"MCP server {name} has an invalid URL authority") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

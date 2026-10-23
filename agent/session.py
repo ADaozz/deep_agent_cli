@@ -347,13 +347,17 @@ def _session_info(row: Any) -> SessionInfo:
 
 
 def _status_for_reason(reason: StopReason) -> SessionStatus:
-    return {
-        StopReason.PENDING: "running",
-        StopReason.STOP: "completed",
-        StopReason.ERROR: "failed",
-        StopReason.ABORTED: "cancelled",
-        StopReason.DEFERRED: "waiting",
-    }[reason]
+    if reason is StopReason.PENDING:
+        return "running"
+    if reason is StopReason.STOP:
+        return "completed"
+    if reason is StopReason.ERROR:
+        return "failed"
+    if reason is StopReason.ABORTED:
+        return "cancelled"
+    if reason is StopReason.DEFERRED:
+        return "waiting"
+    raise KeyError(reason)
 
 
 def tool_message_is_error(message: ToolMessage) -> bool:
