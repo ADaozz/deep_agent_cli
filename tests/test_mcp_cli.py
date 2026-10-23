@@ -175,7 +175,7 @@ def test_approval_card_shows_host_config_without_guessing_credentials() -> None:
     assert "INTERNAL_MCP_TOKEN" in bearer.question
     remove = InteractionController.approval([{"name": "mcp_remove", "args": {"name": "secret-server"}}])
     assert "secret-server" in remove.question
-    assert "unchanged" in remove.question
+    assert "no change" in remove.question
 
 
 @async_test

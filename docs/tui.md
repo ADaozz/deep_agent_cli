@@ -70,9 +70,6 @@ MCP: Disabled
 
 3 servers configured.
 Connections and tools are inactive.
-
-Commands:
-  /mcp enable
 ```
 
 Agent 正在运行或仍有待决审批时，`/mcp disable` 只排队，并说明当前操作会先完成、工具要到下一个安全点才移除。工具表真正切换之后才显示上面的 `MCP: Disabled`。待决审批保留，不会被丢弃。空闲时会立即重建 Graph。`/mcp enable` 写回配置后自动连接已启用的服务，并在安全点恢复 MCP 工具。

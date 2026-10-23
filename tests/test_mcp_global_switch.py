@@ -394,13 +394,13 @@ async def test_mcp_commands_queue_disable_and_restore_on_enable(tmp_path: Path, 
         app.state.running = True
         await handle_mcp_command(app, "disable")
         queued = app.state.blocks[-1].content
-        assert "MCP disable queued." in queued
+        assert "MCP disable queued" in queued
         assert "next safe point" in queued
         assert "MCP: Disabled" not in queued
         assert "mcp__local__echo" in graph_tool_names(runner.prepared.graph)
         app.state.running = False
         await handle_mcp_command(app, "")
-        assert "MCP disable queued." in app.state.blocks[-1].content
+        assert "MCP disable queued" in app.state.blocks[-1].content
         from agent.cli.mcp_ui import _apply_when_idle
 
         await _apply_when_idle(app)

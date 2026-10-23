@@ -23,14 +23,9 @@ ASK_INTERRUPT_ON: dict[str, Any] = {
 }
 
 PERMISSION_ALLOW_WARNING = (
-    "HIGH RISK: Permission mode ALLOW auto-approves all tool calls and any "
-    "capabilities they declare (including file writes and deletes), and runs "
-    "every execute with the sandbox network OPEN: full host network access "
-    "(internet, localhost, LAN). There is no per-call confirmation for those "
-    "tools, including host MCP calls and mcp_add / mcp_remove. MCP commands "
-    "run on the host, outside the sandbox. Switching back to ask only "
-    "restores approval for later commands; already running sandbox processes "
-    "keep going. Only enable this if the agent is running in a SANDBOXED backend."
+    "HIGH RISK. Auto-approves every tool, including writes, deletes, and host MCP. "
+    "execute runs with the sandbox network open. MCP runs on the host, outside the sandbox. "
+    "Switching back to ask does not stop work already running. SANDBOXED only."
 )
 
 

@@ -1370,7 +1370,7 @@ class CliApplication:
             fields=[{
                 "id": "confirm",
                 "type": "text",
-                "label": 'Type ALLOW to confirm auto-approve + sandbox network open',
+                "label": "Type ALLOW to confirm",
                 "required": True,
                 "options": [],
             }],

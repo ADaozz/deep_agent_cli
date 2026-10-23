@@ -12,7 +12,7 @@ from agent.runner import InterruptKind
 
 _USAGE = "Usage: /mcp, /mcp enable, /mcp disable, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>"
 _DISABLED_HINT = "MCP is disabled. Run /mcp enable first."
-_MCP_OPERATION_RUNNING = "MCP operation running; connections and OAuth have a timeout"
+_MCP_OPERATION_RUNNING = "MCP operation running"
 
 
 async def handle_mcp_command(app: Any, arg: str) -> None:
@@ -100,13 +100,10 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         draft["transport"] = str(interaction.values.get("transport") or "")
         app._mcp_draft = draft
         if draft["transport"] == "stdio":
-            question = (
-                "Command and arguments. This process runs on the host, outside the sandbox. "
-                "Example: python server.py --port 8000"
-            )
+            question = "Host command, outside the sandbox. Example: python server.py"
             label = "Host command"
         else:
-            question = "Streamable HTTP endpoint, for example https://mcp.example.com/mcp"
+            question = "URL, for example https://mcp.example.com/mcp"
             label = "URL"
         app.interaction = InteractionController(
             kind="mcp_target",
@@ -125,7 +122,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         app.interaction = InteractionController(
             kind="mcp_auth",
             title="Add MCP server",
-            question="Authentication. Tokens stay in the environment; OAuth is confirmed in the browser.",
+            question="Bearer uses an environment variable. OAuth opens a browser.",
             fields=[{
                 "id": "auth", "type": "single_select", "label": "Auth", "required": True,
                 "options": [
@@ -144,7 +141,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
             app.interaction = InteractionController(
                 kind="mcp_token",
                 title="Add MCP server",
-                question="Environment variable name that holds the bearer token. Do not paste the token.",
+                question="Environment variable name. Do not paste the token.",
                 fields=[{"id": "token_env", "type": "text", "label": "Environment variable", "required": True, "options": []}],
             )
             app.set_status("Enter the variable name · Enter confirm · Esc cancel", transient=False)
@@ -173,7 +170,7 @@ def _begin_add(app: Any) -> None:
     app.interaction = InteractionController(
         kind="mcp_name",
         title="Add MCP server",
-        question="Server name. It must be unique. Cancel leaves the configuration unchanged.",
+        question="Unique server name.",
         fields=[{"id": "name", "type": "text", "label": "Name", "required": True, "options": []}],
     )
     app.set_status("Name the server · Enter confirm · Esc cancel", transient=False)
@@ -193,8 +190,8 @@ def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
         fields=[{
             "id": "confirm", "type": "single_select", "label": "Save", "required": True,
             "options": [
-                {"value": "cancel", "label": "Cancel", "description": "Do not change the configuration"},
-                {"value": "add", "label": "Add server", "description": "Save and test the connection"},
+                {"value": "cancel", "label": "Cancel", "description": "No change"},
+                {"value": "add", "label": "Add server", "description": "Save and connect"},
             ],
         }],
     )
@@ -204,17 +201,16 @@ def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
 def _summary(draft: dict[str, str]) -> str:
     lines = [f"Name: {draft.get('name', '')}", f"Transport: {draft.get('transport', '')}"]
     if draft.get("transport") == "stdio":
-        lines.append("This command will run on the host, outside the sandbox:")
+        lines.append("Host command, outside the sandbox:")
         lines.append(draft.get("target") or "<missing command>")
     else:
         lines.append("URL: " + draft.get("target", ""))
         auth = draft.get("auth") or "none"
         lines.append(f"Auth: {auth}")
         if auth == "bearer":
-            lines.append(f"Token environment variable: {draft.get('token_env', '')}")
-        if auth == "oauth":
-            lines.append("OAuth opens a browser. The agent cannot approve it for you.")
-    lines.append("Cancel does not change the configuration.")
+            lines.append(f"Token variable: {draft.get('token_env', '')}")
+        elif auth == "oauth":
+            lines.append("OAuth opens a browser.")
     return "\n".join(lines)
 
 
@@ -298,9 +294,7 @@ async def _wait_operation(app: Any, task: asyncio.Task | None) -> None:
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        app.state.add_system(
-            "MCP wait cancelled. The background operation is still running until completion or timeout."
-        )
+        app.state.add_system("Wait cancelled. The MCP operation is still running.")
 
 
 def _apply_when_idle_worker(runner: Any) -> list[Any] | None:
@@ -332,26 +326,14 @@ def disabled_status_text(manager: Any) -> str:
         "",
         summary,
         "Connections and tools are inactive.",
-        "",
-        "Commands:",
-        "  /mcp enable",
     ])
 
 
 def _queued_switch_text(enabled: bool, *, approval: bool) -> str:
     action = "enable" if enabled else "disable"
-    follow = (
-        "MCP tools will be added at the next safe point."
-        if enabled else
-        "MCP tools will be removed at the next safe point."
-    )
-    lines = [
-        f"MCP {action} queued.",
-        "Current operation will finish first.",
-        follow,
-    ]
+    lines = [f"MCP {action} queued until the next safe point.", "Finish the current operation first."]
     if approval:
-        lines.append("Resolve the pending approval before the MCP tool list can change.")
+        lines.append("Resolve the pending approval first.")
     return "\n".join(lines)
 
 
@@ -580,15 +562,6 @@ def _enabled_listing(manager: Any) -> tuple[str, tuple[tuple[int, int, str], ...
             spans.append((status_start, status_start + len(status), color))
             lines.append(line)
             offset += len(line) + 1
-    lines.extend([
-        "",
-        "Commands:",
-        "  /mcp disable",
-        "  /mcp add",
-        "  /mcp remove <name>",
-        "  /mcp test <name>",
-        "  /mcp tools <name>",
-    ])
     return "\n".join(lines), tuple(spans)
 
 

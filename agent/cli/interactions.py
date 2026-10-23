@@ -207,10 +207,10 @@ class InteractionController:
                 auth = str(args.get("auth_type") or "none")
                 token_env = str(args.get("token_env") or "")
                 details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))
-                details.append("Saves an MCP server on the host. Reject leaves the configuration unchanged.")
+                details.append("Saves on the host. Reject makes no change.")
             elif name == "mcp_remove":
                 details.append(f"Remove host MCP server: {_mcp_approval_summary(str(args.get('name') or '<not supplied>'))}")
-                details.append("Reject leaves the configuration unchanged.")
+                details.append("Reject makes no change.")
             elif name.startswith("mcp__"):
                 details.append("Execution: Host (outside sandbox)")
                 details.append("Arguments:\n" + mcp_arguments_preview(call.get("args", {})))

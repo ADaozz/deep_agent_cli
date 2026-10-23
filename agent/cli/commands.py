@@ -33,17 +33,17 @@ def command_table() -> tuple[Command, ...]:
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),
         Command(
             "permission",
-            "Tool approval including MCP: ask or allow (auto-approve all tools + sandbox network open, HIGH RISK)",
+            "Tool approval: ask, or allow (auto-approve, network open, HIGH RISK)",
             _permission,
         ),
         Command(
             "sandbox",
-            "Filesystem mode: restricted (default) or full-access (writes the real filesystem, HIGH RISK)",
+            "Filesystem: restricted, or full-access (HIGH RISK)",
             _sandbox,
         ),
         Command(
             "mcp",
-            "Host MCP servers (/mcp, enable, disable, add, remove <name>, test <name>, tools <name>)",
+            "MCP servers: enable, disable, add, remove, test, tools",
             _mcp,
         ),
         Command("exit", "Exit DeepAgent", _exit),
