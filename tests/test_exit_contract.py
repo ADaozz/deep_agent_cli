@@ -16,6 +16,7 @@ from prompt_toolkit.output import DummyOutput
 
 from agent.cli.app import INPUT_CLEARED_HINT, CliApplication
 from agent.cli.interactions import InteractionController
+from agent.cli.lifecycle import TaskStop
 from agent.runner import AgentRunner
 from agent.session import SessionStore
 from tests.conftest import scripted_model
@@ -185,6 +186,26 @@ def test_slash_exit_uses_exit_entry(cli: Harness) -> None:
     asyncio.run(invoke(2))
     assert cli.app._exiting
     assert cli.left == [True]
+    assert cli.cancels == [1]
+
+
+def test_exit_does_not_start_another_ui_task(cli: Harness) -> None:
+    cli.app.state.running = True
+    cli.app.exit()
+
+    async def scenario() -> None:
+        ran: list[int] = []
+
+        async def helper() -> None:
+            ran.append(1)
+
+        task = cli.app.lifecycle.spawn(helper(), stop=TaskStop.CANCEL, name="clipboard-paste")
+        await task
+        assert ran == []
+
+    asyncio.run(scenario())
+    assert cli.cancels == [1]
+    cli.app.exit()
     assert cli.cancels == [1]
 
 

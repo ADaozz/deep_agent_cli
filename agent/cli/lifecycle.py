@@ -70,6 +70,9 @@ class AppLifecycle:
 
     def spawn(self, coro: object, *, stop: TaskStop, name: str) -> asyncio.Task[object]:
         if stop is TaskStop.CANCEL and self.phase is not ExitPhase.ACTIVE:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
             return asyncio.create_task(_refuse_ui_task(), name=name)
         task = asyncio.create_task(coro, name=name)  # type: ignore[arg-type]
         self._tracked.append((task, stop))

@@ -30,7 +30,7 @@
 
 ## 输入决策的当前优先级
 
-按键映射在 `agent/cli/input.py` 的 `Keymap`。`Esc`、`Ctrl+C`、`Ctrl+D` 和 `/exit` 的优先级只在 `InputActionRouter` 决定；`CliApplication.apply_input_action()` 执行界面操作。双击退出窗口只有路由器的 `last_ctrl_c` 一处，长度是 `EXIT_WINDOW_SECONDS`（1 秒），`CliApplication._last_ctrl_c` 只是它的只读视图。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。
+按键映射在 `agent/cli/input.py` 的 `Keymap`。`Esc`、`Ctrl+C`、`Ctrl+D` 和 `/exit` 的优先级只在 `InputActionRouter` 决定；`CliApplication.apply_input_action()` 执行界面操作。双击退出窗口只有路由器的 `last_ctrl_c` 一处，长度是 `EXIT_WINDOW_SECONDS`（1 秒），`CliApplication._last_ctrl_c` 只是它的只读视图。打开中的交互被 `Ctrl+C` 关掉时不武装这个窗口。退出请求已经发出后，不再创建剪贴板、斜杠命令这类界面辅助任务；重复的退出请求不会再走一遍资源通知。此时 `Esc` 仍按原来的优先级处理，运行标记还在时可以再请求一次 Run Cancel。
 
 `Ctrl+C`（`clear_or_exit`）：
 
@@ -82,4 +82,4 @@
 | TUI 退出本身不释放租约；`Runner.close()` 成功后才释放 | `test_ui_exit_keeps_the_session_lease` |
 | 一个 Session 的取消不影响另一个 Session 的模型流 | `test_cancelling_one_session_leaves_concurrent_streams_intact` |
 
-会话恢复只加载已有消息和待处理交互，不自动调用模型。快照展示只在 `SessionController.apply_snapshot`。`CliApplication._apply_session_snapshot` 只转发给它。恢复、等待和租约见 `tests/test_session_switch.py`、`tests/test_session_lock.py` 和 `tests/test_cli.py` 中的 resume 用例。模型、权限、沙箱和 MCP 工具表的空闲应用走 `AgentRunner.apply_pending_config_if_idle()`，CLI 不再自己拿运行锁。MCP 操作是否进行中、操作代号和开关锁在 `MCPController`，不再挂在临时属性上。
+会话恢复只加载已有消息和待处理交互，不自动调用模型。快照展示只在 `SessionController.apply_snapshot`。`CliApplication._apply_session_snapshot` 只转发给它。恢复、等待和租约见 `tests/test_session_switch.py`、`tests/test_session_lock.py` 和 `tests/test_cli.py` 中的 resume 用例。模型、权限、沙箱和 MCP 工具表的空闲应用走 `AgentRunner.apply_pending_config_if_idle()`，CLI 不再自己拿运行锁。MCP 操作是否进行中、操作代号、开关锁，以及工具表发布的 revision 和结果都在 `MCPController`。添加服务的草稿仍留在界面上。同一 revision 失败或已经发布后不会自动再发；更新的 revision 可以再发。

@@ -25,6 +25,7 @@ def test_escape_during_exit_still_reaches_a_running_cancel() -> None:
     """exit() does not mark cancel_sent, so Esc can request cancel again."""
     router = InputActionRouter()
     assert router.decide_interrupt(InputView(exiting=True, running=True)) is InputAction.CANCEL_RUN
+    assert router.decide_interrupt(InputView(exiting=True)) is InputAction.NONE
 
 
 def test_ctrl_c_window_is_armed_only_by_the_router() -> None:

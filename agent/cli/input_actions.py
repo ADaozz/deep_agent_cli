@@ -61,6 +61,14 @@ class InputActionRouter:
         self.last_ctrl_c: float | None = None
 
     def decide_interrupt(self, view: InputView) -> InputAction:
+        # Exit in progress does not add another shutdown. Esc still follows
+        # the same chain, so a run that is still marked active can be cancelled.
+        if view.exiting and not any((
+            view.has_interaction, view.completion_open, view.slash_line,
+            view.transcript_away, view.session_waiting, view.reviewing,
+            view.compacting, view.running, view.mcp_busy,
+        )):
+            return InputAction.NONE
         if not view.has_interaction and view.completion_open:
             return InputAction.DISMISS_COMPLETION
         if not view.has_interaction and view.slash_line:
