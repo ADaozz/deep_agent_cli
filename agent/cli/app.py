@@ -1299,6 +1299,21 @@ class CliApplication:
         self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
+    def _show_sandbox_mounts(self) -> None:
+        from agent.sandbox_mounts import render_launch_manifest
+
+        backend = getattr(self.runner.prepared, "backend", None)
+        executor = getattr(backend, "executor", None)
+        config = getattr(executor, "config", None) or self.runner._sandbox_config
+        if config is None:
+            self.state.add_system("Sandbox mount policy is not available for this backend.", error=True)
+            return
+        skills = getattr(backend, "skills_dir", None)
+        self.state.add_system(render_launch_manifest(
+            config, skills_dir=skills, pending_mode=self.runner.pending_sandbox_mode(),
+        ))
+        self.application.invalidate()
+
     async def select_sandbox(self, arg: str = "") -> None:
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status(), transient=False)
@@ -1307,11 +1322,14 @@ class CliApplication:
             self.set_status("Finish the current interaction before changing sandbox mode")
             return
         raw = arg.strip()
+        if raw == "mounts":
+            self._show_sandbox_mounts()
+            return
         if raw:
             mode = parse_sandbox_mode(raw)
             if mode is None:
                 self.state.add_system(
-                    "Unknown sandbox mode. Use /sandbox restricted or /sandbox full-access",
+                    "Unknown sandbox mode. Use /sandbox restricted, /sandbox full-access, or /sandbox mounts",
                     error=True,
                 )
                 return

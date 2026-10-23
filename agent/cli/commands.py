@@ -38,7 +38,7 @@ def command_table() -> tuple[Command, ...]:
         ),
         Command(
             "sandbox",
-            "Filesystem: restricted, or full-access (HIGH RISK)",
+            "Filesystem: restricted, full-access (HIGH RISK), or mounts",
             _sandbox,
         ),
         Command(
