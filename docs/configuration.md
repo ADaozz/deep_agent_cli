@@ -250,7 +250,7 @@ web_search:
 | `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。固定系统文件列表里没有的路径也写在这里，例如 CentOS 的 `/etc/pki` 挂到同名路径。SANDBOXED 下文件工具按只读使用同一目标。不能设 `dev_bind` |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上，另可设 `dev_bind: true`，对该条使用 `--dev-bind`，用来挂宿主 `/dev` 或单个设备节点。普通 `--bind` 带 `nodev`，打不开 USB 串口。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
-表中的默认值是代码内默认值。首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 写成 `full-access`，并用 `dev_bind` 挂宿主 `/dev`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。`sandbox.dev` 已移除，配置里出现时启动失败。
+表中的默认值是代码内默认值。首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 写成 `restricted`。宿主 `/dev` 写在 `extra_read_write_mounts` 里，并带 `modes: [full-access]`，所以新模板的 restricted 使用沙箱私有 `/dev`，切到 full-access 才做宿主 `dev_bind`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，也不会被悄悄改掉。旧配置里没有 `modes` 的 `/dev` 挂载在两种模式都仍然生效；若希望 restricted 不再开放宿主设备，给那一条加上 `modes: [full-access]` 后重启。`sandbox.dev` 已移除，配置里出现时启动失败。
 
 `sandbox.protected_workspace_paths` 与 `sandbox.allow_unsandboxed` 已移除，配置中出现时启动报错。Bubblewrap 不可用时启动失败，没有宿主机执行回退。
 
@@ -269,7 +269,7 @@ web_search:
 
 以上项目是 `restricted` 收窄可见范围时的例子，不是模板的生效配置。路径不存在就跳过，不寻找替代路径，也不表示对应工具已通过运行检查。
 
-模板默认是 `mode: full-access`。宿主目录按真实路径使用；`/dev` 通过 `extra_read_write_mounts` 里 `dev_bind: true` 的 `/dev` → `/dev` 传入。不要设备节点时删掉这一条。`env_allowlist` 含 `PATH` 和 `DISPLAY`，因此命令沿宿主 `PATH` 查找。`env_set` 为空；若在其中写入 `PATH`，会盖住宿主 `PATH`。改成 `restricted` 后，再按需把上表挂载写回配置，并让 `env_set.PATH` 指向这些沙箱路径。程序会将 `/run/deep-agent` 自动放到 `PATH` 最前。配置文件未写 `mode` 时，代码默认仍是 `restricted`。
+模板默认是 `mode: restricted`。`env_allowlist` 仍含 `PATH` 和 `DISPLAY`，但这只是允许传入这些变量，不表示宿主 `PATH` 上的目录已经挂进沙箱。`env_set` 为空。程序会将 `/run/deep-agent` 自动放到 `PATH` 最前。配置文件未写 `mode` 时，代码默认仍是 `restricted`。挂载可以写 `modes: [restricted]`、`[full-access]` 或两者；省略 `modes` 时两种模式都生效。空数组、未知值或重复模式会在加载配置时失败。
 
 `source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
 

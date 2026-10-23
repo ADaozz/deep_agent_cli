@@ -101,4 +101,4 @@
 
 中断分类、工具事件、usage 和终态 `RunResult` 在 `agent/run_events.py`。`RunEvent` 与 `RunResult` 仍从 `agent.runner` 导入。图循环、取消和租约仍在 `AgentRunner`。同一 tool call id 只发一次 `tool_started`。`ToolMessage.artifact` 原样进入 `tool_completed`。只有带 `input_tokens` 的 usage 才算一次输入用量。当前 Run 没有请求取消时，`ModelStreamCancelled` 是失败，不是取消。最终回答已经进入 checkpoint 后，迟到的取消不改写完成结果。
 
-沙箱没有再拆。`agent/sandbox.py` 拥有路径、挂载参数、文件工具路由和单次命令的收集与取消。`agent/sandbox_pool.py` 拥有有网/无网实例的复用和 Runner 关闭时的清理。`agent/sandbox_worker.py` 拥有沙箱内按 request id 执行的一条命令；`kill` 只作用于该命令。这三处的回归仍是 `tests/test_sandbox.py` 和 `tests/test_persistent_sandbox.py`。权限模型、默认挂载模板和工作区路径没有在这一轮改动。
+沙箱执行仍由三个模块负责。`agent/sandbox_mounts.py` 只按当前模式筛选用户挂载，并生成 `/sandbox mounts` 的有效启动策略。`agent/sandbox.py` 拥有路径校验、文件工具路由和单次命令的收集与取消；模式切换先建好候选路由，再停旧 Pool，失败不发布新模式。`agent/sandbox_pool.py` 拥有有网/无网实例的复用和 Runner 关闭时的清理。`agent/sandbox_worker.py` 拥有沙箱内按 request id 执行的一条命令；`kill` 只作用于该命令。新模板默认 `restricted`，宿主 `/dev` 只在 `full-access` 生效。没有 `modes` 的旧挂载两种模式都保留。Runtime Config 仍由 `AgentRunner._apply_pending_runtime_config()` 在同一把锁里准备并发布；图循环里重复的 `runtime_config_boundary` 恢复走 `_resume_config_boundaries()`。

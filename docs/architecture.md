@@ -194,6 +194,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 | 模块 | 负责 | 不负责 |
 |---|---|---|
+| `agent/sandbox_mounts.py` | 按当前模式筛选用户挂载，并生成有效启动策略清单 | 启动沙箱、读取内核挂载表 |
 | `agent/sandbox.py` | 路径校验、挂载参数、文件工具路由、单次命令的输出收集与取消 | 跨会话复用沙箱进程 |
 | `agent/sandbox_pool.py` | 有网和无网实例的懒启动、复用、失效替换，以及关闭 Runner 时的清理 | 改写 restricted / full-access 的挂载规则 |
 | `agent/sandbox_worker.py` | 沙箱内常驻进程，按 request id 执行一条 shell 或 argv；`kill` 只作用于该命令 | import `agent`，或在 Worker 丢失后自动重放命令 |
