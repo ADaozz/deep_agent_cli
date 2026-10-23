@@ -1381,9 +1381,7 @@ class AgentRunner:
 
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
-            while result.status == "runtime_config_boundary":
-                self._apply_pending_runtime_config(event_handler)
-                result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+            result = self._resume_config_boundaries(result, config, run_control, event_handler)
             # Consume queued input at the same run boundary for every client.
             while result.status == "completed" and not self.control.cancel_requested:
                 text = self.control.pop_steering()
@@ -1402,9 +1400,7 @@ class AgentRunner:
                     run_control,
                     event_handler,
                 )
-                while result.status == "runtime_config_boundary":
-                    self._apply_pending_runtime_config(event_handler)
-                    result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+                result = self._resume_config_boundaries(result, config, run_control, event_handler)
             if result.status == "completed":
                 _emit(event_handler, RunEvent(type="run_completed", content=result.output))
                 emit_turn_completed(result.output)
@@ -1423,6 +1419,19 @@ class AgentRunner:
             ):
                 self._resume_context = None
             self._event_handler = None
+
+    def _resume_config_boundaries(
+        self,
+        result: RunResult,
+        config: dict[str, Any],
+        run_control: Any,
+        event_handler: RunEventHandler | None,
+    ) -> RunResult:
+        """Apply a queued runtime change and resume the same run. Not a new generation."""
+        while result.status == "runtime_config_boundary":
+            self._apply_pending_runtime_config(event_handler)
+            result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+        return result
 
     def _refresh_environment_snapshot(self) -> None:
         """Reuse a matching sandbox fingerprint. Probe again only when it changed."""
