@@ -264,7 +264,6 @@ def _start_operation(
             if quiet_success:
                 if not result.ok:
                     app.state.add_system(result.message, error=True)
-                    return
                 if app.runner.mcp.toolset_dirty():
                     await _coalesced_publish(app)
                     if app.runner.mcp.switch_epoch == epoch:

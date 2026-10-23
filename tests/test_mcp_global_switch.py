@@ -51,6 +51,7 @@ class _App:
 
     def set_status(self, text: str, transient: bool = True) -> None:
         self.status = text
+        self.state.status = text
 
 
 def _native(graph: object) -> set[str]:
@@ -950,6 +951,85 @@ async def test_two_blocked_connects_do_not_stall_the_cli_executor(tmp_path: Path
                     await task
             app._io_executor.shutdown(wait=False, cancel_futures=True)
             runner.close()
+
+
+@async_test
+async def test_quiet_connect_publishes_the_server_that_succeeded(tmp_path: Path, monkeypatch) -> None:
+    from langchain_core.tools import StructuredTool
+
+    from agent.cli.mcp_ui import _MCP_OPERATION_RUNNING, _start_operation
+
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "alpha": {"transport": "stdio", "command": "fixture"},
+        "beta": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+
+    class Client:
+        async def close(self) -> None:
+            return None
+
+    def connect(config, _bridge, **_kwargs):
+        if config.name == "beta":
+            raise RuntimeError("beta unreachable")
+
+        def echo() -> str:
+            """Marker from the server that connected."""
+            return "alpha"
+
+        return LoadedServer(Client(), [StructuredTool.from_function(echo, name="mcp__alpha__echo")], [])
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    try:
+        task = _start_operation(app, manager.connect_pending, quiet_success=True)
+        assert task is not None
+        await task
+        assert "mcp__alpha__echo" in graph_tool_names(runner.prepared.graph)
+        assert any(block.is_error and "beta" in block.content for block in app.state.blocks)
+        assert app.status != _MCP_OPERATION_RUNNING
+        assert not app._mcp_busy
+    finally:
+        runner.close()
+        manager.close()
+
+
+@async_test
+async def test_quiet_connect_shows_errors_and_leaves_the_running_status(tmp_path: Path, monkeypatch) -> None:
+    from agent.cli.mcp_ui import _MCP_OPERATION_RUNNING, _start_operation
+
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"servers": {
+        "alpha": {"transport": "stdio", "command": "fixture"},
+        "beta": {"transport": "stdio", "command": "fixture"},
+    }}), encoding="utf-8")
+
+    def connect(_config, _bridge, **_kwargs):
+        raise RuntimeError("unreachable")
+
+    monkeypatch.setattr("agent.mcp.manager.open_server", connect)
+    manager = MCPManager(path)
+    manager.load()
+    runner = _runner(manager)
+    app = _App(runner)
+    try:
+        task = _start_operation(app, manager.connect_pending, quiet_success=True)
+        assert task is not None
+        await task
+        errors = [block.content for block in app.state.blocks if block.is_error]
+        assert errors
+        assert "alpha" in errors[0] and "beta" in errors[0]
+        assert "unreachable" in errors[0]
+        assert app.status == "Ready"
+        assert app.status != _MCP_OPERATION_RUNNING
+        assert app._mcp_quiet_settled
+        assert not app._mcp_busy
+    finally:
+        runner.close()
+        manager.close()
 
 
 def test_partial_batch_reports_superseded(tmp_path: Path, monkeypatch) -> None:
