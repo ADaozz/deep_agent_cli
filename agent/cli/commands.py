@@ -43,7 +43,7 @@ def command_table() -> tuple[Command, ...]:
         ),
         Command(
             "mcp",
-            "Host MCP servers (/mcp, add, remove <name>, test <name>, tools <name>)",
+            "Host MCP servers (/mcp, enable, disable, add, remove <name>, test <name>, tools <name>)",
             _mcp,
         ),
         Command("exit", "Exit DeepAgent", _exit),

@@ -177,14 +177,17 @@ def build_agent(
     compact_middleware = create_summarization_tool_middleware(model, fs_backend)
     mcp_revision: int | None = None
     mcp_tools: list[Any] = []
+    include_mcp = False
     if mcp is not None:
         from agent.mcp.middleware import MCPMiddleware, MCP_HOST_PROMPT
         from agent.mcp.names import host_interrupt_on
 
         mcp_revision, mcp_tools = mcp.snapshot()
-        if permission is PermissionMode.ASK:
-            hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
-        prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
+        include_mcp = bool(mcp.snapshot_includes_mcp(mcp_revision))
+        if include_mcp:
+            if permission is PermissionMode.ASK:
+                hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
+            prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
     try:
         graph = create_deep_agent(
             model=model,
@@ -203,7 +206,7 @@ def build_agent(
                 AttachmentMaterializationMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
                 compact_middleware,
-                *([MCPMiddleware(mcp, mcp_tools)] if mcp is not None else []),
+                *([MCPMiddleware(mcp, mcp_tools)] if include_mcp else []),
                 *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
             ],
             skills=skill_sources,

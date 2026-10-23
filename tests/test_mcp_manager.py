@@ -1,6 +1,7 @@
 """Server lifecycle: several servers, prefixes, failure isolation, process cleanup."""
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 import pytest
@@ -88,8 +89,9 @@ def test_disable_removes_tools_on_the_next_snapshot(tmp_path: Path, http_mcp: Ht
         added = manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url)
         assert added.ok
         assert any(tool.name == "mcp__local__echo" for tool in manager.snapshot()[1])
-        saved = path.read_text(encoding="utf-8").replace('"enabled": true', '"enabled": false', 1)
-        path.write_text(saved, encoding="utf-8")
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        saved["servers"]["local"]["enabled"] = False
+        path.write_text(json.dumps(saved), encoding="utf-8")
         manager.load()
         state = manager.get("local")
         assert state is not None and state.status is ServerStatus.DISABLED

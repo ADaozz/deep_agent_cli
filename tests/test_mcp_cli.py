@@ -63,7 +63,7 @@ def test_existing_commands_stay_registered() -> None:
     listed = list(completer.get_completions(Document("/"), None))
     assert len(listed) == len(command_table())
     subcommands = {item.text for item in completer.get_completions(Document("/mcp "), None)}
-    assert subcommands == {"add", "remove", "test", "tools"}
+    assert subcommands == {"enable", "disable", "add", "remove", "test", "tools"}
 
 
 @async_test

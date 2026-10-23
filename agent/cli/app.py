@@ -211,6 +211,8 @@ class SlashCompleter(Completer):
             candidates.extend((mode, descriptions[mode]) for mode in self.sandbox_modes())
         elif name == "mcp":
             candidates.extend((
+                ("enable", "Enable MCP and connect configured servers"),
+                ("disable", "Disable MCP without deleting servers or tokens"),
                 ("add", "Add a host MCP server"),
                 ("remove", "Remove a configured server"),
                 ("test", "Connect and list tools"),
@@ -709,9 +711,10 @@ class CliApplication:
 
     def _start_mcp_connections(self) -> None:
         manager = getattr(self.runner, "mcp", None)
-        if manager is not None and manager.list_servers():
-            from agent.cli.mcp_ui import _start_operation
-            _start_operation(self, manager.connect_pending)
+        if manager is None or not manager.enabled or not manager.list_servers():
+            return
+        from agent.cli.mcp_ui import _start_operation
+        _start_operation(self, manager.connect_pending, quiet_success=True)
 
     @contextmanager
     def _capture_runtime_logs(self) -> Iterator[None]:
@@ -2446,6 +2449,8 @@ class CliApplication:
                 changes.append(f"permission: {event.result['permission_mode']}")
             if event.result.get("sandbox_changed"):
                 changes.append(f"sandbox: {event.result['sandbox_mode']}")
+            if event.result.get("mcp_changed"):
+                self._announce_mcp_switch()
             if announce:
                 if event.result.get("model_changed") or event.result.get("reasoning_changed"):
                     self.set_status("; ".join(changes))
@@ -2456,6 +2461,14 @@ class CliApplication:
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
         self.application.invalidate()
+
+    def _announce_mcp_switch(self) -> None:
+        """Show the global MCP state only after the rebuilt graph has published it."""
+        from agent.cli.mcp_ui import _announce_published_switch
+
+        if getattr(self.runner, "mcp", None) is None:
+            return
+        _announce_published_switch(self)
 
     def _handle_result(self, result: RunResult) -> None:
         if result.status == "cancelled":
