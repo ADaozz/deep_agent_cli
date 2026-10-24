@@ -58,6 +58,9 @@ llm:
       # 流式无进展超时（秒）。连续这么久没有新的模型 chunk 就重试当前请求。
       # 持续输出不受这个上限约束。0 表示禁用，可在模型项中覆盖。
       stream_chunk_timeout: 120
+      # HTTP 请求超时（秒）。限制连接，以及两次收到网络数据之间的等待，含响应头。
+      # 有数据持续到达时，整轮生成可以超过它。可在模型项中覆盖。
+      timeout: 60
       reasoning_efforts: [none, low, medium, xhigh]
       models:
         qwen3.8-flash:
