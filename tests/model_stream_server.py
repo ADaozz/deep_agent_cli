@@ -2,9 +2,10 @@
 
 The server speaks both Chat Completions and Responses streaming over a real
 socket. Each request consumes one ``Turn``. A turn may stall before its first
-chunk, stall after some chunks, or stream forever; while stalled the handler
-sends nothing and only watches the socket, so it can observe when the client
-closes the connection.
+chunk, stall after some chunks, or stream forever. A silent stall sends nothing.
+``keepalive_interval`` emits SSE comment lines during the stall so a chunk
+timer can be distinguished from a byte-level read timeout. The handler still
+watches the socket and records when the client closes the connection.
 """
 from __future__ import annotations
 
@@ -31,12 +32,14 @@ class Turn:
     # content chunks then stay silent. "forever": keep sending deltas.
     # "disconnect" / "transport_disconnect": EOF / truncated HTTP body after
     # chunks_before_hang SSE events. "disconnect_tool": EOF after partial args.
+    # "hang_tool": partial tool arguments, then the same stall as "hang".
     mode: str = "finish"
     chunks_before_hang: int = 0
     status: int = 200
     retry_after: str = "0.001"
     interval: float = 0.0
     gap_before_text: float = 0.0
+    keepalive_interval: float = 0.0
     usage: dict[str, int] | None = field(
         default_factory=lambda: {"input_tokens": 21, "output_tokens": 7, "total_tokens": 28}
     )
@@ -53,6 +56,7 @@ class Connection:
     closed: threading.Event = field(default_factory=threading.Event)
     first_chunk_sent: threading.Event = field(default_factory=threading.Event)
     hanging: threading.Event = field(default_factory=threading.Event)
+    keepalives_sent: int = 0
 
 
 def _chat_payload(model: str, delta: dict[str, Any] | None = None, *, finish: str | None = None, rid: str = "local",
@@ -184,7 +188,9 @@ class ScriptedSSEServer:
                     return
                 if event is _HANG:
                     connection.hanging.set()
-                    self._watch_until_closed(sock, connection)
+                    self._watch_until_closed(
+                        sock, connection, keepalive=turn.keepalive_interval, writer=handler.wfile,
+                    )
                     return
                 if isinstance(event, _Gap):
                     if self._sleep_or_closed(sock, connection, event.seconds):
@@ -227,12 +233,28 @@ class ScriptedSSEServer:
                 return True
         return False
 
-    def _watch_until_closed(self, sock: socket.socket, connection: Connection) -> None:
+    def _watch_until_closed(
+        self, sock: socket.socket, connection: Connection, *,
+        keepalive: float = 0.0, writer: Any = None,
+    ) -> None:
+        next_keepalive = time.monotonic() + keepalive if keepalive > 0 and writer is not None else None
         while not self._stop.is_set():
-            readable, _, _ = select.select([sock], [], [], 0.02)
+            timeout = 0.02
+            if next_keepalive is not None:
+                timeout = min(timeout, max(0.0, next_keepalive - time.monotonic()))
+            readable, _, _ = select.select([sock], [], [], timeout)
             if readable and self._client_closed(sock):
                 self._mark_closed(connection)
                 return
+            if next_keepalive is not None and time.monotonic() >= next_keepalive:
+                try:
+                    writer.write(b": keepalive\n\n")
+                    writer.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    self._mark_closed(connection)
+                    return
+                connection.keepalives_sent += 1
+                next_keepalive = time.monotonic() + keepalive
         connection.closed.set()
 
     def _events(self, turn: Turn, model: str, rid: str):
@@ -277,14 +299,19 @@ class ScriptedSSEServer:
             delta["reasoning_content" if kind == "reasoning" else "content"] = text
             yield data(_chat_payload(model, delta, rid=rid))
         for index, call in enumerate(turn.tool_calls):
+            arguments = json.dumps(call["args"])
+            if turn.mode in {"disconnect_tool", "hang_tool"}:
+                arguments = arguments[:5]
             delta = {"tool_calls": [{"index": index, "id": call["id"], "type": "function", "function": {
-                "name": call["name"], "arguments": (json.dumps(call["args"])[:5]
-                    if turn.mode == "disconnect_tool" else json.dumps(call["args"]))}}]}
+                "name": call["name"], "arguments": arguments}}]}
             if first:
                 delta["role"] = "assistant"
                 first = False
             yield data(_chat_payload(model, delta, rid=rid))
             if turn.mode == "disconnect_tool":
+                return
+            if turn.mode == "hang_tool":
+                yield _HANG
                 return
         yield data(_chat_payload(model, {}, finish="tool_calls" if turn.tool_calls else "stop", rid=rid))
         if turn.usage is not None:
@@ -317,8 +344,11 @@ class ScriptedSSEServer:
             yield data({"type": "response.output_item.added", "output_index": index, "item": item})
             yield data({"type": "response.function_call_arguments.delta", "output_index": index,
                         "item_id": item["id"], "delta": (json.dumps(call["args"])[:5]
-                            if turn.mode == "disconnect_tool" else json.dumps(call["args"]))})
+                            if turn.mode in {"disconnect_tool", "hang_tool"} else json.dumps(call["args"]))})
             if turn.mode == "disconnect_tool":
+                return
+            if turn.mode == "hang_tool":
+                yield _HANG
                 return
         yield data({"type": "response.completed", "response": _response_body("completed", turn.usage, rid)})
 

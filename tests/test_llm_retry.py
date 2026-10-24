@@ -1,4 +1,6 @@
 """Real HTTP/SDK/Agent regressions for request retries and stream rollback."""
+import time
+
 import httpx
 import pytest
 from deepagents.backends import StateBackend
@@ -323,3 +325,150 @@ def test_mixed_failures_share_six_request_budget(api, asynchronous, outcome, run
             if not asynchronous:
                 asyncio.run(client.aclose())
                 asyncio.run(transport.aclose())
+
+
+def _no_backoff(monkeypatch) -> None:
+    import agent.llm as llm_module
+    import agent.llm_stream as stream_module
+
+    monkeypatch.setattr(llm_module, "stream_retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(stream_module, "stream_retry_delay", lambda _attempt: 0)
+
+
+def _invoke(runner, prompt: str, *, timeout: float = 6):
+    harness = Harness(runner).start(runner.invoke, prompt)
+    if not harness.join(timeout):
+        runner.request_cancel()
+        harness.join(2)
+        pytest.fail(f"run still going after {timeout}s; events={harness.types()}")
+    assert harness.error is None, harness.error
+    return harness
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_build_pins_idle_timeout_even_when_env_is_short(api, monkeypatch):
+    from agent.llm import STREAM_CHUNK_TIMEOUT_SECONDS
+
+    monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
+    model = build_chat_model(ModelProfile("local/idle", "test", api=api))
+    assert model.stream_chunk_timeout == STREAM_CHUNK_TIMEOUT_SECONDS == 120.0
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_idle_after_first_chunk_retries_the_same_model_request(api, runner_factory, monkeypatch):
+    _no_backoff(monkeypatch)
+    stalled = Turn(text="hello there", mode="hang", chunks_before_hang=1, keepalive_interval=0.05)
+    with ScriptedSSEServer(api, [stalled, Turn(text="done")]) as server:
+        runner = runner_factory(server)
+        runner._chat_model.stream_chunk_timeout = 0.2
+        harness = _invoke(runner, "hello")
+        assert harness.result.status == "completed" and harness.result.output == "done"
+        assert len(server.connections) == 2
+        assert server.connections[0].body == server.connections[1].body
+        assert server.connections[0].keepalives_sent >= 1
+        assert server.connections[0].closed.wait(2)
+        values = runner.prepared.graph.get_state(runner._thread_config()).values
+        answers = [message for message in values["messages"] if isinstance(message, AIMessage)]
+        assert len(answers) == 1 and answers[0].text == "done"
+        assert live_stream_count() == 0
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_idle_mid_tool_call_discards_partial_arguments(api, runner_factory, monkeypatch):
+    _no_backoff(monkeypatch)
+    calls = []
+
+    @tool
+    def record(value: str) -> str:
+        """Record a value once."""
+        calls.append(value)
+        return value
+
+    call = {"id": "call-1", "name": "record", "args": {"value": "complete"}}
+    stalled = Turn(tool_calls=[call], mode="hang_tool", keepalive_interval=0.05)
+    with ScriptedSSEServer(api, [stalled, Turn(tool_calls=[call]), Turn(text="done")]) as server:
+        runner = runner_factory(server, tools=[record])
+        runner._chat_model.stream_chunk_timeout = 0.2
+        harness = _invoke(runner, "record", timeout=8)
+        assert harness.result.status == "completed" and harness.result.output == "done"
+        assert calls == ["complete"]
+        assert len(server.connections) == 3
+        assert server.connections[0].body == server.connections[1].body
+        assert server.connections[0].keepalives_sent >= 1
+        values = runner.prepared.graph.get_state(runner._thread_config()).values
+        results = [message for message in values["messages"] if isinstance(message, ToolMessage)]
+        assert len(results) == 1 and results[0].content == "complete"
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_idle_after_completed_tool_does_not_rerun_it(api, runner_factory, monkeypatch):
+    _no_backoff(monkeypatch)
+    calls = []
+
+    @tool
+    def record() -> str:
+        """Record a completed action."""
+        calls.append(1)
+        return "recorded"
+
+    call = {"id": "call-1", "name": "record", "args": {}}
+    stalled = Turn(text="partial later", mode="hang", chunks_before_hang=1, keepalive_interval=0.05)
+    with ScriptedSSEServer(api, [Turn(text="calling tool", tool_calls=[call]), stalled,
+                                 Turn(text="done")]) as server:
+        runner = runner_factory(server, tools=[record])
+        runner._chat_model.stream_chunk_timeout = 0.2
+        harness = _invoke(runner, "record", timeout=8)
+        assert harness.result.status == "completed" and harness.result.output == "done"
+        assert calls == [1]
+        assert len(server.connections) == 3
+        assert server.connections[1].body == server.connections[2].body
+        assert server.connections[1].keepalives_sent >= 1
+        values = runner.prepared.graph.get_state(runner._thread_config()).values
+        results = [message for message in values["messages"] if isinstance(message, ToolMessage)]
+        assert len(results) == 1 and results[0].content == "recorded"
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_steady_chunks_are_not_cut_by_the_idle_timeout(api, runner_factory):
+    text = " ".join(f"w{i}" for i in range(10))
+    with ScriptedSSEServer(api, [Turn(text=text, interval=0.05)]) as server:
+        runner = runner_factory(server)
+        runner._chat_model.stream_chunk_timeout = 0.2
+        started = time.monotonic()
+        harness = _invoke(runner, "hello", timeout=6)
+        elapsed = time.monotonic() - started
+        assert harness.result.status == "completed"
+        assert harness.result.output == text
+        assert len(server.connections) == 1
+        assert elapsed > 0.2
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_cancel_during_idle_stream_does_not_retry(api, runner_factory):
+    stalled = Turn(text="partial answer", mode="hang", chunks_before_hang=1)
+    with ScriptedSSEServer(api, [stalled, Turn(text="must not run")]) as server:
+        runner = runner_factory(server)
+        assert runner._chat_model.stream_chunk_timeout == 120.0
+        harness = Harness(runner).start(runner.invoke, "hello")
+        assert server.wait_for_connection(0).hanging.wait(5)
+        runner.request_cancel()
+        assert harness.join(3) and harness.error is None
+        assert harness.result.status == "cancelled"
+        time.sleep(0.3)
+        assert len(server.connections) == 1
+        assert live_stream_count() == 0
+
+
+@pytest.mark.parametrize("api", APIS)
+def test_idle_timeout_exhausts_the_retry_budget(api, runner_factory, monkeypatch):
+    _no_backoff(monkeypatch)
+    stalled = Turn(text="partial answer", mode="hang", chunks_before_hang=1, keepalive_interval=0.05)
+    with ScriptedSSEServer(api, [stalled, stalled, stalled, Turn(text="must not run")]) as server:
+        runner = runner_factory(server, retries=2)
+        runner._chat_model.stream_chunk_timeout = 0.15
+        harness = _invoke(runner, "hello")
+        assert harness.result.status == "failed"
+        assert "after 3 attempts" in harness.result.error
+        assert "idle timeout" in harness.result.error
+        assert len(server.connections) == 3
+        assert all(connection.keepalives_sent >= 1 for connection in server.connections)
