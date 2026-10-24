@@ -55,6 +55,9 @@ llm:
       api: chat_completions
       # 额外重试次数；0 表示禁用，可在模型项中覆盖。
       max_retries: 5
+      # 流式无进展超时（秒）。连续这么久没有新的模型 chunk 就重试当前请求。
+      # 持续输出不受这个上限约束。0 表示禁用，可在模型项中覆盖。
+      stream_chunk_timeout: 120
       reasoning_efforts: [none, low, medium, xhigh]
       models:
         qwen3.8-flash:

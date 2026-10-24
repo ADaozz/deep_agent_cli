@@ -204,11 +204,11 @@ def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None
 
 
 # ---------------------------------------------------------------------------
-# C03: a slow but healthy reasoning stream is never killed by a chunk timeout.
+# C03: a reasoning gap shorter than the configured idle timeout still completes.
+# The profile default is 120s, so a short env override must not apply.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("api", APIS)
 def test_long_silent_reasoning_gap_is_not_cancelled(api: str, make_runner, monkeypatch) -> None:
-    # LangChain's async path applies this per-chunk timeout; the sync path never did.
     monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
     with ScriptedSSEServer(api, [Turn(reasoning="long think", gap_before_text=1.5, text="done thinking")]) as server:
         runner = make_runner(server)

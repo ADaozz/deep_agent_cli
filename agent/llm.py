@@ -39,7 +39,6 @@ class _StreamStatus:
 
 _STREAM_STATUS: ContextVar[_StreamStatus | None] = ContextVar("deep_agent_stream_status", default=None)
 
-
 class _CompletionTrackingStream(httpx.AsyncByteStream):
     """Observe Chat Completions' [DONE], which the SDK consumes internally."""
 
@@ -295,10 +294,6 @@ class ProtocolChatOpenAI(ChatOpenAI):
         """Keep direct construction safe from inherited WSL SOCKS settings too."""
         if not isinstance(values, dict):
             return values
-        if "stream_chunk_timeout" in cls.model_fields and "stream_chunk_timeout" not in values:
-            # The async stream would otherwise abort after 120s without a
-            # content chunk, which the synchronous stream never did.
-            values = {**values, "stream_chunk_timeout": None}
         if values.get("http_client") is None or values.get("http_async_client") is None:
             values = dict(values)
             values.setdefault("http_socket_options", ())
@@ -390,6 +385,10 @@ class ProtocolChatOpenAI(ChatOpenAI):
             if exc.status_code not in {408, 409, 429} and exc.status_code < 500:
                 raise
             raise ModelStreamInterrupted(str(exc)) from exc
+        except asyncio.TimeoutError as exc:
+            # StreamChunkTimeoutError is a TimeoutError. Cancellation is
+            # CancelledError and must keep propagating so the run does not retry.
+            raise ModelStreamInterrupted(f"LLM stream idle timeout: {exc}") from exc
         finally:
             _STREAM_STATUS.reset(status_token)
 
@@ -550,6 +549,9 @@ def build_chat_model(
     model = adapter(
         model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
         streaming=streaming, max_retries=profile.max_retries, timeout=600.0,
+        # Idle gap between parsed chunks. Not a cap on the whole run, and SSE
+        # keepalives do not reset it. Header wait still uses timeout=600.
+        stream_chunk_timeout=profile.stream_chunk_timeout,
         http_socket_options=(), http_client=httpx.Client(trust_env=trust_env),
         http_async_client=httpx.AsyncClient(trust_env=trust_env), **protocol_kwargs,
     )

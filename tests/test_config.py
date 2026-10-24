@@ -699,6 +699,38 @@ def test_model_max_retries_rejects_invalid_values(value):
         }}})
 
 
+@pytest.mark.parametrize("value", [-1, True, False, "120", float("nan"), float("inf")])
+def test_stream_chunk_timeout_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="stream_chunk_timeout"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"stream_chunk_timeout": value, "models": {"test": {}}},
+        }}})
+
+
+def test_stream_chunk_timeout_is_not_a_top_level_llm_field():
+    with pytest.raises(ValueError, match="llm.stream_chunk_timeout is unsupported"):
+        Settings.from_mapping({"llm": {
+            "default": "local/test", "stream_chunk_timeout": 30,
+            "models": {"local": {"models": {"test": {}}}},
+        }})
+
+
+def test_stream_chunk_timeout_defaults_inheritance_and_override():
+    from agent.config import DEFAULT_STREAM_CHUNK_TIMEOUT
+
+    assert Settings().active_profile.stream_chunk_timeout == DEFAULT_STREAM_CHUNK_TIMEOUT
+    settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
+        "local": {"stream_chunk_timeout": 30, "models": {
+            "a": {}, "b": {"stream_chunk_timeout": 0}, "c": {"stream_chunk_timeout": 12.5},
+        }},
+    }}})
+    assert settings.get_profile("local/a").stream_chunk_timeout == 30.0
+    assert settings.get_profile("local/b").stream_chunk_timeout == 0.0
+    assert settings.get_profile("local/c").stream_chunk_timeout == 12.5
+    disabled = build_chat_model(settings.get_profile("local/b"))
+    assert disabled.stream_chunk_timeout == 0.0
+
+
 def test_model_retry_defaults_inheritance_and_override():
     assert Settings().active_profile.max_retries == 5
     settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
