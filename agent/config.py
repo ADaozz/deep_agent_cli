@@ -62,7 +62,6 @@ class ModelProfile:
     reasoning_efforts: tuple[str, ...] = ()
     max_retries: int = 5
     stream_chunk_timeout: float = DEFAULT_STREAM_CHUNK_TIMEOUT
-    timeout: float = DEFAULT_REQUEST_TIMEOUT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_retries", _model_max_retries(self.max_retries, field_name="max_retries"))
@@ -70,7 +69,6 @@ class ModelProfile:
             self, "stream_chunk_timeout",
             _model_stream_chunk_timeout(self.stream_chunk_timeout, field_name="stream_chunk_timeout"),
         )
-        object.__setattr__(self, "timeout", _model_request_timeout(self.timeout, field_name="timeout"))
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -176,11 +174,16 @@ class Settings:
     hidden_tools: tuple[str, ...] = ()
     tavily_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
     def __post_init__(self) -> None:
         if not isinstance(self.trust_env, bool):
             raise ValueError("trust_env must be a boolean")
         object.__setattr__(self, "sandbox", replace(self.sandbox, trust_env=self.trust_env))
+        object.__setattr__(
+            self, "request_timeout",
+            _model_request_timeout(self.request_timeout, field_name="llm.timeout"),
+        )
 
     @property
     def llm_model(self) -> str:
@@ -281,6 +284,7 @@ class Settings:
                 "sandbox.dev was removed; use extra_read_write_mounts with dev_bind: true for host device nodes"
             )
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
+        request_timeout = _model_request_timeout(llm.get("timeout"), field_name="llm.timeout")
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise ValueError("agent.instructions must be a string or null")
@@ -307,6 +311,7 @@ class Settings:
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
                 web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
             ),
+            request_timeout=request_timeout,
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -508,7 +513,7 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
     _reject_removed_protocol_fields(llm, field_name="llm")
     source_fields = {
         "model", "api_key", "base_url", "input", "api", "context_window", "source",
-        "reasoning_efforts", "max_retries", "stream_chunk_timeout", "timeout",
+        "reasoning_efforts", "max_retries", "stream_chunk_timeout",
     }
     unsupported = source_fields.intersection(llm)
     if unsupported:
@@ -535,7 +540,10 @@ def _grouped_llm_profiles(
         _model_stream_chunk_timeout(
             group.get("stream_chunk_timeout"), field_name=f"llm.models.{source}.stream_chunk_timeout",
         )
-        _model_request_timeout(group.get("timeout"), field_name=f"llm.models.{source}.timeout")
+        if "timeout" in group:
+            raise ValueError(
+                f"llm.models.{source}.timeout is not per model; set llm.timeout once for every model"
+            )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -544,6 +552,8 @@ def _grouped_llm_profiles(
             field = f"llm.models.{source}.models.{name}"
             if not isinstance(item, Mapping):
                 raise ValueError(f"{field} must be a mapping")
+            if "timeout" in item:
+                raise ValueError(f"{field}.timeout is not per model; set llm.timeout once for every model")
             def inherited(
                 key: str,
                 item: Mapping[Any, Any] = item,
@@ -569,7 +579,6 @@ def _grouped_llm_profiles(
                 stream_chunk_timeout=_model_stream_chunk_timeout(
                     inherited("stream_chunk_timeout"), field_name=f"{field}.stream_chunk_timeout",
                 ),
-                timeout=_model_request_timeout(inherited("timeout"), field_name=f"{field}.timeout"),
                 source=source,
             ))
     default = llm.get("default")
@@ -750,7 +759,7 @@ def _model_stream_chunk_timeout(value: Any, *, field_name: str) -> float:
 
 
 def _model_request_timeout(value: Any, *, field_name: str) -> float:
-    """HTTP timeout for one model request. ``None`` keeps the 60 second default."""
+    """Shared HTTP wait for the first response bytes. ``None`` keeps 60 seconds."""
     if value is None:
         return DEFAULT_REQUEST_TIMEOUT
     if isinstance(value, bool) or not isinstance(value, (int, float)):

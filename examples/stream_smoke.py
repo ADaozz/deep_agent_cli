@@ -39,7 +39,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("stream_smoke requires thinking; effort none disables it")
     if args.effort is not None and args.effort not in settings.active_profile.reasoning_efforts:
         parser.error("--effort must be declared in the model's effective reasoning_efforts")
-    model = build_chat_model(settings.active_profile, reasoning_effort=args.effort)
+    model = build_chat_model(
+        settings.active_profile, reasoning_effort=args.effort, timeout=settings.request_timeout,
+    )
     runner = AgentRunner(
         prepared=create_agent(
             model=model,
