@@ -232,6 +232,7 @@ class AgentRunner:
         self._current_model_id = profile.id
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
             profile, attachment_store=self.attachment_store, trust_env=cfg.trust_env,
+            timeout=cfg.request_timeout,
         ))
         object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
@@ -495,6 +496,7 @@ class AgentRunner:
                             profile, attachment_store=self.attachment_store,
                             trust_env=self._spec.trust_env,
                             reasoning_effort=None if target_effort == "default" else target_effort,
+                            timeout=self.settings.request_timeout,
                         )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
                     applied_mcp = mcp_dirty
@@ -692,6 +694,7 @@ class AgentRunner:
                 trust_env=self._spec.trust_env,
                 reasoning_effort=None if self._reasoning_effort == "default" else self._reasoning_effort,
                 attachment_store=self.attachment_store,
+                timeout=self.settings.request_timeout,
             )
         self.prepared = build_agent(
             self._spec, chat, mode, self._checkpointer,
@@ -964,6 +967,7 @@ class AgentRunner:
                     profile, attachment_store=self.attachment_store,
                     trust_env=self._spec.trust_env,
                     reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
+                    timeout=self.settings.request_timeout,
                 ),
                 permission_mode=plan.permission_mode,
             )

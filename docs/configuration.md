@@ -116,6 +116,7 @@ tools:
 ```yaml
 llm:
   default: token-plan/qwen3.8-flash
+  timeout: 60
   models:
     token-plan:
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
@@ -128,7 +129,7 @@ llm:
           context_window: 1m
 ```
 
-来源下可以写的字段，模型项中也都可以写；模型项中的值覆盖来源级的值。
+来源下可以写的字段，模型项中也都可以写；模型项中的值覆盖来源级的值。`timeout` 例外：它只写在 `llm` 下一次，所有模型共用。
 
 接入新的标准兼容模型，只需要在这里配置 `api`、端点地址/凭据、模型 ID 和模型能力。协议格式转换由程序完成，无需修改 Agent 核心，也无需配置厂商兼容模式。
 
@@ -139,7 +140,6 @@ llm:
 | `api` | `responses` | `responses` 使用 Responses API；`chat_completions` 使用 Chat Completions |
 | `max_retries` | `5` | 非负整数，额外重试次数；`0` 禁用。模型级覆盖来源级 |
 | `stream_chunk_timeout` | `120` | 模型流无进展超时（秒）。连续这么久没有新的解析后 chunk 就中断并重试当前请求；持续输出可以超过它。`0` 禁用。模型级覆盖来源级 |
-| `timeout` | `60` | HTTP 请求超时（秒）。限制连接，以及两次收到网络数据之间的等待，包含响应头。有数据持续到达时，整轮生成可以超过它。必须为正数。模型级覆盖来源级 |
 | `model` | 模型键 | 仅模型项可用，实际请求的模型名 |
 | `input` | `[text]` | 支持图片输入时写 `[text, image]`；必须包含 `text` |
 | `context_window` | `0` | 模型输入窗口，可写 `128000`、`128k`、`1m`。`0` 表示未知：底栏不显示占用百分比，压缩阈值使用 Deep Agents 的默认值 |
@@ -158,7 +158,7 @@ llm:
 
 模型流的无进展超时由 `stream_chunk_timeout` 配置，默认 120 秒：连续这么久没有新的解析后 chunk 就中断当前这次模型请求并按同一预算重试。持续输出的流可以超过该值。SSE keepalive 不会重置这个计时器。它不是整次 Agent Run 的总时间上限。设为 `0` 则关闭。不完整的工具参数不会被执行。
 
-HTTP 请求超时由 `timeout` 配置，默认 60 秒。它限制建立连接，以及两次收到网络数据之间的等待，包含等到响应头。只要连接上仍有数据到达（包括 SSE keepalive），整轮生成可以超过 60 秒。完全没有字节到达时，这个超时会先于 `stream_chunk_timeout` 触发。
+HTTP 首字节超时由 `llm.timeout` 配置，默认 60 秒，所有模型共用，不能写在来源或单个模型上。它限制建立连接，以及等到第一批响应数据。响应开始之后，只要仍有数据到达，整轮生成可以超过 60 秒。完全没有字节时，它会先于 `stream_chunk_timeout` 触发。必须为正数。
 
 重试重新发起当前模型调用，清除失败尝试的临时文本、思考内容和工具参数，已完成的工具不会重跑；Esc 在请求和退避等待期间均可取消，取消不触发重试。重试只覆盖模型请求，不覆盖工具执行。
 

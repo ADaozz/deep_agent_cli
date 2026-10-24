@@ -18,7 +18,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr, model_validator
 
 from agent.attachments import ATTACHMENT_META_KEY, AttachmentStore, refs_from_message
-from agent.config import ModelProfile
+from agent.config import DEFAULT_REQUEST_TIMEOUT, ModelProfile
 from agent.llm_stream import (
     CancellableStreamBridge,
     ModelStreamCancelled,
@@ -528,6 +528,7 @@ def build_chat_model(
     attachment_store: AttachmentStore | None = None,
     reasoning_effort: str | None = None,
     trust_env: bool = False,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> ChatOpenAI:
     """Build a chat client from a ModelProfile."""
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
@@ -548,10 +549,10 @@ def build_chat_model(
         raise ValueError(f"Unsupported model API: {profile.api}")
     model = adapter(
         model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
-        streaming=streaming, max_retries=profile.max_retries, timeout=profile.timeout,
+        streaming=streaming, max_retries=profile.max_retries, timeout=timeout,
         # Idle gap between parsed chunks. Not a cap on the whole run, and SSE
-        # keepalives do not reset it. The HTTP timeout covers connect and the
-        # wait for the next bytes, including response headers.
+        # keepalives do not reset it. timeout is the shared HTTP wait for the
+        # first bytes, including response headers.
         stream_chunk_timeout=profile.stream_chunk_timeout,
         http_socket_options=(), http_client=httpx.Client(trust_env=trust_env),
         http_async_client=httpx.AsyncClient(trust_env=trust_env), **protocol_kwargs,
