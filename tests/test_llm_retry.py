@@ -347,11 +347,15 @@ def _invoke(runner, prompt: str, *, timeout: float = 6):
 
 @pytest.mark.parametrize("api", APIS)
 def test_build_pins_idle_timeout_even_when_env_is_short(api, monkeypatch):
-    from agent.llm import STREAM_CHUNK_TIMEOUT_SECONDS
+    from agent.config import DEFAULT_STREAM_CHUNK_TIMEOUT
 
     monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
     model = build_chat_model(ModelProfile("local/idle", "test", api=api))
-    assert model.stream_chunk_timeout == STREAM_CHUNK_TIMEOUT_SECONDS == 120.0
+    assert model.stream_chunk_timeout == DEFAULT_STREAM_CHUNK_TIMEOUT == 120.0
+    configured = build_chat_model(ModelProfile(
+        "local/idle", "test", api=api, stream_chunk_timeout=30,
+    ))
+    assert configured.stream_chunk_timeout == 30.0
 
 
 @pytest.mark.parametrize("api", APIS)

@@ -204,8 +204,8 @@ def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None
 
 
 # ---------------------------------------------------------------------------
-# C03: a reasoning gap shorter than the 120s idle timeout still completes.
-# build_chat_model pins that timeout, so a short env override must not apply.
+# C03: a reasoning gap shorter than the configured idle timeout still completes.
+# The profile default is 120s, so a short env override must not apply.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("api", APIS)
 def test_long_silent_reasoning_gap_is_not_cancelled(api: str, make_runner, monkeypatch) -> None:

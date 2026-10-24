@@ -19,6 +19,7 @@ SAFE_INHERITED_ENV = (
 
 _DEFAULT_CONFIG_NAME = "config.yaml"
 DEFAULT_UI_TIMEZONE = "Asia/Shanghai"
+DEFAULT_STREAM_CHUNK_TIMEOUT = 120.0
 
 
 class ConfigError(ValueError):
@@ -59,9 +60,14 @@ class ModelProfile:
     source: str = ""
     reasoning_efforts: tuple[str, ...] = ()
     max_retries: int = 5
+    stream_chunk_timeout: float = DEFAULT_STREAM_CHUNK_TIMEOUT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_retries", _model_max_retries(self.max_retries, field_name="max_retries"))
+        object.__setattr__(
+            self, "stream_chunk_timeout",
+            _model_stream_chunk_timeout(self.stream_chunk_timeout, field_name="stream_chunk_timeout"),
+        )
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -497,7 +503,10 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
     _reject_removed_protocol_fields(llm, field_name="llm")
-    source_fields = {"model", "api_key", "base_url", "input", "api", "context_window", "source", "reasoning_efforts", "max_retries"}
+    source_fields = {
+        "model", "api_key", "base_url", "input", "api", "context_window", "source",
+        "reasoning_efforts", "max_retries", "stream_chunk_timeout",
+    }
     unsupported = source_fields.intersection(llm)
     if unsupported:
         field = sorted(unsupported)[0]
@@ -520,6 +529,9 @@ def _grouped_llm_profiles(
             raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
         group_api = _model_api(group, field_name=f"llm.models.{source}")
         _model_max_retries(group.get("max_retries"), field_name=f"llm.models.{source}.max_retries")
+        _model_stream_chunk_timeout(
+            group.get("stream_chunk_timeout"), field_name=f"llm.models.{source}.stream_chunk_timeout",
+        )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -550,6 +562,9 @@ def _grouped_llm_profiles(
                 context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
                 reasoning_efforts=_model_reasoning_efforts(inherited("reasoning_efforts"), field_name=f"{field}.reasoning_efforts"),
                 max_retries=_model_max_retries(inherited("max_retries"), field_name=f"{field}.max_retries"),
+                stream_chunk_timeout=_model_stream_chunk_timeout(
+                    inherited("stream_chunk_timeout"), field_name=f"{field}.stream_chunk_timeout",
+                ),
                 source=source,
             ))
     default = llm.get("default")
@@ -712,3 +727,18 @@ def _model_max_retries(value: Any, *, field_name: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"{field_name} must be a non-negative integer")
     return value
+
+
+def _model_stream_chunk_timeout(value: Any, *, field_name: str) -> float:
+    """Seconds without a parsed stream chunk before the current model request retries.
+
+    ``0`` disables the idle timeout. ``None`` keeps the 120 second default.
+    """
+    if value is None:
+        return DEFAULT_STREAM_CHUNK_TIMEOUT
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a non-negative number of seconds")
+    number = float(value)
+    if not (number >= 0 and number < float("inf")):
+        raise ValueError(f"{field_name} must be a non-negative number of seconds")
+    return number
