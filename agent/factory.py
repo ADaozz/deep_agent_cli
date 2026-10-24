@@ -290,7 +290,9 @@ def create_agent(
 
 
 def _default_model(cfg: Settings) -> BaseChatModel:
-    return build_chat_model(cfg.active_profile, streaming=True, trust_env=cfg.trust_env)
+    return build_chat_model(
+        cfg.active_profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
+    )
 
 
 def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:
