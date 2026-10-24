@@ -20,6 +20,7 @@ SAFE_INHERITED_ENV = (
 _DEFAULT_CONFIG_NAME = "config.yaml"
 DEFAULT_UI_TIMEZONE = "Asia/Shanghai"
 DEFAULT_STREAM_CHUNK_TIMEOUT = 120.0
+DEFAULT_REQUEST_TIMEOUT = 60.0
 
 
 class ConfigError(ValueError):
@@ -61,6 +62,7 @@ class ModelProfile:
     reasoning_efforts: tuple[str, ...] = ()
     max_retries: int = 5
     stream_chunk_timeout: float = DEFAULT_STREAM_CHUNK_TIMEOUT
+    timeout: float = DEFAULT_REQUEST_TIMEOUT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_retries", _model_max_retries(self.max_retries, field_name="max_retries"))
@@ -68,6 +70,7 @@ class ModelProfile:
             self, "stream_chunk_timeout",
             _model_stream_chunk_timeout(self.stream_chunk_timeout, field_name="stream_chunk_timeout"),
         )
+        object.__setattr__(self, "timeout", _model_request_timeout(self.timeout, field_name="timeout"))
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -505,7 +508,7 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
     _reject_removed_protocol_fields(llm, field_name="llm")
     source_fields = {
         "model", "api_key", "base_url", "input", "api", "context_window", "source",
-        "reasoning_efforts", "max_retries", "stream_chunk_timeout",
+        "reasoning_efforts", "max_retries", "stream_chunk_timeout", "timeout",
     }
     unsupported = source_fields.intersection(llm)
     if unsupported:
@@ -532,6 +535,7 @@ def _grouped_llm_profiles(
         _model_stream_chunk_timeout(
             group.get("stream_chunk_timeout"), field_name=f"llm.models.{source}.stream_chunk_timeout",
         )
+        _model_request_timeout(group.get("timeout"), field_name=f"llm.models.{source}.timeout")
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -565,6 +569,7 @@ def _grouped_llm_profiles(
                 stream_chunk_timeout=_model_stream_chunk_timeout(
                     inherited("stream_chunk_timeout"), field_name=f"{field}.stream_chunk_timeout",
                 ),
+                timeout=_model_request_timeout(inherited("timeout"), field_name=f"{field}.timeout"),
                 source=source,
             ))
     default = llm.get("default")
@@ -741,4 +746,16 @@ def _model_stream_chunk_timeout(value: Any, *, field_name: str) -> float:
     number = float(value)
     if not (number >= 0 and number < float("inf")):
         raise ValueError(f"{field_name} must be a non-negative number of seconds")
+    return number
+
+
+def _model_request_timeout(value: Any, *, field_name: str) -> float:
+    """HTTP timeout for one model request. ``None`` keeps the 60 second default."""
+    if value is None:
+        return DEFAULT_REQUEST_TIMEOUT
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a positive number of seconds")
+    number = float(value)
+    if not (number > 0 and number < float("inf")):
+        raise ValueError(f"{field_name} must be a positive number of seconds")
     return number

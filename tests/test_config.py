@@ -731,6 +731,40 @@ def test_stream_chunk_timeout_defaults_inheritance_and_override():
     assert disabled.stream_chunk_timeout == 0.0
 
 
+@pytest.mark.parametrize("value", [0, -1, True, False, "60", float("nan"), float("inf")])
+def test_request_timeout_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="timeout"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"timeout": value, "models": {"test": {}}},
+        }}})
+
+
+def test_request_timeout_is_not_a_top_level_llm_field():
+    with pytest.raises(ValueError, match="llm.timeout is unsupported"):
+        Settings.from_mapping({"llm": {
+            "default": "local/test", "timeout": 30,
+            "models": {"local": {"models": {"test": {}}}},
+        }})
+
+
+def test_request_timeout_defaults_inheritance_and_override():
+    from agent.config import DEFAULT_REQUEST_TIMEOUT
+
+    assert Settings().active_profile.timeout == DEFAULT_REQUEST_TIMEOUT == 60.0
+    settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
+        "local": {"timeout": 30, "models": {
+            "a": {}, "b": {"timeout": 90}, "c": {"timeout": 15.5},
+        }},
+    }}})
+    assert settings.get_profile("local/a").timeout == 30.0
+    assert settings.get_profile("local/b").timeout == 90.0
+    assert settings.get_profile("local/c").timeout == 15.5
+    model = build_chat_model(settings.get_profile("local/b"))
+    assert model.request_timeout == 90.0
+    client = getattr(model.root_client, "_target", model.root_client)
+    assert client.timeout == 90.0
+
+
 def test_model_retry_defaults_inheritance_and_override():
     assert Settings().active_profile.max_retries == 5
     settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
