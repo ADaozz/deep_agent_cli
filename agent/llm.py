@@ -548,9 +548,10 @@ def build_chat_model(
         raise ValueError(f"Unsupported model API: {profile.api}")
     model = adapter(
         model=profile.model, api_key=profile.api_key, base_url=profile.base_url,
-        streaming=streaming, max_retries=profile.max_retries, timeout=600.0,
+        streaming=streaming, max_retries=profile.max_retries, timeout=profile.timeout,
         # Idle gap between parsed chunks. Not a cap on the whole run, and SSE
-        # keepalives do not reset it. Header wait still uses timeout=600.
+        # keepalives do not reset it. The HTTP timeout covers connect and the
+        # wait for the next bytes, including response headers.
         stream_chunk_timeout=profile.stream_chunk_timeout,
         http_socket_options=(), http_client=httpx.Client(trust_env=trust_env),
         http_async_client=httpx.AsyncClient(trust_env=trust_env), **protocol_kwargs,
