@@ -1133,3 +1133,64 @@ def test_transcript_renderer_matches_uncached_render() -> None:
     assert lines == expected.count("\n") + 1
 
 
+
+
+@pytest.mark.parametrize("kind", ["approval", "human", "multi_select"])
+def test_interaction_options_follow_selection_without_scrolling_heading(kind) -> None:
+    from prompt_toolkit.data_structures import Size
+
+    def scenario(app: CliApplication) -> None:
+        if kind == "approval":
+            controller = InteractionController.approval([{
+                "toolCallId": "resize-approval", "name": "execute",
+                "args": {"command": "python process_data.py --source incoming --output results", "network": True},
+            }])
+        else:
+            controller = InteractionController.human({
+                "title": "Choose environment",
+                "question": "Review the deployment environments before confirming your selection.",
+                "fields": [{"id": "target", "type": kind if kind == "multi_select" else "single_select",
+                            "label": "Environment", "options": [
+                                {"value": str(i), "label": f"OPTION_{i:02}",
+                                 "description": "A deployment environment with a long explanatory description."}
+                                for i in range(8)
+                            ]}],
+            })
+        app.interaction = controller
+        app.state.status = "Waiting for input"
+        size = [Size(rows=15, columns=40)]
+        app.application.output.get_size = lambda: size[0]
+
+        def visible_panel():
+            _paint(app)
+            screen = app.application.renderer._last_screen
+            window = next(w for w in app.application.layout.find_all_windows() if w.content is app.interaction_control)
+            position = screen.visible_windows_to_write_positions[window]
+            return ["".join(screen.data_buffer[y][x].char for x in range(size[0].columns))
+                    for y in range(position.ypos, position.ypos + position.height)]
+
+        def key(name):
+            binding = next(b for b in reversed(app.bindings.bindings) if b.keys == (name,))
+            binding.handler(None)
+
+        initial = visible_panel()
+        assert controller.title in initial[0]
+        assert "↑↓ select" in "\n".join(initial)
+        for direction, count in [("down", len(controller.current["options"]) - 1), ("down", 1), ("up", 1)]:
+            for _ in range(count):
+                key(direction)
+                panel = visible_panel()
+                selected = controller.current["options"][controller.option_index]["label"]
+                assert selected in "\n".join(panel)
+                assert "→" in "\n".join(panel)
+                assert panel[0] == initial[0]
+                assert panel[-1] == initial[-1]
+        selected_index = controller.option_index
+        for resized in [Size(rows=40, columns=100), Size(rows=24, columns=60), Size(rows=15, columns=40)]:
+            size[0] = resized
+            panel = visible_panel()
+            assert controller.title in panel[0]
+            assert controller.option_index == selected_index
+            assert controller.current["options"][selected_index]["label"] in "\n".join(panel)
+
+    _with_painted_app(f"options-follow-{kind}", scenario, lines=5)

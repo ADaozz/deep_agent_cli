@@ -63,6 +63,7 @@ from agent.cli.rendering import (
     RenderedUnit,
     TranscriptDocument,
     TranscriptRenderer,
+    render_interaction_viewport,
     render_interaction,
     render_queued_messages,
     render_review,
@@ -276,6 +277,28 @@ class _ScrollableTextControl(FormattedTextControl):
         return None
 
 
+class _InteractionControl(_ScrollableTextControl):
+    """A fixed heading and footer around a selection-following option list."""
+
+    def __init__(self, *args: Any, controller: Any, **kwargs: Any) -> None:
+        self._controller = controller
+        self._option_offset = 0
+        self._selection_context: Any = None
+        super().__init__(*args, **kwargs)
+
+    def create_content(self, width: int, height: int | None = None) -> UIContent:
+        controller = self._controller()
+        context = (controller, controller.index if controller else None, width)
+        if context != self._selection_context:
+            self._option_offset = 0
+            self._selection_context = context
+        rendered, self._option_offset = render_interaction_viewport(
+            controller, width, height or 1, self._option_offset,
+        )
+        self.text = to_formatted_text(ANSI(rendered))
+        return super().create_content(width, height)
+
+
 class _BackToBottomControl(_ScrollableTextControl):
     """Make the whole return-to-bottom hint clickable without stealing wheel events."""
 
@@ -487,8 +510,9 @@ class CliApplication:
             on_select=self._select_transcript,
             selected_line=self._selected_transcript_line,
         )
-        self.interaction_control = _ScrollableTextControl(
+        self.interaction_control = _InteractionControl(
             text=self._interaction_text, focusable=False, on_scroll=self.scroll_transcript,
+            controller=lambda: self.interaction,
             on_select_outside=self._select_below_transcript,
         )
         self.attachment_control = _ScrollableTextControl(

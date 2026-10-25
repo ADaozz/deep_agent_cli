@@ -332,6 +332,11 @@ class InteractionController:
         return True
 
     def render(self) -> Group:
+        header, options, footer = self.render_sections()
+        return Group(*header, *options, *footer)
+
+    def render_sections(self) -> tuple[list[Any], list[Any], list[Any]]:
+        """Keep the heading and hints separate from the selectable list."""
         parts: list[Any] = [Text(self.title, style="bold bright_cyan")]
         if self.reason:
             parts.append(Text(self.reason, style="dim"))
@@ -345,6 +350,7 @@ class InteractionController:
             parts.append(Text("Impact:\n" + "\n".join(f"• {item}" for item in self.impact), style="yellow"))
         field = self.current
         parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {field.get('label') or field.get('id')}", style="bold"))
+        options_start = len(parts)
         options = [] if self.custom_entry else field.get("options") or []
         selected = self.values.get(str(field.get("id") or "")) or []
         for idx, option in enumerate(options):
@@ -370,6 +376,7 @@ class InteractionController:
                 parts.append(row)
             else:
                 parts.append(label_text)
+        options_end = len(parts)
         if self.error:
             parts.append(Text(self.error, style="red"))
         if self.custom_entry:
@@ -385,4 +392,4 @@ class InteractionController:
         else:
             hint = "Enter submit  Ctrl+J newline  Esc cancel"
         parts.append(Text(hint, style="dim"))
-        return Group(*parts)
+        return parts[:options_start], parts[options_start:options_end], parts[options_end:]

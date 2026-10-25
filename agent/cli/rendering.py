@@ -349,6 +349,36 @@ def render_interaction(controller: Any, width: int) -> str:
     return _capture(controller.render(), width)
 
 
+def render_interaction_viewport(controller: Any, width: int, height: int, offset: int) -> tuple[str, int]:
+    """Scroll only the options; headings and keyboard hints stay in place."""
+    if controller is None or height <= 0:
+        return "", 0
+    header, options, footer = controller.render_sections()
+    if not options:
+        return render_interaction(controller, width), 0
+    heading = _capture(Group(*header), width).splitlines()
+    hints = _capture(Group(*footer), width).splitlines()
+    rows = [_capture(option, width).splitlines() for option in options]
+    option_rows = [line for option in rows for line in option]
+    # Reserve list space even when a long question fills a small terminal.
+    hint_height = min(len(hints), max(0, height - 2))
+    list_minimum = min(len(option_rows), max(1, height // 2))
+    heading_height = min(len(heading), max(0, height - hint_height - list_minimum))
+    list_height = max(1, height - hint_height - heading_height)
+    selected = min(controller.option_index, len(rows) - 1)
+    start = sum(len(option) for option in rows[:selected])
+    end = start + len(rows[selected])
+    offset = max(0, min(offset, max(0, len(option_rows) - list_height)))
+    if start < offset:
+        offset = start
+    elif end > offset + list_height:
+        offset = min(start, end - list_height)
+    if heading_height < len(heading) and heading_height > 1:
+        heading = [*heading[:heading_height - 1], _capture(Text("…", style="dim"), width)]
+    visible = heading[:heading_height] + option_rows[offset:offset + list_height] + hints[:hint_height]
+    return "\n".join(visible[:height]), offset
+
+
 def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
     parts: list[Any] = [
         Text("Review", style="bold bright_cyan"),
