@@ -28,8 +28,9 @@ ui:
   timezone: Asia/Shanghai
   # 思考内容折叠时保留的逻辑行数，必须为正整数。
   thinking_tail_lines: 5
-  # 命令输出及通用工具输出折叠时保留的逻辑行数。
+  # 命令正文折叠时保留的开头显示行数，同时也是命令输出保留的末尾逻辑行数。
   execute_tail_lines: 4
+  # 通用工具输出折叠时保留的逻辑行数。
   tool_tail_lines: 8
   expanded_tool_lines: 40
   # 简略列表显示的条目数，按条目计数，不按屏幕换行计数。

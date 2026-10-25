@@ -760,7 +760,14 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     )
     console = Console(width=max(20, width))
     body: list[Any] = []
-    body.extend(_wrap_failure_line(title, console, width))
+    command_lines = _wrap_failure_line(title, console, width)
+    if not expanded and len(command_lines) > limits.execute_tail_lines:
+        hidden = len(command_lines) - limits.execute_tail_lines
+        body.extend(command_lines[:limits.execute_tail_lines])
+        notice = Text(f"  … {hidden} more command lines hidden · {EXPAND_HINT}{suffix}", style="dim")
+        body.extend(_wrap_failure_line(notice, console, width))
+    else:
+        body.extend(command_lines)
 
     display_output = output
     if preview.truncated:

@@ -296,7 +296,7 @@ web_search:
 |---|---|---|
 | `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
 | `thinking_tail_lines` | `5` | 思考区折叠时保留的末尾显示行数，按当前终端宽度折行后计算 |
-| `execute_tail_lines` | `4` | 命令输出折叠时保留的末尾行数 |
+| `execute_tail_lines` | `4` | 折叠时命令正文保留的开头显示行数，以及命令输出保留的末尾行数；Ctrl+O 展开完整命令和输出 |
 | `tool_tail_lines` | `8` | 其他工具输出折叠时保留的末尾行数 |
 | `expanded_tool_lines` | `40` | 展开的普通工具输出最多显示的行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |

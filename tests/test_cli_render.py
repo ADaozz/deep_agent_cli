@@ -686,7 +686,10 @@ def test_command_card_preserves_wrapped_indentation(width, expanded, status, rea
     rendered = _capture(_tool(block, expanded, width), width)
     _assert_card_indentation(rendered, width, output)
     title = _plain(rendered).split("  └ output")[0]
-    assert "a" * 180 in "".join(line.strip() for line in title.splitlines())
+    if expanded or width == 80:
+        assert "a" * 180 in "".join(line.strip() for line in title.splitlines())
+    else:
+        assert "more command lines hidden" in " ".join(line.strip() for line in title.splitlines())
 
 
 @pytest.mark.parametrize("width", [20, 40, 80])
@@ -2154,3 +2157,45 @@ def test_transcript_header_avoids_duplicate_runtime_context() -> None:
     assert "/workspace/project · SANDBOXED · perm:ask" not in rendered
 
 
+
+
+@pytest.mark.parametrize("limit", [1, 3, 6])
+@pytest.mark.parametrize("status", ["running", "completed", "error", "waiting", "interrupted"])
+def test_execute_command_and_output_reuse_configured_fold_limit(limit, status) -> None:
+    from agent.config import UiDisplayLimits
+
+    command = "python - <<'PY'\n" + "\n".join(f"print('code_{i:02}')" for i in range(10)) + "\nPY"
+    block = ToolBlock(
+        "inline-python", "execute", {"command": command},
+        output="\n".join(f"result_{i:02}" for i in range(10)),
+        status=status, is_error=status == "error", exit_code=1 if status == "error" else None,
+    )
+    limits = UiDisplayLimits(execute_tail_lines=limit)
+    collapsed = _plain(_capture(_tool(block, False, 120, limits=limits), 120))
+    command_part, output_part = collapsed.split("  └ output")
+    command_rows = [line for line in command_part.splitlines() if line.strip()]
+    assert len(command_rows) == limit + 1  # One additional row announces the hidden command.
+    assert f"{12 - limit} more command lines hidden · Ctrl+O to expand" in command_part
+    assert "code_09" not in command_part
+    assert "result_09" in output_part and "result_00" not in output_part
+    if status in {"waiting", "interrupted"}:
+        assert ("waiting for input" if status == "waiting" else "completion unconfirmed") in command_part
+    expanded = _plain(_capture(_tool(block, True, 120, limits=limits), 120))
+    assert all(f"code_{i:02}" in expanded and f"result_{i:02}" in expanded for i in range(10))
+    assert "lines hidden" not in expanded
+    assert block.arguments["command"] == command
+
+
+def test_execute_single_line_inline_code_is_folded_after_terminal_wrapping() -> None:
+    from agent.config import UiDisplayLimits
+
+    command = 'python -c "' + "print('payload');" * 50 + 'print(\'last_statement\')"'
+    block = ToolBlock("python-c", "execute", {"command": command}, status="completed")
+    limits = UiDisplayLimits(execute_tail_lines=2)
+    collapsed = _plain(_capture(_tool(block, False, 80, limits=limits), 80))
+    command_rows = [line for line in collapsed.split("  └ output")[0].splitlines() if line.strip()]
+    assert len(command_rows) == 3
+    assert "command lines hidden" in collapsed
+    assert "last_statement" not in collapsed
+    expanded = _plain(_capture(_tool(block, True, 80, limits=limits), 80))
+    assert "last_statement" in "".join(line.strip() for line in expanded.splitlines())
