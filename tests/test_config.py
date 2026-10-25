@@ -21,7 +21,8 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
     assert settings.ui_timezone == "Asia/Shanghai"
-    assert settings.ui_display_limits.thinking_tail_lines == 5
+    assert settings.ui_display_limits.tail_lines == 4
+    assert settings.ui_display_limits.head_lines == 4
 
 
 def test_secret_environment_references_and_tavily_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,16 +66,16 @@ def test_ui_timezone_can_be_configured_and_invalid_names_fail(tmp_path: Path) ->
         Settings.load(path)
 
 
-def test_thinking_tail_lines_can_be_configured(tmp_path: Path) -> None:
+def test_tail_lines_can_be_configured(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text(_MODEL_YAML + "ui:\n  thinking_tail_lines: 3\n", encoding="utf-8")
-    assert Settings.load(path).ui_display_limits.thinking_tail_lines == 3
+    path.write_text(_MODEL_YAML + "ui:\n  tail_lines: 3\n", encoding="utf-8")
+    assert Settings.load(path).ui_display_limits.tail_lines == 3
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, 3.5, "5", None])
-def test_thinking_tail_lines_rejects_invalid_values(value: object) -> None:
-    with pytest.raises(ValueError, match="ui.thinking_tail_lines must be a positive integer"):
-        Settings.from_mapping({"ui": {"thinking_tail_lines": value}})
+def test_tail_lines_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="ui.tail_lines must be a positive integer"):
+        Settings.from_mapping({"ui": {"tail_lines": value}})
 
 
 def test_all_ui_display_limits_are_loaded_and_validated() -> None:
@@ -85,8 +86,7 @@ def test_all_ui_display_limits_are_loaded_and_validated() -> None:
         for invalid in (0, -1, True, None, "2", 2.5):
             with pytest.raises(ValueError, match=f"ui.{name}"):
                 Settings.from_mapping({"ui": {name: invalid}})
-    with pytest.raises(ValueError, match="ui.edit_preview_changed_lines"):
-        Settings.from_mapping({"ui": {"edit_preview_changed_lines": 1}})
+    assert Settings.from_mapping({"ui": {"head_lines": 1}}).ui_display_limits.head_lines == 1
 
 
 def test_removed_protected_paths_fail_with_migration_message() -> None:
@@ -850,3 +850,25 @@ def test_hidden_tools_default_and_yaml_loading(tmp_path):
 def test_hidden_tools_rejects_invalid_lists(value):
     with pytest.raises(ValueError, match="tools.hidden"):
         Settings.from_mapping({"tools": {"hidden": value}})
+
+
+@pytest.mark.parametrize("name", [
+    "thinking_tail_lines", "execute_tail_lines", "tool_tail_lines", "expanded_tool_lines",
+    "edit_preview_changed_lines", "write_preview_lines", "failure_preview_lines", "command_failure_tail_lines",
+])
+def test_removed_ui_line_settings_request_head_tail_migration(name) -> None:
+    with pytest.raises(ValueError, match="use ui.head_lines and ui.tail_lines"):
+        Settings.from_mapping({"ui": {name: 4}})
+
+
+def test_template_and_code_share_four_line_defaults() -> None:
+    import yaml
+
+    template = yaml.safe_load((Path(__file__).parents[1] / "agent/config.example.yaml").read_text())
+    configured = UiDisplayLimits.from_mapping(template["ui"])
+    defaults = UiDisplayLimits()
+    assert configured.head_lines == defaults.head_lines == 4
+    assert configured.tail_lines == defaults.tail_lines == 4
+    assert {name for name in template["ui"] if name.endswith("_lines")} == {
+        "head_lines", "tail_lines", "editor_max_lines", "completion_menu_lines",
+    }

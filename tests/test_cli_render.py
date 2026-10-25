@@ -41,7 +41,7 @@ from agent.cli.rendering import (
     render_transcript,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
-from agent.config import Settings
+from agent.config import Settings, UiDisplayLimits
 from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
 from agent.session import SessionStore, TranscriptBlock, messages_to_transcript
 from agent.tools.examples import build_example_tools
@@ -397,13 +397,14 @@ def test_cli_state_updates_streaming_block_in_place() -> None:
     assert assistants[0].content == "hello world"
 
 
-def test_thinking_collapses_to_latest_five_lines_by_default() -> None:
+def test_thinking_collapses_to_latest_four_lines_by_default() -> None:
     lines = [f"think {index}" for index in range(8)]
     state = CliState(blocks=[MessageBlock(kind="assistant", thinking="\n".join(lines), content="done")])
     collapsed = _plain(render_transcript(state, 100))
-    assert "… 3 earlier thinking lines hidden · Ctrl+T to expand" in collapsed
+    assert "… 4 earlier thinking lines hidden · Ctrl+T to expand" in collapsed
     assert "think 0" not in collapsed and "think 2" not in collapsed
-    assert all(f"think {index}" in collapsed for index in range(3, 8))
+    assert "think 3" not in collapsed
+    assert all(f"think {index}" in collapsed for index in range(4, 8))
 
     state.thinking_collapsed = False
     expanded = _plain(render_transcript(state, 100))
@@ -411,11 +412,11 @@ def test_thinking_collapses_to_latest_five_lines_by_default() -> None:
     assert all(f"think {index}" in expanded for index in range(8))
 
     short = CliState(blocks=[MessageBlock(
-        kind="assistant", thinking="\n".join(f"short {index}" for index in range(5)), content="",
+        kind="assistant", thinking="\n".join(f"short {index}" for index in range(4)), content="",
     )])
     short_view = _plain(render_transcript(short, 100))
     assert "earlier thinking lines hidden" not in short_view
-    assert all(f"short {index}" in short_view for index in range(5))
+    assert all(f"short {index}" in short_view for index in range(4))
 
 
 def test_explore_tools_collapse_into_summary() -> None:
@@ -1044,8 +1045,10 @@ def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
     rendered = _plain(render_transcript(state, 100))
     assert rendered.count(f"Edited {path}") == 1
     assert f"Edited {path} (+4 -4)" in rendered
-    for index in range(4):
+    for index in range(2):
         assert f"+ entry {index}" in rendered
+    assert "+ entry 2" not in rendered
+    assert "4 changed lines hidden" in rendered
     app = CliApplication.__new__(CliApplication)
     app.state = state
     app.interaction = None
@@ -1114,7 +1117,7 @@ def test_large_write_preview_has_numbered_full_width_green_rows(monkeypatch) -> 
     plain = _plain(rendered)
     assert re.search(r"(?m)^\s+1 \+#!/usr/bin/env node", plain)
     assert re.search(r"(?m)^\s+2 \+/\*\*", plain)
-    assert "… 112 lines hidden · Ctrl+R to review" in plain
+    assert "… 114 lines hidden · Ctrl+R to review" in plain
     green_rows = re.findall(r"\x1b\[[0-9;]*48;2;0;95;0m([^\n]*?)\x1b\[0m", rendered)
     assert green_rows and all(len(row) == 59 for row in green_rows)
 
@@ -1203,12 +1206,12 @@ def test_edit_preview_pure_deletion_over_budget() -> None:
     rendered = _plain(render_transcript(state, 100))
     assert "Edited /workspace/f.md (+0 -10)" in rendered
     assert "- line-0" in rendered
-    assert "- line-7" in rendered
-    assert "- line-8" not in rendered
+    assert "- line-3" in rendered
+    assert "- line-4" not in rendered
     assert "- line-9" not in rendered
-    assert "… 2 changed lines hidden · Ctrl+R to review" in rendered
+    assert "… 6 changed lines hidden · Ctrl+R to review" in rendered
     changed = [line for line in build_tool_preview(block).lines if _without_diff_number(line.text).startswith(("-", "+"))]
-    assert len(changed) == 8
+    assert len(changed) == 4
     assert all(_without_diff_number(line.text).startswith("-") for line in changed)
 
 
@@ -1293,8 +1296,8 @@ def test_file_mutation_normalizer_produces_semantics_and_compact_rows() -> None:
     assert normalize_file_mutation(overwritten).operation == "overwrite"
     assert normalize_file_mutation(deleted).operation == "delete"
     compact = normalize_file_mutation(overwritten).compact_lines
-    assert len([line for line in compact if line.style == "add"]) == 6
-    assert compact[-1].text == "… 4 lines hidden · Ctrl+R to review"
+    assert len([line for line in compact if line.style == "add"]) == 4
+    assert compact[-1].text == "… 6 lines hidden · Ctrl+R to review"
     assert normalize_file_mutation(ToolBlock("legacy", "write_file", overwritten.arguments,
                                             status="completed")) is None
 
@@ -1318,14 +1321,14 @@ def test_edit_preview_many_deletions_keep_one_addition() -> None:
         status="completed",
     )
     state = CliState(blocks=[block])
-    rendered = _plain(render_transcript(state, 100))
+    rendered = _plain(render_transcript(state, 100, limits=UiDisplayLimits(head_lines=8)))
     assert "Edited /workspace/file.md (+1 -20)" in rendered
     assert "+ replaced" in rendered
     assert "- keep-6" in rendered
     assert "- keep-7" not in rendered
     assert "⋮" in rendered
     assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
-    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     assert texts == [
         "",
         *[f"- keep-{index}" for index in range(7)],
@@ -1347,13 +1350,13 @@ def test_edit_preview_many_additions_keep_one_deletion() -> None:
         arguments={"file_path": "/workspace/file.md", "old_string": "keep", "new_string": new},
         status="completed",
     )
-    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
     assert "Edited /workspace/file.md (+20 -1)" in rendered
     assert "- keep" in rendered
     assert "+ add-6" in rendered
     assert "+ add-7" not in rendered
     assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
-    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     assert texts == [
         "",
         "- keep",
@@ -1371,7 +1374,7 @@ def test_edit_preview_under_budget_shows_all_without_hidden_hint() -> None:
         arguments={"file_path": "/workspace/notes.md", "old_string": "l1\nl2\nl3", "new_string": "n1\nn2"},
         status="completed",
     )
-    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
     assert "Edited /workspace/notes.md (+2 -3)" in rendered
     for line in ("- l1", "- l2", "- l3", "+ n1", "+ n2"):
         assert line in rendered
@@ -1426,14 +1429,14 @@ def test_edit_preview_separator_does_not_consume_budget() -> None:
         },
         status="completed",
     )
-    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     changed = [text for text in texts if text.startswith(("-", "+"))]
     assert len(changed) == 8
     assert texts.count("  ⋮") == 2
     assert texts == [
         "", "- A", "+ A2", "  ⋮", "- B1", "- B2", "+ B", "  ⋮", "- D", "+ D1", "+ D2",
     ]
-    assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100))
+    assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
 
 
 def test_edit_preview_hidden_count_counts_only_changed_lines() -> None:
@@ -1445,7 +1448,7 @@ def test_edit_preview_hidden_count_counts_only_changed_lines() -> None:
         arguments={"file_path": "/workspace/file.md", "old_string": old, "new_string": keep},
         status="completed",
     )
-    texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     changed = [text for text in texts if text.startswith(("-", "+"))]
     assert len(changed) == 8
     assert texts.count("  ⋮") == 1
@@ -1596,7 +1599,7 @@ def test_unknown_tool_output_folds_like_generic_output() -> None:
     collapsed = _plain(render_transcript(CliState(blocks=[block]), 100))
     assert "row 11" in collapsed
     assert "row 0" not in collapsed
-    assert "… 4 output lines hidden · Ctrl+O to expand" in collapsed
+    assert "… 8 output lines hidden · Ctrl+O to expand" in collapsed
 
 
 def test_unknown_tool_completion_freezes_status_transitions() -> None:
@@ -1715,7 +1718,7 @@ def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
     assert "+302 lines" in preview
     assert "+# Tavily 接口调研报告" in preview
     assert "+> 生成时间：待核实" in preview
-    assert "… 296 lines hidden · Ctrl+R to review" in preview
+    assert "… 298 lines hidden · Ctrl+R to review" in preview
     assert "--- /dev/null" not in preview
     assert "+++ b/workspace" not in preview
     assert "@@ -0,0" not in preview
@@ -2170,7 +2173,7 @@ def test_execute_command_and_output_reuse_configured_fold_limit(limit, status) -
         output="\n".join(f"result_{i:02}" for i in range(10)),
         status=status, is_error=status == "error", exit_code=1 if status == "error" else None,
     )
-    limits = UiDisplayLimits(execute_tail_lines=limit)
+    limits = UiDisplayLimits(head_lines=limit, tail_lines=limit)
     collapsed = _plain(_capture(_tool(block, False, 120, limits=limits), 120))
     command_part, output_part = collapsed.split("  └ output")
     command_rows = [line for line in command_part.splitlines() if line.strip()]
@@ -2191,7 +2194,7 @@ def test_execute_single_line_inline_code_is_folded_after_terminal_wrapping() -> 
 
     command = 'python -c "' + "print('payload');" * 50 + 'print(\'last_statement\')"'
     block = ToolBlock("python-c", "execute", {"command": command}, status="completed")
-    limits = UiDisplayLimits(execute_tail_lines=2)
+    limits = UiDisplayLimits(head_lines=2)
     collapsed = _plain(_capture(_tool(block, False, 80, limits=limits), 80))
     command_rows = [line for line in collapsed.split("  └ output")[0].splitlines() if line.strip()]
     assert len(command_rows) == 3

@@ -154,11 +154,11 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 ## 显示
 
 - **标题**：显示 `DeepAgentCLI v<版本号>`，版本与 `deep-agent --version` 使用同一来源；顶部不再显示第二行快捷键提示，完整操作见 `/help`。
-- **思考区**：默认折叠，保留按当前终端宽度折行后的最后 5 行正文（`ui.thinking_tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
+- **思考区**：默认折叠，保留按当前终端宽度折行后的最后 4 行正文（`ui.tail_lines`），标题和隐藏提示另计；`Ctrl+T` 展开。
 - **用户长消息**：发送后默认显示前 3 个终端显示行，超出时显示隐藏行数和 `Ctrl+B` 提示。`Ctrl+B` 统一切换长消息与队列的展开状态；只改变显示，发送给模型和会话中保存的内容保持完整。
-- **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。实时滚动显示最后 4 行（`ui.execute_tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
+- **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。命令正文默认保留前 4 个显示行（`ui.head_lines`），实时输出保留最后 4 行（`ui.tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**（`ls`、`read_file`，以及历史会话里的 `glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。当前模型工具表不再提供 `glob` 和 `grep`。
-- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入显示前 6 行；`Ctrl+R` 查看完整内容。
+- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入和差异预览默认保留前 4 行（`ui.head_lines`）；`Ctrl+R` 查看完整内容。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。

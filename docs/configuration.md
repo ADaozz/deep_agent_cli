@@ -290,22 +290,24 @@ web_search:
 
 ## 界面（`ui`）
 
-修改后重启 CLI 生效。数量字段均为正整数（`edit_preview_changed_lines` 至少为 2）。带 `_lines` 的折叠项默认按换行符切分的逻辑行计数；`thinking_tail_lines` 例外，按当前终端宽度折行后的显示行计算。带 `_items` 的字段按条目计数。
+修改后重启 CLI 生效。内容折叠统一使用 `head_lines` 和 `tail_lines`，均为正整数，默认各 4 行。需要开头预览的命令正文、写入、差异和普通失败摘要使用 `head_lines`；思考和工具输出、命令失败输出使用 `tail_lines`。命令正文和思考按终端折行后的显示行计数；其他内容按逻辑行计数。展开工具输出后不再受折叠行数限制。带 `_items` 的字段按条目计数。
+
+```yaml
+ui:
+  head_lines: 4
+  tail_lines: 4
+```
+
+原来的 `thinking_tail_lines`、`execute_tail_lines`、`tool_tail_lines`、`expanded_tool_lines`、`edit_preview_changed_lines`、`write_preview_lines`、`failure_preview_lines`、`command_failure_tail_lines` 已移除。已有配置中请删除这些字段，改用上面的两个字段；程序不会覆盖已有配置文件。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
-| `thinking_tail_lines` | `5` | 思考区折叠时保留的末尾显示行数，按当前终端宽度折行后计算 |
-| `execute_tail_lines` | `4` | 折叠时命令正文保留的开头显示行数，以及命令输出保留的末尾行数；Ctrl+O 展开完整命令和输出 |
-| `tool_tail_lines` | `8` | 其他工具输出折叠时保留的末尾行数 |
-| `expanded_tool_lines` | `40` | 展开的普通工具输出最多显示的行数 |
+| `head_lines` | `4` | 内容折叠时保留的开头行数 |
+| `tail_lines` | `4` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
 | `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
-| `edit_preview_changed_lines` | `8` | 修改预览的增删行预算，至少为 2 |
-| `write_preview_lines` | `6` | 覆盖写入预览显示的前几行 |
-| `failure_preview_lines` | `4` | 失败工具摘要显示的前几行 |
-| `command_failure_tail_lines` | `6` | 通用命令失败摘要保留的末尾行数 |
 | `editor_max_lines` | `10` | 输入框最大行数；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
 

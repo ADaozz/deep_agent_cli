@@ -557,7 +557,7 @@ def _message(
     elif block.kind == "assistant":
         if block.thinking:
             body: list[Any] = [Text("Thinking", style="bold #888888")]
-            details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.thinking_tail_lines)
+            details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.tail_lines)
             body.append(Padding(details, (0, 0, 0, 2)))
             items.append(Padding(Group(*body), (1, 1, 0, 1)))
         if block.content:
@@ -674,7 +674,7 @@ def _tool(block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDispla
         ]
         if block.output and block.status != "waiting":
             output = mcp_display_text(block.output).splitlines()
-            limit = limits.expanded_tool_lines if expanded else limits.tool_tail_lines
+            limit = len(output) if expanded else limits.tail_lines
             if len(output) > limit:
                 output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
             body.append(Text("\n".join(output), style="dim"))
@@ -727,7 +727,7 @@ def render_tool_preview(
         output = block.output.strip()
         if output:
             lines = output.splitlines()
-            limit = limits.expanded_tool_lines if expanded else limits.tool_tail_lines
+            limit = len(lines) if expanded else limits.tail_lines
             if len(lines) > limit:
                 skipped = len(lines) - limit
                 lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-limit:]]
@@ -761,9 +761,9 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     console = Console(width=max(20, width))
     body: list[Any] = []
     command_lines = _wrap_failure_line(title, console, width)
-    if not expanded and len(command_lines) > limits.execute_tail_lines:
-        hidden = len(command_lines) - limits.execute_tail_lines
-        body.extend(command_lines[:limits.execute_tail_lines])
+    if not expanded and len(command_lines) > limits.head_lines:
+        hidden = len(command_lines) - limits.head_lines
+        body.extend(command_lines[:limits.head_lines])
         notice = Text(f"  … {hidden} more command lines hidden · {EXPAND_HINT}{suffix}", style="dim")
         body.extend(_wrap_failure_line(notice, console, width))
     else:
@@ -791,9 +791,9 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
             "", display_output,
         )
     lines = display_output.strip().splitlines()
-    if not expanded and len(lines) > limits.execute_tail_lines:
-        hidden = len(lines) - limits.execute_tail_lines
-        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-limits.execute_tail_lines:]]
+    if not expanded and len(lines) > limits.tail_lines:
+        hidden = len(lines) - limits.tail_lines
+        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-limits.tail_lines:]]
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:

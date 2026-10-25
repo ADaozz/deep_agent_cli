@@ -26,23 +26,14 @@ tools:
 ui:
   # 每次回答结束后显示时间所使用的 IANA 时区。
   timezone: Asia/Shanghai
-  # 思考内容折叠时保留的逻辑行数，必须为正整数。
-  thinking_tail_lines: 5
-  # 命令正文折叠时保留的开头显示行数，同时也是命令输出保留的末尾逻辑行数。
-  execute_tail_lines: 4
-  # 通用工具输出折叠时保留的逻辑行数。
-  tool_tail_lines: 8
-  expanded_tool_lines: 40
+  # 内容折叠时保留的开头行数和末尾行数，均为正整数。
+  # 命令、写入、差异和失败摘要使用 head_lines；思考和工具输出使用 tail_lines。
+  head_lines: 4
+  tail_lines: 4
   # 简略列表显示的条目数，按条目计数，不按屏幕换行计数。
   explore_preview_items: 5
   explore_failure_items: 3
   create_preview_items: 5
-  # 文件预览行数；编辑预览至少为 2 行，才能同时显示新增和删除内容。
-  edit_preview_changed_lines: 8
-  write_preview_lines: 6
-  # 工具执行失败时的摘要行数。
-  failure_preview_lines: 4
-  command_failure_tail_lines: 6
   # 编辑器和菜单的最大行数；实际高度可能因终端尺寸而缩小。
   editor_max_lines: 10
   completion_menu_lines: 8
