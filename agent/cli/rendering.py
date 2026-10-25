@@ -242,7 +242,7 @@ def _create_group(blocks: list[ToolBlock], expanded: bool, width: int, *, limits
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
         return _tool(blocks[-1], expanded, width, limits=limits)
-    title = Text.assemble(("● ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
+    title = Text.assemble(("• ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
     rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
     for row in (title, *rows):
         row.truncate(max(1, width - 1), overflow="ellipsis")
@@ -825,7 +825,7 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
 def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int) -> Any:
     _symbol, color = _tool_status_marker("error")
     title = Text.assemble(
-        ("● ", color),
+        ("• ", color),
         (f"Failed (exit {_failure_code(block)}) ", "bold"),
         (preview.target, ""),
     )
@@ -867,10 +867,10 @@ def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
     if status == "running":
         return _spinner(), "green"
     if status == "waiting":
-        return "●", "yellow"
+        return "•", "yellow"
     if status in {"error", "interrupted"} or is_error:
-        return "●", "#888888"
-    return "●", "green"
+        return "•", "#888888"
+    return "•", "green"
 
 
 def _spinner_tick() -> int:

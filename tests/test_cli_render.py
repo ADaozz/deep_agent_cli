@@ -207,7 +207,7 @@ def test_running_tools_use_green_spinner_and_completed_tools_green_dot() -> None
         collapsed_title = _explore_group([explore]).renderables[1]
         expanded_title = _tool(explore, True).renderable.renderables[0]
         for item in (collapsed_title, expanded_title):
-            assert item.plain.lstrip()[0] in ("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if status == "running" else "●")
+            assert item.plain.lstrip()[0] in ("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if status == "running" else "•")
             assert item.spans[0].style == "green"
 
 
@@ -594,7 +594,7 @@ def test_failed_execute_shows_real_exit_code_command_and_compact_output() -> Non
     block = state.blocks[0]
     assert isinstance(block, ToolBlock) and block.exit_code == 7
     collapsed = _plain(render_transcript(state, 100))
-    assert "● Failed (exit 7) git push origin main" in collapsed
+    assert "• Failed (exit 7) git push origin main" in collapsed
     assert "└ output" in collapsed
     assert "detail 9" in collapsed
     assert "detail 0" not in collapsed
@@ -878,7 +878,7 @@ def test_execute_status_semantics_precede_exit_code(reason, exit_code, expected)
     preview = build_tool_preview(block)
     assert isinstance(preview.command_execution, CommandExecutionPreview)
     rendered = _plain(_capture(_tool(block, False), 100))
-    assert f"● {expected} pytest -q" in rendered
+    assert f"• {expected} pytest -q" in rendered
     assert "└ output" in rendered and "result" in rendered
 
 
@@ -959,7 +959,7 @@ def test_execute_status_marker_colors(status, reason, color) -> None:
     )
     title = _tool(block, False).renderable.renderables[0]
     assert title.spans[0].style == color
-    assert title.plain.startswith("● ")
+    assert title.plain.startswith("• ")
 
 
 def test_edit_waiting_shows_short_diff_preview() -> None:
@@ -1268,10 +1268,10 @@ def test_write_operation_artifact_controls_create_and_overwrite_titles() -> None
         {"file_path": path, "old_string": "", "new_string": "hello"},
         artifact={"operation": "create"}, status="completed",
     )
-    assert "● Created /workspace/report.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
-    assert "● Wrote /workspace/report.md" in _plain(render_transcript(CliState(blocks=[overwritten]), 100))
-    assert "● write workspace/report.md" in _plain(render_transcript(CliState(blocks=[unknown]), 100))
-    assert "● Edited /workspace/report.md" in _plain(render_transcript(CliState(blocks=[edited]), 100))
+    assert "• Created /workspace/report.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
+    assert "• Wrote /workspace/report.md" in _plain(render_transcript(CliState(blocks=[overwritten]), 100))
+    assert "• write workspace/report.md" in _plain(render_transcript(CliState(blocks=[unknown]), 100))
+    assert "• Edited /workspace/report.md" in _plain(render_transcript(CliState(blocks=[edited]), 100))
 
 
 def test_file_mutation_normalizer_produces_semantics_and_compact_rows() -> None:
@@ -1521,7 +1521,7 @@ def test_write_empty_file_has_no_fabricated_diff() -> None:
         tool_call_id="write-empty-created", name="write_file", arguments=args,
         artifact={"operation": "create"}, status="completed",
     )
-    assert "● Created /workspace/empty.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
+    assert "• Created /workspace/empty.md" in _plain(render_transcript(CliState(blocks=[created]), 100))
 
 
 def test_edit_preview_counts_added_deleted() -> None:
@@ -1902,7 +1902,7 @@ def test_run_cancelled_keeps_streamed_tool_output() -> None:
     assert tool.is_error
     assert state.status == "Cancelled"
     rendered = _plain(render_transcript(state, 100))
-    assert "● Cancelled" in rendered
+    assert "• Cancelled" in rendered
     assert "Failed (exit 1)" not in rendered
 
 
@@ -2138,7 +2138,7 @@ def test_restored_interrupted_write_has_static_gray_status() -> None:
     block = state.blocks[0]
     assert isinstance(block, ToolBlock)
     title = _tool(block, False).renderable.renderables[0]
-    assert title.plain.startswith("● write workspace/report.md")
+    assert title.plain.startswith("• write workspace/report.md")
     assert "interrupted (completion unconfirmed)" in title.plain
     assert title.spans[0].style == "#888888"
 
