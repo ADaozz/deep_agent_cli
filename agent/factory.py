@@ -32,8 +32,6 @@ from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.usage import UsageIdentityMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
-from agent.middleware.skills import ChineseSkillsMiddleware, SKILLS_CONTEXT_PROMPT
-from agent.middleware.tool_descriptions import ChineseToolDescriptionsMiddleware
 from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
@@ -225,13 +223,9 @@ def build_agent(
                 WriteOperationMiddleware(fs_backend),
                 AttachmentMaterializationMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
-                *([ChineseSkillsMiddleware(
-                    backend=fs_backend, sources=skill_sources, system_prompt=SKILLS_CONTEXT_PROMPT,
-                )] if skill_sources is not None else []),
                 compact_middleware,
                 *([MCPMiddleware(mcp, mcp_tools)] if include_mcp else []),
                 *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
-                ChineseToolDescriptionsMiddleware(),
             ],
             skills=skill_sources,
             backend=fs_backend,
