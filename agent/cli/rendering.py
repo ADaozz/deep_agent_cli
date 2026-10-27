@@ -621,7 +621,7 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
     count = len(blocks)
     verb = "Exploring" if running else "Explore" if waiting or interrupted or failed else "Explored"
     title = Text.assemble(
-        (f" {symbol} ", color),
+        (f"{symbol} ", color),
         (f"{verb} {count} {'item' if count == 1 else 'items'}", "bold"),
         (f" · {len(failed)} failed", "dim") if failed else ("", ""),
         (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
@@ -678,7 +678,7 @@ def _tool(block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDispla
             if len(output) > limit:
                 output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
             body.append(Text("\n".join(output), style="dim"))
-        return Padding(Group(*body), (1, 1, 0, 1), expand=False)
+        return Padding(Group(*body), (1, 0, 0, 0), expand=False)
     return render_tool_preview(
         block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits,
     )
@@ -735,7 +735,7 @@ def render_tool_preview(
                 "\n".join(f"  {line}" for line in lines),
                 style="dim" if not block.is_error else "red",
             ))
-    return Padding(Group(*body), (1, 1, 0, 1), expand=False)
+    return Padding(Group(*body), (1, 0, 0, 0), expand=False)
 
 
 def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
