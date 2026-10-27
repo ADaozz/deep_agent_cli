@@ -68,6 +68,8 @@ runner.close()
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
 
+原生 `task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
+
 `subagents_changed` 事件的 `result["count"]` 是实际运行数量。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。

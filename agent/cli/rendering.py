@@ -733,12 +733,16 @@ def render_tool_preview(
     suffix = (
         " — waiting for input" if block.status == "waiting"
         else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
+        else " — cancelled" if block.status == "cancelled"
+        else " — failed" if preview.kind == "task" and block.is_error
         else ""
     )
     verb = preview.verb
     if block.status == "running":
         verb = {"edit_file": "Editing", "write_file": "Writing", "delete": "Deleting"}.get(block.name, verb)
     summary = f"{verb} {preview.target}".strip()
+    if preview.kind == "task":
+        summary = f"{'Running SubAgent' if block.status == 'running' else 'SubAgent'} · {preview.target}"
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
     mutation = preview.file_mutation
     if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
@@ -751,6 +755,10 @@ def render_tool_preview(
         title.append(f" {preview.detail}", style="bold")
     title.append(suffix, style="dim")
     body: list[Any] = [title]
+    if preview.kind == "task":
+        body.append(Text(f"  {preview.detail}", style="dim"))
+        if block.output:
+            body.append(Text("  └ result", style="dim"))
     if preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
     elif preview.lines:
@@ -915,7 +923,7 @@ def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
         return _spinner(), "green"
     if status == "waiting":
         return "•", "yellow"
-    if status in {"error", "interrupted"} or is_error:
+    if status in {"error", "interrupted", "cancelled"} or is_error:
         return "•", "#888888"
     return "•", "green"
 

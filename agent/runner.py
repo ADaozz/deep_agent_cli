@@ -84,6 +84,7 @@ from agent.session import (
     TranscriptBlock,
     messages_to_transcript,
     settle_restored_tools,
+    subagent_result_status,
     workspace_state_path,
 )
 from agent.session_lock import SessionLockBusyError
@@ -1593,5 +1594,7 @@ class AgentRunner:
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:
                 # Native task returns an unnamed ToolMessage. Preserve the
                 # presentation identity even when resuming a saved tool step.
-                event = replace(event, name="task")
+                event = replace(event, name="task", is_error=(
+                    subagent_result_status(event.content, is_error=event.is_error) != "completed"
+                ))
             _emit(handler, event)

@@ -1241,5 +1241,6 @@ def test_subagent_counter_uses_existing_editor_top_row(count, label):
             assert after[editor_y - 1].rstrip().endswith(label)
         app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id='delegate'))
         app.state.apply(RunEvent(type='tool_completed', tool_call_id='delegate', content='private result'))
-        assert not any(isinstance(block, ToolBlock) for block in app.state.blocks)
+        cards = [block for block in app.state.blocks if isinstance(block, ToolBlock)]
+        assert len(cards) == 1 and cards[0].output == 'private result'
     _with_painted_app('subagent-counter', scenario)

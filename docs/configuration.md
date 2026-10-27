@@ -438,7 +438,7 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 `task` 等待任务实际完成，没有跨轮次后台任务。
 
 输入框上方现有空白行右侧只显示 `1 subagent` / `2 subagents` 等运行数量，零时隐藏。
-任务卡片与内部输出不会显示在实时或恢复后的 TUI 中；checkpoint 仍保留合法的最终 task 结果。
+每个 `task` 在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
 
 执行摘要写入配置目录（默认 `~/.deep-agent`）下的
 `subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。

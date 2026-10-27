@@ -123,8 +123,8 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
 摘要只精确替换已知模型和 Tavily Key；未知凭据原样保存。
 主上下文仅接收最终 task 结果，主动调用 `read_subagent_log` 才读取本父会话的日志页。
-TUI 仅在输入框上方显示运行数量，实时、历史恢复和未完成 task 恢复都隐藏任务卡片及内部输出，
-checkpoint 仍保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
+TUI 在输入框上方保留运行数量，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
+实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware
 

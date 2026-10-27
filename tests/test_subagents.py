@@ -70,7 +70,10 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         tool_result = next(m for m in state['messages'] if isinstance(m, ToolMessage))
         assert 'private child final' in tool_result.content
         assert 'run_id=' in tool_result.content
-        assert not [block for block in messages_to_transcript(state['messages']) if block.kind == 'tool']
+        cards = [block for block in messages_to_transcript(state['messages']) if block.kind == 'tool']
+        assert len(cards) == 1 and cards[0].name == 'task'
+        assert cards[0].arguments['description'] == 'Only delegated instructions'
+        assert cards[0].content == tool_result.content
         assert [e.result['count'] for e in events if e.type == 'subagents_changed'] == [1, 0]
         logs = list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
         assert len(logs) == 1
@@ -255,7 +258,7 @@ def test_prepared_runner_honors_subagent_disable_setting(tmp_path):
 
 
 
-def test_resumed_pending_task_result_stays_hidden(tmp_path, monkeypatch):
+def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch):
     import agent.factory as factory
     from agent.cli.state import CliState, ToolBlock
     from langchain_core.messages import HumanMessage
@@ -272,7 +275,10 @@ def test_resumed_pending_task_result_stays_hidden(tmp_path, monkeypatch):
         result = runner._stream(None, on_event=ui.apply)
         assert result.status == 'completed', result.error
         assert result.output == 'public answer'
-        assert not any(isinstance(block, ToolBlock) for block in ui.blocks)
+        cards = [block for block in ui.blocks if isinstance(block, ToolBlock)]
+        assert len(cards) == 1 and cards[0].name == 'task'
+        assert cards[0].arguments['description'] == 'pending delegated task'
+        assert cards[0].status == 'completed' and 'private result' in cards[0].output
         checkpoint = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
         assert 'private result' in next(m.content for m in checkpoint if isinstance(m, ToolMessage))
     finally:

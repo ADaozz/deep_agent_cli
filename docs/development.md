@@ -43,6 +43,7 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 
 ```bash
 pytest -q tests/test_subagents.py tests/test_subagent_lifecycle.py tests/test_subagent_logs.py tests/test_config.py tests/test_model_switch.py
+pytest -q tests/test_subagent_cards.py
 pytest -q tests/test_cli_layout.py tests/test_tui_pty.py -k subagent_counter
 ```
 
