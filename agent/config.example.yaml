@@ -21,9 +21,11 @@ agent:
 subagents:
   enabled: true
   max_concurrent: 2
-  # null：每次委派时继承主 Agent 当前模型/思考强度；model 必须是 llm.models 中的完整 ID。
+  # model 为 null：继承主 Agent 当前模型；否则必须是 llm.models 中的完整 ID。
   model: null
-  reasoning_effort: null
+  # default（旧配置 null 等价）：使用子模型原生默认，不继承主 Agent 的强度。
+  # 可显式填写目标模型支持的 low/high 等强度；暂不支持 auto。
+  reasoning_effort: default
   # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 task 明确失败。
   permission: allow
 

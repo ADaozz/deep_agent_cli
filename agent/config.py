@@ -165,7 +165,7 @@ class SubAgentConfig:
     enabled: bool = True
     max_concurrent: int = 2
     model: str | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str | None = "default"
     permission: str = "allow"
 
     @classmethod
@@ -186,6 +186,10 @@ class SubAgentConfig:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"subagents.{name} must be a non-empty string or null")
+        if self.reasoning_effort is None:
+            object.__setattr__(self, "reasoning_effort", "default")
+        if self.reasoning_effort == "auto":
+            raise ValueError("subagents.reasoning_effort auto is not supported yet")
 
 
 @dataclass(frozen=True)
@@ -214,7 +218,7 @@ class Settings:
             if profile is None:
                 raise ValueError(f"Unknown subagents.model: {self.subagents.model}")
         effort = self.subagents.reasoning_effort
-        if effort is not None and effort not in profile.reasoning_efforts:
+        if effort != "default" and effort not in profile.reasoning_efforts:
             raise ValueError(f"Unsupported subagents.reasoning_effort for {profile.id}: {effort}")
         object.__setattr__(self, "sandbox", replace(self.sandbox, trust_env=self.trust_env))
         object.__setattr__(

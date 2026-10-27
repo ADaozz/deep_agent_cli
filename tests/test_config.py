@@ -891,3 +891,35 @@ def test_subagents_defaults_and_validation():
         replace(cfg, subagents=SubAgentConfig(model='unknown'))
     with pytest.raises(ValueError, match='Unsupported subagents.reasoning_effort'):
         replace(cfg, subagents=SubAgentConfig(reasoning_effort='medium'))
+
+
+@pytest.mark.parametrize('effort', ['default', None])
+def test_subagent_default_effort_loads_without_model_capabilities(effort):
+    import yaml
+    raw = yaml.safe_load('subagents:\n  reasoning_effort: ' + ('null' if effort is None else effort))
+    cfg = Settings.from_mapping(raw)
+    assert cfg.subagents.reasoning_effort == 'default'
+    assert cfg.active_profile.reasoning_efforts == ()
+
+
+def test_subagent_example_uses_model_default_effort():
+    import yaml
+    from agent.config import SubAgentConfig
+    template = yaml.safe_load((Path(__file__).parents[1] / 'agent/config.example.yaml').read_text())
+    assert template['subagents']['reasoning_effort'] == SubAgentConfig().reasoning_effort == 'default'
+
+
+@pytest.mark.parametrize('effort', ['low', 'high'])
+def test_subagent_static_effort_is_validated(effort):
+    from agent.config import ModelProfile, SubAgentConfig
+    profile = ModelProfile('default', 'test', reasoning_efforts=('low', 'high'))
+    cfg = Settings(llm_profiles=(profile,), subagents=SubAgentConfig(reasoning_effort=effort))
+    assert cfg.subagents.reasoning_effort == effort
+    with pytest.raises(ValueError, match='Unsupported subagents.reasoning_effort for default'):
+        Settings(subagents=SubAgentConfig(reasoning_effort=effort))
+
+
+def test_subagent_auto_is_reserved_and_rejected():
+    from agent.config import SubAgentConfig
+    with pytest.raises(ValueError, match='auto is not supported'):
+        SubAgentConfig(reasoning_effort='auto')

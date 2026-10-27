@@ -112,7 +112,7 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
     from agent.runner import AgentRunner
     from agent.sandbox import BackendSelection, ExecutionMode
     from agent.llm import build_chat_model
-    from agent.llm_stream import live_stream_count
+    from agent.llm_stream import close_model_http_clients, live_stream_count
     from tests.model_stream_server import ScriptedSSEServer, Turn
     from tests.test_model_stream_cancel import Harness, settings_for
     call = {'id': 'delegate', 'name': 'task', 'args': {
@@ -121,7 +121,14 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
         cfg = replace(settings_for(server), config_dir=tmp_path)
         backend = StateBackend()
         monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
-        runner = AgentRunner(prepared=create_agent(model=build_chat_model(cfg.active_profile), settings=cfg, skills=[]), settings=cfg)
+        parent_model = build_chat_model(cfg.active_profile)
+        child_models = []
+        def build_child(profile, **kwargs):
+            child = build_chat_model(profile, **kwargs)
+            child_models.append(child)
+            return child
+        monkeypatch.setattr(factory, 'build_chat_model', build_child)
+        runner = AgentRunner(prepared=create_agent(model=parent_model, settings=cfg, skills=[]), settings=cfg)
         harness = Harness(runner).start(runner.invoke, 'parent private history')
         try:
             child_connection = server.wait_for_connection(1)
@@ -141,5 +148,47 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             assert live_stream_count() == 0
             assert runner.prepared.subagent_manager.active_count == 0
             assert 'assistant_delta' not in harness.types()
+            assert len(child_models) == 1 and child_models[0] is not parent_model
+            assert child_models[0].http_client.is_closed
+            assert child_models[0].http_async_client.is_closed
+            assert not parent_model.http_async_client.is_closed
         finally:
             runner.close()
+            close_model_http_clients(parent_model)
+
+
+@pytest.mark.parametrize('api', ['responses', 'chat_completions'])
+def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, monkeypatch):
+    import agent.factory as factory
+    from deepagents.backends import StateBackend
+    from agent.config import ModelProfile, Settings, SubAgentConfig
+    from agent.llm import build_chat_model
+    from agent.runner import AgentRunner
+    from agent.sandbox import BackendSelection, ExecutionMode
+    from tests.conftest import scripted_model
+    cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'parent'), ModelProfile('child', 'child', api=api)),
+                   subagents=SubAgentConfig(model='child'))
+    created = []
+    original = factory.build_agent
+    def assemble(spec, *args, **kwargs):
+        if spec.role == 'subagent':
+            raise RuntimeError('child assembly failed')
+        return original(spec, *args, **kwargs)
+    def build(profile, **kwargs):
+        model = build_chat_model(profile, **kwargs)
+        created.append(model)
+        return model
+    monkeypatch.setattr(factory, 'build_agent', assemble)
+    monkeypatch.setattr(factory, 'build_chat_model', build)
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+    parent = scripted_model([
+        AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'task', 'args': {
+            'description': 'task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported failure')])
+    runner = AgentRunner(model=parent, settings=cfg)
+    try:
+        assert runner.invoke('go').output == 'reported failure'
+        assert len(created) == 1
+        assert created[0].http_client.is_closed and created[0].http_async_client.is_closed
+        assert runner.prepared.subagent_manager.active_count == 0
+    finally:
+        runner.close()

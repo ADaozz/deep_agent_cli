@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+import pytest
+
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -270,5 +272,127 @@ def test_resumed_pending_task_result_stays_hidden(tmp_path, monkeypatch):
         assert not any(isinstance(block, ToolBlock) for block in ui.blocks)
         checkpoint = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
         assert 'private result' in next(m.content for m in checkpoint if isinstance(m, ToolMessage))
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize('api', ['responses', 'chat_completions'])
+@pytest.mark.parametrize('override_model', [False, True])
+@pytest.mark.parametrize('parent_effort,child_effort,expected', [
+    ('high', 'default', None), ('low', 'default', None),
+    ('high', 'low', 'low'), ('low', 'high', 'high'), ('high', None, None),
+])
+def test_child_request_effort_is_independent_of_parent(
+    api, override_model, parent_effort, child_effort, expected, tmp_path, monkeypatch,
+):
+    import agent.factory as factory
+    from agent.config import ModelProfile
+    from agent.llm import build_chat_model
+    from agent.llm_stream import close_model_http_clients
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+    call = {'name': 'task', 'id': 'delegate', 'args': {
+        'description': 'child-only task', 'subagent_type': 'general-purpose'}}
+    with ScriptedSSEServer(api, [Turn(tool_calls=[call]), Turn(text='child answer'), Turn(text='parent answer')]) as server:
+        main = ModelProfile('main', 'main-model', api=api, base_url=server.base_url,
+                            reasoning_efforts=('low', 'high'), max_retries=0)
+        # A different child with no effort capabilities reproduces the review
+        # finding: the main model's high must never reach this profile.
+        other = ModelProfile('other', 'child-model', api=api, base_url=server.base_url,
+                             reasoning_efforts=('low', 'high') if expected else (), max_retries=0)
+        cfg = Settings(llm_profiles=(main, other), llm_default='main', config_dir=tmp_path,
+                       subagents=SubAgentConfig(model='other' if override_model else None, reasoning_effort=child_effort))
+        parent = build_chat_model(main, reasoning_effort=parent_effort)
+        children = []
+        def build(profile, **kwargs):
+            child = build_chat_model(profile, **kwargs)
+            children.append(child)
+            return child
+        monkeypatch.setattr(factory, 'build_chat_model', build)
+        monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+        runner = AgentRunner(model=parent, settings=cfg)
+        try:
+            assert runner.invoke('delegate').output == 'parent answer'
+            messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
+            assert 'child answer' in next(m.content for m in messages if isinstance(m, ToolMessage))
+            assert len(server.connections) == 3
+            request = server.connections[1].body
+            assert request['model'] == ('child-model' if override_model else 'main-model')
+            if api == 'responses':
+                assert server.connections[0].body['reasoning']['effort'] == parent_effort
+                if expected is None:
+                    assert 'effort' not in (request.get('reasoning') or {})
+                else:
+                    assert request['reasoning']['effort'] == expected
+            else:
+                assert server.connections[0].body['reasoning_effort'] == parent_effort
+                if expected is None:
+                    assert 'reasoning_effort' not in request
+                else:
+                    assert request['reasoning_effort'] == expected
+            assert len(children) == 1 and children[0] is not parent
+            assert children[0].http_client.is_closed and children[0].http_async_client.is_closed
+            assert not parent.http_client.is_closed and not parent.http_async_client.is_closed
+        finally:
+            runner.close()
+            close_model_http_clients(parent)
+
+
+def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monkeypatch):
+    import agent.factory as factory
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+    def unexpected_build(*args, **kwargs):
+        pytest.fail('custom injected model silently replaced by configured default')
+    monkeypatch.setattr(factory, 'build_chat_model', unexpected_build)
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+            'description': 'custom task', 'subagent_type': 'general-purpose'}}]),
+        AIMessage(content='custom child'), AIMessage(content='custom parent')])
+    runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path))
+    try:
+        assert runner.invoke('go').output == 'custom parent'
+    finally:
+        runner.close()
+
+
+def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, monkeypatch):
+    import agent.factory as factory
+    from agent.config import ModelProfile
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+    cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'configured', reasoning_efforts=('low',)),),
+                   subagents=SubAgentConfig(reasoning_effort='low'))
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+            'description': 'custom task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported')])
+    monkeypatch.setattr(factory, 'build_chat_model', lambda *args, **kwargs: pytest.fail('unexpected profile fallback'))
+    runner = AgentRunner(model=model, settings=cfg)
+    try:
+        assert runner.invoke('go').output == 'reported'
+        messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
+        assert 'custom BaseChatModel requires subagents.model' in next(m.content for m in messages if isinstance(m, ToolMessage))
+    finally:
+        runner.close()
+
+
+def test_log_redacts_only_configured_model_and_tavily_keys(tmp_path, monkeypatch):
+    import agent.factory as factory
+    from agent.config import ModelProfile
+    monkeypatch.delenv('TAVILY_API_KEY', raising=False)
+    monkeypatch.setenv('UNKNOWN_SERVICE_TOKEN', 'unknown-output-key')
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+    cfg = Settings(config_dir=tmp_path, tavily_api_key='known-tavily-key', llm_profiles=(
+        ModelProfile('default', 'main', api_key='known-main-key'),
+        ModelProfile('unused', 'unused', api_key='known-unused-key')))
+    description = 'known-main-key known-unused-key known-tavily-key password=unknown-output-key'
+    parent = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+            'description': description, 'subagent_type': 'general-purpose'}}]),
+        AIMessage(content='child result'), AIMessage(content='parent result')])
+    runner = AgentRunner(model=parent, settings=cfg)
+    try:
+        assert runner.invoke('go').output == 'parent result'
+        log = next((tmp_path / 'subagents').rglob('*.jsonl')).read_text()
+        assert all(key not in log for key in ('known-main-key', 'known-unused-key', 'known-tavily-key'))
+        assert 'password=unknown-output-key' in log
+        assert '[REDACTED]' in log
     finally:
         runner.close()

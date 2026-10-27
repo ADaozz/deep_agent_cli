@@ -409,13 +409,20 @@ subagents:
   enabled: true
   max_concurrent: 2
   model: null
-  reasoning_effort: null
+  reasoning_effort: default
   permission: allow
 ```
 
 `max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
-`model` 必须是 `llm.models` 中的完整模型 ID，`reasoning_effort` 必须属于目标模型声明的能力。
-空值继承当前主模型和思考强度；模型切换只影响下一次创建的任务。
+`model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
+`reasoning_effort` 默认 `default`，旧配置 `null` 与它等价：使用子模型原生默认强度，
+不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
+常规路径每次委派创建独立模型客户端，默认不向 Responses API 传 `reasoning.effort`，
+也不向 Chat Completions API 传 `reasoning_effort`；任务结束后关闭子任务客户端。
+模型切换只影响下一次创建的任务，默认强度仍然独立于主 Agent。
+直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
+此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
+当前原生 `task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
 当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
@@ -431,7 +438,9 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 `subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。
 这样可复用现有受保护配置目录，避免工作区工具直接读取其他会话日志。
 每项事件最多约 24 KB，较大内容截断并标记；模型增量、工具输出、最终状态按顺序追加并 flush。
-已知配置密钥及常见 token/password 字段会脱敏；这不是任意自然语言秘密的通用识别器。
+日志只对已掌握的模型 API Key 和已配置的 Tavily API Key 做精确字符串替换。
+不按字段名或文本格式识别凭据，不扫描其他环境变量；未知的 `password=...`、`token=...`
+和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
 日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
 
 主 Agent 可按需调用 `read_subagent_log(run_id=null, offset=0, limit=100)` 查看当前会话的

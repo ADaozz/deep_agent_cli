@@ -777,3 +777,60 @@ def test_cli_package_does_not_acquire_the_runner_operation_lock() -> None:
         if "_operation_lock" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+
+@pytest.mark.parametrize('api', ['responses', 'chat_completions'])
+@pytest.mark.parametrize('child_effort', ['default', None, 'high'])
+def test_subagent_effort_stays_independent_after_main_model_switch(api, child_effort, tmp_path, monkeypatch):
+    import agent.factory as factory
+    from agent.config import SubAgentConfig
+    from agent.llm import build_chat_model
+    from agent.llm_stream import close_model_http_clients
+    from agent.sandbox import BackendSelection, ExecutionMode
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+    def task_call(identity):
+        return {'id': identity, 'name': 'task', 'args': {
+            'description': identity, 'subagent_type': 'general-purpose'}}
+    turns = [Turn(tool_calls=[task_call('first')]), Turn(text='first child'), Turn(text='first parent'),
+             Turn(tool_calls=[task_call('second')]), Turn(text='second child'), Turn(text='second parent')]
+    with ScriptedSSEServer(api, turns) as server:
+        profiles = tuple(ModelProfile(identity, f'{identity}-model', api=api, base_url=server.base_url,
+                         reasoning_efforts=('low', 'high'), max_retries=0) for identity in ('alpha', 'beta'))
+        cfg = Settings(config_dir=tmp_path, llm_profiles=profiles, llm_default='alpha',
+                       subagents=SubAgentConfig(reasoning_effort=child_effort))
+        first_model = build_chat_model(profiles[0], reasoning_effort='high')
+        children = []
+        def build_child(profile, **kwargs):
+            model = build_chat_model(profile, **kwargs)
+            children.append(model)
+            return model
+        monkeypatch.setattr(factory, 'build_chat_model', build_child)
+        monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+        runner = AgentRunner(model=first_model, settings=cfg)
+        try:
+            assert runner.invoke('first').output == 'first parent'
+            runner.request_model_change('beta', reasoning_effort='low')
+            assert runner.invoke('second').output == 'second parent'
+            assert len(server.connections) == 6
+            for index, identity in [(1, 'alpha'), (4, 'beta')]:
+                body = server.connections[index].body
+                assert body['model'] == f'{identity}-model'
+                if child_effort == 'high':
+                    assert (body['reasoning']['effort'] if api == 'responses' else body['reasoning_effort']) == 'high'
+                elif api == 'responses':
+                    assert 'effort' not in (body.get('reasoning') or {})
+                else:
+                    assert 'reasoning_effort' not in body
+            first, second = server.connections[0].body, server.connections[3].body
+            if api == 'responses':
+                assert first['reasoning']['effort'] == 'high' and second['reasoning']['effort'] == 'low'
+            else:
+                assert first['reasoning_effort'] == 'high' and second['reasoning_effort'] == 'low'
+            assert [model._deep_agent_model_id for model in children] == ['alpha', 'beta']
+            assert all(model.http_client.is_closed and model.http_async_client.is_closed for model in children)
+        finally:
+            runner.close()
+            close_model_http_clients(first_model)
+            if runner.prepared.model is not first_model:
+                close_model_http_clients(runner.prepared.model)

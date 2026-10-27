@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.config import SandboxConfig, Settings
 from agent.control import RunController
 from agent.environment import EnvironmentContextMiddleware
-from agent.llm import build_chat_model
+from agent.llm import ProtocolChatOpenAI, build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.pause import PauseGateMiddleware
@@ -235,14 +235,23 @@ def build_agent(
         def prepare_child(controller: RunController) -> PreparedAgent:
             if execution_mode is not ExecutionMode.SANDBOXED:
                 raise ValueError("Subagents require a verified SANDBOXED backend for allow permission")
-            child_model = model
-            if cfg.subagents.model is not None or cfg.subagents.reasoning_effort is not None:
+            effort = cfg.subagents.reasoning_effort
+            effort = None if effort in (None, "default") else effort
+            if cfg.subagents.model is not None or isinstance(model, ProtocolChatOpenAI):
                 profile = cfg.get_profile(cfg.subagents.model or getattr(model, "_deep_agent_model_id", cfg.llm_default))
-                inherited_effort = getattr(model, "reasoning_effort", None) or (getattr(model, "reasoning", None) or {}).get("effort")
+                # Each task owns a fresh client. Never inherit the parent's
+                # configured effort, including when it uses the same profile.
                 child_model = build_chat_model(
                     profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
-                    reasoning_effort=cfg.subagents.reasoning_effort or inherited_effort,
+                    reasoning_effort=effort,
                 )
+            else:
+                # Injected custom models (including scripted test doubles) have
+                # no general profile-based reconstruction contract. Keep the
+                # supplied object instead of silently selecting cfg.llm_default.
+                if effort is not None:
+                    raise ValueError("A custom BaseChatModel requires subagents.model to override reasoning_effort")
+                child_model = model
             child_spec = replace(
                 spec, role="subagent", tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),

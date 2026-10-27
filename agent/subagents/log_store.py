@@ -11,7 +11,6 @@ import threading
 from typing import Any
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
-_SECRET = re.compile(r"(?i)(bearer\s+|(?:api[_-]?key|token|password|secret)[\"']?\s*[:=]\s*[\"']?)([^\s\"',}]+)")
 MAX_EVENT_BYTES = 24_000
 MAX_PAGE_BYTES = 64_000
 
@@ -19,7 +18,7 @@ MAX_PAGE_BYTES = 64_000
 class SubAgentLogStore:
     def __init__(self, root: Path, secrets: tuple[str, ...] = ()) -> None:
         self.root = root
-        self.secrets = tuple(value for value in secrets if value and len(value) >= 4)
+        self.secrets = tuple(value for value in secrets if value)
         self._lock = threading.Lock()
 
     def _directory(self, parent: str) -> Path:
@@ -28,16 +27,15 @@ class SubAgentLogStore:
 
     def _redact(self, text: str) -> str:
         for secret in self.secrets:
-            text = text.replace(secret, "[REDACTED]")
-        return _SECRET.sub(r"\1[REDACTED]", text)
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+        return text
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):
             return self._redact(value)
         if isinstance(value, dict):
-            sensitive = {"api_key", "apikey", "token", "access_token", "refresh_token", "password", "secret", "authorization"}
-            return {str(key): "[REDACTED]" if str(key).lower().replace("-", "_") in sensitive
-                    else self._sanitize(item) for key, item in value.items()}
+            return {str(key): self._sanitize(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._sanitize(item) for item in value]
         if value is None or isinstance(value, (int, float, bool)):
@@ -49,11 +47,11 @@ class SubAgentLogStore:
     def append(self, parent: str, run_id: str, event: str, **payload: Any) -> None:
         if not _ID.fullmatch(run_id):
             raise ValueError("Invalid subagent run ID")
-        record = dict(timestamp=datetime.now(timezone.utc).isoformat(), run_id=run_id, event=event, **payload)
-        encoded = json.dumps(self._sanitize(record), ensure_ascii=False)
+        record = self._sanitize(dict(timestamp=datetime.now(timezone.utc).isoformat(), run_id=run_id, event=event, **payload))
+        encoded = json.dumps(record, ensure_ascii=False)
         if len(encoded.encode()) > MAX_EVENT_BYTES:
-            record = dict(timestamp=record["timestamp"], run_id=run_id, event=event,
-                          truncated=True, status=payload.get("status"), model=payload.get("model"),
+            record = dict(timestamp=record["timestamp"], run_id=record["run_id"], event=record["event"],
+                          truncated=True, status=record.get("status"), model=record.get("model"),
                           preview=encoded.encode()[:MAX_EVENT_BYTES // 4].decode(errors="ignore"))
             encoded = json.dumps(record, ensure_ascii=False)
         with self._lock:

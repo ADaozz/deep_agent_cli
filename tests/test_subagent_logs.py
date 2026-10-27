@@ -18,7 +18,7 @@ def test_log_restart_paging_ownership_and_redaction(tmp_path):
     assert page['next_offset'] == 3
     raw = json.dumps(page)
     assert 'configured-secret-value' not in raw
-    assert 'supersecret' not in raw
+    assert 'token=supersecret' in raw
     assert restarted.read('parent-b')['runs'] == []
     assert 'error' in restarted.read('parent-b', run)
     with pytest.raises(ValueError):
@@ -44,13 +44,42 @@ def test_log_bounds_and_crash_tail(tmp_path):
 
 
 
-def test_redaction_preserves_json_escaping_and_structured_credentials(tmp_path):
-    store = SubAgentLogStore(tmp_path, ('secret"with\\quotes',))
+def test_only_known_strings_are_redacted_in_nested_and_serialized_values(tmp_path):
+    from langchain_core.messages import AIMessage
+    known = 'model-key"with\\quotes'
+    tavily = 'known-tavily-key'
+    store = SubAgentLogStore(tmp_path, (known, tavily, 'xy', ''))
     run = uuid4().hex
-    store.append('parent', run, 'tool', input={'password': 'neverpersist', 'nested': {'api-key': 'anothersecret'}},
-                 output='token=value"quoted password=abc\\def')
+    payload = {
+        'password': 'unknown123', 'token': 'unknown123', 'api_key': 'unknown123',
+        'nested': [{'value': known}, (tavily, 'ordinary log')],
+        'serialized': json.dumps({'password': 'correct horse battery staple', 'token': tavily}),
+        'message': AIMessage(content=known),
+        'short_known_secret': 'xy',
+    }
+    store.append('parent', run, 'tool', input=payload,
+                 output='password=unknown123 token=unknown123 bearer unknown123')
     raw = next(tmp_path.rglob('*.jsonl')).read_text()
-    assert 'neverpersist' not in raw and 'anothersecret' not in raw
-    assert 'value' not in raw and 'abc' not in raw
-    assert json.loads(raw)['input']['password'] == '[REDACTED]'
-    assert len(store.read('parent', run)['records']) == 1
+    record = json.loads(raw)
+    assert record['input']['password'] == 'unknown123'
+    assert record['input']['token'] == 'unknown123'
+    assert record['input']['api_key'] == 'unknown123'
+    assert record['input']['nested'] == [{'value': '[REDACTED]'}, ['[REDACTED]', 'ordinary log']]
+    assert json.loads(record['input']['serialized']) == {
+        'password': 'correct horse battery staple', 'token': '[REDACTED]'}
+    assert record['input']['message']['content'] == '[REDACTED]'
+    assert record['input']['short_known_secret'] == '[REDACTED]'
+    assert record['output'] == 'password=unknown123 token=unknown123 bearer unknown123'
+    assert known not in raw and tavily not in raw
+    assert store.read('parent', run)['records'] == [record]
+
+
+def test_known_strings_stay_redacted_when_event_is_truncated(tmp_path):
+    store = SubAgentLogStore(tmp_path, ('known-model-key', 'known-tavily-key'))
+    run = uuid4().hex
+    store.append('parent', run, 'known-model-key', model='known-model-key', status='known-tavily-key',
+                 output='known-model-key ' * MAX_EVENT_BYTES)
+    raw = next(tmp_path.rglob('*.jsonl')).read_text()
+    assert 'known-model-key' not in raw and 'known-tavily-key' not in raw
+    record = json.loads(raw)
+    assert record['truncated'] and record['model'] == record['status'] == record['event'] == '[REDACTED]'
