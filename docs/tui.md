@@ -125,7 +125,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 Esc 取消当前 Run 时会传播到全部关联子任务；退出沿用既有 Ctrl+C、Ctrl+D 和 `/exit` 规则。
 
 主模型切换只影响下一次派生使用的模型 Profile；子任务默认强度使用自身模型默认，
-不受主 Agent 当前 high/low 影响。独立日志及按需查询见 [配置参考](configuration.md#subagent-委派)。
+不受主 Agent 当前 high/low 影响。执行摘要仅包含操作、状态、耗时及有界最终结果，不保存模型 Token 或思考；按需查询见 [配置参考](configuration.md#subagent-委派)。
 
 ## 模型切换
 

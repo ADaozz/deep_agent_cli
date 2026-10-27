@@ -74,7 +74,10 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         assert [e.result['count'] for e in events if e.type == 'subagents_changed'] == [1, 0]
         logs = list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
         assert len(logs) == 1
-        assert 'model_start' in logs[0].read_text()
+        import json
+        records = [json.loads(line) for line in logs[0].read_text().splitlines()]
+        assert [record['event'] for record in records] == ['start', 'finish']
+        assert records[-1]['tool_count'] == 0
         assert 'private child final' in logs[0].read_text()
         assert 'parent secret conversation' not in logs[0].read_text()
     finally:

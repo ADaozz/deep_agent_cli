@@ -6,6 +6,9 @@ callbacks, checkpoint namespace, stream writer and configuration implicitly.
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+from time import monotonic
 from contextvars import Context
 from typing import Any, Callable
 
@@ -20,30 +23,98 @@ from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import SubAgentManager
 
 
+SUMMARY_LIMIT = 1000
+COMMAND_LIMIT = 300
+ERROR_LIMIT = 240
+
+
+def _brief(value: str, limit: int) -> str:
+    text = " ".join(value.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _error_reason(error: BaseException) -> str:
+    return _brief(str(error) or type(error).__name__, ERROR_LIMIT)
+
+
 class LogCallback(BaseCallbackHandler):
+    """Record tool operations and outcomes, never model or raw output data."""
+
     def __init__(self, write: Callable[..., None]) -> None:
         self.write = write
-
-    def on_chat_model_start(self, serialized: dict, messages: list, **kwargs: Any) -> None:
-        self.write("model_start", input=[[message.model_dump() for message in batch] for batch in messages])
-
-    def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
-        self.write("model_delta", output=chunk.model_dump() if hasattr(chunk, "model_dump") else token)
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        self.write("model", output=response.model_dump())
+        self._lock = threading.Lock()
+        self._tools: dict[Any, tuple[str, float]] = {}
+        self.tool_count = 0
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.write("model_error", error=str(error))
+        self.write("model_error", reason=_error_reason(error))
 
     def on_tool_start(self, serialized: dict, input_str: str, **kwargs: Any) -> None:
-        self.write("tool_start", tool_name=serialized.get("name"), input=input_str)
+        name = (serialized or {}).get("name") or "tool"
+        arguments = kwargs.get("inputs")
+        if not isinstance(arguments, dict):
+            try:
+                arguments = json.loads(input_str)
+            except (ValueError, TypeError):
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        operation = {}
+        if name == "execute":
+            command = arguments.get("command")
+            if isinstance(command, str):
+                operation["command"] = _brief(command, COMMAND_LIMIT)
+        else:
+            for key in ("file_path", "path", "directory", "query"):
+                target = arguments.get(key)
+                if isinstance(target, str):
+                    operation["query" if key == "query" else "target"] = _brief(target, COMMAND_LIMIT)
+                    break
+        with self._lock:
+            self._tools[kwargs.get("run_id")] = (name, monotonic())
+            self.tool_count += 1
+        self.write("tool_start", tool_name=name, tool_run_id=str(kwargs.get("run_id") or ""), **operation)
+
+    def _finish_tool(self, kwargs: dict) -> dict:
+        with self._lock:
+            name, started = self._tools.pop(kwargs.get("run_id"), ("tool", monotonic()))
+        return dict(tool_name=name, tool_run_id=str(kwargs.get("run_id") or ""),
+                    elapsed_seconds=round(max(0.0, monotonic() - started), 3))
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> None:
-        self.write("tool_finish", output=output.model_dump() if hasattr(output, "model_dump") else output)
+        result = self._finish_tool(kwargs)
+        artifact = getattr(output, "artifact", None)
+        artifact = artifact if isinstance(artifact, dict) else {}
+        exit_code = artifact.get("exit_code")
+        termination = artifact.get("termination_reason")
+        content = getattr(output, "content", output if isinstance(output, str) else "")
+        content = content if isinstance(content, str) else ""
+        failed = (getattr(output, "status", None) == "error" or bool(termination)
+                  or (type(exit_code) is int and exit_code != 0)
+                  or content.lower().startswith("error") or "cancelled by user" in content.lower())
+        result["status"] = "cancelled" if termination == "cancelled" or "cancelled by user" in content.lower() else (
+            "failed" if failed else "completed"
+        )
+        if type(exit_code) is int:
+            result["exit_code"] = exit_code
+        if result["tool_name"] == "execute":
+            log_path = artifact.get("agent_log_path") or artifact.get("host_log_path")
+            if isinstance(log_path, str):
+                result["log_path"] = _brief(log_path, COMMAND_LIMIT)
+        # Successful file reads/edits and commands never copy their output.
+        result["summary"] = "Completed" if not failed else "Tool failed"
+        if failed:
+            if termination:
+                reason = str(termination)
+            elif type(exit_code) is int:
+                reason = f"Command exited with code {exit_code}"
+            else:
+                reason = content.splitlines()[0] if content else "Tool returned an error"
+            result["reason"] = _brief(reason, ERROR_LIMIT)
+        self.write("tool_finish", **result)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.write("tool_error", error=str(error))
+        self.write("tool_error", **self._finish_tool(kwargs), status="failed", reason=_error_reason(error))
 
 
 class SubAgentRuntime(Runnable):
@@ -81,12 +152,15 @@ class SubAgentRuntime(Runnable):
         def write(event: str, **payload: Any) -> None:
             self.store.append(parent, run_id, event, model=self.model_name, **payload)
 
-        write("start", status="running", input=input.get("messages", [])[-1].content)
+        started = monotonic()
+        description = visible_text(input["messages"][-1])
+        write("start", status="running", description=_brief(description, SUMMARY_LIMIT),
+              description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT)
         set_stream_owner(controller)
-        set_output_emitter(lambda call_id, content, stream: write(
-            "tool_output", tool_call_id=call_id, output=content, stream=stream,
-        ))
+        set_output_emitter(None)
+        callback = LogCallback(write)
         prepared = None
+        status, summary, summary_truncated = "failed", "", False
         try:
             prepared = self.prepare(controller)
             if controller.cancel_requested:
@@ -95,7 +169,7 @@ class SubAgentRuntime(Runnable):
             for final in prepared.graph.stream(
                 {"messages": input["messages"][-1:]},
                 {"configurable": {"thread_id": run_id, "checkpoint_ns": ""},
-                 "callbacks": [LogCallback(write)]},
+                 "callbacks": [callback]},
                 stream_mode="values", control=controller.run_control,
             ):
                 if final.get("__interrupt__"):
@@ -107,12 +181,15 @@ class SubAgentRuntime(Runnable):
                            if isinstance(m, AIMessage) and not m.tool_calls), "")
             if not answer:
                 raise RuntimeError("Subagent did not produce a final answer")
-            write("finish", status="completed", output=answer)
+            status = "completed"
+            summary = _brief(answer, SUMMARY_LIMIT)
+            summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
             # Return only the final response: no child messages or state channels.
             return {"messages": [AIMessage(content=f"[subagent run_id={run_id}]\n{answer}")]}
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
-            write("error", status=status, error=str(exc))
+            summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc)
+            write("error", status=status, reason=summary)
             return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {str(exc)[:1000]}")]}
         finally:
             if prepared is not None and getattr(prepared, "owns_model_clients", False):
@@ -120,4 +197,6 @@ class SubAgentRuntime(Runnable):
                 try:
                     close_model_http_clients(prepared.model)
                 except Exception as exc:
-                    write("cleanup_error", error=str(exc))
+                    write("error", phase="cleanup", reason=_error_reason(exc))
+            write("finish", status=status, summary=summary, summary_truncated=summary_truncated,
+                  elapsed_seconds=round(max(0.0, monotonic() - started), 3), tool_count=callback.tool_count)

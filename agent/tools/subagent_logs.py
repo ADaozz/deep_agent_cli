@@ -9,7 +9,7 @@ def build_subagent_log_tool(store: SubAgentLogStore):
     @tool
     def read_subagent_log(runtime: ToolRuntime, run_id: str | None = None,
                           offset: int = 0, limit: int = 100) -> dict:
-        """List this session's delegated run IDs, or read a bounded page of one run's log."""
+        """List this session's delegated run IDs, or read a bounded page of execution summary events."""
         parent = str(runtime.config.get("configurable", {}).get("thread_id", ""))
         if not parent:
             return {"error": "Parent session ID unavailable"}

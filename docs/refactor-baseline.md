@@ -39,7 +39,7 @@
 
 父 Run Cancel 传播到子任务模型流及命令；任务结束释放并发许可，Pool 继续由父 Runner 持有。
 输入框上方只显示实际运行数量；实时与历史恢复均隐藏普通 task 卡片，checkpoint 不删消息。
-日志独立持久化、按父会话查询，只精确替换已知模型和 Tavily Key。
+执行摘要独立持久化、按父会话查询，只精确替换已知模型和 Tavily Key；不保存模型请求、Token、思考或原始工具输出。tool_start 和 tool_finish 分别记录，最终回答仅落盘最多 1,000 字符，主 Agent 收到的结果保持完整。
 模型 Profile 可继承当前主模型，默认思考强度使用子模型原生默认，旧 null 等价于 default。
 实现与验证入口见 [架构](architecture.md#subagent-委派边界) 和 [开发指南](development.md#subagent-开发契约)。
 

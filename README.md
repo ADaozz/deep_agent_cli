@@ -180,7 +180,7 @@ SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权
 
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。模型与会话切换复用 Pool，关闭 Runner 或更换文件系统模式时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
-- **本地状态**：SubAgent 日志独立保存在受保护配置目录的 `subagents/` 下，仅精确替换已知模型及 Tavily Key；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，只精确替换已知模型及 Tavily Key；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
 - **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。

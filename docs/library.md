@@ -42,7 +42,7 @@ runner.close()
 
 默认模型 Profile 继承主模型，思考强度 `default/null` 使用子模型原生默认；独立客户端在任务结束后关闭。
 直接注入的自定义 `BaseChatModel` 保留原对象，强度覆盖需显式指定子模型 Profile。
-日志独立持久化且按父会话隔离，只精确替换已知密钥；完整配置与查询工具见 [SubAgent 配置](configuration.md#subagent-委派)。
+执行摘要独立持久化且按父会话隔离，只精确替换已知密钥；完整配置与查询工具见 [SubAgent 配置](configuration.md#subagent-委派)。
 
 ## 处理中断
 
@@ -68,7 +68,7 @@ runner.close()
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
 
-`subagents_changed` 事件的 `result["count"]` 是实际运行数量。子任务模型增量与工具输出使用独立日志通道，不转发给主 Runner 的流式回调。
+`subagents_changed` 事件的 `result["count"]` 是实际运行数量。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
 
