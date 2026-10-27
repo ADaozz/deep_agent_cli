@@ -26,28 +26,23 @@ tools:
 ui:
   # 每次回答结束后显示时间所使用的 IANA 时区。
   timezone: Asia/Shanghai
-  # 思考内容折叠时保留的逻辑行数，必须为正整数。
-  thinking_tail_lines: 5
-  # 命令输出及通用工具输出折叠时保留的逻辑行数。
-  execute_tail_lines: 4
-  tool_tail_lines: 8
-  expanded_tool_lines: 40
+  # 内容折叠时保留的开头行数和末尾行数，均为正整数。
+  # 命令、写入、差异和失败摘要使用 head_lines；思考和工具输出使用 tail_lines。
+  head_lines: 4
+  tail_lines: 4
   # 简略列表显示的条目数，按条目计数，不按屏幕换行计数。
   explore_preview_items: 5
   explore_failure_items: 3
   create_preview_items: 5
-  # 文件预览行数；编辑预览至少为 2 行，才能同时显示新增和删除内容。
-  edit_preview_changed_lines: 8
-  write_preview_lines: 6
-  # 工具执行失败时的摘要行数。
-  failure_preview_lines: 4
-  command_failure_tail_lines: 6
   # 编辑器和菜单的最大行数；实际高度可能因终端尺寸而缩小。
   editor_max_lines: 10
   completion_menu_lines: 8
 
 llm:
   default: token-plan/qwen3.8-flash
+  # 所有模型共用的 HTTP 首字节超时（秒）。限制连接，以及等到第一批响应数据。
+  # 响应开始之后，整轮生成可以继续。不要写到单个模型上。
+  timeout: 60
   models:
     token-plan:
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
@@ -55,6 +50,9 @@ llm:
       api: chat_completions
       # 额外重试次数；0 表示禁用，可在模型项中覆盖。
       max_retries: 5
+      # 流式无进展超时（秒）。连续这么久没有新的模型 chunk 就重试当前请求。
+      # 持续输出不受这个上限约束。0 表示禁用，可在模型项中覆盖。
+      stream_chunk_timeout: 120
       reasoning_efforts: [none, low, medium, xhigh]
       models:
         qwen3.8-flash:
@@ -120,8 +118,9 @@ sandbox:
   bwrap_path: bwrap
   # restricted：只开放工作区、skills 和下面声明的挂载，系统目录只读。
   # full-access：开放宿主上的全部路径，仅保护 Agent 安装文件和配置目录。
-  # 配置文件未写 mode 时，代码默认仍是 restricted。/dev 由 extra_read_write_mounts 的 dev_bind 决定。
-  mode: full-access
+  # 配置文件未写 mode 时，代码默认仍是 restricted。
+  # 新模板也从 restricted 开始。已有 ~/.deep-agent/config.yaml 不会被这次改动覆盖。
+  mode: restricted
   # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
   timeout_seconds: null
   max_output_bytes: 100000
@@ -165,11 +164,13 @@ sandbox:
   # 挂载整个目录仍会暴露其中的敏感文件。只读只能禁止写入。
   extra_read_only_mounts: []
   extra_read_write_mounts:
-    # --dev 会换成沙箱自己的 /dev。要打开 USB 串口等设备节点，用 dev_bind 覆盖宿主 /dev。
+    # --dev 会换成沙箱自己的 /dev。要在 full-access 打开 USB 串口等设备节点，用 dev_bind。
+    # modes 省略时，这条挂载在 restricted 和 full-access 都生效。旧配置没有 modes，因此仍会在 restricted 开放宿主 /dev。
     # 不要这一条就把此项删掉。只读挂载不能设 dev_bind。
     - source: /dev
       destination: /dev
       dev_bind: true
+      modes: [full-access]
 
 paths:
   # SQLite 会话数据库；null 表示使用 ~/.deep-agent/sessions/<workspace-hash>.sqlite3。

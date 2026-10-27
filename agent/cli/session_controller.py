@@ -10,6 +10,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from agent.cli.interactions import InteractionController
+from agent.cli.lifecycle import TaskStop
 
 if TYPE_CHECKING:
     from agent.cli.app import CliApplication
@@ -64,21 +65,17 @@ class SessionController:
         except RuntimeError as exc:
             app.state.add_system(str(exc), error=True)
             return
-        app._clear_skill_draft()
-        app.clear_transcript_selection()
+        app.reset_session_view()
         app.state.clear()
         app.state.context_pristine = True
         app.state.attachments.clear()
-        app.interaction = None
-        app._deferred_config_interaction = None
-        app._reviewing = False
-        app._transcript_anchor = None
-        app._renderer.clear()
         app.state.add_system(f"Started session {info.id}")
         app.set_status("Ready", transient=False)
 
     async def resume(self, arg: str = "") -> None:
         app = self._app
+        if app.lifecycle.exiting:
+            return
         if app.state.running:
             app.set_status("Cancel the active run before switching sessions")
             return
@@ -92,6 +89,8 @@ class SessionController:
         if arg.strip():
             app._restore_queued_to_editor(app.buffer)
             await self._switch_with_wait(arg.strip())
+            return
+        if app.lifecycle.exiting:
             return
         sessions = self._sessions_with_content(limit=50)
         if not sessions:
@@ -137,13 +136,9 @@ class SessionController:
 
     def apply_snapshot(self, snapshot: Any) -> None:
         app = self._app
-        app._clear_skill_draft()
-        app.clear_transcript_selection()
+        app.reset_session_view()
         app.state.load_transcript(snapshot.transcript)
         app.state.load_model_metrics(snapshot.model_metrics_history)
-        app.interaction = None
-        app._deferred_config_interaction = None
-        app._reviewing = False
         app.state.add_system(
             f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
         )
@@ -151,8 +146,6 @@ class SessionController:
             app.state.add_system(notice)
         if not app._reopen_pending_interaction(notify_missing=False):
             app.set_status("Ready", transient=False)
-        app._transcript_anchor = None
-        app._renderer.clear()
         app.state.usage = dict(app.runner.latest_usage())
         app.application.invalidate()
 
@@ -168,7 +161,10 @@ class SessionController:
         try:
             result = await app._run_blocking(app.runner.begin_session_switch, session_id)
         except (KeyError, RuntimeError) as exc:
-            app.state.add_system(str(exc), error=True)
+            if not app.lifecycle.exiting:
+                app.state.add_system(str(exc), error=True)
+            return
+        if app.lifecycle.exiting:
             return
         if result.busy:
             self._enter_wait(result.target_id)
@@ -179,6 +175,8 @@ class SessionController:
     def _enter_wait(self, target_id: str) -> None:
         """Detach into a visible wait for a session busy in another window."""
         app = self._app
+        if app.lifecycle.exiting:
+            return
         self._wait_target = target_id
         self._wait_cancelled = False
         app.interaction = None
@@ -187,7 +185,9 @@ class SessionController:
             f"Session {target_id[:8]} is open in another window; waiting for it to be released."
         )
         app.set_status(self.wait_status(), transient=False)
-        self._wait_task = asyncio.create_task(self._wait_for_session(target_id))
+        self._wait_task = self._app.lifecycle.spawn(
+            self._wait_for_session(target_id), stop=TaskStop.OBSERVE, name="session-wait",
+        )
         app.application.invalidate()
 
     async def _wait_for_session(self, target_id: str) -> None:
@@ -199,10 +199,15 @@ class SessionController:
             )
         except (KeyError, RuntimeError) as exc:
             self._wait_target = None
-            app.state.add_system(str(exc), error=True)
-            app.set_status("Session switch failed")
+            if not app.lifecycle.exiting:
+                app.state.add_system(str(exc), error=True)
+                app.set_status("Session switch failed")
             return
         self._wait_target = None
+        if app.lifecycle.exiting:
+            # Exit cancelled the wait. Esc is the only path that reopens the picker.
+            # A switch that already took the lease stays with the runner.
+            return
         if snapshot is None:
             # Cancelled: the runner stays detached, so the picker (or /new) must
             # choose the next session explicitly.

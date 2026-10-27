@@ -38,7 +38,7 @@ def command_table() -> tuple[Command, ...]:
         ),
         Command(
             "sandbox",
-            "Filesystem: restricted, or full-access (HIGH RISK)",
+            "Filesystem: restricted, full-access (HIGH RISK), or mounts",
             _sandbox,
         ),
         Command(
@@ -116,4 +116,4 @@ async def _mcp(app: "CliApplication", arg: str) -> None:
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:
-    app.exit()
+    app.request_command_exit()

@@ -1,3 +1,9 @@
+"""Host path routing, mount rules, and one-shot command execution.
+
+Persistent sandbox reuse lives in ``sandbox_pool.py``. The in-sandbox worker
+lives in ``sandbox_worker.py`` and cannot import this package. ``restricted``
+and ``full-access`` mounts are decided here; pool reuse does not change them.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +22,7 @@ import signal
 import subprocess
 import sysconfig
 import time
+from typing import cast
 import uuid
 
 from agent.cancel import emit_tool_output, get_cancel_context
@@ -28,6 +35,7 @@ from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
     FileDownloadResponse,
+    FileInfo,
     FileUploadResponse,
     GlobResult,
     GrepResult,
@@ -38,6 +46,7 @@ from deepagents.backends.protocol import (
 )
 
 from agent.config import SAFE_INHERITED_ENV, BindMount, SandboxConfig, SandboxMode, default_skills_dir
+from agent.sandbox_mounts import effective_user_mounts
 from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxPool, SandboxStartError
 
 
@@ -252,9 +261,10 @@ def _mount_points(config: SandboxConfig, skills_dir: Path | None) -> tuple[_Moun
     also be mounted at several paths with different permissions; file tools
     then judge read-only versus read-write by the path the caller used.
     """
+    read_only, read_write = effective_user_mounts(config)
     ordered: list[tuple[Path, str, bool]] = [(config.workspace, sandbox_workspace_root(config.workspace), False)]
-    ordered.extend((mount.source, mount.destination, True) for mount in config.extra_read_only_mounts)
-    ordered.extend((mount.source, mount.destination, False) for mount in config.extra_read_write_mounts)
+    ordered.extend((mount.source, mount.destination, True) for mount in read_only)
+    ordered.extend((mount.source, mount.destination, False) for mount in read_write)
     if skills_dir is not None:
         ordered.append((skills_dir, SKILLS_ROOT, False))
 
@@ -522,6 +532,19 @@ class _DeniedBackend(BackendProtocol):
         return [FileDownloadResponse(path=path, error=CONFIG_DENIED) for path in paths]
 
 
+@dataclass(frozen=True)
+class _RouteState:
+    """Candidate file-tool routes. Building one must not publish it."""
+
+    default: BackendProtocol
+    routes: dict[str, BackendProtocol]
+    points: tuple[_MountPoint, ...]
+    files: dict[str, _MountPoint]
+    directories: tuple[str, ...]
+    hidden_roots: tuple[Path, ...]
+    install_roots: tuple[Path, ...]
+
+
 class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     """按启动时固定的挂载表路由文件工具，执行仍委托给底层 executor。"""
 
@@ -534,13 +557,13 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.skills_dir = skills_dir
         self._hidden_roots: tuple[Path, ...] = ()
         self._install_roots: tuple[Path, ...] = ()
-        default, routes, points, files, directories = self._route_state()
+        state = self._route_state()
         super().__init__(
-            default=default,
-            routes=routes,
+            default=state.default,
+            routes=state.routes,
             artifacts_root=f"{self.workspace_root}/.deepagents",
         )
-        self._remember_routes(points, files, directories, default)
+        self._publish_route_state(state)
 
     def apply_sandbox_mode(self, mode: SandboxMode) -> None:
         """Switch filesystem mounts on the existing sandbox and drop its processes."""
@@ -549,16 +572,22 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
         updated = replace(config, mode=mode)
         _validate_config(updated)
+        skills = _validated_skills_dir(updated.workspace)
+        env = sandbox_environment(updated)
+        # Build the next file routes before publishing. A failure here leaves
+        # the live config, protection cache, and current pool alone.
+        state = self._route_state(config=updated, skills_dir=skills)
+        try:
+            self.executor.pool.shutdown("sandbox mode changed")
+        except Exception as exc:
+            raise RuntimeError(
+                f"sandbox mode was not changed; the current sandbox did not stop: {exc}"
+            ) from exc
         self.executor.config = updated
-        self.executor.skills_dir = _validated_skills_dir(updated.workspace)
-        self.skills_dir = self.executor.skills_dir
-        self.executor._env = sandbox_environment(updated)
-        self.executor.pool.shutdown("sandbox mode changed")
-        default, routes, points, files, directories = self._route_state()
-        self.default = default
-        self.routes = routes
-        self.sorted_routes = sorted(routes.items(), key=lambda item: len(item[0]), reverse=True)
-        self._remember_routes(points, files, directories, default)
+        self.executor.skills_dir = skills
+        self.skills_dir = skills
+        self.executor._env = env
+        self._publish_route_state(state)
 
     def _remember_routes(
         self,
@@ -573,12 +602,24 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self.exact_file_mounts = frozenset(files)
         self._denied = getattr(default, "denied", CONFIG_DENIED)
 
+    def _publish_route_state(self, state: _RouteState) -> None:
+        self.default = state.default
+        self.routes = state.routes
+        self.sorted_routes = sorted(state.routes.items(), key=lambda item: len(item[0]), reverse=True)
+        self._remember_routes(state.points, state.files, list(state.directories), state.default)
+        self._hidden_roots = state.hidden_roots
+        self._install_roots = state.install_roots
+
     def _route_state(
         self,
-    ) -> tuple[BackendProtocol, dict[str, BackendProtocol], tuple[_MountPoint, ...], dict[str, _MountPoint], list[str]]:
+        config: SandboxConfig | None = None,
+        skills_dir: Path | None = None,
+    ) -> _RouteState:
         executor = self.executor
-        config = getattr(executor, "config", None)
-        skills_dir = self.skills_dir
+        if config is None:
+            config = getattr(executor, "config", None)
+        if skills_dir is None:
+            skills_dir = self.skills_dir
         points = _mount_points(config, skills_dir) if isinstance(config, SandboxConfig) else ()
         expose_mounts = isinstance(executor, BubblewrapBackend)
         full_access = expose_mounts and isinstance(config, SandboxConfig) and config.mode == "full-access"
@@ -604,14 +645,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                     root_dir=skills_dir, virtual_mode=True, max_file_size_mb=10,
                 )
                 directories.append(SKILLS_ROOT)
-        self._hidden_roots = ()
-        self._install_roots = ()
+        hidden_roots: tuple[Path, ...] = ()
+        install_roots: tuple[Path, ...] = ()
         if full_access and isinstance(config, SandboxConfig):
-            self._install_roots = agent_install_paths()
+            install_roots = agent_install_paths()
             hidden = [sandbox_config_dir(config)]
             hidden.extend(path for path in config.protected_files if path.is_dir())
-            self._hidden_roots = tuple(dict.fromkeys(hidden))
-            for root in self._install_roots:
+            hidden_roots = tuple(dict.fromkeys(hidden))
+            for root in install_roots:
                 if root.is_dir():
                     routes[f"{root.as_posix()}/"] = _ReadOnlyFilesystemBackend(root, reason=INSTALL_READ_ONLY)
                     directories.append(root.as_posix())
@@ -621,7 +662,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                         PurePosixPath(root.as_posix()), root, True, True,
                     )
             denied = _DeniedBackend()
-            for root in self._hidden_roots:
+            for root in hidden_roots:
                 routes[f"{root.as_posix()}/"] = denied
                 directories.append(root.as_posix())
             for path in config.protected_files:
@@ -632,7 +673,15 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             default: BackendProtocol = FilesystemBackend(root_dir=Path("/"), virtual_mode=True, max_file_size_mb=10)
         else:
             default = _OutsideWorkspaceBackend(tuple(directories), tuple(files))
-        return default, routes, active_points, files, directories
+        return _RouteState(
+            default=default,
+            routes=routes,
+            points=active_points,
+            files=files,
+            directories=tuple(directories),
+            hidden_roots=hidden_roots,
+            install_roots=install_roots,
+        )
 
     @property
     def supports_regex_search(self) -> bool:
@@ -670,8 +719,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         return any(_component_within(destination, root) and destination.rstrip("/") != root.rstrip("/")
                    for root in self._directory_roots)
 
-    def _file_info(self, point: _MountPoint) -> dict[str, object]:
-        info: dict[str, object] = {"path": point.virtual, "is_dir": False}
+    def _file_info(self, point: _MountPoint) -> FileInfo:
+        info: FileInfo = {"path": point.virtual, "is_dir": False}
         try:
             stat_result = point.source.stat()
         except OSError:
@@ -683,18 +732,18 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     def _present_ls(self, path: str, result: LsResult) -> LsResult:
         if path != "/" or result.error or not result.entries or not self._file_mounts:
             return result
-        entries: list[dict[str, object]] = []
+        entries: list[FileInfo] = []
         for entry in result.entries:
             route = str(entry.get("path", "")).rstrip("/")
             point = self._file_mounts.get(route)
             if point is None:
-                entries.append(dict(entry))
+                entries.append(cast(FileInfo, dict(entry)))
                 continue
             if self._covered_by_directory(route):
                 continue
             entries.append(self._file_info(point))
         entries.sort(key=lambda item: str(item.get("path", "")))
-        return LsResult(entries=entries)  # type: ignore[arg-type]
+        return LsResult(entries=entries)
 
     def ls(self, path: str) -> LsResult:
         normalized = path.rstrip("/") or "/"
@@ -719,14 +768,14 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             return destination[len(base):].lstrip("/")
         return None
 
-    def _uncovered_file_matches(self, pattern: str, path: str | None) -> list[dict[str, object]]:
+    def _uncovered_file_matches(self, pattern: str, path: str | None) -> list[FileInfo]:
         if not self._file_mounts:
             return []
         try:
             matcher = compile_grep_include_glob(pattern)
         except InvalidGlobPatternError:
             return []
-        matches: list[dict[str, object]] = []
+        matches: list[FileInfo] = []
         for destination, point in self._file_mounts.items():
             if self._covered_by_directory(destination):
                 continue
@@ -749,7 +798,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         matches = [*(result.matches or []), *extra]
         matches.sort(key=lambda item: str(item.get("path", "")))
         return GlobResult(
-            matches=matches,  # type: ignore[arg-type]
+            matches=matches,
             truncated=result.truncated,
             truncation_reason=result.truncation_reason,
         )
@@ -796,7 +845,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         result = host.ls("/")
         if result.error:
             return result
-        entries = [dict(entry) for entry in result.entries or []]
+        entries: list[FileInfo] = [cast(FileInfo, dict(entry)) for entry in result.entries or []]
         seen = {str(entry.get("path", "")).rstrip("/") or "/" for entry in entries}
         for route in self.routes:
             prefix = route.rstrip("/") or "/"
@@ -807,7 +856,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             entries.append({"path": prefix, "is_dir": True, "size": 0, "modified_at": ""})
             seen.add(prefix)
         entries.sort(key=lambda item: str(item.get("path", "")))
-        return LsResult(entries=entries)  # type: ignore[arg-type]
+        return LsResult(entries=entries)
 
     def _hidden_roots_text(self) -> tuple[str, ...]:
         return tuple(path.as_posix() for path in self._hidden_roots)
@@ -1167,9 +1216,10 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         # After runtime mounts so a workspace under /usr or /tmp stays reachable
         # at its real path and remains writable.
         args += ["--bind", str(self.config.workspace.expanduser().resolve()), self.workspace_root]
-        for mount in self.config.extra_read_only_mounts:
+        read_only, read_write = effective_user_mounts(self.config)
+        for mount in read_only:
             args += _mount_args("--ro-bind", mount, workspace_root=self.workspace_root)
-        for mount in self.config.extra_read_write_mounts:
+        for mount in read_write:
             flag = "--dev-bind" if mount.dev_bind else "--bind"
             args += _mount_args(flag, mount, workspace_root=self.workspace_root)
         if self.skills_dir is not None:
@@ -1325,7 +1375,8 @@ def _full_access_created_dirs(
     if skills_dir is not None:
         _mark_missing_mount(SKILLS_ROOT, created)
     created.add("/run/deep-agent")
-    for mount in (*config.extra_read_only_mounts, *config.extra_read_write_mounts):
+    read_only, read_write = effective_user_mounts(config)
+    for mount in (*read_only, *read_write):
         destination = str(PurePosixPath(mount.destination))
         if Path(destination).exists():
             continue
@@ -1453,10 +1504,11 @@ def _validate_full_access(config: SandboxConfig, workspace: Path, skills: Path |
     for path in installs:
         if path == Path("/") or path == workspace or _is_within(path, workspace):
             raise ValueError("full-access cannot protect an install path that contains the workspace")
-    for mount in (*config.extra_read_only_mounts, *config.extra_read_write_mounts):
+    read_only, read_write = effective_user_mounts(config)
+    for mount in (*read_only, *read_write):
         source = mount.source.expanduser().resolve()
         destination = PurePosixPath(mount.destination)
-        writable = mount in config.extra_read_write_mounts
+        writable = mount in read_write
         if _path_inside_config(source, config_dir, skills):
             raise ValueError(f"extra mount cannot expose the agent configuration directory: {source}")
         if any(destination == PurePosixPath(path.as_posix()) for path in (config_dir, *config.protected_files)):
@@ -1492,9 +1544,10 @@ def _validate_config(config: SandboxConfig) -> Path:
         raise ValueError("sandbox state directories must be outside the workspace")
     if config.mode == "full-access":
         _validate_full_access(config, workspace, skills)
-    for mount in config.extra_read_only_mounts:
+    read_only, read_write = effective_user_mounts(config)
+    for mount in read_only:
         _mount_args("--ro-bind", mount, workspace_root=sandbox_workspace_root(workspace))
-    for mount in config.extra_read_write_mounts:
+    for mount in read_write:
         _mount_args("--bind", mount, workspace_root=sandbox_workspace_root(workspace))
     _mount_points(replace(config, workspace=workspace), skills)
     for name in (*config.env_allowlist, *config.env_set):

@@ -18,28 +18,20 @@ def build_web_search_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
         raise ValueError("Tavily API key must not be empty")
 
     def web_search(
-        query: str,
-        max_results: Annotated[int, Field(ge=1, le=20)] = 5,
-        topic: Literal["general", "news"] = "general",
-        time_range: Literal["day", "week", "month", "year"] | None = None,
-        include_domains: list[str] | None = None,
+        query: Annotated[str, Field(description="具体的搜索关键词或问题。")],
+        max_results: Annotated[int, Field(ge=1, le=20, description="最多返回的结果数，范围为 1 到 20。")] = 5,
+        topic: Annotated[Literal["general", "news"], Field(description="搜索主题：general 为通用搜索，news 为新闻。")] = "general",
+        time_range: Annotated[Literal["day", "week", "month", "year"] | None, Field(description="限定最近一天、一周、一月或一年的结果；省略时不限定。")] = None,
+        include_domains: Annotated[list[str] | None, Field(description="仅搜索这些域名；省略时不限定来源。")] = None,
     ) -> tuple[str, dict[str, object]]:
-        """Search the public web for current or external information.
+        """搜索公共网页，获取最新信息或工作区之外的资料。
 
-        Use web_search when:
-        - the user explicitly asks to search, browse, look up, or verify something;
-        - information may have changed recently, such as documentation, releases,
-          versions, APIs, products, prices, or news;
-        - you are uncertain about a factual claim or need authoritative sources;
-        - the answer depends on information outside the local workspace.
-
-        Do not use web_search for local files or code. Use read_file to read files or execute with rg to search instead.
-
-        Prefer specific queries. Use include_domains when an official or particular
-        source is required. Use topic="news" and a time range for recent events.
-
-        Search results are ranked snippets, not exhaustive results or full page content.
-        Do not assume absence from the returned results means the information does not exist.
+        用户明确要求搜索、查找或核实时，或文档、版本、API、产品、价格、新闻等信息
+        可能变化时使用。事实不确定或需要权威来源时也应搜索。
+        本地文件阅读使用 read_file，本地代码搜索通过 execute 运行 rg。
+        搜索词应具体；需要官方或指定来源时使用 include_domains。
+        查询近期事件时使用 topic="news"，并指定 time_range。
+        结果是排序后的摘要片段，并非完整网页或穷尽结果；未返回某项不代表它不存在。
         """
         query = query.strip()
         if not query:

@@ -116,7 +116,11 @@ class CliState:
         self.clear()
         self.context_pristine = not bool(blocks)
         for item in blocks:
-            if item.kind == "user":
+            if item.kind == "turn_summary" and item.finished_at is not None:
+                self.blocks.append(TurnSummaryBlock(
+                    elapsed_seconds=item.elapsed_seconds, finished_at=item.finished_at,
+                ))
+            elif item.kind == "user":
                 self.blocks.append(MessageBlock(
                     kind="user", content=item.content, attachments=item.attachments,
                 ))
@@ -203,15 +207,15 @@ class CliState:
                 tool = ToolBlock(event.tool_call_id, event.name, {})
                 self.blocks.append(tool)
             touch(tool)
-            artifact = event.artifact if isinstance(event.artifact, dict) else None
+            completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
             had_tail_snapshot = (
                 event.name == "execute" and isinstance(tool.artifact, dict)
                 and tool.artifact.get("truncated") is True
             )
-            if artifact is not None:
-                tool.artifact = artifact
-            if event.name == "execute" and artifact is not None:
-                if artifact.get("truncated") and not had_tail_snapshot and event.content:
+            if completed_artifact is not None:
+                tool.artifact = completed_artifact
+            if event.name == "execute" and completed_artifact is not None:
+                if completed_artifact.get("truncated") and not had_tail_snapshot and event.content:
                     # Without streamed output, the final result contains the tail.
                     tool.output = event.content
                 elif not tool.output:
@@ -220,8 +224,8 @@ class CliState:
                 tool.output = event.content
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
-            if event.name == "execute" and artifact is not None:
-                code = artifact.get("exit_code")
+            if event.name == "execute" and completed_artifact is not None:
+                code = completed_artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
             mode = ""

@@ -169,9 +169,12 @@ def _stream(argv: list[str], consume: Callable[[bytes], bool], *, deadline: floa
                 pass
             finally:
                 process.stdin.close()
+        stdout = process.stdout
+        stderr_pipe = process.stderr
+        assert stdout is not None and stderr_pipe is not None
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, "out")
-            selector.register(process.stderr, selectors.EVENT_READ, "err")
+            selector.register(stdout, selectors.EVENT_READ, "out")
+            selector.register(stderr_pipe, selectors.EVENT_READ, "err")
             while selector.get_map():
                 if context and context.cancelled:
                     status = "cancelled"
@@ -587,37 +590,23 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend, *, network: bool =
         max_count: int | None = None,
         fixed_string: bool = False,
     ) -> str:
-        """Search source files using regular expressions.
+        """使用正则表达式搜索源码。
 
-        Behavior:
-        - Patterns are regular expressions by default.
-        - Set fixed_string=true for literal text searches.
-        - Uses ripgrep when available.
-        - Falls back to Python regex search when ripgrep is unavailable.
-        - Searches the project workspace by default. /skills and declared sandbox mounts can be searched by path.
-        - Like ripgrep, skips hidden files, .gitignore/.ignore/.rgignore matches,
-          symlinks, binary files and files over 10 MiB. .git is always skipped.
+        pattern 默认按正则表达式解释，fixed_string=true 时按字面文本搜索。
+        优先使用 ripgrep，不可用时回退到 Python 正则搜索。
+        默认搜索项目工作区，也可通过 path 指定 /skills 或已声明的沙箱挂载。
+        跳过隐藏文件、忽略规则匹配项、符号链接、二进制文件及超过 10 MiB 的文件；始终跳过 .git。
 
-        glob: one ripgrep glob or a list of them, relative to the search path.
-        - "*.py" searches only Python files (no "/" matches at any depth).
-        - "!*.test.py" excludes files; "!**/node_modules/**" excludes a directory.
-        - ["*.py", "!**/tests/**"]: Python files outside tests/.
-        - Rules apply in order and the last matching rule wins, so
-          ["!**/tests/**", "*.py"] includes tests/*.py again.
-        - Prefer "!**/.git/**" over "!*/.git/*": a "/" anchors the glob to the
-          search path, so "*/.git/*" only matches one directory level deep.
-        - Include globs can override ignore rules for matching files.
+        glob 为相对搜索路径的 ripgrep 匹配规则，也可传规则数组。
+        "*.py" 匹配任意深度的 Python 文件，"!*.test.py" 排除测试文件，
+        "!**/node_modules/**" 排除目录。规则按顺序生效，最后匹配的规则优先。
+        包含 "/" 的规则锚定搜索路径，例如 "*/.git/*" 只匹配一层；
+        排除任意深度的 .git 应使用 "!**/.git/**"。包含规则可覆盖匹配文件的忽略规则。
 
-        Output modes:
-        - files_with_matches: Return matching file paths.
-        - content: Return matching lines with line numbers.
-        - count: Return matching line counts grouped by file.
-
-        max_count (default 1000) limits matching lines in content mode and
-        files in files_with_matches/count mode; counts per file are complete.
-        Results are bounded by size and time and truncation is reported.
-        Prefer grep for locating source code. Use read_file with offset and
-        limit to inspect surrounding code.
+        output_mode：files_with_matches 返回文件路径；content 返回匹配行和行号；
+        count 按文件返回匹配行数。max_count 默认 1000；content 模式限制匹配行数，
+        其他模式限制文件数，单文件计数保持完整。结果受大小和时间限制，截断时会明确提示。
+        用于定位源码；查看上下文时通过 read_file 的 offset 和 limit 分页读取。
         """
         return search(backend, pattern, path, glob, output_mode, max_count, fixed_string, network=network)
 

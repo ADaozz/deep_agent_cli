@@ -17,6 +17,56 @@ from agent.session import SessionStore, StopReason, messages_to_transcript, sett
 from tests.conftest import scripted_model
 
 
+@pytest.mark.parametrize("queued", [False, True])
+def test_turn_timings_survive_restart_and_restore_after_each_answer(tmp_path: Path, queued: bool) -> None:
+    from agent.cli.rendering import render_transcript
+    from agent.cli.state import CliState, TurnSummaryBlock
+    from agent.runner import TurnTiming
+
+    path = tmp_path / "timings.sqlite3"
+    store = SessionStore(path)
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="first answer"), AIMessage(content="second answer")]),
+        backend=StateBackend(), session_store=store,
+    )
+    identifier = runner.thread_id
+    events = []
+
+    def on_event(event):
+        events.append(event)
+        if queued and event.type == "run_started":
+            runner.follow_up("second")
+
+    try:
+        assert runner.invoke("first", on_event=on_event).status == "completed"
+        if not queued:
+            assert runner.invoke("second", on_event=on_event).status == "completed"
+        timings = [event.result for event in events if event.type == "turn_completed"]
+        assert len(timings) == 2 and all(isinstance(timing, TurnTiming) for timing in timings)
+    finally:
+        runner.close()
+        store.close()
+
+    store = SessionStore(path)
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store)
+    try:
+        snapshot = runner.switch_session(identifier)
+        assert [block.kind for block in snapshot.transcript] == [
+            "user", "assistant", "turn_summary", "user", "assistant", "turn_summary",
+        ]
+        state = CliState()
+        state.load_transcript(snapshot.transcript)
+        summaries = [block for block in state.blocks if isinstance(block, TurnSummaryBlock)]
+        assert [(block.elapsed_seconds, block.finished_at) for block in summaries] == [
+            (timing.elapsed_seconds, timing.finished_at) for timing in timings
+        ]
+        assert render_transcript(state, 80).count("Worked for") == 2
+        assert store.turn_timings("another-session") == {}
+    finally:
+        runner.close()
+        store.close()
+
+
 def test_draft_restarts_and_new_sessions_do_not_persist(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "draft.sqlite3")
     identifiers = set()

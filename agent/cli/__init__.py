@@ -1,4 +1,4 @@
-"""Terminal presentation layer for the DeepAgent template."""
+"""Terminal presentation layer for the Deep Agent CLI."""
 
 from agent.cli.app import CliApplication
 

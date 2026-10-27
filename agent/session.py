@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS session_model_metrics (
 );
 CREATE INDEX IF NOT EXISTS session_model_metrics_session_idx
     ON session_model_metrics (session_id, id);
+CREATE TABLE IF NOT EXISTS session_turn_timings (
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    elapsed_seconds REAL NOT NULL,
+    finished_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, message_id)
+);
 """
 
 
@@ -95,6 +102,8 @@ class TranscriptBlock:
     # Raw ToolMessage.artifact restored from the checkpoint; UI previews are
     # re-derived from it instead of being persisted.
     artifact: Any = None
+    elapsed_seconds: float = 0.0
+    finished_at: datetime | None = None
 
 
 def workspace_state_path(workspace: Path, *, override: str | Path | None = None) -> Path:
@@ -300,6 +309,26 @@ class SessionStore:
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def save_turn_timing(
+        self, session_id: str, message_id: str, elapsed_seconds: float, finished_at: datetime,
+    ) -> None:
+        with self.checkpointer.lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_turn_timings "
+                "(session_id, message_id, elapsed_seconds, finished_at) "
+                "SELECT id, ?, ?, ? FROM session_catalog WHERE id = ?",
+                (message_id, elapsed_seconds, finished_at.isoformat(), session_id),
+            )
+            self._conn.commit()
+
+    def turn_timings(self, session_id: str) -> dict[str, tuple[float, datetime]]:
+        with self.checkpointer.lock:
+            rows = self._conn.execute(
+                "SELECT message_id, elapsed_seconds, finished_at FROM session_turn_timings WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+        return {row[0]: (row[1], _parse_dt(row[2])) for row in rows}
+
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
@@ -347,13 +376,17 @@ def _session_info(row: Any) -> SessionInfo:
 
 
 def _status_for_reason(reason: StopReason) -> SessionStatus:
-    return {
-        StopReason.PENDING: "running",
-        StopReason.STOP: "completed",
-        StopReason.ERROR: "failed",
-        StopReason.ABORTED: "cancelled",
-        StopReason.DEFERRED: "waiting",
-    }[reason]
+    if reason is StopReason.PENDING:
+        return "running"
+    if reason is StopReason.STOP:
+        return "completed"
+    if reason is StopReason.ERROR:
+        return "failed"
+    if reason is StopReason.ABORTED:
+        return "cancelled"
+    if reason is StopReason.DEFERRED:
+        return "waiting"
+    raise KeyError(reason)
 
 
 def tool_message_is_error(message: ToolMessage) -> bool:
@@ -376,7 +409,9 @@ def tool_message_is_error(message: ToolMessage) -> bool:
     )
 
 
-def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]:
+def messages_to_transcript(
+    messages: list[BaseMessage], *, turn_timings: dict[str, tuple[float, datetime]] | None = None,
+) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
     for message in messages:
@@ -398,6 +433,11 @@ def messages_to_transcript(messages: list[BaseMessage]) -> list[TranscriptBlock]
                     name=str(call.get("name") or "tool"),
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     status="running",
+                ))
+            timing = (turn_timings or {}).get(message.id or "")
+            if timing is not None:
+                blocks.append(TranscriptBlock(
+                    kind="turn_summary", elapsed_seconds=timing[0], finished_at=timing[1],
                 ))
         elif isinstance(message, ToolMessage):
             content = message_text(message)

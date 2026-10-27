@@ -1,6 +1,6 @@
 ---
 name: example-research
-description: Gather facts with lookup_docs before answering. Use when the user asks about this template, middleware, or HITL.
+description: Gather facts with lookup_docs before answering. Use when the user asks about this project, middleware, or HITL.
 ---
 
 # Example Research

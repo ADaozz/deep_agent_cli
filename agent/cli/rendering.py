@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import re
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import dataclass
 from io import StringIO
@@ -65,7 +65,7 @@ def render_transcript(
 ) -> str:
     return "\n".join(
         _capture(unit.build(), width) for unit in transcript_units(
-            state, timezone or ZoneInfo(DEFAULT_UI_TIMEZONE), width, limits=limits,
+            state, timezone, width, limits=limits,
         )
     )
 
@@ -130,11 +130,27 @@ def transcript_units(
         TranscriptUnit("header", (), lambda: Group(*_header())),
     ]
     index = 0
-    blocks = state.blocks
+    # Streaming can create an assistant block before any visible text arrives.
+    # An empty Rich Group still occupies a row, adding a second gap above the
+    # editor. Keep these placeholders out of the layout until they have content.
+    blocks = [
+        block for block in state.blocks
+        if not (
+            isinstance(block, MessageBlock) and block.kind == "assistant"
+            and not block.content.strip() and not block.thinking.strip()
+        )
+    ]
     while index < len(blocks):
         block = blocks[index]
+        previous = blocks[index - 1] if index else None
+        # The user bubble already carries one blank row below it; the next unit
+        # drops its own top margin so exactly one blank line separates them.
+        after_user = isinstance(previous, MessageBlock) and previous.kind == "user"
         if isinstance(block, MessageBlock):
-            units.append(_message_unit(block, state.thinking_collapsed, limits, state.messages_expanded))
+            units.append(_message_unit(
+                block, state.thinking_collapsed, limits, state.messages_expanded,
+                after_user=after_user,
+            ))
             index += 1
             continue
         if isinstance(block, TurnSummaryBlock):
@@ -146,8 +162,7 @@ def transcript_units(
             ))
             index += 1
             continue
-        create_path = _created_file_path(block)
-        if create_path is not None:
+        if _created_file_path(block) is not None:
             group = [block]
             while index + len(group) < len(blocks):
                 candidate = blocks[index + len(group)]
@@ -155,7 +170,7 @@ def transcript_units(
                     break
                 group.append(candidate)
             if len(group) > 1:
-                units.append(_create_group_unit(group, state.tools_expanded, width, limits=limits))
+                units.append(_create_group_unit(group, state.tools_expanded, width, limits=limits, after_user=after_user))
                 index += len(group)
                 continue
         if not state.tools_expanded and _is_explore(block):
@@ -167,7 +182,7 @@ def transcript_units(
                     break
                 group.append(next_block)
                 index += 1
-            units.append(_explore_unit(group, width, limits=limits))
+            units.append(_explore_unit(group, width, limits=limits, after_user=after_user))
             continue
         edit_path = _mergeable_modify_path(block)
         if edit_path is not None:
@@ -178,41 +193,48 @@ def transcript_units(
                     break
                 group.append(candidate)
             if len(group) > 1:
-                units.append(_modify_group_unit(group, width, limits=limits))
+                units.append(_modify_group_unit(group, width, limits=limits, after_user=after_user))
                 index += len(group)
                 continue
-        units.append(_tool_unit(block, state.tools_expanded, width, limits=limits))
+        units.append(_tool_unit(block, state.tools_expanded, width, limits=limits, after_user=after_user))
         index += 1
     return units
 
 
 def _message_unit(
     block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits, messages_expanded: bool = False,
+    *, after_user: bool = False,
 ) -> TranscriptUnit:
     return TranscriptUnit(
         key=("message", id(block)),
-        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False),
-        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded)),
+        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False, after_user),
+        build=lambda: Group(*_message(
+            block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded, after_user=after_user,
+        )),
         owner=block,
     )
 
 
-def _tool_unit(block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> TranscriptUnit:
+def _tool_unit(
+    block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> TranscriptUnit:
     return TranscriptUnit(
         key=("tool", id(block), expanded),
-        fingerprint=(block.revision, expanded, _live_tick(block), limits),
-        build=lambda: _tool(block, expanded, width, limits=limits),
+        fingerprint=(block.revision, expanded, _live_tick(block), limits, after_user),
+        build=lambda: _tool(block, expanded, width, limits=limits, after_user=after_user),
         owner=block,
     )
 
 
-def _explore_unit(blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> TranscriptUnit:
+def _explore_unit(
+    blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> TranscriptUnit:
     members = tuple(blocks)
     tick = next((item for item in (_live_tick(block) for block in members) if item is not None), None)
     return TranscriptUnit(
         key=("explore", id(members[0])),
-        fingerprint=(tuple(item.revision for item in members), tick, limits),
-        build=lambda: _explore_group(list(members), width, limits=limits),
+        fingerprint=(tuple(item.revision for item in members), tick, limits, after_user),
+        build=lambda: _explore_group(members, width, limits=limits, after_user=after_user),
         owner=members,
     )
 
@@ -227,43 +249,51 @@ def _created_file_path(block: Any) -> str | None:
     return mutation.path if mutation and mutation.operation == "create" else None
 
 
-def _create_group_unit(blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> TranscriptUnit:
+def _create_group_unit(
+    blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> TranscriptUnit:
     members = tuple(blocks)
     return TranscriptUnit(
         key=("create_group", id(members[0]), expanded),
-        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), expanded, limits),
-        build=lambda: _create_group(list(members), expanded, width, limits=limits),
+        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), expanded, limits, after_user),
+        build=lambda: _create_group(members, expanded, width, limits=limits, after_user=after_user),
         owner=members,
     )
 
 
-def _create_group(blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+def _create_group(
+    blocks: Sequence[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits)) is not None]
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
-        return _tool(blocks[-1], expanded, width, limits=limits)
-    title = Text.assemble(("● ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
+        return _tool(blocks[-1], expanded, width, limits=limits, after_user=after_user)
+    title = Text.assemble(("• ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
     rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
     for row in (title, *rows):
         row.truncate(max(1, width - 1), overflow="ellipsis")
-    return Group(Text(""), title, *rows)
+    return Group(*([] if after_user else [Text("")]), title, *rows)
 
 
-def _modify_group_unit(blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> TranscriptUnit:
+def _modify_group_unit(
+    blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> TranscriptUnit:
     members = tuple(blocks)
     return TranscriptUnit(
         key=("modify_group", id(members[0])),
-        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), limits),
-        build=lambda: _modify_group(list(members), width, limits=limits),
+        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), limits, after_user),
+        build=lambda: _modify_group(members, width, limits=limits, after_user=after_user),
         owner=members,
     )
 
 
-def _modify_group(blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+def _modify_group(
+    blocks: Sequence[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits)) is not None]
     mutation = aggregate_file_mutations(mutations, limits=limits)
     preview = file_tool_preview(mutation)
-    return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits)
+    return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
 
 
 def _live_tick(block: ToolBlock) -> int | None:
@@ -347,6 +377,36 @@ def render_interaction(controller: Any, width: int) -> str:
     if controller is None:
         return ""
     return _capture(controller.render(), width)
+
+
+def render_interaction_viewport(controller: Any, width: int, height: int, offset: int) -> tuple[str, int]:
+    """Scroll only the options; headings and keyboard hints stay in place."""
+    if controller is None or height <= 0:
+        return "", 0
+    header, options, footer = controller.render_sections()
+    if not options:
+        return render_interaction(controller, width), 0
+    heading = _capture(Group(*header), width).splitlines()
+    hints = _capture(Group(*footer), width).splitlines()
+    rows = [_capture(option, width).splitlines() for option in options]
+    option_rows = [line for option in rows for line in option]
+    # Reserve list space even when a long question fills a small terminal.
+    hint_height = min(len(hints), max(0, height - 2))
+    list_minimum = min(len(option_rows), max(1, height // 2))
+    heading_height = min(len(heading), max(0, height - hint_height - list_minimum))
+    list_height = max(1, height - hint_height - heading_height)
+    selected = min(controller.option_index, len(rows) - 1)
+    start = sum(len(option) for option in rows[:selected])
+    end = start + len(rows[selected])
+    offset = max(0, min(offset, max(0, len(option_rows) - list_height)))
+    if start < offset:
+        offset = start
+    elif end > offset + list_height:
+        offset = min(start, end - list_height)
+    if heading_height < len(heading) and heading_height > 1:
+        heading = [*heading[:heading_height - 1], _capture(Text("…", style="dim"), width)]
+    visible = heading[:heading_height] + option_rows[offset:offset + list_height] + hints[:hint_height]
+    return "\n".join(visible[:height]), offset
 
 
 def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
@@ -507,9 +567,10 @@ def render_queued_messages(messages: list[str], width: int) -> str:
 
 def _message(
     block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
-    *, messages_expanded: bool = False,
+    *, messages_expanded: bool = False, after_user: bool = False,
 ) -> list[Any]:
     items: list[Any] = []
+    top = 0 if after_user else 1
     if block.kind == "user":
         style = "white on #404040" if block.pending else "white on #303030"
         label = f"⟳ {block.content}" if block.pending else block.content
@@ -523,22 +584,23 @@ def _message(
                 f"▣ Image #{index}  {ref.filename} · {_format_bytes(ref.size)}",
                 style="bright_cyan",
             ))
-        items.append(Padding(Group(*content), (1, 1, 1, 1), style=style))
+        box = Padding(Group(*content), (1, 1, 1, 1), style=style)
+        items.append(Padding(box, (top, 0, 1, 0)))
     elif block.kind == "assistant":
         if block.thinking:
             body: list[Any] = [Text("Thinking", style="bold #888888")]
-            details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.thinking_tail_lines)
+            details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.tail_lines)
             body.append(Padding(details, (0, 0, 0, 2)))
-            items.append(Padding(Group(*body), (1, 1, 0, 1)))
+            items.append(Padding(Group(*body), (top, 1, 0, 1)))
         if block.content:
-            items.append(Padding(Markdown(block.content), (1, 1, 0, 1)))
+            items.append(Padding(Markdown(block.content), (1 if block.thinking else top, 1, 0, 1)))
     elif block.kind == "error":
-        items.append(Padding(Text(f"Error: {block.content}", style="red"), (1, 1, 0, 1)))
+        items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
         text = Text(block.content, style="white" if block.styled_spans else "yellow")
         for start, end, style in block.styled_spans:
             text.stylize(style, start, end)
-        items.append(Padding(text, (1, 1, 0, 1)))
+        items.append(Padding(text, (top, 1, 0, 1)))
     return items
 
 
@@ -553,7 +615,7 @@ def _turn_summary(block: TurnSummaryBlock, timezone: ZoneInfo) -> Any:
     else:
         duration = f"{seconds}s"
     finished = block.finished_at.astimezone(timezone).strftime("%H:%M")
-    return Padding(Text(f"Worked for {duration} · {finished}", style="dim"), (0, 1, 1, 1))
+    return Padding(Text(f"Worked for {duration} · {finished}", style="dim"), (0, 1, 0, 1))
 
 
 def _header() -> list[Any]:
@@ -575,7 +637,9 @@ def _preview_label(preview: ToolPreview) -> str:
     return preview.summary or f"{preview.verb} {preview.target}".strip() or preview.kind
 
 
-def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+def _explore_group(
+    blocks: Sequence[ToolBlock], width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     previews = [build_tool_preview(block, limits=limits) for block in blocks]
     running = any(block.status == "running" for block in blocks)
     waiting = any(block.status == "waiting" for block in blocks)
@@ -591,7 +655,7 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
     count = len(blocks)
     verb = "Exploring" if running else "Explore" if waiting or interrupted or failed else "Explored"
     title = Text.assemble(
-        (f" {symbol} ", color),
+        (f"{symbol} ", color),
         (f"{verb} {count} {'item' if count == 1 else 'items'}", "bold"),
         (f" · {len(failed)} failed", "dim") if failed else ("", ""),
         (f" · {interrupted} interrupted", "dim") if interrupted else ("", ""),
@@ -630,10 +694,12 @@ def _explore_group(blocks: list[ToolBlock], width: int = 80, *, limits: UiDispla
     rows.append(hint)
     # Avoid full-width Padding here: a terminal auto-wrap can leave stale text
     # over the editor when this summary changes.
-    return Group(Text(""), title, *rows)
+    return Group(*([] if after_user else [Text("")]), title, *rows)
 
 
-def _tool(block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+def _tool(
+    block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     if block.name.startswith("mcp__"):
         from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
         symbol, color = _tool_status_marker(block.status, block.is_error)
@@ -644,23 +710,25 @@ def _tool(block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDispla
         ]
         if block.output and block.status != "waiting":
             output = mcp_display_text(block.output).splitlines()
-            limit = limits.expanded_tool_lines if expanded else limits.tool_tail_lines
+            limit = len(output) if expanded else limits.tail_lines
             if len(output) > limit:
                 output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
             body.append(Text("\n".join(output), style="dim"))
-        return Padding(Group(*body), (1, 1, 0, 1), expand=False)
+        return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
     return render_tool_preview(
-        block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits,
+        block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits, after_user=after_user,
     )
 
 
 def render_tool_preview(
-    block: ToolBlock, preview: ToolPreview, *, expanded: bool, width: int = 80, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+    block: ToolBlock, preview: ToolPreview, *, expanded: bool, width: int = 80,
+    limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     """Generic tool card: status, spinner, colors, folding — no tool semantics."""
     if preview.command_execution is not None:
-        return _command_card(block.output, preview.command_execution, expanded, width, limits=limits)
+        return _command_card(block.output, preview.command_execution, expanded, width, limits=limits, after_user=after_user)
     if preview.kind == "failure":
-        return _failure_card(block, preview, expanded, width)
+        return _failure_card(block, preview, expanded, width, after_user=after_user)
     symbol, color = _tool_status_marker(block.status, block.is_error)
     suffix = (
         " — waiting for input" if block.status == "waiting"
@@ -685,7 +753,6 @@ def render_tool_preview(
     body: list[Any] = [title]
     if preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
-        return Padding(Group(*body), (1, 0, 0, 0), expand=False)
     elif preview.lines:
         body.append(Text(
             "\n".join(f"  {line.text}" for line in preview.lines),
@@ -697,7 +764,7 @@ def render_tool_preview(
         output = block.output.strip()
         if output:
             lines = output.splitlines()
-            limit = limits.expanded_tool_lines if expanded else limits.tool_tail_lines
+            limit = len(lines) if expanded else limits.tail_lines
             if len(lines) > limit:
                 skipped = len(lines) - limit
                 lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-limit:]]
@@ -705,10 +772,13 @@ def render_tool_preview(
                 "\n".join(f"  {line}" for line in lines),
                 style="dim" if not block.is_error else "red",
             ))
-    return Padding(Group(*body), (1, 1, 0, 1), expand=False)
+    return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
-def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> Any:
+def _command_card(
+    output: str, preview: CommandExecutionPreview, expanded: bool, width: int, *,
+    limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+) -> Any:
     """Render the current output snapshot; every delta rebuilds this card."""
     status = preview.status
     verb = {
@@ -730,7 +800,14 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
     )
     console = Console(width=max(20, width))
     body: list[Any] = []
-    body.extend(_wrap_failure_line(title, console, width))
+    command_lines = _wrap_failure_line(title, console, width)
+    if not expanded and len(command_lines) > limits.head_lines:
+        hidden = len(command_lines) - limits.head_lines
+        body.extend(command_lines[:limits.head_lines])
+        notice = Text(f"  … {hidden} more command lines hidden · {EXPAND_HINT}{suffix}", style="dim")
+        body.extend(_wrap_failure_line(notice, console, width))
+    else:
+        body.extend(command_lines)
 
     display_output = output
     if preview.truncated:
@@ -754,9 +831,9 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
             "", display_output,
         )
     lines = display_output.strip().splitlines()
-    if not expanded and len(lines) > limits.execute_tail_lines:
-        hidden = len(lines) - limits.execute_tail_lines
-        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-limits.execute_tail_lines:]]
+    if not expanded and len(lines) > limits.tail_lines:
+        hidden = len(lines) - limits.tail_lines
+        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-limits.tail_lines:]]
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:
@@ -772,7 +849,7 @@ def _command_card(output: str, preview: CommandExecutionPreview, expanded: bool,
         else:
             notice = "Output truncated"
         body.extend(_wrap_failure_line(Text(f"  {notice}", style="dim"), console, width))
-    return Padding(Group(*body), (1, 0, 0, 0), expand=False)
+    return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
 def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
@@ -792,15 +869,15 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
     return body
 
 
-def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int) -> Any:
+def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int, *, after_user: bool = False) -> Any:
     _symbol, color = _tool_status_marker("error")
     title = Text.assemble(
-        ("● ", color),
+        ("• ", color),
         (f"Failed (exit {_failure_code(block)}) ", "bold"),
         (preview.target, ""),
     )
     console = Console(width=max(20, width))
-    body: list[Any] = [Text("")]
+    body: list[Any] = [] if after_user else [Text("")]
     body.extend(_wrap_failure_line(title, console, width))
     if expanded:
         lines = block.output.strip().splitlines()
@@ -837,10 +914,10 @@ def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
     if status == "running":
         return _spinner(), "green"
     if status == "waiting":
-        return "●", "yellow"
+        return "•", "yellow"
     if status in {"error", "interrupted"} or is_error:
-        return "●", "#888888"
-    return "●", "green"
+        return "•", "#888888"
+    return "•", "green"
 
 
 def _spinner_tick() -> int:

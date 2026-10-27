@@ -21,7 +21,8 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
     assert settings.ui_timezone == "Asia/Shanghai"
-    assert settings.ui_display_limits.thinking_tail_lines == 5
+    assert settings.ui_display_limits.tail_lines == 4
+    assert settings.ui_display_limits.head_lines == 4
 
 
 def test_secret_environment_references_and_tavily_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,16 +66,16 @@ def test_ui_timezone_can_be_configured_and_invalid_names_fail(tmp_path: Path) ->
         Settings.load(path)
 
 
-def test_thinking_tail_lines_can_be_configured(tmp_path: Path) -> None:
+def test_tail_lines_can_be_configured(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    path.write_text(_MODEL_YAML + "ui:\n  thinking_tail_lines: 3\n", encoding="utf-8")
-    assert Settings.load(path).ui_display_limits.thinking_tail_lines == 3
+    path.write_text(_MODEL_YAML + "ui:\n  tail_lines: 3\n", encoding="utf-8")
+    assert Settings.load(path).ui_display_limits.tail_lines == 3
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, 3.5, "5", None])
-def test_thinking_tail_lines_rejects_invalid_values(value: object) -> None:
-    with pytest.raises(ValueError, match="ui.thinking_tail_lines must be a positive integer"):
-        Settings.from_mapping({"ui": {"thinking_tail_lines": value}})
+def test_tail_lines_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="ui.tail_lines must be a positive integer"):
+        Settings.from_mapping({"ui": {"tail_lines": value}})
 
 
 def test_all_ui_display_limits_are_loaded_and_validated() -> None:
@@ -85,8 +86,7 @@ def test_all_ui_display_limits_are_loaded_and_validated() -> None:
         for invalid in (0, -1, True, None, "2", 2.5):
             with pytest.raises(ValueError, match=f"ui.{name}"):
                 Settings.from_mapping({"ui": {name: invalid}})
-    with pytest.raises(ValueError, match="ui.edit_preview_changed_lines"):
-        Settings.from_mapping({"ui": {"edit_preview_changed_lines": 1}})
+    assert Settings.from_mapping({"ui": {"head_lines": 1}}).ui_display_limits.head_lines == 1
 
 
 def test_removed_protected_paths_fail_with_migration_message() -> None:
@@ -699,6 +699,76 @@ def test_model_max_retries_rejects_invalid_values(value):
         }}})
 
 
+@pytest.mark.parametrize("value", [-1, True, False, "120", float("nan"), float("inf")])
+def test_stream_chunk_timeout_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="stream_chunk_timeout"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"stream_chunk_timeout": value, "models": {"test": {}}},
+        }}})
+
+
+def test_stream_chunk_timeout_is_not_a_top_level_llm_field():
+    with pytest.raises(ValueError, match="llm.stream_chunk_timeout is unsupported"):
+        Settings.from_mapping({"llm": {
+            "default": "local/test", "stream_chunk_timeout": 30,
+            "models": {"local": {"models": {"test": {}}}},
+        }})
+
+
+def test_stream_chunk_timeout_defaults_inheritance_and_override():
+    from agent.config import DEFAULT_STREAM_CHUNK_TIMEOUT
+
+    assert Settings().active_profile.stream_chunk_timeout == DEFAULT_STREAM_CHUNK_TIMEOUT
+    settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
+        "local": {"stream_chunk_timeout": 30, "models": {
+            "a": {}, "b": {"stream_chunk_timeout": 0}, "c": {"stream_chunk_timeout": 12.5},
+        }},
+    }}})
+    assert settings.get_profile("local/a").stream_chunk_timeout == 30.0
+    assert settings.get_profile("local/b").stream_chunk_timeout == 0.0
+    assert settings.get_profile("local/c").stream_chunk_timeout == 12.5
+    disabled = build_chat_model(settings.get_profile("local/b"))
+    assert disabled.stream_chunk_timeout == 0.0
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "60", float("nan"), float("inf")])
+def test_request_timeout_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="llm.timeout"):
+        Settings.from_mapping({"llm": {
+            "default": "local/test", "timeout": value,
+            "models": {"local": {"models": {"test": {}}}},
+        }})
+
+
+@pytest.mark.parametrize("placed", ["source", "model"])
+def test_request_timeout_is_not_per_model(placed):
+    source = {"models": {"test": {}}}
+    if placed == "source":
+        source["timeout"] = 30
+    else:
+        source["models"]["test"]["timeout"] = 30
+    with pytest.raises(ValueError, match="set llm.timeout once"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {"local": source}}})
+
+
+def test_request_timeout_is_shared_by_every_model():
+    from agent.config import DEFAULT_REQUEST_TIMEOUT
+
+    assert Settings().request_timeout == DEFAULT_REQUEST_TIMEOUT == 60.0
+    settings = Settings.from_mapping({"llm": {
+        "default": "local/a", "timeout": 45,
+        "models": {"local": {"models": {"a": {}, "b": {}}}},
+    }})
+    assert settings.request_timeout == 45.0
+    assert "timeout" not in settings.get_profile("local/a").__dataclass_fields__
+    for profile in settings.list_profiles():
+        model = build_chat_model(profile, timeout=settings.request_timeout)
+        client = getattr(model.root_client, "_target", model.root_client)
+        assert model.request_timeout == client.timeout == 45.0
+    unset = build_chat_model(settings.get_profile("local/b"))
+    assert unset.request_timeout == 60.0
+
+
 def test_model_retry_defaults_inheritance_and_override():
     assert Settings().active_profile.max_retries == 5
     settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
@@ -709,6 +779,63 @@ def test_model_retry_defaults_inheritance_and_override():
     assert profile.max_retries == 0
     model = build_chat_model(profile)
     assert model.max_retries == model.root_client.max_retries == model.root_async_client.max_retries == 0
+
+
+def test_mount_modes_reject_empty_unknown_and_duplicate_values(tmp_path: Path) -> None:
+    present = tmp_path / "present"
+    present.mkdir()
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_write_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: []
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="modes"):
+        Settings.load(config)
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_write_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: [restricted, restricted]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        Settings.load(config)
+    config.write_text(
+        _MODEL_YAML
+        + f"""
+sandbox:
+  extra_read_only_mounts:
+    - source: {present}
+      destination: /opt/present
+      modes: [full-access]
+""",
+        encoding="utf-8",
+    )
+    mount = Settings.load(config).sandbox.extra_read_only_mounts[0]
+    assert mount.modes == ("full-access",)
+
+
+def test_shipped_template_is_restricted_and_scopes_host_dev() -> None:
+    import yaml
+    from importlib.resources import files
+
+    data = yaml.safe_load(files("agent").joinpath("config.example.yaml").read_text(encoding="utf-8"))
+    sandbox = data["sandbox"]
+    assert sandbox["mode"] == "restricted"
+    dev = sandbox["extra_read_write_mounts"][0]
+    assert dev["source"] == "/dev" and dev["dev_bind"] is True
+    assert dev["modes"] == ["full-access"]
 
 
 def test_hidden_tools_default_and_yaml_loading(tmp_path):
@@ -723,3 +850,25 @@ def test_hidden_tools_default_and_yaml_loading(tmp_path):
 def test_hidden_tools_rejects_invalid_lists(value):
     with pytest.raises(ValueError, match="tools.hidden"):
         Settings.from_mapping({"tools": {"hidden": value}})
+
+
+@pytest.mark.parametrize("name", [
+    "thinking_tail_lines", "execute_tail_lines", "tool_tail_lines", "expanded_tool_lines",
+    "edit_preview_changed_lines", "write_preview_lines", "failure_preview_lines", "command_failure_tail_lines",
+])
+def test_removed_ui_line_settings_request_head_tail_migration(name) -> None:
+    with pytest.raises(ValueError, match="use ui.head_lines and ui.tail_lines"):
+        Settings.from_mapping({"ui": {name: 4}})
+
+
+def test_template_and_code_share_four_line_defaults() -> None:
+    import yaml
+
+    template = yaml.safe_load((Path(__file__).parents[1] / "agent/config.example.yaml").read_text())
+    configured = UiDisplayLimits.from_mapping(template["ui"])
+    defaults = UiDisplayLimits()
+    assert configured.head_lines == defaults.head_lines == 4
+    assert configured.tail_lines == defaults.tail_lines == 4
+    assert {name for name in template["ui"] if name.endswith("_lines")} == {
+        "head_lines", "tail_lines", "editor_max_lines", "completion_menu_lines",
+    }

@@ -94,11 +94,6 @@ class MCPFile:
         return body
 
 
-def default_mcp_path(config_dir: Path | None = None) -> Path:
-    root = config_dir if config_dir is not None else Path.home() / ".deep-agent"
-    return root.expanduser() / "mcp.json"
-
-
 def parse_server(name: str, raw: Any) -> MCPServerConfig:
     if not isinstance(raw, dict):
         raise MCPConfigError(f"MCP server {name} must be an object")
@@ -277,7 +272,7 @@ def _http_url(name: str, value: Any) -> str:
     url = value.strip()
     try:
         parsed = urlparse(url)
-        parsed.port  # Validate malformed authority/ports without echoing the URL.
+        _ = parsed.port  # Validate malformed authority/ports without echoing the URL.
     except ValueError:
         raise MCPConfigError(f"MCP server {name} has an invalid URL authority") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

@@ -65,8 +65,8 @@ def test_spec_rebuild_keeps_static_inputs_and_rereads_project_instructions(
     prepared = build_agent(spec, scripted_model([AIMessage(content="ok")]), PermissionMode.ASK,
                            None, RunController(), lambda: False)
     runner = AgentRunner(prepared=prepared, settings=_settings(tmp_path))
-    assert "# User Instructions\n中文优先" in prepared.system_prompt
-    assert "# Project Instructions\n规则一" in prepared.system_prompt
+    assert "# 用户指令\n中文优先" in prepared.system_prompt
+    assert "# 项目指令\n规则一" in prepared.system_prompt
     assert "custom_lookup" in prepared.exposed_tool_names
     (tmp_path / "AGENTS.md").write_text("规则二", encoding="utf-8")
     runner.switch_model("beta")
@@ -93,12 +93,12 @@ def test_configured_instructions_reach_runner_and_create_agent(tmp_path: Path) -
     )
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
                          backend=StateBackend(), settings=settings)
-    assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
+    assert "# 用户指令\n配置说明" in runner.prepared.system_prompt
     runner.switch_model("beta")
     with patch("agent.runner.build_chat_model",
                side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
         assert runner.invoke("switch").status == "completed"
-    assert "# User Instructions\n配置说明" in runner.prepared.system_prompt
+    assert "# 用户指令\n配置说明" in runner.prepared.system_prompt
     prepared = create_agent(model=scripted_model([AIMessage(content="unused")]),
                             backend=StateBackend(), settings=settings)
     assert prepared.spec.instructions == "配置说明"
@@ -159,7 +159,7 @@ def test_resume_permission_fallback_and_stop_status(tmp_path: Path) -> None:
     assert store.get(thread).permission_mode == "ask"
     assert snapshot.info.last_run_status is StopReason.ABORTED
     assert second._resume_context is not None
-    assert "aborted" in second._resume_context.text
+    assert "用户中止" in second._resume_context.text
     assert any("unavailable" in notice for notice in snapshot.notices)
     store.close()
 
@@ -180,7 +180,7 @@ def test_recovery_middleware_keeps_request_and_checkpoint_messages_separate() ->
         middleware.wrap_model_call(request, lambda item: seen.append(item) or item)
     finally:
         reset_recovery_context(token)
-    assert "Previous run status" in seen[0].system_message.content
+    assert "上一轮运行状态" in seen[0].system_message.content
     assert seen[1].system_message is original_system
     assert request.system_message is original_system
     assert request.messages == [user]
@@ -238,8 +238,8 @@ def test_resume_recovery_is_one_shot_and_user_text_stays_raw(
     assert second._resume_context is not None
     assert second.invoke("先检查，不要修改").status == "completed"
     assert len(captured) == 2
-    assert "Previous run status" in str(captured[0][0].content)
-    assert "Previous run status" not in str(captured[1][0].content)
+    assert "上一轮运行状态" in str(captured[0][0].content)
+    assert "上一轮运行状态" not in str(captured[1][0].content)
     saved = second.load_session(thread)
     assert [block.content for block in saved.transcript if block.kind == "user"] == [
         "before", "先检查，不要修改",

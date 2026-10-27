@@ -186,13 +186,13 @@ def _changed_lines(raw: str) -> list[_ChangedLine]:
 def _select_changed_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[_ChangedLine]:
     """Pick the compact-preview lines: first N, then a +/- floor, then re-sort.
 
-    When both sides exist, the preview must show at least one - and one +;
+    With a budget of at least two, show both - and + when both sides exist;
     the replacement line keeps its original diff position after sorting.
     """
-    if len(changed) <= limits.edit_preview_changed_lines:
+    if len(changed) <= limits.head_lines:
         return list(changed)
-    selected = changed[:limits.edit_preview_changed_lines]
-    if len({line.kind for line in changed}) < 2:
+    selected = changed[:limits.head_lines]
+    if limits.head_lines < 2 or len({line.kind for line in changed}) < 2:
         return selected
     if "add" not in {line.kind for line in selected}:
         replacement = next(line for line in changed if line.kind == "add")
@@ -305,7 +305,7 @@ def _write_compact_lines(diff: DiffPreview | None, *, limits: UiDisplayLimits = 
         return ()
     lines = [
         PreviewLine(f"{number:>4} {line.text}", line.style)
-        for number, line in enumerate(diff.lines[:limits.write_preview_lines], 1)
+        for number, line in enumerate(diff.lines[:limits.head_lines], 1)
     ]
     hidden = len(diff.lines) - len(lines)
     if hidden:
@@ -390,11 +390,11 @@ def aggregate_file_mutations(
         for line in mutation.compact_lines
         if line.style in {"add", "delete"}
     ]
-    selected = list(enumerate(changes[:limits.edit_preview_changed_lines]))
-    if len(changes) > limits.edit_preview_changed_lines:
+    selected = list(enumerate(changes[:limits.head_lines]))
+    if len(changes) > limits.head_lines:
         kinds = {line.style for _, line in changes}
         shown = {line.style for _, (_, line) in selected}
-        if len(kinds) == 2 and len(shown) == 1:
+        if limits.head_lines >= 2 and len(kinds) == 2 and len(shown) == 1:
             replacement = next((order, item) for order, item in enumerate(changes) if item[1].style not in shown)
             selected[-1] = replacement
             selected.sort(key=lambda item: item[0])
@@ -520,8 +520,12 @@ def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
         status = "interrupted"
     elif block.status == "running":
         status = "running"
-    elif reason in ("cancelled", "timeout", "spawn_error"):
-        status = reason
+    elif reason == "cancelled":
+        status = "cancelled"
+    elif reason == "timeout":
+        status = "timeout"
+    elif reason == "spawn_error":
+        status = "spawn_error"
     elif exit_code not in (None, 0) or block.is_error or block.status == "error":
         status = "failed"
     else:
@@ -647,11 +651,11 @@ def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLi
     lines = block.output.strip().splitlines()
     if lines and lines[0].startswith("参数校验失败"):
         details = [line.strip().removeprefix("- ") for line in lines if line.startswith("- ")]
-        shown = details[:limits.failure_preview_lines] or lines[:1]
+        shown = details[:limits.head_lines] or lines[:1]
         hidden = len(lines) - len(shown)
     else:
         content = [line for line in lines if line.strip() and not line.strip().startswith("Exit code:")]
-        limit = limits.command_failure_tail_lines if group == "command" else limits.failure_preview_lines
+        limit = limits.tail_lines if group == "command" else limits.head_lines
         shown = content[-limit:] if group == "command" else content[:limit]
         hidden = len(content) - len(shown)
     if hidden > 0:

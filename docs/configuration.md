@@ -105,7 +105,7 @@ tools:
     - request_human_input
 ```
 
-未写 `hidden` 时不隐藏任何工具。示例配置 [`config.example.yaml`](../agent/config.example.yaml) 里写了 `compact_conversation`，首次生成的配置会按该列表隐藏；已有配置不会被覆盖。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。隐藏 `request_human_input` 时，同时去除内置提示词中要求调用它的说明。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
+未写 `hidden` 时不隐藏任何工具。示例配置 [`config.example.yaml`](../agent/config.example.yaml) 里写了 `compact_conversation`，首次生成的配置会按该列表隐藏；已有配置不会被覆盖。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。内置系统提示词使用中文，字段名、工具名及枚举值保持英文；系统提示词不包含工具用法。工具说明与参数由上游工具定义原样提供，不做翻译；本地自定义工具可直接用中文编写说明。外部 MCP 服务的原始说明和用户、项目提供的内容不自动翻译。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
 
 此设置只控制模型可见工具，不改变 ASK/ALLOW 审批规则，不提供 `/tool` 命令或运行时热切换。
 
@@ -116,6 +116,7 @@ tools:
 ```yaml
 llm:
   default: token-plan/qwen3.8-flash
+  timeout: 60
   models:
     token-plan:
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
@@ -128,7 +129,7 @@ llm:
           context_window: 1m
 ```
 
-来源下可以写的字段，模型项中也都可以写；模型项中的值覆盖来源级的值。
+来源下可以写的字段，模型项中也都可以写；模型项中的值覆盖来源级的值。`timeout` 例外：它只写在 `llm` 下一次，所有模型共用。
 
 接入新的标准兼容模型，只需要在这里配置 `api`、端点地址/凭据、模型 ID 和模型能力。协议格式转换由程序完成，无需修改 Agent 核心，也无需配置厂商兼容模式。
 
@@ -138,6 +139,7 @@ llm:
 | `api_key` | `sk-local` | 字面值或 `${变量名}` |
 | `api` | `responses` | `responses` 使用 Responses API；`chat_completions` 使用 Chat Completions |
 | `max_retries` | `5` | 非负整数，额外重试次数；`0` 禁用。模型级覆盖来源级 |
+| `stream_chunk_timeout` | `120` | 模型流无进展超时（秒）。连续这么久没有新的解析后 chunk 就中断并重试当前请求；持续输出可以超过它。`0` 禁用。模型级覆盖来源级 |
 | `model` | 模型键 | 仅模型项可用，实际请求的模型名 |
 | `input` | `[text]` | 支持图片输入时写 `[text, image]`；必须包含 `text` |
 | `context_window` | `0` | 模型输入窗口，可写 `128000`、`128k`、`1m`。`0` 表示未知：底栏不显示占用百分比，压缩阈值使用 Deep Agents 的默认值 |
@@ -154,7 +156,11 @@ llm:
 
 流式调用由单层逻辑统一重试连接错误和响应读取中断（包括缺少结束事件就直接 EOF），共享同一预算：首次请求 + 最多 5 次重试，总 HTTP 请求次数不超过 6 次。每次流式请求使用独立的 SDK 客户端副本并禁用 SDK 内部重试，不修改共享客户端；非流式调用仍使用 SDK 原生重试。
 
-重试重新发起当前模型调用，清除失败尝试的临时文本、思考内容和工具参数，已完成的工具不会重跑；Esc 在请求和退避等待期间均可取消。重试只覆盖模型请求，不覆盖工具执行。
+模型流的无进展超时由 `stream_chunk_timeout` 配置，默认 120 秒：连续这么久没有新的解析后 chunk 就中断当前这次模型请求并按同一预算重试。持续输出的流可以超过该值。SSE keepalive 不会重置这个计时器。它不是整次 Agent Run 的总时间上限。设为 `0` 则关闭。不完整的工具参数不会被执行。
+
+HTTP 首字节超时由 `llm.timeout` 配置，默认 60 秒，所有模型共用，不能写在来源或单个模型上。它限制建立连接，以及等到第一批响应数据。响应开始之后，只要仍有数据到达，整轮生成可以超过 60 秒。完全没有字节时，它会先于 `stream_chunk_timeout` 触发。必须为正数。
+
+重试重新发起当前模型调用，清除失败尝试的临时文本、思考内容和工具参数，已完成的工具不会重跑；Esc 在请求和退避等待期间均可取消，取消不触发重试。重试只覆盖模型请求，不覆盖工具执行。
 
 ### 已移除的配置字段
 
@@ -250,7 +256,7 @@ web_search:
 | `extra_read_only_mounts` | `[]` | 额外只读挂载，`[{source, destination, optional}]`。`optional: true` 且源目录不存在时跳过。固定系统文件列表里没有的路径也写在这里，例如 CentOS 的 `/etc/pki` 挂到同名路径。SANDBOXED 下文件工具按只读使用同一目标。不能设 `dev_bind` |
 | `extra_read_write_mounts` | `[]` | 额外读写挂载，格式同上，另可设 `dev_bind: true`，对该条使用 `--dev-bind`，用来挂宿主 `/dev` 或单个设备节点。普通 `--bind` 带 `nodev`，打不开 USB 串口。SANDBOXED 下文件工具也可写这些目标。重复目标、后挂载盖住先挂载或错位嵌套在启动时拒绝。同一目录的只读和读写别名可以共存，权限按虚拟路径区分 |
 
-表中的默认值是代码内默认值。首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 写成 `full-access`，并用 `dev_bind` 挂宿主 `/dev`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，更新模板后需要手动合并并重启 CLI。`sandbox.dev` 已移除，配置里出现时启动失败。
+表中的默认值是代码内默认值。首次生成的 [`config.example.yaml`](../agent/config.example.yaml) 写成 `restricted`。宿主 `/dev` 写在 `extra_read_write_mounts` 里，并带 `modes: [full-access]`，所以新模板的 restricted 使用沙箱私有 `/dev`，切到 full-access 才做宿主 `dev_bind`。已有的 `~/.deep-agent/config.yaml` 不会被覆盖，也不会被悄悄改掉。旧配置里没有 `modes` 的 `/dev` 挂载在两种模式都仍然生效；若希望 restricted 不再开放宿主设备，给那一条加上 `modes: [full-access]` 后重启。`sandbox.dev` 已移除，配置里出现时启动失败。
 
 `sandbox.protected_workspace_paths` 与 `sandbox.allow_unsandboxed` 已移除，配置中出现时启动报错。Bubblewrap 不可用时启动失败，没有宿主机执行回退。
 
@@ -269,7 +275,7 @@ web_search:
 
 以上项目是 `restricted` 收窄可见范围时的例子，不是模板的生效配置。路径不存在就跳过，不寻找替代路径，也不表示对应工具已通过运行检查。
 
-模板默认是 `mode: full-access`。宿主目录按真实路径使用；`/dev` 通过 `extra_read_write_mounts` 里 `dev_bind: true` 的 `/dev` → `/dev` 传入。不要设备节点时删掉这一条。`env_allowlist` 含 `PATH` 和 `DISPLAY`，因此命令沿宿主 `PATH` 查找。`env_set` 为空；若在其中写入 `PATH`，会盖住宿主 `PATH`。改成 `restricted` 后，再按需把上表挂载写回配置，并让 `env_set.PATH` 指向这些沙箱路径。程序会将 `/run/deep-agent` 自动放到 `PATH` 最前。配置文件未写 `mode` 时，代码默认仍是 `restricted`。
+模板默认是 `mode: restricted`。`env_allowlist` 仍含 `PATH` 和 `DISPLAY`，但这只是允许传入这些变量，不表示宿主 `PATH` 上的目录已经挂进沙箱。`env_set` 为空。程序会将 `/run/deep-agent` 自动放到 `PATH` 最前。配置文件未写 `mode` 时，代码默认仍是 `restricted`。挂载可以写 `modes: [restricted]`、`[full-access]` 或两者；省略 `modes` 时两种模式都生效。空数组、未知值或重复模式会在加载配置时失败。
 
 `source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
 
@@ -284,22 +290,24 @@ web_search:
 
 ## 界面（`ui`）
 
-修改后重启 CLI 生效。数量字段均为正整数（`edit_preview_changed_lines` 至少为 2）。带 `_lines` 的折叠项默认按换行符切分的逻辑行计数；`thinking_tail_lines` 例外，按当前终端宽度折行后的显示行计算。带 `_items` 的字段按条目计数。
+修改后重启 CLI 生效。内容折叠统一使用 `head_lines` 和 `tail_lines`，均为正整数，默认各 4 行。需要开头预览的命令正文、写入、差异和普通失败摘要使用 `head_lines`；思考和工具输出、命令失败输出使用 `tail_lines`。命令正文和思考按终端折行后的显示行计数；其他内容按逻辑行计数。展开工具输出后不再受折叠行数限制。带 `_items` 的字段按条目计数。
+
+```yaml
+ui:
+  head_lines: 4
+  tail_lines: 4
+```
+
+原来的 `thinking_tail_lines`、`execute_tail_lines`、`tool_tail_lines`、`expanded_tool_lines`、`edit_preview_changed_lines`、`write_preview_lines`、`failure_preview_lines`、`command_failure_tail_lines` 已移除。已有配置中请删除这些字段，改用上面的两个字段；程序不会覆盖已有配置文件。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
-| `thinking_tail_lines` | `5` | 思考区折叠时保留的末尾显示行数，按当前终端宽度折行后计算 |
-| `execute_tail_lines` | `4` | 命令输出折叠时保留的末尾行数 |
-| `tool_tail_lines` | `8` | 其他工具输出折叠时保留的末尾行数 |
-| `expanded_tool_lines` | `40` | 展开的普通工具输出最多显示的行数 |
+| `head_lines` | `4` | 内容折叠时保留的开头行数 |
+| `tail_lines` | `4` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
 | `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
-| `edit_preview_changed_lines` | `8` | 修改预览的增删行预算，至少为 2 |
-| `write_preview_lines` | `6` | 覆盖写入预览显示的前几行 |
-| `failure_preview_lines` | `4` | 失败工具摘要显示的前几行 |
-| `command_failure_tail_lines` | `6` | 通用命令失败摘要保留的末尾行数 |
 | `editor_max_lines` | `10` | 输入框最大行数；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
 

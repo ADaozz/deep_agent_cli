@@ -9,7 +9,7 @@ DOCS = {
 
 
 def lookup_docs(query: str) -> str:
-    """Search local documentation. ALLOW — runs immediately without confirmation."""
+    """检索本地文档，无需人工确认即可执行。"""
     key = (query or "").strip().lower()
     for name, text in DOCS.items():
         if name in key or key in name:

@@ -140,7 +140,9 @@ sequenceDiagram
     R->>S: 记录结束原因或待恢复状态
 ```
 
-`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。它把模型与工具消息转成 `RunEvent`，负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。
+`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。中断分类、消息文本和 `RunEvent` 的构造在 `agent/run_events.py`；`RunResult` 与 `RunEvent` 仍从 `agent.runner` 导入。Runner 负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。`RunController` 仍是取消当前 Run 的唯一入口。
+
+终端侧的所有者也是分开的：`Keymap` 只做按键映射，`InputActionRouter` 决定 Ctrl+C、Esc、Ctrl+D 和 `/exit`，`CliApplication` 执行界面动作，`AppLifecycle` 在离开全屏之后收尾界面任务，`Runner.close()` 才释放 Session 租约。离开 `ACTIVE` 之后不再登记新的 Run、Session 等待或 MCP 操作；已经在跑的工作仍由各自的所有者取消。MCP 的忙闲和工具表发布状态在 `MCPController`，连接和宿主执行仍在 `MCPManager`。`Esc` 取消 Session 等待会回到选择器；CLI 退出只取消等待，不打开选择器。
 
 `RunResult` 的状态包括 `completed`、`failed`、`cancelled`、`waiting_confirmation`、`waiting_human`、`paused` 和 `runtime_config_boundary`。几类中断含义不同：审批是执行前授权；人工输入是 Agent 提问；暂停是用户请求；配置边界用于安全切换模型或权限。它们借助 checkpoint 恢复，但不能互相替代。
 
@@ -182,13 +184,22 @@ sequenceDiagram
 
 Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 等）不进入文件工具路由。重复目标、后挂载盖住先挂载或错位嵌套在初始化时失败。同一宿主目录的只读和读写别名按各自路径分别授权。文件工具不能删除挂载点，也不能顺着符号链接删掉链接背后的文件，或绕过配置目录与安装目录保护。`/sandbox` 会按新模式刷新这张路由，工作区路径保持不变。
 
-工具挂载由配置直接声明，没有工具链自动发现或版本选择层。默认模板将 NVM 的整个版本目录挂到 `/opt/node`，版本由用户在 PATH 中指定；Cargo 和 Rustup 分别挂载为 `/opt/cargo`、`/opt/rustup`；Chrome 程序只读，浏览器缓存单独可写。可选源不存在时在配置加载阶段跳过。模板的具体路径及环境变量见 [默认工具挂载](configuration.md#默认工具挂载)。用户扩大或缩小挂载范围不改变审批策略；只读挂载仍允许读取其中的敏感内容。
+工具挂载由配置直接声明，没有工具链自动发现或版本选择层。默认模板不预置工具挂载；`restricted` 需要工具时由用户按示例挂载，例如把 NVM 的整个版本目录挂到 `/opt/node` 后在 PATH 中指定版本，Cargo 和 Rustup 分别挂载为 `/opt/cargo`、`/opt/rustup`，Chrome 程序只读、浏览器缓存单独可写。可选源不存在时在配置加载阶段跳过。具体路径及环境变量见 [默认工具挂载](configuration.md#默认工具挂载)。用户扩大或缩小挂载范围不改变审批策略；只读挂载仍允许读取其中的敏感内容。
 
 `artifacts_root` 为 `<工作区真实路径>/.deepagents`，用于压缩历史等上游产物。文件工具的访问边界来自 Backend 路径约束，不能描述为所有读写都在 Bubblewrap 内。`.git/`、`.env` 等文件若在授权工作区内，也在 Agent 可访问范围内。
 
 ### 双持久沙箱
 
-一个 Runner 按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。`SandboxPool` 负责懒启动、复用、失效替换与 Runner 关闭时的清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。
+一个 Runner 按需保有 offline 和 online 两个 Bubblewrap 实例，每个实例以常驻 Python Worker 为主进程。三个模块的所有者是分开的：
+
+| 模块 | 负责 | 不负责 |
+|---|---|---|
+| `agent/sandbox_mounts.py` | 按当前模式筛选用户挂载，并生成有效启动策略清单 | 启动沙箱、读取内核挂载表 |
+| `agent/sandbox.py` | 路径校验、挂载参数、文件工具路由、单次命令的输出收集与取消 | 跨会话复用沙箱进程 |
+| `agent/sandbox_pool.py` | 有网和无网实例的懒启动、复用、失效替换，以及关闭 Runner 时的清理 | 改写 restricted / full-access 的挂载规则 |
+| `agent/sandbox_worker.py` | 沙箱内常驻进程，按 request id 执行一条 shell 或 argv；`kill` 只作用于该命令 | import `agent`，或在 Worker 丢失后自动重放命令 |
+
+`SandboxPool` 负责懒启动、复用、失效替换与 Runner 关闭时的清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。取消一条命令不会关闭 Pool，也不会影响另一个网络实例。
 
 每次 `execute` 启动新的 `/bin/sh -lc`，Shell 变量和 `cd` 不跨调用保留；实例内 `/tmp`、`/home` 文件以及仍存活的后台进程可以保留。有网和无网实例绑定同一组 `/tmp` 与 `/home`：`restricted` 是专用持久目录，`full-access` 是当前环境的真实目录。切换回 `ask` 不会停止此前有网实例中的后台进程。`/sandbox` 会关闭两个实例。
 
@@ -312,7 +323,8 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 源码入口
 
-- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
+- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[run_events.py](../agent/run_events.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
 - 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
-- 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
+- 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
+- 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_controller.py](../agent/cli/mcp_controller.py)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
 - 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。

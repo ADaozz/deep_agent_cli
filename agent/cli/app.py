@@ -63,6 +63,7 @@ from agent.cli.rendering import (
     RenderedUnit,
     TranscriptDocument,
     TranscriptRenderer,
+    render_interaction_viewport,
     render_interaction,
     render_queued_messages,
     render_review,
@@ -81,6 +82,14 @@ from agent.permission import (
     allow_mode_unavailable_reason,
     parse_permission_mode,
 )
+from agent.cli.lifecycle import AppLifecycle, TaskStop
+from agent.cli.mcp_controller import MCPController
+from agent.cli.input_actions import (
+    EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
+    InputAction,
+    InputActionRouter,
+    InputView,
+)
 from agent.performance import model_metric_groups
 from agent.mcp.logging import MCPLogHandler
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
@@ -88,7 +97,6 @@ from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, Unknow
 # Workspace/model and execution settings on the left; git/context on the right.
 FOOTER_LINES = 2
 INPUT_CLEARED_HINT = "Input cleared · press Ctrl+C again to exit"
-CTRL_C_EXIT_WINDOW_SECONDS = 1.0
 STATUS_NOTICE_SECONDS = 1.0
 
 _RUN_EPOCH: ContextVar[int | None] = ContextVar("deep_agent_tui_run_epoch", default=None)
@@ -269,6 +277,28 @@ class _ScrollableTextControl(FormattedTextControl):
         return None
 
 
+class _InteractionControl(_ScrollableTextControl):
+    """A fixed heading and footer around a selection-following option list."""
+
+    def __init__(self, *args: Any, controller: Any, **kwargs: Any) -> None:
+        self._controller = controller
+        self._option_offset = 0
+        self._selection_context: Any = None
+        super().__init__(*args, **kwargs)
+
+    def create_content(self, width: int, height: int | None = None) -> UIContent:
+        controller = self._controller()
+        context = (controller, controller.index if controller else None, width)
+        if context != self._selection_context:
+            self._option_offset = 0
+            self._selection_context = context
+        rendered, self._option_offset = render_interaction_viewport(
+            controller, width, height or 1, self._option_offset,
+        )
+        self.text = to_formatted_text(ANSI(rendered))
+        return super().create_content(width, height)
+
+
 class _BackToBottomControl(_ScrollableTextControl):
     """Make the whole return-to-bottom hint clickable without stealing wheel events."""
 
@@ -431,11 +461,13 @@ class CliApplication:
         self._run_epoch = 0
         self._cancel_sent = False
         self._compacting = False
-        self._last_ctrl_c: float | None = None
+        self._input_actions = InputActionRouter()
         self._status_notice_handle: asyncio.TimerHandle | None = None
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
-        self._exiting = False
+        self.lifecycle = AppLifecycle(self)
+        self.mcp_controller = MCPController()
+        self._mcp_draft: dict[str, str] = {}
         self._transcript_line_count = 1
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._transcript_anchor: int | None = None
@@ -478,8 +510,9 @@ class CliApplication:
             on_select=self._select_transcript,
             selected_line=self._selected_transcript_line,
         )
-        self.interaction_control = _ScrollableTextControl(
+        self.interaction_control = _InteractionControl(
             text=self._interaction_text, focusable=False, on_scroll=self.scroll_transcript,
+            controller=lambda: self.interaction,
             on_select_outside=self._select_below_transcript,
         )
         self.attachment_control = _ScrollableTextControl(
@@ -702,12 +735,7 @@ class CliApplication:
                 await self.sessions.start()
                 await self.application.run_async(pre_run=self._start_mcp_connections)
             finally:
-                manager = getattr(self.runner, "mcp", None)
-                if manager is not None:
-                    manager.cancel_pending_connections()
-                self.sessions.notify_exit()
-                await self._stop_git_watch()
-                self._io_executor.shutdown(wait=False, cancel_futures=True)
+                await self.lifecycle.shutdown()
 
     def _start_mcp_connections(self) -> None:
         manager = getattr(self.runner, "mcp", None)
@@ -782,7 +810,7 @@ class CliApplication:
     def _start_git_watch(self) -> None:
         if self._git_task is not None:
             return
-        self._git_task = asyncio.get_running_loop().create_task(self._watch_git())
+        self._git_task = self.lifecycle.spawn(self._watch_git(), stop=TaskStop.CANCEL, name="git-watch")
 
     async def _watch_git(self) -> None:
         """Keep the footer's git summary fresh without ever blocking a render pass."""
@@ -872,7 +900,8 @@ class CliApplication:
         interrupt = self.runner.current_interrupt()
         if not self.state.running and interrupt is None:
             events: list[RunEvent] = []
-            self.runner._apply_pending_runtime_config(events.append)
+            if not self.runner.apply_pending_config_if_idle(events.append):
+                events = []
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -891,12 +920,8 @@ class CliApplication:
         before = self.runner.permission_mode()
         self.runner.request_permission_change(mode)
         interrupt = self.runner.current_interrupt()
-        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
-            events: list[RunEvent] = []
-            try:
-                self.runner._apply_pending_runtime_config(events.append)
-            finally:
-                self.runner._operation_lock.release()
+        events: list[RunEvent] = []
+        if not self.state.running and interrupt is None and self.runner.apply_pending_config_if_idle(events.append):
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -919,12 +944,8 @@ class CliApplication:
             self.state.add_system(str(exc), error=True)
             return
         interrupt = self.runner.current_interrupt()
-        if not self.state.running and interrupt is None and self.runner._operation_lock.acquire(blocking=False):
-            events: list[RunEvent] = []
-            try:
-                self.runner._apply_pending_runtime_config(events.append)
-            finally:
-                self.runner._operation_lock.release()
+        events: list[RunEvent] = []
+        if not self.state.running and interrupt is None and self.runner.apply_pending_config_if_idle(events.append):
             for event in events:
                 self._apply_event(event, announce=False)
             if any(event.type == "runtime_config_failed" for event in events):
@@ -943,6 +964,7 @@ class CliApplication:
             for item in self.commands
         )
         self.state.add_system(
+            "/help\n"
             "Keyboard\n"
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
@@ -970,6 +992,7 @@ class CliApplication:
         if pending_effort is not None:
             model_line += f"Reasoning: {self.runner.reasoning_effort()} → {pending_effort} (pending)\n"
         self.state.add_system(
+            "/status\n"
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
             f"{tool_line}\n"
@@ -1007,6 +1030,7 @@ class CliApplication:
         )
         if store is None:
             self.state.add_system(
+                "/session\n"
                 f"Session: {self.runner.thread_id}\n"
                 f"{model_line}"
                 "Checkpointer: in-memory\nPersistent /resume is not configured."
@@ -1019,6 +1043,7 @@ class CliApplication:
         created_at = info.created_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         updated_at = info.updated_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         self.state.add_system(
+            "/session\n"
             f"Session: {self.runner.thread_id}\n"
             f"Title: {title}\n"
             f"Created: {created_at}\n"
@@ -1035,6 +1060,16 @@ class CliApplication:
 
     async def resume_session(self, arg: str = "") -> None:
         await self.sessions.resume(arg)
+
+    def reset_session_view(self) -> None:
+        """Drop editor chrome that belonged to the previous session."""
+        self._clear_skill_draft()
+        self.clear_transcript_selection()
+        self.interaction = None
+        self._deferred_config_interaction = None
+        self._reviewing = False
+        self._transcript_anchor = None
+        self._renderer.clear()
 
     def _apply_session_snapshot(self, snapshot: Any) -> None:
         self.sessions.apply_snapshot(snapshot)
@@ -1292,6 +1327,21 @@ class CliApplication:
         self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.application.invalidate()
 
+    def _show_sandbox_mounts(self) -> None:
+        from agent.sandbox_mounts import render_launch_manifest
+
+        backend = getattr(self.runner.prepared, "backend", None)
+        executor = getattr(backend, "executor", None)
+        config = getattr(executor, "config", None) or self.runner._sandbox_config
+        if config is None:
+            self.state.add_system("Sandbox mount policy is not available for this backend.", error=True)
+            return
+        skills = getattr(backend, "skills_dir", None)
+        self.state.add_system(render_launch_manifest(
+            config, skills_dir=skills, pending_mode=self.runner.pending_sandbox_mode(),
+        ))
+        self.application.invalidate()
+
     async def select_sandbox(self, arg: str = "") -> None:
         if self.sessions.waiting:
             self.set_status(self.sessions.wait_status(), transient=False)
@@ -1300,11 +1350,14 @@ class CliApplication:
             self.set_status("Finish the current interaction before changing sandbox mode")
             return
         raw = arg.strip()
+        if raw == "mounts":
+            self._show_sandbox_mounts()
+            return
         if raw:
             mode = parse_sandbox_mode(raw)
             if mode is None:
                 self.state.add_system(
-                    "Unknown sandbox mode. Use /sandbox restricted or /sandbox full-access",
+                    "Unknown sandbox mode. Use /sandbox restricted, /sandbox full-access, or /sandbox mounts",
                     error=True,
                 )
                 return
@@ -1457,45 +1510,120 @@ class CliApplication:
             buffer.cursor_position = len(text)
         return restored_parts
 
-    def _apply_session_snapshot(self, snapshot: Any) -> None:
-        self._clear_skill_draft()
-        self.clear_transcript_selection()
-        self.state.load_transcript(snapshot.transcript)
-        self.state.load_model_metrics(snapshot.model_metrics_history)
-        self.interaction = None
-        self._reviewing = False
-        self.state.add_system(
-            f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
+    @property
+    def _exiting(self) -> bool:
+        return self.lifecycle.exiting
+
+    @property
+    def _last_ctrl_c(self) -> float | None:
+        """Double-press clock. Owned by InputActionRouter; exposed for existing checks."""
+        return self._input_actions.last_ctrl_c
+
+    def _input_view(self, buffer: Buffer) -> InputView:
+        text = buffer.text
+        interaction = self.interaction
+        return InputView(
+            has_interaction=interaction is not None,
+            custom_entry=bool(interaction is not None and interaction.custom_entry),
+            completion_open=buffer.complete_state is not None,
+            slash_line=text.startswith("/") and "\n" not in text,
+            transcript_away=self.transcript_away_from_bottom(),
+            session_waiting=self.sessions.waiting,
+            reviewing=self._reviewing,
+            compacting=self._compacting,
+            running=self.state.running,
+            cancel_sent=self._cancel_sent,
+            mcp_busy=self.mcp_controller.busy,
+            buffer_empty=not text,
+            exiting=self._exiting,
         )
-        for notice in snapshot.notices:
-            self.state.add_system(notice)
-        if not self._reopen_pending_interaction(notify_missing=False):
-            self.set_status("Ready", transient=False)
-        self._transcript_anchor = None
-        self._renderer.clear()
-        self.state.usage = dict(self.runner.latest_usage())
-        self.application.invalidate()
+
+    def apply_input_action(self, action: InputAction, buffer: Buffer) -> None:
+        """Perform one decision from InputActionRouter. Does not choose another."""
+        if action is InputAction.NONE:
+            return
+        if action is InputAction.DISMISS_COMPLETION:
+            # Dismiss the menu without cancel_completion restoring its pre-selection document.
+            buffer.complete_state = None
+            self.application.invalidate()
+            return
+        if action is InputAction.CLEAR_SLASH_LINE:
+            self.slash_completer.accepted_text = None
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.application.invalidate()
+            return
+        if action is InputAction.FOLLOW_TRANSCRIPT:
+            self.follow_transcript()
+            return
+        if action is InputAction.CANCEL_COMPLETION:
+            buffer.cancel_completion()
+            return
+        if action is InputAction.CANCEL_SESSION_WAIT:
+            self.sessions.cancel_wait()
+            return
+        if action is InputAction.CLOSE_REVIEW:
+            self._close_review()
+            return
+        if action is InputAction.EXIT_CUSTOM_ENTRY:
+            assert self.interaction is not None
+            self.interaction.custom_entry = False
+            self.interaction.error = ""
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.application.invalidate()
+            return
+        if action is InputAction.CANCEL_INTERACTION:
+            self._finish_interaction(cancelled=True)
+            return
+        if action is InputAction.WAIT_FOR_COMPACTION:
+            self.set_status("Wait for compaction to finish")
+            return
+        if action is InputAction.CANCEL_ALREADY_SENT:
+            self.set_status("Cancelling… waiting for the run to stop", transient=False)
+            self.application.invalidate()
+            return
+        if action is InputAction.CANCEL_RUN:
+            restored = self._restore_queued_to_editor(buffer)
+            self._cancel_sent = True
+            self.runner.request_cancel()
+            if restored:
+                self.set_status("Cancelling… · queued messages restored", transient=False)
+            else:
+                self.set_status("Cancelling…", transient=False)
+            self.application.invalidate()
+            return
+        if action is InputAction.MCP_STILL_RUNNING:
+            self.set_status(
+                "MCP is still running in the background; wait for completion or timeout",
+                transient=False,
+            )
+            self.application.invalidate()
+            return
+        if action is InputAction.CLEAR_INPUT:
+            buffer.reset()
+            self._pasted_content.clear()
+            self._skill_draft.clear()
+            self.state.attachments.clear()
+            self._show_input_cleared_hint()
+            return
+        if action is InputAction.REQUEST_EXIT:
+            self.exit()
+            return
+        if action is InputAction.DELETE_AFTER_CURSOR:
+            buffer.delete()
+            return
+        raise AssertionError(f"Unhandled input action: {action}")
+
+    def request_command_exit(self) -> None:
+        """`/exit` uses the same exit action as an empty Ctrl+D."""
+        self.apply_input_action(self._input_actions.decide_exit_command(), self.buffer)
 
     def exit(self) -> None:
-        if self._exiting:
-            return
-        self._exiting = True
-        if self._status_notice_handle is not None:
-            self._status_notice_handle.cancel()
-            self._status_notice_handle = None
-        self._stop_selection_scroll()
-        # Stop mouse reports before prompt_toolkit leaves the alternate screen.
-        # Otherwise motion generated during shutdown can reach the shell.
-        self.application.output.disable_mouse_support()
-        self.application.output.flush()
-        self.sessions.notify_exit()
-        manager = getattr(self.runner, "mcp", None)
-        if manager is not None:
-            manager.cancel_pending_connections()
-        if self.state.running:
-            self.runner.request_cancel()
-        self._io_executor.shutdown(wait=False, cancel_futures=True)
-        self.application.exit()
+        """Ask the lifecycle to leave. Resource shutdown happens after the prompt loop."""
+        self.lifecycle.request_exit()
 
     async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -1623,7 +1751,7 @@ class CliApplication:
             self._stop_selection_scroll()
             selected = self._selected_transcript_text()
             if selected:
-                asyncio.create_task(self._copy_selection(selected))
+                self.lifecycle.spawn(self._copy_selection(selected), stop=TaskStop.CANCEL, name="clipboard-copy")
         else:
             return
         self.application.invalidate()
@@ -1805,7 +1933,7 @@ class CliApplication:
         return FormattedText(fragments)
 
     def _footer_text(self):  # type: ignore[no-untyped-def]
-        mode = self.runner.prepared.execution_mode.value
+        mode = self.runner.prepared.execution_mode.value.lower()
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
@@ -1922,7 +2050,7 @@ class CliApplication:
             if self.interaction is not None:
                 return
             self.set_status("Reading clipboard…", transient=False)
-            asyncio.create_task(self._paste_clipboard())
+            self.lifecycle.spawn(self._paste_clipboard(), stop=TaskStop.CANCEL, name="clipboard-paste")
 
         @kb.add(Keys.BracketedPaste, eager=True)
         def bracketed_paste(event) -> None:  # type: ignore[no-untyped-def]
@@ -2010,78 +2138,24 @@ class CliApplication:
 
         @bind("interrupt")
         def escape(event) -> None:  # type: ignore[no-untyped-def]
-            if self.interaction is None and event.current_buffer.complete_state is not None:
-                # Dismiss the menu without cancel_completion restoring its pre-selection document.
-                event.current_buffer.complete_state = None
-                self.application.invalidate()
-            elif self.interaction is None and event.current_buffer.text.startswith("/") and "\n" not in event.current_buffer.text:
-                self.slash_completer.accepted_text = None
-                event.current_buffer.reset()
-                self._pasted_content.clear()
-                self._skill_draft.clear()
-                self.application.invalidate()
-            elif self.transcript_away_from_bottom():
-                self.follow_transcript()
-            elif event.current_buffer.complete_state is not None:
-                event.current_buffer.cancel_completion()
-            elif self.sessions.waiting:
-                self.sessions.cancel_wait()
-            elif self._reviewing:
-                self._close_review()
-            elif self.interaction is not None and self.interaction.custom_entry:
-                self.interaction.custom_entry = False
-                self.interaction.error = ""
-                event.current_buffer.reset()
-                self._pasted_content.clear()
-                self._skill_draft.clear()
-                self.application.invalidate()
-            elif self.interaction is not None:
-                self._finish_interaction(cancelled=True)
-            elif self._compacting:
-                self.set_status("Wait for compaction to finish")
-            elif self.state.running:
-                restored = self._restore_queued_to_editor(event.current_buffer)
-                if self._cancel_sent:
-                    self.set_status("Cancelling… waiting for the run to stop", transient=False)
-                    self.application.invalidate()
-                    return
-                self._cancel_sent = True
-                self.runner.request_cancel()
-                if restored:
-                    self.set_status("Cancelling… · queued messages restored", transient=False)
-                else:
-                    self.set_status("Cancelling…", transient=False)
-                self.application.invalidate()
-
-            elif getattr(self, "_mcp_busy", False):
-                self.set_status(
-                    "MCP is still running in the background; wait for completion or timeout",
-                    transient=False,
-                )
-                self.application.invalidate()
+            buffer = event.current_buffer
+            action = self._input_actions.decide_interrupt(self._input_view(buffer))
+            self.apply_input_action(action, buffer)
 
         @bind("clear_or_exit")
         def ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
-            if self.interaction is not None:
-                self._finish_interaction(cancelled=True)
-                return
+            buffer = event.current_buffer
             now = time.monotonic()
-            if self._last_ctrl_c is not None and now - self._last_ctrl_c < CTRL_C_EXIT_WINDOW_SECONDS:
-                self.exit()
-                return
-            event.current_buffer.reset()
-            self._pasted_content.clear()
-            self._skill_draft.clear()
-            self.state.attachments.clear()
-            self._last_ctrl_c = now
-            self._show_input_cleared_hint()
+            action = self._input_actions.decide_clear_or_exit(self._input_view(buffer), now)
+            self.apply_input_action(action, buffer)
+            if action is InputAction.CLEAR_INPUT:
+                self._input_actions.arm_clear(now)
 
         @bind("exit")
         def ctrl_d(event) -> None:  # type: ignore[no-untyped-def]
-            if not event.current_buffer.text:
-                self.exit()
-            else:
-                event.current_buffer.delete()
+            buffer = event.current_buffer
+            action = self._input_actions.decide_ctrl_d(self._input_view(buffer))
+            self.apply_input_action(action, buffer)
 
         @bind("tools_expand")
         def tools_expand(event) -> None:  # type: ignore[no-untyped-def]
@@ -2185,7 +2259,7 @@ class CliApplication:
         if (not self._pasted_content.has_blocks and not self._skill_draft.is_present(displayed)
                 and text.startswith("/") and "\n" not in text):
             self.buffer.reset(append_to_history=True)
-            asyncio.create_task(self._dispatch_command(text))
+            self.lifecycle.spawn(self._dispatch_command(text), stop=TaskStop.CANCEL, name="slash-command")
             return
         pending_interrupt = self.runner.current_interrupt() if not self.state.running else None
         if self.state.running or self.runner.control.pending_message_texts() or pending_interrupt is not None:
@@ -2234,6 +2308,10 @@ class CliApplication:
         resume_call: Any | None = None,
         image_refs: tuple[ImageAttachmentRef, ...] = (),
     ) -> None:
+        # Exit may win the race with a completion callback. Refuse before any
+        # visible state change or a new run reservation.
+        if self.lifecycle.exiting:
+            return
         if resume_call is None:
             self.state.add_user(text, attachments=image_refs)
             self.state.attachments.clear()
@@ -2276,9 +2354,13 @@ class CliApplication:
                 if epoch == self._run_epoch:
                     self._cancel_sent = False
 
-        self._run_task = asyncio.create_task(work())
+        self._run_task = self.lifecycle.spawn(work(), stop=TaskStop.OBSERVE, name="agent-run")
 
     def _start_queued_run(self) -> None:
+        # Do not pop steering or follow-up after exit: those messages are not
+        # consumed, and they are not marked applied.
+        if self.lifecycle.exiting:
+            return
         if self.interaction is not None or self.runner.current_interrupt() is not None:
             return
         text = self.runner.control.pop_steering()
@@ -2356,7 +2438,11 @@ class CliApplication:
                 looks_like_image = path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
                 if path.is_file() and looks_like_image:
                     if self.runner.supports_next_input("image"):
-                        asyncio.create_task(self._attach_pasted_path(trimmed, payload))
+                        self.lifecycle.spawn(
+                            self._attach_pasted_path(trimmed, payload),
+                            stop=TaskStop.CANCEL,
+                            name="attach-image",
+                        )
                         return
                     self.set_status("Image path pasted as text: current or pending model does not support images")
             except (OSError, ClipboardError):
@@ -2636,11 +2722,11 @@ class CliApplication:
                 return
             mode_raw = str(interaction.values.get("mode") or "")
             self.interaction = None
-            mode = parse_sandbox_mode(mode_raw)
-            if mode is None:
+            sandbox_mode = parse_sandbox_mode(mode_raw)
+            if sandbox_mode is None:
                 self.state.add_system("No sandbox mode selected", error=True)
                 return
-            self._request_sandbox_mode(mode)
+            self._request_sandbox_mode(sandbox_mode)
             return
         if interaction.kind == "permission_confirm":
             if cancelled:

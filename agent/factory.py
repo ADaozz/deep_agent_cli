@@ -49,17 +49,38 @@ from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
 from agent.tools.web_search import build_web_search_tool
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "write_file", "edit_file", "delete"]
-HUMAN_INPUT_PROMPT = (
-    "如果继续执行需要用户提供信息或从多个选项中做决定，调用 request_human_input 暂停等待回答。"
-    "如果你主动给用户列出多个后续操作供其选择，也必须调用 request_human_input，"
-    "用 fields 的 single_select 或 multi_select 表达选项；不要只在普通回复中写编号菜单。"
-    "每道选择题最多提供 3 个选项；Other 由系统自动添加，不计入这 3 个，不要自行提供。"
-)
 
 DEFAULT_SYSTEM_PROMPT = (
-    "你是使用 {model_name} 的 Coding Agent CLI。"
-    "完成用户请求后直接报告结果。"
-) + HUMAN_INPUT_PROMPT
+    "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
+    "你的职责是理解用户需求、检查相关代码、完成任务、验证结果并准确汇报。\n\n"
+
+    "# 任务执行\n"
+    "- 优先自主完成用户请求，不要只停留在分析或建议阶段。\n"
+    "- 简单任务直接执行；复杂任务先明确实施顺序，再逐步推进。\n"
+    "- 充分利用现有上下文和工具，不要反复询问能够自行确定的信息。\n"
+    "- 遇到失败时分析原因并调整方法，不要无意义地重复相同操作。\n"
+    "- 不猜测文件内容、工具结果或执行状态；无法完成时明确说明原因。\n\n"
+
+    "# 代码修改\n"
+    "- 修改前先理解相关实现、依赖关系和项目约定。\n"
+    "- 优先修复根本原因，保持改动最小、聚焦且符合现有代码风格。\n"
+    "- 不进行无关重构，不修复无关问题，不引入不必要的依赖或抽象。\n"
+    "- 遵循适用的 AGENTS.md 项目规则，目录越深的规则在其作用域内越优先。\n"
+    "- 遵守沙箱限制、文件访问权限和审批机制。\n"
+    "- 未经用户明确要求，不创建 Git 分支、不提交或推送代码。\n"
+    "- 必要时同步更新相关测试和文档。\n\n"
+
+    "# 验证\n"
+    "- 修改代码后尽可能进行验证，从与改动直接相关的测试开始。\n"
+    "- 根据风险和执行成本决定是否扩大测试范围。\n"
+    "- 区分本次修改引入的错误与项目原有问题，不擅自修改无关测试。\n"
+    "- 无法运行测试时说明限制，不声称未经验证的结果已经通过。\n\n"
+
+    "# 沟通与结果\n"
+    "- 长任务在关键阶段简要报告进度，避免逐条复述工具调用。\n"
+    "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
+    "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
+)
 
 
 class HiddenToolsMiddleware(AgentMiddleware):
@@ -119,15 +140,12 @@ class PreparedAgent:
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
     model_name = str(getattr(model, "model_name", None) or get_model_identifier(model) or type(model).__name__)
-    base_prompt = DEFAULT_SYSTEM_PROMPT
-    if "request_human_input" in spec.hidden_tools:
-        base_prompt = base_prompt.removesuffix(HUMAN_INPUT_PROMPT)
-    sections = [base_prompt.format(model_name=model_name)]
+    sections = [DEFAULT_SYSTEM_PROMPT.format(model_name=model_name)]
     if spec.instructions and spec.instructions.strip():
-        sections.append(f"# User Instructions\n{spec.instructions.strip()}")
+        sections.append(f"# 用户指令\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
     if project_instructions.is_file():
-        sections.append(f"# Project Instructions\n{project_instructions.read_text(encoding='utf-8')}")
+        sections.append(f"# 项目指令\n{project_instructions.read_text(encoding='utf-8')}")
     return "\n\n".join(sections)
 
 
@@ -290,7 +308,9 @@ def create_agent(
 
 
 def _default_model(cfg: Settings) -> BaseChatModel:
-    return build_chat_model(cfg.active_profile, streaming=True, trust_env=cfg.trust_env)
+    return build_chat_model(
+        cfg.active_profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
+    )
 
 
 def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:

@@ -1,10 +1,10 @@
-# Stream the compiled graph, classify LangGraph interrupts, resume with Command.
+# Stream the compiled graph and resume with Command.
+# Interrupt classification and terminal RunResult / RunEvent construction live in run_events.
 # Token-level reasoning/assistant deltas use LangChain callbacks (ChatOpenAI streaming=True).
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from functools import wraps
 from pathlib import Path
 import os
@@ -15,7 +15,7 @@ from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphDrained
 from langgraph.types import Command
@@ -31,7 +31,7 @@ from agent.attachments import (
     ImageAttachmentRef,
     refs_to_dicts,
 )
-from agent.config import InputKind, ModelProfile, SandboxConfig, Settings, parse_sandbox_mode
+from agent.config import InputKind, ModelProfile, SandboxConfig, SandboxMode, Settings, parse_sandbox_mode
 from agent.control import RunController
 from agent.environment import (
     EnvironmentCache, bubblewrap_backend, probe_sandbox, reset_environment_cache, set_environment_cache,
@@ -40,9 +40,35 @@ from agent.factory import AgentSpec, PreparedAgent, build_agent
 from agent.sandbox import WorkspaceCompositeBackend
 from agent.sandbox_pool import SandboxPool
 from agent.llm import build_chat_model
-from agent.llm_stream import ModelStreamCancelled, reset_stream_owner, set_stream_owner
+from agent.llm_stream import reset_stream_owner, set_stream_owner
 from agent.middleware.attachments import reset_attachment_store, set_attachment_store
 from agent.middleware.recovery import RecoveryContext, reset_recovery_context, set_recovery_context
+from agent.run_events import (
+    CompactResult,
+    InterruptKind,
+    InterruptState,
+    RunEvent,
+    RunEventHandler,
+    RunResult,
+    TurnTiming,
+    UnknownInterruptError as UnknownInterruptError,
+    _emit,
+    _final_output,
+    _last_message_id,
+    _tool_decisions,
+    _usage_from_messages,
+    cancelled_result,
+    classify_interrupt,
+    completed_result,
+    failed_result,
+    final_answer_committed,
+    interaction_result,
+    normalize_stream_error,
+    update_tool_events,
+    interrupt_kind_from_state,
+    interrupt_payloads,
+    is_valid_hitl_interrupt as is_valid_hitl_interrupt,
+)
 from agent.permission import (
     PermissionMode,
     allow_mode_available,
@@ -58,12 +84,11 @@ from agent.session import (
     TranscriptBlock,
     messages_to_transcript,
     settle_restored_tools,
-    tool_message_is_error,
     workspace_state_path,
 )
 from agent.session_lock import SessionLockBusyError
 from agent.session_runtime import RestorePlan, SessionLeaseLike, SessionRuntime
-from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, visible_text
+from agent.stream import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks
 from agent.tools.human_interaction import validate_human_input_values
 
 HUMAN_TOOLS = frozenset({"request_human_input"})
@@ -97,72 +122,6 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
                 self.control.release_reservation(reservation)
             self._operation_lock.release()
     return guarded
-
-
-@dataclass(frozen=True)
-class RunEvent:
-    """Presentation-neutral event emitted while a graph run is progressing."""
-
-    type: str
-    content: str = ""
-    message_id: str = ""
-    tool_call_id: str = ""
-    name: str = ""
-    arguments: dict[str, Any] = field(default_factory=dict)
-    result: Any = None
-    is_error: bool = False
-    stream: str = ""
-    # Structured tool result payload (ToolMessage.artifact), forwarded as-is
-    # for every tool, not just execute.
-    artifact: Any = None
-
-
-@dataclass(frozen=True)
-class TurnTiming:
-    elapsed_seconds: float
-    finished_at: datetime
-
-
-RunEventHandler = Callable[[RunEvent], None]
-
-
-@dataclass
-class RunResult:
-    status: str
-    output: str = ""
-    pending_tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    human_input: dict[str, Any] = field(default_factory=dict)
-    error: str = ""
-
-
-@dataclass(frozen=True)
-class CompactResult:
-    status: str
-    used_tokens: int | None = None
-    window_tokens: int = 0
-    message: str = ""
-
-    @property
-    def percent(self) -> float | None:
-        return self.used_tokens / self.window_tokens * 100 if self.window_tokens > 0 and self.used_tokens is not None else None
-
-
-class InterruptKind(StrEnum):
-    PAUSED = "paused"
-    WAITING_HUMAN = "waiting_human"
-    WAITING_CONFIRMATION = "waiting_confirmation"
-    RUNTIME_CONFIG_BOUNDARY = "runtime_config_boundary"
-
-
-class UnknownInterruptError(ValueError):
-    """Checkpoint or stream has an interrupt that is not a known protocol."""
-
-
-@dataclass(frozen=True)
-class InterruptState:
-    kind: InterruptKind
-    payload: dict[str, Any]
-    pending_tools: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -232,10 +191,12 @@ class AgentRunner:
         self._pending_reasoning_effort: str | None = None
         self._pending_model_id: str | None = None
         self._pending_permission_mode: PermissionMode | None = None
-        configured_mode = self._sandbox_config.mode if self._sandbox_config is not None else "restricted"
+        configured_mode: SandboxMode = (
+            self._sandbox_config.mode if self._sandbox_config is not None else "restricted"
+        )
         self._configured_sandbox_mode = configured_mode
         self._sandbox_mode = configured_mode
-        self._pending_sandbox_mode: str | None = None
+        self._pending_sandbox_mode: SandboxMode | None = None
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._environment = EnvironmentCache()
@@ -271,6 +232,7 @@ class AgentRunner:
         self._current_model_id = profile.id
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
             profile, attachment_store=self.attachment_store, trust_env=cfg.trust_env,
+            timeout=cfg.request_timeout,
         ))
         object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
@@ -388,14 +350,14 @@ class AgentRunner:
         with self._pending_config_lock:
             return self._pending_permission_mode
 
-    def sandbox_mode(self) -> str:
+    def sandbox_mode(self) -> SandboxMode:
         return self._sandbox_mode
 
-    def pending_sandbox_mode(self) -> str | None:
+    def pending_sandbox_mode(self) -> SandboxMode | None:
         with self._pending_config_lock:
             return self._pending_sandbox_mode
 
-    def request_sandbox_mode(self, mode: str) -> str:
+    def request_sandbox_mode(self, mode: str) -> SandboxMode:
         if self._closed:
             raise RuntimeError("Runner is closed")
         self._require_active_session()
@@ -465,6 +427,31 @@ class AgentRunner:
             self._save_pending_config()
         return mode
 
+    def apply_pending_config_if_idle(
+        self,
+        handler: RunEventHandler | None = None,
+        *,
+        lock_timeout: float = 0,
+    ) -> bool:
+        """Apply a queued model, permission, sandbox, or MCP toolset change.
+
+        The operation lock is taken here, so callers do not touch it. Returns
+        False when a run holds the lock or an interrupt is still pending; the
+        queued change stays in place for the next safe point. A closed runner
+        raises instead of applying.
+        """
+        if self._closed:
+            raise RuntimeError("Runner is closed")
+        if not self._operation_lock.acquire(timeout=lock_timeout):
+            return False
+        try:
+            if self.current_interrupt() is not None:
+                return False
+            self._apply_pending_runtime_config(handler)
+            return True
+        finally:
+            self._operation_lock.release()
+
     def _apply_pending_runtime_config(self, handler: RunEventHandler | None = None) -> None:
         failures: list[str] = []
         applied_sandbox = None
@@ -509,6 +496,7 @@ class AgentRunner:
                             profile, attachment_store=self.attachment_store,
                             trust_env=self._spec.trust_env,
                             reasoning_effort=None if target_effort == "default" else target_effort,
+                            timeout=self.settings.request_timeout,
                         )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
                     applied_mcp = mcp_dirty
@@ -557,15 +545,15 @@ class AgentRunner:
                         "mcp_changed": applied_mcp},
             ))
 
-    def _apply_sandbox_mode(self, mode: str) -> None:
+    def _apply_sandbox_mode(self, mode: SandboxMode) -> None:
         backend = self.prepared.backend
         if not isinstance(backend, WorkspaceCompositeBackend):
             raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
-        backend.apply_sandbox_mode(mode)  # type: ignore[arg-type]
+        backend.apply_sandbox_mode(mode)
         if self._sandbox_config is not None:
-            self._sandbox_config = replace(self._sandbox_config, mode=mode)  # type: ignore[arg-type]
+            self._sandbox_config = replace(self._sandbox_config, mode=mode)
         if self._spec.sandbox is not None:
-            self._spec = replace(self._spec, sandbox=replace(self._spec.sandbox, mode=mode))  # type: ignore[arg-type]
+            self._spec = replace(self._spec, sandbox=replace(self._spec.sandbox, mode=mode))
 
     def supports_input(self, kind: InputKind) -> bool:
         profile = self.current_model()
@@ -706,6 +694,7 @@ class AgentRunner:
                 trust_env=self._spec.trust_env,
                 reasoning_effort=None if self._reasoning_effort == "default" else self._reasoning_effort,
                 attachment_store=self.attachment_store,
+                timeout=self.settings.request_timeout,
             )
         self.prepared = build_agent(
             self._spec, chat, mode, self._checkpointer,
@@ -797,7 +786,10 @@ class AgentRunner:
             raise RuntimeError(f"Failed to load session {info.id}: {exc}") from exc
         messages = list((state.values or {}).get("messages", []) or [])
         interrupt = interrupt_kind_from_state(self.prepared.graph, config)
-        transcript = messages_to_transcript(messages)
+        transcript = messages_to_transcript(
+            messages,
+            turn_timings=self.session_store.turn_timings(info.id) if self.session_store is not None else None,
+        )
         settle_restored_tools(
             transcript,
             waiting_ids={
@@ -965,7 +957,7 @@ class AgentRunner:
             return
         backend = self.prepared.backend
         if isinstance(backend, WorkspaceCompositeBackend):
-            backend.apply_sandbox_mode(self._configured_sandbox_mode)  # type: ignore[arg-type]
+            backend.apply_sandbox_mode(self._configured_sandbox_mode)
         self._sandbox_mode = self._configured_sandbox_mode
 
     def _apply_restore_plan(self, plan: RestorePlan) -> None:
@@ -978,6 +970,7 @@ class AgentRunner:
                     profile, attachment_store=self.attachment_store,
                     trust_env=self._spec.trust_env,
                     reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
+                    timeout=self.settings.request_timeout,
                 ),
                 permission_mode=plan.permission_mode,
             )
@@ -1384,20 +1377,27 @@ class AgentRunner:
         turn_started = time.monotonic()
 
         def emit_turn_completed(output: str) -> None:
+            timing = TurnTiming(
+                elapsed_seconds=max(0.0, time.monotonic() - turn_started),
+                finished_at=datetime.now(timezone.utc),
+            )
+            if self.session_store is not None:
+                state = self.prepared.graph.get_state(self._thread_config())
+                messages = list((state.values or {}).get("messages", []) or [])
+                answer = next((item for item in reversed(messages) if isinstance(item, AIMessage)), None)
+                if answer is not None and answer.id:
+                    self.session_store.save_turn_timing(
+                        self.thread_id, answer.id, timing.elapsed_seconds, timing.finished_at,
+                    )
             _emit(event_handler, RunEvent(
                 type="turn_completed",
                 content=output,
-                result=TurnTiming(
-                    elapsed_seconds=max(0.0, time.monotonic() - turn_started),
-                    finished_at=datetime.now(timezone.utc),
-                ),
+                result=timing,
             ))
 
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
-            while result.status == "runtime_config_boundary":
-                self._apply_pending_runtime_config(event_handler)
-                result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+            result = self._resume_config_boundaries(result, config, run_control, event_handler)
             # Consume queued input at the same run boundary for every client.
             while result.status == "completed" and not self.control.cancel_requested:
                 text = self.control.pop_steering()
@@ -1416,9 +1416,7 @@ class AgentRunner:
                     run_control,
                     event_handler,
                 )
-                while result.status == "runtime_config_boundary":
-                    self._apply_pending_runtime_config(event_handler)
-                    result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+                result = self._resume_config_boundaries(result, config, run_control, event_handler)
             if result.status == "completed":
                 _emit(event_handler, RunEvent(type="run_completed", content=result.output))
                 emit_turn_completed(result.output)
@@ -1437,6 +1435,19 @@ class AgentRunner:
             ):
                 self._resume_context = None
             self._event_handler = None
+
+    def _resume_config_boundaries(
+        self,
+        result: RunResult,
+        config: dict[str, Any],
+        run_control: Any,
+        event_handler: RunEventHandler | None,
+    ) -> RunResult:
+        """Apply a queued runtime change and resume the same run. Not a new generation."""
+        while result.status == "runtime_config_boundary":
+            self._apply_pending_runtime_config(event_handler)
+            result = self._stream_once(Command(resume=True), config, run_control, event_handler)
+        return result
 
     def _refresh_environment_snapshot(self) -> None:
         """Reuse a matching sandbox fingerprint. Probe again only when it changed."""
@@ -1492,19 +1503,17 @@ class AgentRunner:
                         human_input = interrupt.payload
         except GraphDrained:
             if self._final_answer_committed(last_message_id):
-                return RunResult(status="completed",
-                                 output=_final_output(self.prepared.graph, self._thread_config()))
+                return completed_result(_final_output(self.prepared.graph, self._thread_config()))
             return self._cancelled_result(event_handler)
         except Exception as exc:  # noqa: BLE001
             # A ModelStreamCancelled without a cancel request of this run is
             # not a user cancel and stays a failure, like any network error.
-            if self.control.cancel_requested:
+            failure = normalize_stream_error(exc, cancel_requested=self.control.cancel_requested)
+            if failure is None:
                 return self._cancelled_result(event_handler)
-            if isinstance(exc, ModelStreamCancelled):
-                exc = RuntimeError(f"Model stream stopped unexpectedly: {exc}")
-            _emit(event_handler, RunEvent(type="run_failed", content=str(exc), is_error=True))
+            _emit(event_handler, RunEvent(type="run_failed", content=str(failure), is_error=True))
             self._touch_status(StopReason.ERROR)
-            return RunResult(status="failed", error=str(exc))
+            return failed_result(str(failure))
 
         # graph.stream returned without GraphDrained: the graph reached its end
         # and the final message is already checkpointed. A cancel that arrived
@@ -1512,16 +1521,11 @@ class AgentRunner:
         if interrupted:
             self.control.set_defer_steering(True)
             self._touch_status(StopReason.DEFERRED)
-            result = RunResult(
-                status=interrupted,
-                pending_tool_calls=pending,
-                human_input=human_input,
-            )
+            result = interaction_result(interrupted, pending, human_input)
             _emit(event_handler, RunEvent(type="interaction_requested", result=result))
             return result
 
-        output = _final_output(self.prepared.graph, self._thread_config())
-        return RunResult(status="completed", output=output)
+        return completed_result(_final_output(self.prepared.graph, self._thread_config()))
 
     def _final_answer_committed(self, last_message_id: str | None) -> bool:
         """Whether this run checkpointed a final answer before it was drained.
@@ -1531,10 +1535,7 @@ class AgentRunner:
         complete and the late cancel must not report it as cancelled.
         """
         values = self.prepared.graph.get_state(self._thread_config()).values or {}
-        messages = values.get("messages") or []
-        if not messages or _last_message_id(values) == last_message_id:
-            return False
-        return isinstance(messages[-1], AIMessage) and not messages[-1].tool_calls
+        return final_answer_committed(values.get("messages") or [], last_message_id)
 
     def _cancelled_result(self, event_handler: RunEventHandler | None) -> RunResult:
         """Finish a cancelled run once its model request is confirmed closed.
@@ -1545,9 +1546,11 @@ class AgentRunner:
         """
         closed = self.control.wait_model_streams_closed(MODEL_STREAM_CLOSE_SECONDS)
         self._touch_status(StopReason.ABORTED)
-        error = "" if closed else MODEL_STREAM_UNCLOSED
+        error, result = cancelled_result(
+            model_stream_closed=closed, unclosed_message=MODEL_STREAM_UNCLOSED,
+        )
         _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
-        return RunResult(status="cancelled", error=error)
+        return result
 
     def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
@@ -1572,248 +1575,9 @@ class AgentRunner:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
-        for message in _messages_in_update(chunk):
-            if isinstance(message, AIMessage):
-                message_id = str(getattr(message, "id", "") or "")
-                usage = _usage_metadata_dict(message)
-                # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
-                if "input_tokens" in usage:
-                    self._context_usage_invalidated = False
-                    _emit(handler, RunEvent(type="usage", result=usage))
-                for call in message.tool_calls or []:
-                    tool_call_id = str(call.get("id") or "")
-                    identity = tool_call_id or f"{call.get('name')}:{id(call)}"
-                    if identity in self._seen_tool_calls:
-                        continue
-                    self._seen_tool_calls.add(identity)
-                    _emit(handler, RunEvent(
-                        type="tool_started",
-                        message_id=message_id,
-                        tool_call_id=tool_call_id,
-                        name=str(call.get("name") or "tool"),
-                        arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
-                    ))
-            elif isinstance(message, ToolMessage):
-                tool_name = str(getattr(message, "name", "") or "tool")
-                content = _message_text(message)
-                artifact = getattr(message, "artifact", None)
-                is_error = tool_message_is_error(message)
-                _emit(handler, RunEvent(
-                    type="tool_completed",
-                    tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
-                    name=tool_name,
-                    content=content,
-                    result=getattr(message, "content", content),
-                    is_error=is_error,
-                    artifact=artifact,
-                ))
-
-def interrupt_payloads(interrupts: Any) -> list[dict[str, Any]]:
-    payloads: list[dict[str, Any]] = []
-    items = interrupts if isinstance(interrupts, (list, tuple)) else [interrupts]
-    for item in items:
-        value = getattr(item, "value", item)
-        if isinstance(value, dict):
-            payloads.append(value)
-        elif isinstance(value, (list, tuple)):
-            for inner in value:
-                inner_value = getattr(inner, "value", inner)
-                if isinstance(inner_value, dict):
-                    payloads.append(inner_value)
-    return payloads
-
-
-def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
-    requested: list[dict[str, Any]] = []
-    for interrupt in interrupts if isinstance(interrupts, (list, tuple)) else [interrupts]:
-        value = getattr(interrupt, "value", interrupt)
-        if isinstance(value, dict):
-            for action in value.get("action_requests", []) or []:
-                requested.append({
-                    "name": action.get("name"),
-                    "args": action.get("args", {}),
-                    "description": action.get("description", ""),
-                })
-    tool_call_ids: dict[str, list[str]] = {}
-    try:
-        state = graph.get_state(config)
-        messages = state.values.get("messages", [])
-        for message in reversed(messages):
-            if isinstance(message, AIMessage) and message.tool_calls:
-                for call in message.tool_calls:
-                    tool_call_ids.setdefault(str(call.get("name")), []).append(str(call.get("id")))
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    pending: list[dict[str, Any]] = []
-    for action in requested:
-        name = str(action["name"])
-        ids = tool_call_ids.get(name, [])
-        pending.append({
-            "toolCallId": ids.pop(0) if ids else "",
-            "name": name,
-            "args": action["args"],
-        })
-    return pending
-
-
-def is_valid_hitl_interrupt(payload: Any) -> bool:
-    """True only for the locked LangChain HITLRequest schema (no type field)."""
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("type") not in (None, ""):
-        return False
-    requests = payload.get("action_requests")
-    configs = payload.get("review_configs")
-    if not isinstance(requests, list) or not requests:
-        return False
-    if not isinstance(configs, list) or not configs:
-        return False
-    for item in requests:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
-            return False
-        if not isinstance(item.get("args"), dict):
-            return False
-    for item in configs:
-        if not isinstance(item, dict) or not isinstance(item.get("action_name"), str):
-            return False
-        if not isinstance(item.get("allowed_decisions"), list):
-            return False
-    return True
-
-
-def classify_interrupt(
-    interrupts: Any, graph: Any, config: dict[str, Any],
-) -> InterruptState:
-    payloads = interrupt_payloads(interrupts)
-    if not payloads:
-        raise UnknownInterruptError("Interrupt has no recognizable payload")
-    for payload in payloads:
-        kind = str(payload.get("type") or "").strip().lower()
-        if kind == "human_input":
-            return InterruptState(InterruptKind.WAITING_HUMAN, payload)
-        if kind == "pause":
-            return InterruptState(InterruptKind.PAUSED, payload)
-        if kind == "runtime_config_boundary":
-            return InterruptState(InterruptKind.RUNTIME_CONFIG_BOUNDARY, payload)
-        if is_valid_hitl_interrupt(payload):
-            pending = resolve_pending_tool_calls(interrupts, graph, config)
-            return InterruptState(InterruptKind.WAITING_CONFIRMATION, payload, tuple(pending))
-        if kind:
-            raise UnknownInterruptError(f"Unsupported interrupt type: {kind!r}")
-    raise UnknownInterruptError(
-        f"Unsupported interrupt payload: {sorted(payloads[0].keys()) if payloads[0] else 'empty dict'}"
-    )
-
-
-def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> InterruptState | None:
-    state = graph.get_state(config)
-    interrupts = getattr(state, "interrupts", ()) or ()
-    if not interrupts:
-        return None
-    return classify_interrupt(interrupts, graph, config)
-
-
-def _last_message_id(values: dict[str, Any]) -> str | None:
-    messages = values.get("messages") or []
-    return getattr(messages[-1], "id", None) if messages else None
-
-
-def _final_output(graph: Any, config: dict[str, Any]) -> str:
-    state = graph.get_state(config)
-    messages = state.values.get("messages", [])
-    for message in reversed(messages):
-        if isinstance(message, AIMessage) and not message.tool_calls:
-            return visible_text(message) or _message_text(message)
-    return ""
-
-
-def _message_text(message: Any) -> str:
-    text = getattr(message, "text", None)
-    if isinstance(text, str) and text:
-        return text
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-        elif isinstance(block, str):
-            parts.append(block)
-    return "".join(parts)
-
-
-def _messages_in_update(value: Any) -> list[BaseMessage]:
-    """Find messages in LangGraph update envelopes without depending on node names."""
-    found: list[BaseMessage] = []
-    if isinstance(value, BaseMessage):
-        return [value]
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key == "__interrupt__":
-                continue
-            found.extend(_messages_in_update(item))
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            found.extend(_messages_in_update(item))
-    return found
-
-
-_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
-
-
-def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
-    usage = getattr(message, "usage_metadata", None)
-    if not isinstance(usage, dict):
-        return {}
-    return {key: int(usage[key]) for key in _USAGE_KEYS if type(usage.get(key)) is int and usage[key] >= 0}
-
-
-def _usage_from_messages(messages: Any) -> dict[str, int]:
-    """Most recent reported usage, which is the size of the context the model saw."""
-    for message in reversed(list(messages or [])):
-        if isinstance(message, AIMessage):
-            if message.additional_kwargs.get("manual_compact_completed"):
-                return {}
-            return _usage_metadata_dict(message)
-    return {}
-
-
-def _emit(handler: RunEventHandler | None, event: RunEvent) -> None:
-    if handler is not None:
-        try:
-            handler(event)
-        except Exception:  # noqa: BLE001
-            # Presentation observers must never change Agent/Tool execution semantics.
-            pass
-
-
-def _tool_decisions(
-    pending: list[dict[str, Any]],
-    *,
-    decision_type: str,
-    tool_call_ids: Sequence[str],
-    message: str | None = None,
-    others: str = "reject",
-) -> dict[str, Any]:
-    if decision_type not in ("approve", "reject"):
-        raise ValueError("Tool decision must be approve or reject")
-    targets = [str(item) for item in tool_call_ids if str(item)]
-    if not targets:
-        raise ValueError("Tool call id is required")
-    pending_ids = [str(call.get("toolCallId", "")) for call in pending]
-    for target in targets:
-        if target not in pending_ids:
-            raise ValueError(f"Tool call is no longer pending approval: {target}")
-    item: dict[str, Any] = {"type": decision_type}
-    if decision_type == "reject" and message:
-        item["message"] = str(message)
-    chosen = set(targets) if others == "same" else {targets[0]}
-    if len(pending_ids) <= 1:
-        return {"decisions": [dict(item) for _ in range(max(len(pending_ids), 1))]}
-    return {"decisions": [
-        dict(item) if tool_call_id in chosen
-        else {"type": "reject", "message": "另一个并发的待确认调用未包含在本次人工决策中，按拒绝处理"}
-        for tool_call_id in pending_ids
-    ]}
+        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
+        # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
+        if saw_input_usage:
+            self._context_usage_invalidated = False
+        for event in events:
+            _emit(handler, event)

@@ -57,8 +57,10 @@ class MCPResult:
 
 
 class _Snapshot(NamedTuple):
+    """Reference count for one published tool list. ``holders`` is not tuple.count."""
+
     clients: list[Any]
-    count: int
+    holders: int
     include_mcp: bool
 
 
@@ -312,9 +314,10 @@ class MCPManager:
                     f"MCP server {server.name} already exists with a different configuration. "
                     "Remove it before adding it again. The file was not modified.",
                 )
-            already = current is not None and current.fingerprint() == server.fingerprint()
-            if already:
+            already = False
+            if current is not None and current.fingerprint() == server.fingerprint():
                 server = current
+                already = True
             existing = self._states.get(server.name)
             if (
                 already and existing is not None and existing.status is ServerStatus.CONNECTED
@@ -427,8 +430,8 @@ class MCPManager:
                         tools.extend(state.tools)
                         clients.append(state.client)
             current = self._snapshots.get(self._revision)
-            count = current.count if current is not None else 0
-            self._snapshots[self._revision] = _Snapshot(clients, count + 1, include)
+            holders = current.holders if current is not None else 0
+            self._snapshots[self._revision] = _Snapshot(clients, holders + 1, include)
             return self._revision, tools
 
     def snapshot_includes_mcp(self, revision: int) -> bool:
@@ -446,8 +449,8 @@ class MCPManager:
     def _discard_locked(self, revision: int) -> None:
         item = self._snapshots.get(revision)
         if item is not None:
-            if item.count > 1:
-                self._snapshots[revision] = _Snapshot(item.clients, item.count - 1, item.include_mcp)
+            if item.holders > 1:
+                self._snapshots[revision] = _Snapshot(item.clients, item.holders - 1, item.include_mcp)
             else:
                 self._snapshots.pop(revision)
 

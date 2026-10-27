@@ -13,6 +13,7 @@ from prompt_toolkit.document import Document
 from agent.cli.app import SlashCompleter
 from agent.cli.commands import command_table
 from agent.cli.interactions import InteractionController
+from agent.cli.mcp_controller import MCPController
 from agent.cli.mcp_ui import finish_mcp_interaction, handle_mcp_command
 from agent.cli.state import CliState
 from agent.mcp.manager import MCPManager
@@ -34,6 +35,7 @@ class _App:
         self.state = CliState()
         self.interaction: InteractionController | None = None
         self._mcp_draft: dict[str, str] = {}
+        self.mcp_controller = MCPController()
         self.status = ""
         self.application = SimpleNamespace(invalidate=lambda: None)
 
@@ -91,7 +93,7 @@ async def test_list_test_tools_and_failed_add_message(tmp_path: Path, http_mcp: 
         _advance(app, "http://127.0.0.1:1/mcp")
         _advance(app)
         _advance(app, option=1)
-        await app._mcp_operation
+        await app.mcp_controller.operation
         assert any(block.is_error and "not connected" in block.content for block in app.state.blocks)
     finally:
         runner.close()
@@ -204,7 +206,7 @@ async def test_real_prompt_toolkit_loop_remains_responsive_and_busy_until_worker
         task = asyncio.create_task(app.run_async())
         try:
             for _ in range(100):
-                if app.application.is_running and not getattr(app, "_mcp_busy", False):
+                if app.application.is_running and not app.mcp_controller.busy:
                     break
                 await asyncio.sleep(.01)
             pipe.send_text("/mcp test slow\r")
@@ -221,30 +223,69 @@ async def test_real_prompt_toolkit_loop_remains_responsive_and_busy_until_worker
             assert calls == ["slow"]
             pipe.send_text("\x1b")
             await asyncio.sleep(.6)  # prompt-toolkit's escape sequence timeout
-            assert app._mcp_busy
+            assert app.mcp_controller.busy
             assert "still running" in app.state.status
             # Cancelling the waiter must not clear busy while its thread runs.
             from agent.cli.mcp_ui import _wait_operation
-            waiter = asyncio.create_task(_wait_operation(app, app._mcp_operation))
+            waiter = asyncio.create_task(_wait_operation(app, app.mcp_controller.operation))
             await asyncio.sleep(0)
             waiter.cancel()
             await waiter
-            assert app._mcp_busy
+            assert app.mcp_controller.busy
             assert any("still running" in b.content for b in app.state.blocks)
             release.set()
-            await asyncio.wait_for(app._mcp_operation, 3)
-            assert not app._mcp_busy
+            await asyncio.wait_for(app.mcp_controller.operation, 3)
+            assert not app.mcp_controller.busy
             await handle_mcp_command(app, "test slow")
             assert calls == ["slow", "slow"]
-            assert not app._mcp_busy
+            assert not app.mcp_controller.busy
         finally:
             release.set()
-            if hasattr(app, "_mcp_operation"):
-                await asyncio.wait_for(app._mcp_operation, 3)
+            if app.mcp_controller.operation is not None:
+                await asyncio.wait_for(app.mcp_controller.operation, 3)
             if app.application.is_running:
                 app.application.exit()
             await task
             runner.close()
+
+
+@async_test
+async def test_cancelled_mcp_wait_is_silent_after_exit() -> None:
+    from agent.cli.mcp_ui import _wait_operation
+
+    class _State:
+        def __init__(self) -> None:
+            self.blocks: list[str] = []
+
+        def add_system(self, text: str, error: bool = False) -> None:
+            self.blocks.append(text)
+
+    class _Lifecycle:
+        def __init__(self, exiting: bool) -> None:
+            self.exiting = exiting
+
+    async def hang() -> None:
+        await asyncio.sleep(30)
+
+    active = SimpleNamespace(state=_State(), lifecycle=_Lifecycle(False))
+    running = asyncio.create_task(hang())
+    waiter = asyncio.create_task(_wait_operation(active, running))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await waiter
+    assert any("still running" in text for text in active.state.blocks)
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+
+    leaving = SimpleNamespace(state=_State(), lifecycle=_Lifecycle(True))
+    running = asyncio.create_task(hang())
+    waiter = asyncio.create_task(_wait_operation(leaving, running))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await waiter
+    assert leaving.state.blocks == []
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
 
 
 def test_mcp_approval_preview_preserves_structure_and_original_arguments():
@@ -399,7 +440,7 @@ async def test_allow_add_wizard_saves_without_final_approval(tmp_path: Path, htt
             _advance(app, http_mcp.url)
             _advance(app)  # No authentication; final save is automatic in allow.
             assert app.interaction is None
-            await app._mcp_operation
+            await app.mcp_controller.operation
             assert manager.get("local") is not None
             assert "mcp__local__echo" in runner.prepared.model_tool_names
             assert runner.prepared.interrupt_on == {}

@@ -19,6 +19,8 @@ SAFE_INHERITED_ENV = (
 
 _DEFAULT_CONFIG_NAME = "config.yaml"
 DEFAULT_UI_TIMEZONE = "Asia/Shanghai"
+DEFAULT_STREAM_CHUNK_TIMEOUT = 120.0
+DEFAULT_REQUEST_TIMEOUT = 60.0
 
 
 class ConfigError(ValueError):
@@ -31,12 +33,17 @@ def default_skills_dir() -> Path:
 
 @dataclass(frozen=True)
 class BindMount:
-    """An explicit host-to-sandbox mount."""
+    """An explicit host-to-sandbox mount.
+
+    ``modes`` is ``None`` when the mount applies in both filesystem modes.
+    That is the historical behavior for entries that omit the field.
+    """
 
     source: Path
     destination: str
     optional: bool = False
     dev_bind: bool = False
+    modes: tuple["SandboxMode", ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -54,9 +61,14 @@ class ModelProfile:
     source: str = ""
     reasoning_efforts: tuple[str, ...] = ()
     max_retries: int = 5
+    stream_chunk_timeout: float = DEFAULT_STREAM_CHUNK_TIMEOUT
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_retries", _model_max_retries(self.max_retries, field_name="max_retries"))
+        object.__setattr__(
+            self, "stream_chunk_timeout",
+            _model_stream_chunk_timeout(self.stream_chunk_timeout, field_name="stream_chunk_timeout"),
+        )
 
     def supports_input(self, kind: "InputKind") -> bool:
         return kind in self.input
@@ -72,8 +84,10 @@ _SANDBOX_MODES = frozenset({"restricted", "full-access"})
 
 def parse_sandbox_mode(value: str) -> SandboxMode | None:
     key = value.strip().lower()
-    if key in _SANDBOX_MODES:
-        return key  # type: ignore[return-value]
+    if key == "restricted":
+        return "restricted"
+    if key == "full-access":
+        return "full-access"
     return None
 
 
@@ -116,30 +130,30 @@ def _default_profiles() -> tuple[ModelProfile, ...]:
 class UiDisplayLimits:
     """Content folding limits, loaded from the main configuration's ui section."""
 
-    thinking_tail_lines: int = 5
-    execute_tail_lines: int = 4
-    tool_tail_lines: int = 8
-    expanded_tool_lines: int = 40
+    head_lines: int = 4
+    tail_lines: int = 4
     explore_preview_items: int = 5
     explore_failure_items: int = 3
-    edit_preview_changed_lines: int = 8
-    write_preview_lines: int = 6
     create_preview_items: int = 5
-    failure_preview_lines: int = 4
-    command_failure_tail_lines: int = 6
     editor_max_lines: int = 10
     completion_menu_lines: int = 8
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:
             value = getattr(self, name)
-            minimum = 2 if name == "edit_preview_changed_lines" else 1
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-                requirement = "a positive integer" if minimum == 1 else "an integer >= 2"
-                raise ValueError(f"ui.{name} must be {requirement}")
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"ui.{name} must be a positive integer")
 
     @classmethod
     def from_mapping(cls, ui: Mapping[str, Any]) -> "UiDisplayLimits":
+        removed = (
+            "thinking_tail_lines", "execute_tail_lines", "tool_tail_lines", "expanded_tool_lines",
+            "edit_preview_changed_lines", "write_preview_lines", "failure_preview_lines",
+            "command_failure_tail_lines",
+        )
+        obsolete = [name for name in removed if name in ui]
+        if obsolete:
+            raise ValueError(f"Removed ui settings: {', '.join(obsolete)}; use ui.head_lines and ui.tail_lines")
         return cls(**{name: ui[name] for name in cls.__dataclass_fields__ if name in ui})
 
 
@@ -160,11 +174,16 @@ class Settings:
     hidden_tools: tuple[str, ...] = ()
     tavily_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
+    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
 
     def __post_init__(self) -> None:
         if not isinstance(self.trust_env, bool):
             raise ValueError("trust_env must be a boolean")
         object.__setattr__(self, "sandbox", replace(self.sandbox, trust_env=self.trust_env))
+        object.__setattr__(
+            self, "request_timeout",
+            _model_request_timeout(self.request_timeout, field_name="llm.timeout"),
+        )
 
     @property
     def llm_model(self) -> str:
@@ -265,6 +284,7 @@ class Settings:
                 "sandbox.dev was removed; use extra_read_write_mounts with dev_bind: true for host device nodes"
             )
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
+        request_timeout = _model_request_timeout(llm.get("timeout"), field_name="llm.timeout")
         instructions = agent.get("instructions")
         if instructions is not None and not isinstance(instructions, str):
             raise ValueError("agent.instructions must be a string or null")
@@ -291,6 +311,7 @@ class Settings:
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
                 web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
             ),
+            request_timeout=request_timeout,
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -439,6 +460,21 @@ def _as_str_dict(value: Any, *, field_name: str) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
+def _mount_modes(value: Any, *, field_name: str) -> tuple[SandboxMode, ...] | None:
+    """``None`` means both modes. An empty or unknown list is a config error."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field_name} must list restricted and/or full-access")
+    modes: list[SandboxMode] = []
+    for item in value:
+        parsed = parse_sandbox_mode(item) if isinstance(item, str) else None
+        if parsed is None or parsed in modes:
+            raise ValueError(f"{field_name} has an invalid or duplicate mode: {item!r}")
+        modes.append(parsed)
+    return tuple(modes)
+
+
 def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMount, ...]:
     if value is None:
         return ()
@@ -459,6 +495,7 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
             source_path = source_path.resolve()
         optional = _as_bool(item.get("optional", False), field_name=f"{field_name}[{index}].optional")
         dev_bind = _as_bool(item.get("dev_bind", False), field_name=f"{field_name}[{index}].dev_bind")
+        modes = _mount_modes(item.get("modes"), field_name=f"{field_name}[{index}].modes")
         if dev_bind and field_name == "sandbox.extra_read_only_mounts":
             raise ValueError(
                 f"{field_name}[{index}].dev_bind cannot be true; device binds must be extra_read_write_mounts"
@@ -467,13 +504,17 @@ def _as_mounts(value: Any, *, field_name: str, base_dir: Path) -> tuple[BindMoun
             continue
         mounts.append(BindMount(
             source=source_path, destination=str(destination), optional=optional, dev_bind=dev_bind,
+            modes=modes,
         ))
     return tuple(mounts)
 
 
 def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfile, ...], str]:
     _reject_removed_protocol_fields(llm, field_name="llm")
-    source_fields = {"model", "api_key", "base_url", "input", "api", "context_window", "source", "reasoning_efforts", "max_retries"}
+    source_fields = {
+        "model", "api_key", "base_url", "input", "api", "context_window", "source",
+        "reasoning_efforts", "max_retries", "stream_chunk_timeout",
+    }
     unsupported = source_fields.intersection(llm)
     if unsupported:
         field = sorted(unsupported)[0]
@@ -496,6 +537,13 @@ def _grouped_llm_profiles(
             raise ValueError(f"llm.models.{source}.models must be a non-empty mapping")
         group_api = _model_api(group, field_name=f"llm.models.{source}")
         _model_max_retries(group.get("max_retries"), field_name=f"llm.models.{source}.max_retries")
+        _model_stream_chunk_timeout(
+            group.get("stream_chunk_timeout"), field_name=f"llm.models.{source}.stream_chunk_timeout",
+        )
+        if "timeout" in group:
+            raise ValueError(
+                f"llm.models.{source}.timeout is not per model; set llm.timeout once for every model"
+            )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
@@ -504,7 +552,13 @@ def _grouped_llm_profiles(
             field = f"llm.models.{source}.models.{name}"
             if not isinstance(item, Mapping):
                 raise ValueError(f"{field} must be a mapping")
-            def inherited(key: str) -> Any:
+            if "timeout" in item:
+                raise ValueError(f"{field}.timeout is not per model; set llm.timeout once for every model")
+            def inherited(
+                key: str,
+                item: Mapping[Any, Any] = item,
+                group: Mapping[Any, Any] = group,
+            ) -> Any:
                 return item.get(key, group.get(key))
             model_name = item.get("model", name)
             if not isinstance(model_name, str) or not model_name.strip():
@@ -522,6 +576,9 @@ def _grouped_llm_profiles(
                 context_window=_model_context_window(inherited("context_window"), field_name=f"{field}.context_window"),
                 reasoning_efforts=_model_reasoning_efforts(inherited("reasoning_efforts"), field_name=f"{field}.reasoning_efforts"),
                 max_retries=_model_max_retries(inherited("max_retries"), field_name=f"{field}.max_retries"),
+                stream_chunk_timeout=_model_stream_chunk_timeout(
+                    inherited("stream_chunk_timeout"), field_name=f"{field}.stream_chunk_timeout",
+                ),
                 source=source,
             ))
     default = llm.get("default")
@@ -574,7 +631,15 @@ def _model_inputs(value: Any, *, field_name: str) -> tuple[InputKind, ...]:
         raise ValueError(f"{field_name} contains unsupported input kinds: {', '.join(unknown)}")
     if "text" not in result:
         raise ValueError(f"{field_name} must include text")
-    return result  # type: ignore[return-value]
+    kinds: list[InputKind] = []
+    for item in result:
+        if item == "text":
+            kinds.append("text")
+        elif item == "image":
+            kinds.append("image")
+        else:
+            raise ValueError(f"{field_name} contains unsupported input kinds: {item}")
+    return tuple(kinds)
 
 
 def _reject_removed_protocol_fields(mapping: Mapping[str, Any], *, field_name: str) -> None:
@@ -634,9 +699,12 @@ def _model_context_window(value: Any, *, field_name: str) -> int:
 def _sandbox_mode(value: Any) -> SandboxMode:
     if value is None:
         return "restricted"
-    if not isinstance(value, str) or value.strip().lower() not in _SANDBOX_MODES:
+    if not isinstance(value, str):
         raise ValueError("sandbox.mode must be restricted or full-access")
-    return value.strip().lower()  # type: ignore[return-value]
+    parsed = parse_sandbox_mode(value)
+    if parsed is None:
+        raise ValueError("sandbox.mode must be restricted or full-access")
+    return parsed
 
 
 def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> SandboxConfig:
@@ -673,3 +741,30 @@ def _model_max_retries(value: Any, *, field_name: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"{field_name} must be a non-negative integer")
     return value
+
+
+def _model_stream_chunk_timeout(value: Any, *, field_name: str) -> float:
+    """Seconds without a parsed stream chunk before the current model request retries.
+
+    ``0`` disables the idle timeout. ``None`` keeps the 120 second default.
+    """
+    if value is None:
+        return DEFAULT_STREAM_CHUNK_TIMEOUT
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a non-negative number of seconds")
+    number = float(value)
+    if not (number >= 0 and number < float("inf")):
+        raise ValueError(f"{field_name} must be a non-negative number of seconds")
+    return number
+
+
+def _model_request_timeout(value: Any, *, field_name: str) -> float:
+    """Shared HTTP wait for the first response bytes. ``None`` keeps 60 seconds."""
+    if value is None:
+        return DEFAULT_REQUEST_TIMEOUT
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a positive number of seconds")
+    number = float(value)
+    if not (number > 0 and number < float("inf")):
+        raise ValueError(f"{field_name} must be a positive number of seconds")
+    return number

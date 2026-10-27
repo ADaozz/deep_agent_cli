@@ -23,7 +23,7 @@ import pytest
 
 from tests.test_playwright_sandbox import page_url  # noqa: F401  pytest fixture for the Playwright PTY test
 
-pytestmark = pytest.mark.sandbox
+pytestmark = [pytest.mark.sandbox, pytest.mark.pty]
 
 _PROBE = r'''
 import asyncio, json, sys
@@ -83,7 +83,7 @@ asyncio.run(main())
 
 
 class Tui:
-    def __init__(self, tmp_path: Path, playwright=False, page_url="", probe=None, extra_args=()):
+    def __init__(self, tmp_path: Path, playwright=False, page_url="", probe=None, extra_args=()):  # noqa: F811  constructor arg, not the fixture
         # Read the module global at call time: other suites patch _PROBE.
         probe = probe or _PROBE
         self.state = tmp_path / 'state.json'
@@ -194,6 +194,12 @@ def test_real_pty_completion_permission_and_pending_approval(tui):
     assert state['pending'] is None
 
 
+def test_real_pty_exit_command_leaves_the_process(tui):
+    tui.send("/exit\r")
+    tui.process.wait(timeout=4)
+    assert tui.process.returncode == 0
+
+
 @pytest.mark.parametrize('gap,exits', [(0.3, True), (0.7, True), (1.2, False)])
 def test_real_pty_ctrl_c_window(tui, gap, exits):
     tui.send('draft\x03')
@@ -211,7 +217,7 @@ def test_real_pty_ctrl_c_window(tui, gap, exits):
 
 
 @pytest.mark.playwright
-def test_real_pty_allow_playwright_flow(tmp_path, page_url):
+def test_real_pty_allow_playwright_flow(tmp_path, page_url):  # noqa: F811  pytest fixture parameter
     from tests.test_playwright_sandbox import _prerequisites
     _prerequisites(tmp_path)  # Explicit prerequisite skip occurs in parent, never after launch failure.
     tui = Tui(tmp_path, playwright=True, page_url=page_url)
@@ -310,7 +316,7 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             state = tui.wait(lambda s: 'second answer' in s['transcript'] and s['status'] == 'Ready')
             assert state['cancel_requests'] == 1 and state['live_streams'] == 0
             assert len(server.connections) == 2
-            assert 'aborted by the user' in json.dumps(server.connections[1].body)
+            assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
             tui.close()
         assert server.open_connections() == []
@@ -383,7 +389,7 @@ _MCP_TUI_PROBE = _PROBE.replace(
 ).replace(
     "'status':app.state.status,",
     """'status':app.state.status,
-                'mcp_settled':bool(getattr(app, '_mcp_quiet_settled', False)),
+                'mcp_settled':app.mcp_controller.quiet_settled,
                 'expanded':app.state.tools_expanded,
                 'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
                 'rendered_transcript':render_transcript(app.state, 60),""",
@@ -575,7 +581,7 @@ def test_mcp_logs_do_not_corrupt_choice_input_during_resize(tmp_path):
         os.kill(tui.process.pid, signal.SIGWINCH)
         for option in (1, 2, 3):
             tui.send('\x1b[B')
-            state = tui.wait(lambda s: s['option'] == option)
+            state = tui.wait(lambda s, option=option: s['option'] == option)
             assert state['rendered'].count('→') == 1
         tui.send('\r')
         tui.wait(lambda s: s['custom'])
