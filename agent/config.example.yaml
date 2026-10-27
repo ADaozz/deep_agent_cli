@@ -18,6 +18,7 @@ agent:
   #   优先使用中文回答。
   instructions: null
 
+# 仅当问题可分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 subagents:
   enabled: true
   max_concurrent: 2

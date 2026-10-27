@@ -14,7 +14,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一 Runner 的模型、权限切换及新建、切换对话会话复用沙箱；文件系统模式变化或关闭 Runner 时清理沙箱。
 
-当前没有启用子 Agent，也没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
+当前通过原生同步 `task` 启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
 
 ## 分层
 
@@ -28,6 +28,12 @@ flowchart TB
     FACTORY --> GRAPH["Deep Agents / LangGraph"]
     GRAPH --> MODEL["LLM 协议适配"]
     GRAPH --> TOOLS["工具与 Middleware"]
+    GRAPH --> TASK["原生 task / SubAgentMiddleware"]
+    TASK --> MANAGER["SubAgentManager · 并发 / 取消"]
+    MANAGER --> CHILD["CompiledSubAgent · isolated"]
+    CHILD --> FILES
+    CHILD --> EXEC
+    CHILD --> LOGS["独立 JSONL 日志"]
     TOOLS --> FILES["WorkspaceCompositeBackend · 文件路径路由"]
     TOOLS --> EXEC["BubblewrapBackend / SandboxPool"]
     EXEC --> WORKER["持久 Worker · Shell / argv 子进程"]
@@ -39,6 +45,7 @@ flowchart TB
 |---|---|---|
 | 交互入口 | `agent/cli/` | 输入、渲染、审批与提问界面 |
 | 运行控制 | `agent/runner.py`、`control.py` | Run 生命周期、中断恢复、取消、steering、统一事件 |
+| 子任务 | `agent/subagents/` | 独立图执行、并发许可、取消关联和日志持久化 |
 | 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
@@ -77,7 +84,9 @@ flowchart TB
 | `write_file`、`edit_file`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
 | `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
-| `request_human_input` | 始终注册 | 独立的人工输入中断 |
+| `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
+| `task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
+| `read_subagent_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -87,7 +96,30 @@ flowchart TB
 
 文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read_file`、`write_file`、`edit_file` 和 `delete`，不包含 `grep` 或 `glob`。
 
-Harness Profile 禁用默认 general-purpose 子 Agent，因此没有 `task` 工具。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `task`。关闭 `subagents.enabled` 后不提供 `task` 或 `read_subagent_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+
+### SubAgent 委派边界
+
+只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
+这个条件通过 `general-purpose` 描述告知主模型，不负责检测文件冲突，也不构成沙箱安全边界。
+子任务共享工作区，依赖前一任务结果或会竞争修改同一文件的步骤应顺序执行。
+
+每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
+`mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
+执行前清空父级隐式回调与配置上下文。默认最多同时运行 2 个子任务，第三个立即返回超限错误，
+完成、失败和取消均释放许可；原生 `task` 在任务结束后返回最终结果或简短错误，没有跨轮后台任务。
+
+子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
+已配置的 web_search 和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
+主 Agent 的 `ask` 不会触发子任务审批；不能提供已验证沙箱时明确拒绝委派。
+常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
+显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
+
+父任务取消传播到全部子任务的模型流和命令，单个子任务结束不关闭 Pool。
+完整事件写入受保护配置目录下的独立 JSONL，只精确替换已知模型和 Tavily Key；未知凭据原样保存。
+主上下文仅接收最终 task 结果，主动调用 `read_subagent_log` 才读取本父会话的日志页。
+TUI 仅在输入框上方显示运行数量，实时、历史恢复和未完成 task 恢复都隐藏任务卡片及内部输出，
+checkpoint 仍保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware
 

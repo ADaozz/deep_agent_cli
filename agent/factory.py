@@ -270,8 +270,19 @@ def build_agent(
 
         runtime = SubAgentRuntime(manager, store, prepare_child,
                                   cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__))
-        subagents.append({"name": "general-purpose", "description": "Complete an isolated coding or research task. Only the final result is returned. No MCP, user interaction, or recursive delegation. Maximum concurrent tasks is configured by the host.",
-                          "runnable": runtime, "mode": "isolated"})
+        subagents.append({
+            "name": "general-purpose",
+            "description": (
+                "Only delegate when the problem can be decomposed into independent "
+                "subproblems that do not interfere with one another. "
+                "Complete an isolated coding or research task. "
+                "Only the final result is returned. "
+                "No MCP, user interaction, or recursive delegation. "
+                "Maximum concurrent tasks is configured by the host."
+            ),
+            "runnable": runtime,
+            "mode": "isolated",
+        })
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(

@@ -13,6 +13,10 @@ rg --files -g 'pattern' path
 
 搜索权限与 `execute` 一致：`ask` 下每次命令都要审批，`allow` 下免审批并默认使用有网沙箱。它不再享有以前独立 `grep` 工具的免审批规则。
 
+如果搜索任务可拆成多个独立、互不干扰的子问题，主 Agent 可以委派给 SubAgent，
+例如不同模块的只读调查。子任务共享同一授权工作区，并使用沙箱 `allow`，其 `execute` 搜索不弹出审批；
+存在前后依赖或写入竞争的任务应由主 Agent 顺序处理。完整边界见 [SubAgent 配置](configuration.md#subagent-委派)。
+
 `rg` 保持自身默认行为：位于 Git 仓库内时遵守 `.gitignore`、`.ignore`、`.rgignore` 和 `.git/info/exclude`，并默认跳过隐藏文件、符号链接、二进制文件以及大于自身限制的文件。需要放宽时使用 `rg` 自己的参数，例如 `--hidden`、`--no-ignore` 或 `-L`。
 
 下文保留未注册搜索实现的参数和限制，供阅读现有代码时对照，不是模型当前可用的工具。

@@ -18,13 +18,13 @@ pip install -e ".[dev]"
 
 ```bash
 pytest -q                          # 全部自动测试，不调用真实模型
-pytest -m "not sandbox"            # 进程内契约与逻辑测试，不启动 Bubblewrap
+pytest -m "not sandbox"            # 未标记与集成测试；部分 SubAgent 用例仍启动沙箱
 pytest -m integration              # 只跑本地模拟模型端点的集成测试，需要能监听 127.0.0.1
 pytest -m pty                      # 真实 PTY 快捷键；这些测试同时带 sandbox 标记
 REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，而不是跳过
 ```
 
-- 未标记的测试在进程内使用脚本模型和内存 Backend，不代表真实终端或沙箱。
+- 未标记测试主要使用脚本模型和内存 Backend；部分 SubAgent 专项也直接启动本地 HTTP 端点或真实沙箱，不能仅凭无标记判断其环境需求。
 - `integration` 测试启动一个本地模拟的 OpenAI Chat Completions 服务，覆盖流式回答、工具调用、审批、暂停、恢复和 SQLite 重启恢复。
 - `sandbox` 标记的测试需要真实可用的 Bubblewrap；不可用时默认跳过。跳过不代表当前环境兼容。
 - `pty` 标记的测试通过真实伪终端发送按键。输入、取消、退出和会话租约的当前契约见 [重构基线](refactor-baseline.md)。
@@ -32,6 +32,24 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 - `/sandbox mounts` 的文本来自当前模式筛选后的启动策略，测试不把它当成内核实时挂载表。
 
 默认挂载模板的验证分为两个目标：配置在可选目录缺失、HOME 不同的机器上仍可加载；指定 PATH 后，已挂载的工具能在真实沙箱中运行。修改模板时运行 `pytest tests/test_config.py tests/test_bootstrap.py -q`，并用临时安装目录验证多版本 Node 的手动选择、Rustup 路径、只读工具目录与读写缓存。启动时的 `true` 预检只验证沙箱本身，不替代工具运行验证。
+
+## SubAgent 开发契约
+
+只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent；
+这条条件位于 `agent/factory.py` 中 `general-purpose` 的描述，由主模型判断，
+不增加原生 `task` 参数，也不自动检测共享文件的修改冲突。实现边界见 [架构](architecture.md#subagent-委派边界)。
+
+修改相关逻辑后运行现有回归：
+
+```bash
+pytest -q tests/test_subagents.py tests/test_subagent_lifecycle.py tests/test_subagent_logs.py tests/test_config.py tests/test_model_switch.py
+pytest -q tests/test_cli_layout.py tests/test_tui_pty.py -k subagent_counter
+```
+
+覆盖原生委派、上下文与工具隔离、真实沙箱并发/取消、两种 API 的独立思考强度与客户端回收，
+以及日志精确替换、分页和重启查询。依赖仍为 Deep Agents `>=0.7.17,<0.8.0`，
+兼容性验证应在独立环境安装 0.7.17 后运行相关测试。
+仅改说明文案时复用现有测试并检查实际 task 描述，避免把提示词条件误写成运行时安全校验。
 
 ## 真实模型冒烟
 
