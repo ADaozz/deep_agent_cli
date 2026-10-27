@@ -12,6 +12,7 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
+from deepagents.middleware.subagents import CompiledSubAgent
 from deepagents.middleware.summarization import (
     SummarizationToolMiddleware,
     create_summarization_tool_middleware,
@@ -113,6 +114,8 @@ class AgentSpec:
     web_search_api_key: str | None = field(default=None, repr=False)
     hidden_tools: tuple[str, ...] = ()
     trust_env: bool = False
+    role: str = "main"
+    settings: Settings | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -136,6 +139,8 @@ class PreparedAgent:
     sandbox_pool: SandboxPool | None = None
     skill_sources: tuple[str, ...] = ()
     model_tool_names: tuple[str, ...] = ()
+    subagent_manager: Any = None
+    owns_model_clients: bool = False
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -159,6 +164,7 @@ def build_agent(
     interrupt_on_override: dict[str, Any] | None = None,
     backend_selection: BackendSelection | None = None,
     mcp: Any | None = None,
+    settings: Settings | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = replace(spec.sandbox or SandboxConfig(), trust_env=spec.trust_env)
     selected: BackendSelection | None = None
@@ -169,14 +175,15 @@ def build_agent(
         security_warning = selected.warning
     else:
         fs_backend = spec.backend
-        execution_mode = ExecutionMode.CUSTOM
-        security_warning = ""
+        selected = backend_selection if backend_selection is not None and backend_selection.backend is fs_backend else None
+        execution_mode = selected.mode if selected is not None else ExecutionMode.CUSTOM
+        security_warning = selected.warning if selected is not None else ""
     if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
     sandbox_pool = sandbox_pool_of(fs_backend)
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
-    tools = [*build_human_input_tools(), *spec.tools]
+    tools = [*build_human_input_tools(), *spec.tools] if spec.role == "main" else []
     if spec.web_search_api_key:
         tools.append(build_web_search_tool(spec.web_search_api_key, trust_env=spec.trust_env))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
@@ -196,7 +203,7 @@ def build_agent(
     mcp_revision: int | None = None
     mcp_tools: list[Any] = []
     include_mcp = False
-    if mcp is not None:
+    if mcp is not None and spec.role == "main":
         from agent.mcp.middleware import MCPMiddleware, MCP_HOST_PROMPT
         from agent.mcp.names import host_interrupt_on
 
@@ -206,9 +213,61 @@ def build_agent(
             if permission is PermissionMode.ASK:
                 hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
+    subagents: list[CompiledSubAgent] = []
+    manager = None
+    cfg = settings or spec.settings or Settings()
+    if spec.role == "main" and cfg.subagents.enabled:
+        from agent.subagents.manager import SubAgentManager
+        from agent.subagents.log_store import SubAgentLogStore
+        from agent.subagents.runtime import SubAgentRuntime
+        from agent.tools.subagent_logs import build_subagent_log_tool
+        # Rebuilds occur at a safe boundary; keep lifetime accounting on the
+        # parent controller, which survives model changes and session switches.
+        manager = getattr(run_controller, "subagent_manager", None)
+        if manager is None:
+            manager = SubAgentManager(run_controller, cfg.subagents.max_concurrent)
+            run_controller.subagent_manager = manager
+        manager.max_concurrent = cfg.subagents.max_concurrent
+        root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
+        store = SubAgentLogStore(root, tuple(p.api_key for p in cfg.llm_profiles) + (spec.web_search_api_key or "",))
+        tools.append(build_subagent_log_tool(store))
+
+        def prepare_child(controller: RunController) -> PreparedAgent:
+            if execution_mode is not ExecutionMode.SANDBOXED:
+                raise ValueError("Subagents require a verified SANDBOXED backend for allow permission")
+            child_model = model
+            if cfg.subagents.model is not None or cfg.subagents.reasoning_effort is not None:
+                profile = cfg.get_profile(cfg.subagents.model or getattr(model, "_deep_agent_model_id", cfg.llm_default))
+                inherited_effort = getattr(model, "reasoning_effort", None) or (getattr(model, "reasoning", None) or {}).get("effort")
+                child_model = build_chat_model(
+                    profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
+                    reasoning_effort=cfg.subagents.reasoning_effort or inherited_effort,
+                )
+            child_spec = replace(
+                spec, role="subagent", tools=(), backend=fs_backend,
+                skills=tuple(skill_sources or ()),
+                hidden_tools=tuple(set(spec.hidden_tools) | {"task", "request_human_input", "read_subagent_log"}),
+            )
+            try:
+                child = build_agent(child_spec, child_model, PermissionMode.ALLOW, None,
+                                    controller, lambda: False, backend_selection=selected, settings=cfg)
+            except BaseException:
+                if child_model is not model:
+                    from agent.llm_stream import close_model_http_clients
+                    close_model_http_clients(child_model)
+                raise
+            child.owns_model_clients = child_model is not model
+            return child
+
+        runtime = SubAgentRuntime(manager, store, prepare_child,
+                                  cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__))
+        subagents.append({"name": "general-purpose", "description": "Complete an isolated coding or research task. Only the final result is returned. No MCP, user interaction, or recursive delegation. Maximum concurrent tasks is configured by the host.",
+                          "runnable": runtime, "mode": "isolated"})
+    tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(
             model=model,
+            subagents=subagents,
             tools=tools,
             system_prompt=prompt,
             middleware=[
@@ -254,6 +313,7 @@ def build_agent(
             backend_selection=selected,
             sandbox_pool=sandbox_pool,
             skill_sources=tuple(skill_sources or ()),
+            subagent_manager=manager,
         )
 
         if mcp is not None and mcp_revision is not None:
@@ -279,9 +339,14 @@ def create_agent(
     sandbox_config: SandboxConfig | None = None,
     run_controller: RunController | None = None,
     mcp: Any | None = None,
+    role: str = "main",
+    backend_selection: BackendSelection | None = None,
 ) -> PreparedAgent:
     cfg = settings or Settings()
+    if role not in {"main", "subagent"}:
+        raise ValueError("Unknown agent role")
     spec = AgentSpec(
+        role=role, settings=cfg,
         trust_env=cfg.trust_env,
         instructions=instructions if instructions is not None else cfg.agent_instructions,
         tools=tuple(extra_tools or ()),
@@ -291,6 +356,8 @@ def create_agent(
         sandbox=sandbox_config or cfg.sandbox,
         web_search_api_key=os.environ.get("TAVILY_API_KEY") or cfg.tavily_api_key,
     )
+    if role == "subagent":
+        interrupt_on = {}
     permission = permission_mode_from_interrupt_on(interrupt_on) if interrupt_on is not None else PermissionMode.ASK
     effective_interrupt_on = interrupt_on
     if interrupt_on:
@@ -303,7 +370,8 @@ def create_agent(
         spec, model or _default_model(cfg), permission, checkpointer,
         run_controller or RunController(), should_pause or (lambda: False),
         interrupt_on_override=effective_interrupt_on,
-        mcp=mcp,
+        mcp=mcp if role == "main" else None,
+        backend_selection=backend_selection,
     )
 
 

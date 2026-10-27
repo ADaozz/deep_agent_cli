@@ -1220,3 +1220,26 @@ def test_tool_tail_has_one_blank_row_before_editor(content) -> None:
         assert editor_row - last_content == 2
 
     _with_painted_app("tool-editor-spacing", scenario)
+
+
+@pytest.mark.parametrize('count, label', [(0, ''), (1, '1 subagent'), (2, '2 subagents')])
+def test_subagent_counter_uses_existing_editor_top_row(count, label):
+    def scenario(app):
+        def rows():
+            _paint(app)
+            screen = app.application.renderer._last_screen
+            columns = app.application.output.get_size().columns
+            return [''.join(screen.data_buffer[y][x].char for x in range(columns))
+                    for y in range(app.application.output.get_size().rows)]
+        before = rows()
+        app.state.apply(RunEvent(type='subagents_changed', result={'count': count}))
+        after = rows()
+        editor_y = next(y for y, row in enumerate(after) if row.startswith('› '))
+        assert editor_y == next(y for y, row in enumerate(before) if row.startswith('› '))
+        assert after[editor_y - 1].strip() == label
+        if label:
+            assert after[editor_y - 1].rstrip().endswith(label)
+        app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id='delegate'))
+        app.state.apply(RunEvent(type='tool_completed', tool_call_id='delegate', content='private result'))
+        assert not any(isinstance(block, ToolBlock) for block in app.state.blocks)
+    _with_painted_app('subagent-counter', scenario)

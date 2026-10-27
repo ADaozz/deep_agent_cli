@@ -333,3 +333,13 @@ def wait_for_stream_retry(attempt: int) -> None:
 
 def stream_retry_delay(attempt: int) -> float:
     return min(0.5 * 2 ** min(attempt, 4), 8.0)
+
+
+def close_model_http_clients(model: Any, timeout: float = CANCEL_CLOSE_SECONDS) -> None:
+    """Close clients owned by a short-lived model on the stream's own loop."""
+    client = getattr(model, "http_client", None)
+    if client is not None:
+        client.close()
+    async_client = getattr(model, "http_async_client", None)
+    if async_client is not None:
+        asyncio.run_coroutine_threadsafe(async_client.aclose(), _LOOP.get()).result(timeout)

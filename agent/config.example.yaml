@@ -18,6 +18,15 @@ agent:
   #   优先使用中文回答。
   instructions: null
 
+subagents:
+  enabled: true
+  max_concurrent: 2
+  # null：每次委派时继承主 Agent 当前模型/思考强度；model 必须是 llm.models 中的完整 ID。
+  model: null
+  reasoning_effort: null
+  # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 task 明确失败。
+  permission: allow
+
 tools:
   # 启动时从模型请求中隐藏的工具名。这里隐藏上下文压缩工具；/compact 仍可使用。
   hidden:

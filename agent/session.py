@@ -414,6 +414,8 @@ def messages_to_transcript(
 ) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
+    task_ids = {str(call.get("id") or "") for message in messages if isinstance(message, AIMessage)
+                for call in message.tool_calls or [] if call.get("name") == "task"}
     for message in messages:
         if isinstance(message, HumanMessage):
             blocks.append(TranscriptBlock(
@@ -427,6 +429,8 @@ def messages_to_transcript(
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
+                if call.get("name") == "task":
+                    continue
                 blocks.append(TranscriptBlock(
                     kind="tool",
                     tool_call_id=str(call.get("id") or ""),
@@ -440,6 +444,8 @@ def messages_to_transcript(
                     kind="turn_summary", elapsed_seconds=timing[0], finished_at=timing[1],
                 ))
         elif isinstance(message, ToolMessage):
+            if message.name == "task" or str(message.tool_call_id) in task_ids:
+                continue
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)

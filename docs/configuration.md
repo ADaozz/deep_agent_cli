@@ -397,3 +397,43 @@ bailian:
 ```
 
 北京公共域名仍可使用；官方建议迁移到业务空间专属域名，见 [Responses 端点说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)。协议只由 `api` 决定；所有地址均按 SDK 标准格式序列化 `extra_body`。`qwen3-vl-flash` 使用 Chat Completions，窗口按 [官方模型规格](https://help.aliyun.com/zh/model-studio/qwen3-vl-flash) 填写。示例不为旧型号推测推理强度列表。
+
+
+## SubAgent 委派
+
+默认启用 Deep Agents 原生同步 `task`，注册 `general-purpose` 子 Agent。
+配置位于顶层 `subagents`：
+
+```yaml
+subagents:
+  enabled: true
+  max_concurrent: 2
+  model: null
+  reasoning_effort: null
+  permission: allow
+```
+
+`max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
+`model` 必须是 `llm.models` 中的完整模型 ID，`reasoning_effort` 必须属于目标模型声明的能力。
+空值继承当前主模型和思考强度；模型切换只影响下一次创建的任务。
+当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
+
+子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
+SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills 和 AGENTS.md，
+不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
+父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
+`task` 等待任务实际完成，没有跨轮次后台任务。
+
+输入框上方现有空白行右侧只显示 `1 subagent` / `2 subagents` 等运行数量，零时隐藏。
+任务卡片与内部输出不会显示在实时或恢复后的 TUI 中；checkpoint 仍保留合法的最终 task 结果。
+
+完整事件写入配置目录（默认 `~/.deep-agent`）下的
+`subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。
+这样可复用现有受保护配置目录，避免工作区工具直接读取其他会话日志。
+每项事件最多约 24 KB，较大内容截断并标记；模型增量、工具输出、最终状态按顺序追加并 flush。
+已知配置密钥及常见 token/password 字段会脱敏；这不是任意自然语言秘密的通用识别器。
+日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
+
+主 Agent 可按需调用 `read_subagent_log(run_id=null, offset=0, limit=100)` 查看当前会话的
+最近任务 ID；指定 ID 后分页读取事件。ID 不接受路径，查询限定父会话，单页最多 100 项、约 64 KB。
+常规 task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。

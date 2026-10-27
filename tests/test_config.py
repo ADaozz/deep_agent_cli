@@ -872,3 +872,22 @@ def test_template_and_code_share_four_line_defaults() -> None:
     assert {name for name in template["ui"] if name.endswith("_lines")} == {
         "head_lines", "tail_lines", "editor_max_lines", "completion_menu_lines",
     }
+
+
+def test_subagents_defaults_and_validation():
+    from agent.config import ModelProfile, SubAgentConfig
+    from dataclasses import replace
+    cfg = Settings.from_mapping({})
+    assert cfg.subagents == SubAgentConfig()
+    profile = ModelProfile('provider/test', 'test', reasoning_efforts=('low', 'high'))
+    cfg = Settings(llm_profiles=(profile,), llm_default=profile.id,
+                   subagents=SubAgentConfig(model=profile.id, reasoning_effort='low'))
+    assert cfg.subagents.model == profile.id
+    for values in ({'enabled': 'true'}, {'max_concurrent': 0}, {'max_concurrent': True},
+                   {'permission': 'ask'}, {'model': ''}, {'reasoning_effort': False}):
+        with pytest.raises(ValueError):
+            SubAgentConfig(**values)
+    with pytest.raises(ValueError, match='Unknown subagents.model'):
+        replace(cfg, subagents=SubAgentConfig(model='unknown'))
+    with pytest.raises(ValueError, match='Unsupported subagents.reasoning_effort'):
+        replace(cfg, subagents=SubAgentConfig(reasoning_effort='medium'))

@@ -23,7 +23,7 @@ from tests.conftest import graph_tool_names, scripted_model
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
-    assert prepared.exposed_tool_names == []
+    assert prepared.exposed_tool_names == ["read_subagent_log"]
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
     assert "Deep Agent CLI" in prepared.system_prompt
     assert "编程智能体" in prepared.system_prompt
@@ -35,7 +35,8 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert len(names) == 7
+    assert {"task", "read_subagent_log"} <= names
+    assert len(names) == 9
 
 
 def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> None:

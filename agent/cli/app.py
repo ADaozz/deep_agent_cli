@@ -662,7 +662,12 @@ class CliApplication:
             ),
             ConditionalContainer(
                 HSplit([
-                    Window(height=1, char=" ", style="class:editor"),
+                    Window(
+                        FormattedTextControl(lambda: (
+                            f"{self.state.subagent_count} subagent" + ("s" if self.state.subagent_count != 1 else "") + " "
+                            if self.state.subagent_count else ""
+                        )), height=1, align=WindowAlign.RIGHT, style="class:editor",
+                    ),
                     VSplit([
                         Window(FormattedTextControl("› "), width=2, style="class:editor"),
                         Window(

@@ -181,6 +181,7 @@ class AgentRunner:
         self.on_event = on_event
         self._event_handler: RunEventHandler | None = None
         self._seen_tool_calls: set[str] = set()
+        self._subagent_tool_ids: set[str] = set()
         self.settings = settings
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
@@ -236,6 +237,7 @@ class AgentRunner:
         ))
         object.__setattr__(initial_model, "_deep_agent_model_id", self._current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
+            settings=cfg,
             trust_env=cfg.trust_env,
             instructions=cfg.agent_instructions,
             hidden_tools=cfg.hidden_tools,
@@ -262,6 +264,7 @@ class AgentRunner:
             and saver is prepared.checkpointer
             and initial_model is prepared.model
             and mcp_manager is None
+            and (settings is None or prepared.spec.settings == settings)
         )
         override = prepared.interrupt_on if prepared is not None else None
         if mcp_manager is not None:
@@ -271,7 +274,7 @@ class AgentRunner:
             self.control, self._pause_condition,
             interrupt_on_override=override,
             backend_selection=prepared.backend_selection if prepared is not None else None,
-            mcp=mcp_manager,
+            mcp=mcp_manager, settings=settings,
         )
         self._checkpointer = self.prepared.checkpointer
         self._chat_model = initial_model
@@ -701,7 +704,7 @@ class AgentRunner:
             self.control, self._pause_condition,
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
             backend_selection=self.prepared.backend_selection,
-            mcp=self.mcp,
+            mcp=self.mcp, settings=self.settings,
         )
         self._chat_model = chat
 
@@ -1476,6 +1479,11 @@ class AgentRunner:
         pending: list[dict[str, Any]] = []
         human_input: dict[str, Any] = {}
         state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
+        self._subagent_tool_ids = {
+            str(call.get("id") or "") for message in state_values.get("messages", [])
+            if isinstance(message, AIMessage) for call in message.tool_calls or []
+            if call.get("name") == "task"
+        }
         last_message_id = _last_message_id(state_values)
         try:
             for chunk in self.prepared.graph.stream(
@@ -1580,4 +1588,10 @@ class AgentRunner:
         if saw_input_usage:
             self._context_usage_invalidated = False
         for event in events:
+            if event.type == "tool_started" and event.name == "task":
+                self._subagent_tool_ids.add(event.tool_call_id)
+            elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:
+                # Native task returns an unnamed ToolMessage. Preserve the
+                # presentation identity even when resuming a saved tool step.
+                event = replace(event, name="task")
             _emit(handler, event)

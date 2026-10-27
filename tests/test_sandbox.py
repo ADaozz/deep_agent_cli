@@ -329,8 +329,10 @@ def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.Monkey
         "delete",
         "execute",
         "compact_conversation",
+        "task",
+        "read_subagent_log",
     }
-    assert len(names) == 8
+    assert len(names) == 10
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 

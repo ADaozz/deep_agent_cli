@@ -60,6 +60,8 @@ class CliState:
     blocks: list[Block] = field(default_factory=list)
     running: bool = False
     compacting: bool = False
+    subagent_count: int = 0
+    hidden_task_ids: set[str] = field(default_factory=set)
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
@@ -141,6 +143,14 @@ class CliState:
                 ))
 
     def apply(self, event: RunEvent) -> None:
+        if event.type == "subagents_changed":
+            self.subagent_count = max(0, int((event.result or {}).get("count", 0)))
+            return
+        if event.type == "tool_started" and event.name == "task":
+            self.hidden_task_ids.add(event.tool_call_id)
+            return
+        if event.type.startswith("tool_") and (event.name == "task" or event.tool_call_id in self.hidden_task_ids):
+            return
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
         if event.type == "run_started":

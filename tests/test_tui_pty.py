@@ -592,3 +592,34 @@ def test_mcp_logs_do_not_corrupt_choice_input_during_resize(tmp_path):
         assert b'logging.py:' not in tui.terminal
     finally:
         tui.close()
+
+
+@pytest.mark.parametrize('cancel_key', ['\x1b', '\x03\x03'])
+def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
+    from tests.model_stream_server import ScriptedSSEServer, Turn
+    probe = _STREAM_PROBE.replace(
+        "runner = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id='pty-cancel')",
+        """
+    from dataclasses import replace
+    from agent.config import SandboxConfig
+    settings = replace(settings, sandbox=SandboxConfig(workspace=workspace), config_dir=workspace.parent/'private')
+    runner = AgentRunner(settings=settings, session_store=store, thread_id='pty-cancel')
+""".strip(),
+    ).replace("'running': app.state.running,", "'running': app.state.running, 'subagents': app.state.subagent_count,")
+    call = {'name': 'task', 'id': 'delegate', 'args': {
+        'description': 'private child task', 'subagent_type': 'general-purpose'}}
+    with ScriptedSSEServer('chat_completions', [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
+        tui = Tui(tmp_path, probe=probe, extra_args=(server.base_url, 'chat_completions'))
+        try:
+            tui.wait(lambda state: state['status'] == 'Ready', timeout=20)
+            tui.send('delegate task\r')
+            child = server.wait_for_connection(1)
+            assert child.hanging.wait(8)
+            tui.wait(lambda state: state['subagents'] == 1 and b'1 subagent' in tui.terminal)
+            tui.send(cancel_key)
+            state = tui.wait(lambda state: not state['running'] and state['subagents'] == 0, timeout=8)
+            assert state['live_streams'] == 0
+            assert child.closed.wait(2) and child.closed_by_client_at is not None
+            assert 'private child task' not in state['transcript']
+        finally:
+            tui.close()
