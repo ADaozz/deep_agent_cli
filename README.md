@@ -19,7 +19,7 @@ OpenAI 兼容接口 · Bubblewrap
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
-> 当前版本 **0.1.9**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
+> 当前版本 **0.2.0**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
 

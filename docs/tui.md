@@ -99,7 +99,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 | `Ctrl+P` / `Alt+P` | 切换到下一个 / 上一个模型 |
 | `Ctrl+V` / `Alt+V` | 粘贴图片或文本 |
 | `Ctrl+C` | 清空输入；空闲时提示约 1 秒后消失，运行和待审批状态保持；1 秒内再按一次退出 |
-| `Ctrl+D` | 退出 |
+| `Ctrl+D` | 输入为空时退出；非空时删除光标后的字符 |
 | 滚轮、`PgUp` / `PgDn`、`Ctrl+Home` / `Ctrl+End` | 滚动转录区；`Ctrl+End` 回到底部并恢复跟随 |
 | 鼠标左键拖动 | 选择转录内容，松开后复制到系统剪贴板；拖到边缘会自动滚动 |
 
@@ -159,7 +159,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 - **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。命令正文默认保留前 4 个显示行（`ui.head_lines`），实时输出保留最后 4 行（`ui.tail_lines`），`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**（`ls`、`read_file`，以及历史会话里的 `glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。当前模型工具表不再提供 `glob` 和 `grep`。
 - **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。连续成功新建合并为 `Created N files`；覆盖写入和差异预览默认保留前 4 行（`ui.head_lines`）；`Ctrl+R` 查看完整内容。
-- 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。恢复会话时不重建历史回合的耗时行。
+- 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。耗时写入会话数据库，恢复会话时重建历史回合的耗时行；升级前未记录耗时的旧回合不补算。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。
 
