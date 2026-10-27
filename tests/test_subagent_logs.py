@@ -206,3 +206,33 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
     assert records[-1]['status'] == ('cancelled' if cancelled else 'failed')
     assert records[-1]['tool_count'] == 1 and len(records[-2]['reason']) <= 240
     assert manager.active_count == 0
+
+
+
+def test_known_keys_are_replaced_before_summary_limits(tmp_path):
+    from types import SimpleNamespace
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from agent.control import RunController
+    from agent.subagents.manager import SubAgentManager
+    from agent.subagents.runtime import SubAgentRuntime
+
+    key = 'KNOWN_SECRET_BOUNDARY_VALUE_' * 10
+    description = 'd' * 990 + key
+    answer = 'a' * 990 + key
+    class Graph:
+        def stream(self, input, config, **kwargs):
+            callback = config['callbacks'][0]
+            callback.on_tool_start({'name': 'execute'}, '', inputs={'command': 'c' * 290 + key}, run_id='tool')
+            callback.on_tool_end(ToolMessage(content='', tool_call_id='tool', artifact={'exit_code': 0}), run_id='tool')
+            callback.on_llm_error(RuntimeError('e' * 230 + key))
+            yield {'messages': [AIMessage(content=answer)]}
+    parent = RunController()
+    parent.begin_run()
+    store = SubAgentLogStore(tmp_path, (key,))
+    runtime = SubAgentRuntime(SubAgentManager(parent), store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model')
+    result = runtime.invoke({'messages': [HumanMessage(content=description)]},
+                            {'configurable': {'thread_id': 'parent'}})
+    assert result['messages'][0].content.endswith(answer)
+    raw = next(tmp_path.rglob('*.jsonl')).read_text()
+    assert 'KNOWN' not in raw
+    assert '[REDACTED]' in raw

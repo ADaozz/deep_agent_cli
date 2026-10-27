@@ -33,21 +33,26 @@ def _brief(value: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _error_reason(error: BaseException) -> str:
-    return _brief(str(error) or type(error).__name__, ERROR_LIMIT)
+def _error_reason(error: BaseException, redact: Callable[[str], str] | None = None) -> str:
+    text = str(error) or type(error).__name__
+    return _brief(redact(text) if redact is not None else text, ERROR_LIMIT)
 
 
 class LogCallback(BaseCallbackHandler):
     """Record tool operations and outcomes, never model or raw output data."""
 
-    def __init__(self, write: Callable[..., None]) -> None:
+    def __init__(self, write: Callable[..., None], redact: Callable[[str], str] | None = None) -> None:
         self.write = write
+        self._redact = redact or (lambda value: value)
         self._lock = threading.Lock()
         self._tools: dict[Any, tuple[str, float]] = {}
         self.tool_count = 0
 
+    def _brief(self, value: str, limit: int) -> str:
+        return _brief(self._redact(value), limit)
+
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.write("model_error", reason=_error_reason(error))
+        self.write("model_error", reason=_error_reason(error, self._redact))
 
     def on_tool_start(self, serialized: dict, input_str: str, **kwargs: Any) -> None:
         name = (serialized or {}).get("name") or "tool"
@@ -63,12 +68,12 @@ class LogCallback(BaseCallbackHandler):
         if name == "execute":
             command = arguments.get("command")
             if isinstance(command, str):
-                operation["command"] = _brief(command, COMMAND_LIMIT)
+                operation["command"] = self._brief(command, COMMAND_LIMIT)
         else:
             for key in ("file_path", "path", "directory", "query"):
                 target = arguments.get(key)
                 if isinstance(target, str):
-                    operation["query" if key == "query" else "target"] = _brief(target, COMMAND_LIMIT)
+                    operation["query" if key == "query" else "target"] = self._brief(target, COMMAND_LIMIT)
                     break
         with self._lock:
             self._tools[kwargs.get("run_id")] = (name, monotonic())
@@ -100,7 +105,7 @@ class LogCallback(BaseCallbackHandler):
         if result["tool_name"] == "execute":
             log_path = artifact.get("agent_log_path") or artifact.get("host_log_path")
             if isinstance(log_path, str):
-                result["log_path"] = _brief(log_path, COMMAND_LIMIT)
+                result["log_path"] = self._brief(log_path, COMMAND_LIMIT)
         # Successful file reads/edits and commands never copy their output.
         result["summary"] = "Completed" if not failed else "Tool failed"
         if failed:
@@ -110,11 +115,11 @@ class LogCallback(BaseCallbackHandler):
                 reason = f"Command exited with code {exit_code}"
             else:
                 reason = content.splitlines()[0] if content else "Tool returned an error"
-            result["reason"] = _brief(reason, ERROR_LIMIT)
+            result["reason"] = self._brief(reason, ERROR_LIMIT)
         self.write("tool_finish", **result)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.write("tool_error", **self._finish_tool(kwargs), status="failed", reason=_error_reason(error))
+        self.write("tool_error", **self._finish_tool(kwargs), status="failed", reason=_error_reason(error, self._redact))
 
 
 class SubAgentRuntime(Runnable):
@@ -152,13 +157,18 @@ class SubAgentRuntime(Runnable):
         def write(event: str, **payload: Any) -> None:
             self.store.append(parent, run_id, event, model=self.model_name, **payload)
 
+        def brief(value: str, limit: int) -> str:
+            # Exact known-value replacement precedes truncation so a boundary
+            # never leaves a partial API key that the store cannot match.
+            return _brief(self.store._redact(value), limit)
+
         started = monotonic()
         description = visible_text(input["messages"][-1])
-        write("start", status="running", description=_brief(description, SUMMARY_LIMIT),
+        write("start", status="running", description=brief(description, SUMMARY_LIMIT),
               description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT)
         set_stream_owner(controller)
         set_output_emitter(None)
-        callback = LogCallback(write)
+        callback = LogCallback(write, self.store._redact)
         prepared = None
         status, summary, summary_truncated = "failed", "", False
         try:
@@ -182,13 +192,13 @@ class SubAgentRuntime(Runnable):
             if not answer:
                 raise RuntimeError("Subagent did not produce a final answer")
             status = "completed"
-            summary = _brief(answer, SUMMARY_LIMIT)
+            summary = brief(answer, SUMMARY_LIMIT)
             summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
             # Return only the final response: no child messages or state channels.
             return {"messages": [AIMessage(content=f"[subagent run_id={run_id}]\n{answer}")]}
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
-            summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc)
+            summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
             write("error", status=status, reason=summary)
             return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {str(exc)[:1000]}")]}
         finally:
@@ -197,6 +207,6 @@ class SubAgentRuntime(Runnable):
                 try:
                     close_model_http_clients(prepared.model)
                 except Exception as exc:
-                    write("error", phase="cleanup", reason=_error_reason(exc))
+                    write("error", phase="cleanup", reason=_error_reason(exc, self.store._redact))
             write("finish", status=status, summary=summary, summary_truncated=summary_truncated,
                   elapsed_seconds=round(max(0.0, monotonic() - started), 3), tool_count=callback.tool_count)
