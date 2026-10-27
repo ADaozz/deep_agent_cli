@@ -30,7 +30,7 @@
 
 配置文件未写 `sandbox.mode` 时，代码缺省为 `restricted`。随程序提供的模板也是 `restricted`。模板里的宿主 `/dev` 只在 `modes: [full-access]` 时做 `dev_bind`；restricted 使用 Bubblewrap 的私有 `/dev`。没有 `modes` 的旧挂载仍在两种模式生效，程序不会自动删掉它们。运行中用 `/sandbox` 切换；`/sandbox mounts` 打印下一次创建 Worker 会使用的有效启动策略，不读取内核挂载表，也不启动或关闭沙箱。切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。候选挂载、文件路由，以及配置目录和安装路径的保护缓存会先建好；构建失败或旧沙箱停不下来时，当前模式和这些保护都不发布。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `allow`。
 
-随程序提供的沙箱配置是一份最小基线，不是针对具体部署的安全策略。它只确定工作区、运行所需的只读系统目录、持久的 `/tmp` 与 `/home`，以及模板里若干可选的常见工具路径。这些可选路径在源目录不存在时跳过，既不表示工具已经可用，也不覆盖容器、多用户主机或自定义安装前缀。
+随程序提供的沙箱配置是一份最小基线，不是针对具体部署的安全策略。它只确定工作区、运行所需的只读系统目录、持久的 `/tmp` 与 `/home`，以及 full-access 模式下的宿主 `/dev`；Node、Cargo、Chrome 等常见工具路径的挂载只作为注释示例写在模板里。这些可选路径在源目录不存在时跳过，既不表示工具已经可用，也不覆盖容器、多用户主机或自定义安装前缀。
 
 可见范围和需要隔离的目录由部署方按实际环境声明。通过 `extra_read_only_mounts`、`extra_read_write_mounts` 和 `env_set` 提供运行所依赖的路径，并避免把凭据、密钥及其他不准备交给 Agent 的目录纳入挂载。`full-access` 仍强制保护 Agent 安装目录和配置目录，额外挂载不能解除这层保护。其余路径是否可见、是否可写，以当前模式和显式挂载为准。
 
@@ -82,7 +82,7 @@
 | `/proc` | 沙箱自己的实例 |
 | `/dev` | 沙箱自己的设备 tmpfs。要宿主设备节点时，在 `extra_read_write_mounts` 写 `source: /dev`、`destination: /dev`、`dev_bind: true` |
 
-表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。`full-access` 改为映射当前文件系统，再在最后盖上安装只读和配置目录遮罩。`/dev` 仍先是沙箱自己的 tmpfs，由额外 `dev_bind` 挂载覆盖。`restricted` 的工具挂载示例见 [restricted 下的工具挂载示例](configuration.md#restricted-下的工具挂载示例)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
+表外的宿主路径只有在工作区或额外挂载覆盖它们时才可见。`full-access` 改为映射当前文件系统，再在最后盖上安装只读和配置目录遮罩。`/dev` 仍先是沙箱自己的 tmpfs，由额外 `dev_bind` 挂载覆盖。`restricted` 的工具挂载示例见 [默认工具挂载](configuration.md#默认工具挂载)。其他安装位置由用户通过 `sandbox.extra_read_only_mounts` 或 `extra_read_write_mounts` 声明，并按需调整环境变量。
 
 额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/mnt/d/test`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
 

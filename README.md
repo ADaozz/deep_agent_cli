@@ -61,7 +61,7 @@ deep-agent
 
 配置、Skills 和按键配置目录必须位于工作区之外，**不要将家目录或其上层目录作为工作区**。
 
-默认模板提供可选的 Node、Cargo / Rustup、Chrome、X11 和浏览器缓存挂载。NVM 挂载整个版本目录，使用哪个版本由用户在沙箱 `PATH` 中指定；程序不自动发现工具安装位置或选择版本。已有配置需手动对照 [默认挂载说明](docs/configuration.md#默认工具挂载) 合并，升级不会覆盖用户配置。
+默认模板是 `mode: restricted`，不预置工具挂载；需要 Node、Cargo / Rustup、Chrome、X11 或浏览器缓存时，按 [默认工具挂载](docs/configuration.md#默认工具挂载) 中的示例手动添加，可选源不存在时跳过。NVM 挂载整个版本目录后，使用哪个版本由用户在沙箱 `PATH` 中指定；程序不自动发现工具安装位置或选择版本。已有配置需手动对照模板合并，升级不会覆盖用户配置。
 
 默认模板使用 `token-plan/qwen3.8-flash`。在启动 Agent 的同一个 Bash 终端中输入对应密钥：
 
@@ -81,11 +81,14 @@ printf '\n'
 ```yaml
 llm:
   default: token-plan/qwen3.8-flash
+  timeout: 60
   models:
     token-plan:
       base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
       api_key: ${TOKEN_PLAN_API_KEY}
       api: chat_completions
+      max_retries: 5
+      stream_chunk_timeout: 120
       reasoning_efforts: [none, low, medium, xhigh]
       models:
         qwen3.8-flash:
