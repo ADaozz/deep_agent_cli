@@ -32,6 +32,8 @@ from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.usage import UsageIdentityMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
 from agent.middleware.steering import SteeringMiddleware
+from agent.middleware.skills import ChineseSkillsMiddleware, SKILLS_CONTEXT_PROMPT
+from agent.middleware.tool_descriptions import ChineseToolDescriptionsMiddleware
 from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
@@ -50,20 +52,8 @@ from agent.tools.web_search import build_web_search_tool
 
 DEFAULT_FS_TOOLS = ["ls", "read_file", "write_file", "edit_file", "delete"]
 
-HUMAN_INPUT_PROMPT = (
-    "\n\n# 人工输入\n"
-    "- 仅当继续执行所必需的信息或决策无法合理确定时，"
-    "才调用 request_human_input 暂停等待用户回答。\n"
-    "- 能根据现有需求和上下文合理决定的技术细节，应自主处理。\n"
-    "- 需要用户在多个选项中决策时，使用 fields 的 "
-    "single_select 或 multi_select 表达选择。\n"
-    "- 每道选择题最多提供 3 个选项；Other 由系统自动添加，不要自行提供。\n"
-    "- 任务已经完成时，可以直接说明可选后续操作，"
-    "不必为了展示这些选项而调用 request_human_input。"
-)
-
 DEFAULT_SYSTEM_PROMPT = (
-    "你是运行在 Deep Agent CLI 中、使用 {model_name} 的 Coding Agent。"
+    "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
     "你的职责是理解用户需求、检查相关代码、完成任务、验证结果并准确汇报。\n\n"
 
     "# 任务执行\n"
@@ -78,18 +68,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "- 优先修复根本原因，保持改动最小、聚焦且符合现有代码风格。\n"
     "- 不进行无关重构，不修复无关问题，不引入不必要的依赖或抽象。\n"
     "- 遵循适用的 AGENTS.md 项目规则，目录越深的规则在其作用域内越优先。\n"
+    "- 遵守沙箱限制、文件访问权限和审批机制。\n"
     "- 未经用户明确要求，不创建 Git 分支、不提交或推送代码。\n"
     "- 必要时同步更新相关测试和文档。\n\n"
-
-    "# 工具使用\n"
-    "- 根据任务选择当前实际可用的工具，不调用不存在或已隐藏的工具。\n"
-    "- 使用 ls 检查目录，read_file 阅读已知文件。\n"
-    "- 修改已有文件优先使用 edit_file，创建文件使用 write_file。\n"
-    "- 仅在任务确实需要时使用 delete 删除文件。\n"
-    "- 搜索文件和代码时，优先通过 execute 使用 rg 和 rg --files，并尽量缩小搜索范围。\n"
-    "- execute 用于命令执行、构建、测试及其他必要的 Shell 操作。\n"
-    "- 不通过其他工具或命令绕过沙箱限制、文件访问权限和审批机制。\n"
-    "- 工具失败时检查错误信息；操作成功与否以实际执行结果为准。\n\n"
 
     "# 验证\n"
     "- 修改代码后尽可能进行验证，从与改动直接相关的测试开始。\n"
@@ -101,8 +82,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- 长任务在关键阶段简要报告进度，避免逐条复述工具调用。\n"
     "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
     "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
-) + HUMAN_INPUT_PROMPT
-
+)
 
 
 class HiddenToolsMiddleware(AgentMiddleware):
@@ -162,15 +142,12 @@ class PreparedAgent:
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
     model_name = str(getattr(model, "model_name", None) or get_model_identifier(model) or type(model).__name__)
-    base_prompt = DEFAULT_SYSTEM_PROMPT
-    if "request_human_input" in spec.hidden_tools:
-        base_prompt = base_prompt.removesuffix(HUMAN_INPUT_PROMPT)
-    sections = [base_prompt.format(model_name=model_name)]
+    sections = [DEFAULT_SYSTEM_PROMPT.format(model_name=model_name)]
     if spec.instructions and spec.instructions.strip():
-        sections.append(f"# User Instructions\n{spec.instructions.strip()}")
+        sections.append(f"# 用户指令\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
     if project_instructions.is_file():
-        sections.append(f"# Project Instructions\n{project_instructions.read_text(encoding='utf-8')}")
+        sections.append(f"# 项目指令\n{project_instructions.read_text(encoding='utf-8')}")
     return "\n\n".join(sections)
 
 
@@ -248,9 +225,13 @@ def build_agent(
                 WriteOperationMiddleware(fs_backend),
                 AttachmentMaterializationMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+                *([ChineseSkillsMiddleware(
+                    backend=fs_backend, sources=skill_sources, system_prompt=SKILLS_CONTEXT_PROMPT,
+                )] if skill_sources is not None else []),
                 compact_middleware,
                 *([MCPMiddleware(mcp, mcp_tools)] if include_mcp else []),
                 *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),
+                ChineseToolDescriptionsMiddleware(),
             ],
             skills=skill_sources,
             backend=fs_backend,

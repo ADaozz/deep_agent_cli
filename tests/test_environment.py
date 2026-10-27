@@ -61,9 +61,9 @@ def test_failed_probe_does_not_raise_and_keeps_mount_facts(tmp_path: Path) -> No
     assert snapshot.agent_install == ""
     text = render_environment_context(snapshot)
     assert len(text.splitlines()) == 6
-    assert "execute 视图" in text
-    assert "read_file" in text
-    assert "不要再查" in text
+    assert "命令执行环境" in text
+    assert "文件工具的可见范围" in text
+    assert "以下为" in text
     assert "未提供" not in text
     lowered = text.lower()
     for word in ("cpu", "memory", "meminfo", "loadavg", "package"):
@@ -271,8 +271,8 @@ def test_middleware_appends_the_short_snapshot_on_every_call(tmp_path: Path) -> 
         middleware.wrap_model_call(request, lambda item: seen.append(item) or item)
     finally:
         reset_environment_cache(token)
-    assert seen[0].system_message.content.startswith("base\n\nEnvironment\n")
-    assert seen[1].system_message.content.startswith("base\n\nEnvironment\n")
+    assert seen[0].system_message.content.startswith("base\n\n环境信息\n")
+    assert seen[1].system_message.content.startswith("base\n\n环境信息\n")
     assert len(seen[0].system_message.content.splitlines()) == 8
     assert request.system_message.content == "base"
     assert request.messages[0].content == "hi"

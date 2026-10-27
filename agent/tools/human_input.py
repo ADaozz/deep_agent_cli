@@ -159,7 +159,8 @@ def _plain(value: Any) -> Any:
 def _request_description() -> str:
     return (
         "请求用户提供继续执行所需的信息或决策，并暂停直到收到响应。"
-        "当你要让用户从多个后续操作中选择时，必须调用本工具，不要只在普通回复中列出编号选项。"
+        "仅在继续执行必需的信息或决策无法合理确定时调用；能自行判断的技术细节应自主处理。"
+        "任务完成后介绍可选后续操作时无需调用。"
         "只声明交互语义，不要指定前端组件。"
         "fields / recommendation / impact 必须传原生 JSON 结构，不要序列化成字符串。"
         "有可选项时必须用 single_select 或 multi_select，选项写进该字段的 options，"

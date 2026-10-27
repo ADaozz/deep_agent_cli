@@ -1194,3 +1194,29 @@ def test_interaction_options_follow_selection_without_scrolling_heading(kind) ->
             assert controller.current["options"][selected_index]["label"] in "\n".join(panel)
 
     _with_painted_app(f"options-follow-{kind}", scenario, lines=5)
+
+
+@pytest.mark.parametrize("content", [None, "", "\n", "  \n  "])
+def test_tool_tail_has_one_blank_row_before_editor(content) -> None:
+    def scenario(app: CliApplication) -> None:
+        app._apply_event(RunEvent(
+            type="tool_started", tool_call_id="spacing-tool", name="execute",
+            arguments={"command": "printf spacing-output"},
+        ))
+        app._apply_event(RunEvent(
+            type="tool_completed", tool_call_id="spacing-tool", name="execute",
+            content="spacing-output",
+        ))
+        if content is not None:
+            app._apply_event(RunEvent(type="assistant_delta", content=content))
+        _paint(app)
+        screen = app.application.renderer._last_screen
+        positions = screen.visible_windows_to_write_positions
+        editor = next(window for window in positions if window.content is app.editor_control)
+        editor_row = positions[editor].ypos
+        rows = ["".join(screen.data_buffer[y][x].char for x in range(app._width())) for y in range(editor_row)]
+        last_content = max(y for y, row in enumerate(rows) if row.strip())
+        assert "spacing-output" in rows[last_content]
+        assert editor_row - last_content == 2
+
+    _with_painted_app("tool-editor-spacing", scenario)

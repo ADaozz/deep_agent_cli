@@ -245,8 +245,8 @@ def render_environment_context(snapshot: EnvironmentSnapshot) -> str:
     """Short execute-view text. File tools do not share this view."""
     install = f" agent_install={_field(snapshot.agent_install)}" if snapshot.agent_install else ""
     return "\n".join([
-        "Environment",
-        "execute 视图，read_file 不共享。已给出的字段不要再查。",
+        "环境信息",
+        "以下为命令执行环境；文件工具的可见范围与此不同。",
         (
             f"os={_field(snapshot.os_name)} kernel={_field(snapshot.kernel)} "
             f"runtime={_field(snapshot.runtime)} arch={_field(snapshot.architecture)} "

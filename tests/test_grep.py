@@ -489,18 +489,18 @@ def test_execute_description_tracks_rg_availability(monkeypatch):
     allowed = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
     for tool in (available, allowed):
         assert _SEARCH_GUIDANCE in tool.description
-        assert "do not install or download it" in tool.description
+        assert "无需安装或下载" in tool.description
         assert "Prefer ls/" not in tool.description
         assert set(tool.args) == {"command", "timeout", "network"}
-    assert "every execute needs" in available.description
-    assert "without approval" in allowed.description
+    assert "每次 execute 都需审批" in available.description
+    assert "无需审批" in allowed.description
 
     monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
     missing = build_execute_tool(Backend())  # type: ignore[arg-type]
     missing_allow = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
     for tool in (missing, missing_allow):
         assert _SEARCH_UNAVAILABLE in tool.description
-        assert "Use `rg -n" not in tool.description
+        assert "使用 rg -n" not in tool.description
         assert set(tool.args) == {"command", "timeout", "network"}
 
 

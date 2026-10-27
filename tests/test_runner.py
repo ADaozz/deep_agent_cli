@@ -26,7 +26,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert prepared.exposed_tool_names == []
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
     assert "Deep Agent CLI" in prepared.system_prompt
-    assert "Coding Agent" in prepared.system_prompt
+    assert "编程智能体" in prepared.system_prompt
     names = graph_tool_names(prepared.graph)
     assert "handoff_to_human" not in names
     assert "request_human_input" in names

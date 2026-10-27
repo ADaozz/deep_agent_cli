@@ -199,8 +199,8 @@ def test_cancel_stops_model_stream(api: str, scenario: str, make_runner) -> None
         assert follow.error is None and follow.result.status == "completed", (follow.error, follow.types())
         assert follow.result.output == "fresh answer"
         assert "run_cancelled" not in follow.types()
-        recovery = json.dumps(server.connections[1].body)
-        assert "aborted by the user" in recovery
+        recovery = json.dumps(server.connections[1].body, ensure_ascii=False)
+        assert "用户中止" in recovery
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ def test_cancel_after_answer_committed_keeps_completed(api: str, make_runner) ->
         assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
         follow = runner.invoke("again")
         assert follow.status == "completed" and follow.output == "next answer"
-        assert "aborted by the user" not in json.dumps(server.connections[1].body)
+        assert "用户中止" not in json.dumps(server.connections[1].body, ensure_ascii=False)
 
 
 @pytest.mark.parametrize("api", APIS)
@@ -329,7 +329,7 @@ def test_cancel_after_graph_finished_keeps_completed(api: str, make_runner) -> N
         assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
         # The late cancel belonged to the finished run only.
         assert runner.invoke("again").status == "completed"
-        assert "aborted by the user" not in json.dumps(server.connections[1].body)
+        assert "用户中止" not in json.dumps(server.connections[1].body, ensure_ascii=False)
 
 
 @pytest.mark.parametrize("api", APIS)
@@ -366,7 +366,7 @@ def test_cancel_after_stop_persisted_before_cleanup_keeps_completed(api: str, ma
         assert terminal == ["run_completed"], types
         follow = runner.invoke("again")
         assert follow.status == "completed" and follow.output == "next answer"
-        assert "[Previous run status]" not in json.dumps(server.connections[1].body, ensure_ascii=False)
+        assert "[上一轮运行状态]" not in json.dumps(server.connections[1].body, ensure_ascii=False)
         assert runner.session_store.get(runner.thread_id).last_run_status is StopReason.STOP
 
 

@@ -94,11 +94,6 @@ class MCPFile:
         return body
 
 
-def default_mcp_path(config_dir: Path | None = None) -> Path:
-    root = config_dir if config_dir is not None else Path.home() / ".deep-agent"
-    return root.expanduser() / "mcp.json"
-
-
 def parse_server(name: str, raw: Any) -> MCPServerConfig:
     if not isinstance(raw, dict):
         raise MCPConfigError(f"MCP server {name} must be an object")

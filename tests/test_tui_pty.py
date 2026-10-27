@@ -316,7 +316,7 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             state = tui.wait(lambda s: 'second answer' in s['transcript'] and s['status'] == 'Ready')
             assert state['cancel_requests'] == 1 and state['live_streams'] == 0
             assert len(server.connections) == 2
-            assert 'aborted by the user' in json.dumps(server.connections[1].body)
+            assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
             tui.close()
         assert server.open_connections() == []
