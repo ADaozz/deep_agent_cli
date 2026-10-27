@@ -115,7 +115,7 @@ def test_rejected_add_does_not_save_and_accepted_add_waits_for_the_safe_point(
             assert resumed.status == "waiting_confirmation", resumed.error
             assert resumed.pending_tool_calls[0]["name"] == "mcp__local__echo"
             tool_messages = [message for message in _messages(accepted) if isinstance(message, ToolMessage)]
-            assert "next safe point" in str(tool_messages[-1].content)
+            assert "下一安全点" in str(tool_messages[-1].content)
             assert path.is_file()
             assert "mcp__local__echo" in graph_tool_names(accepted.prepared.graph)
             echo_done = accepted.approve_tool("call-echo")
