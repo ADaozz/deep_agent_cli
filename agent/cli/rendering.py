@@ -134,7 +134,11 @@ def transcript_units(
     while index < len(blocks):
         block = blocks[index]
         if isinstance(block, MessageBlock):
-            units.append(_message_unit(block, state.thinking_collapsed, limits, state.messages_expanded))
+            previous = blocks[index - 1] if index else None
+            units.append(_message_unit(
+                block, state.thinking_collapsed, limits, state.messages_expanded,
+                after_user=isinstance(previous, MessageBlock) and previous.kind == "user",
+            ))
             index += 1
             continue
         if isinstance(block, TurnSummaryBlock):
@@ -188,11 +192,14 @@ def transcript_units(
 
 def _message_unit(
     block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits, messages_expanded: bool = False,
+    *, after_user: bool = False,
 ) -> TranscriptUnit:
     return TranscriptUnit(
         key=("message", id(block)),
-        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False),
-        build=lambda: Group(*_message(block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded)),
+        fingerprint=(block.revision, thinking_collapsed, limits, messages_expanded if block.kind == "user" else False, after_user),
+        build=lambda: Group(*_message(
+            block, thinking_collapsed, limits=limits, messages_expanded=messages_expanded, after_user=after_user,
+        )),
         owner=block,
     )
 
@@ -537,9 +544,10 @@ def render_queued_messages(messages: list[str], width: int) -> str:
 
 def _message(
     block: MessageBlock, thinking_collapsed: bool, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
-    *, messages_expanded: bool = False,
+    *, messages_expanded: bool = False, after_user: bool = False,
 ) -> list[Any]:
     items: list[Any] = []
+    top = 0 if after_user else 1
     if block.kind == "user":
         style = "white on #404040" if block.pending else "white on #303030"
         label = f"⟳ {block.content}" if block.pending else block.content
@@ -553,22 +561,23 @@ def _message(
                 f"▣ Image #{index}  {ref.filename} · {_format_bytes(ref.size)}",
                 style="bright_cyan",
             ))
-        items.append(Padding(Group(*content), (1, 1, 1, 1), style=style))
+        box = Padding(Group(*content), (1, 1, 1, 1), style=style)
+        items.append(Padding(box, (top, 0, 1, 0)))
     elif block.kind == "assistant":
         if block.thinking:
             body: list[Any] = [Text("Thinking", style="bold #888888")]
             details = _ThinkingDetails(block.thinking, thinking_collapsed, limits.tail_lines)
             body.append(Padding(details, (0, 0, 0, 2)))
-            items.append(Padding(Group(*body), (1, 1, 0, 1)))
+            items.append(Padding(Group(*body), (top, 1, 0, 1)))
         if block.content:
-            items.append(Padding(Markdown(block.content), (1, 1, 0, 1)))
+            items.append(Padding(Markdown(block.content), (1 if block.thinking else top, 1, 0, 1)))
     elif block.kind == "error":
-        items.append(Padding(Text(f"Error: {block.content}", style="red"), (1, 1, 0, 1)))
+        items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
         text = Text(block.content, style="white" if block.styled_spans else "yellow")
         for start, end, style in block.styled_spans:
             text.stylize(style, start, end)
-        items.append(Padding(text, (1, 1, 0, 1)))
+        items.append(Padding(text, (top, 1, 0, 1)))
     return items
 
 
@@ -583,7 +592,7 @@ def _turn_summary(block: TurnSummaryBlock, timezone: ZoneInfo) -> Any:
     else:
         duration = f"{seconds}s"
     finished = block.finished_at.astimezone(timezone).strftime("%H:%M")
-    return Padding(Text(f"Worked for {duration} · {finished}", style="dim"), (0, 1, 1, 1))
+    return Padding(Text(f"Worked for {duration} · {finished}", style="dim"), (0, 1, 0, 1))
 
 
 def _header() -> list[Any]:

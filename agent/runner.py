@@ -786,7 +786,10 @@ class AgentRunner:
             raise RuntimeError(f"Failed to load session {info.id}: {exc}") from exc
         messages = list((state.values or {}).get("messages", []) or [])
         interrupt = interrupt_kind_from_state(self.prepared.graph, config)
-        transcript = messages_to_transcript(messages)
+        transcript = messages_to_transcript(
+            messages,
+            turn_timings=self.session_store.turn_timings(info.id) if self.session_store is not None else None,
+        )
         settle_restored_tools(
             transcript,
             waiting_ids={
@@ -1374,13 +1377,22 @@ class AgentRunner:
         turn_started = time.monotonic()
 
         def emit_turn_completed(output: str) -> None:
+            timing = TurnTiming(
+                elapsed_seconds=max(0.0, time.monotonic() - turn_started),
+                finished_at=datetime.now(timezone.utc),
+            )
+            if self.session_store is not None:
+                state = self.prepared.graph.get_state(self._thread_config())
+                messages = list((state.values or {}).get("messages", []) or [])
+                answer = next((item for item in reversed(messages) if isinstance(item, AIMessage)), None)
+                if answer is not None and answer.id:
+                    self.session_store.save_turn_timing(
+                        self.thread_id, answer.id, timing.elapsed_seconds, timing.finished_at,
+                    )
             _emit(event_handler, RunEvent(
                 type="turn_completed",
                 content=output,
-                result=TurnTiming(
-                    elapsed_seconds=max(0.0, time.monotonic() - turn_started),
-                    finished_at=datetime.now(timezone.utc),
-                ),
+                result=timing,
             ))
 
         try:

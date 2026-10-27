@@ -964,6 +964,7 @@ class CliApplication:
             for item in self.commands
         )
         self.state.add_system(
+            "/help\n"
             "Keyboard\n"
             "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
             "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
@@ -991,6 +992,7 @@ class CliApplication:
         if pending_effort is not None:
             model_line += f"Reasoning: {self.runner.reasoning_effort()} → {pending_effort} (pending)\n"
         self.state.add_system(
+            "/status\n"
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
             f"{tool_line}\n"
@@ -1028,6 +1030,7 @@ class CliApplication:
         )
         if store is None:
             self.state.add_system(
+                "/session\n"
                 f"Session: {self.runner.thread_id}\n"
                 f"{model_line}"
                 "Checkpointer: in-memory\nPersistent /resume is not configured."
@@ -1040,6 +1043,7 @@ class CliApplication:
         created_at = info.created_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         updated_at = info.updated_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         self.state.add_system(
+            "/session\n"
             f"Session: {self.runner.thread_id}\n"
             f"Title: {title}\n"
             f"Created: {created_at}\n"
@@ -1929,7 +1933,7 @@ class CliApplication:
         return FormattedText(fragments)
 
     def _footer_text(self):  # type: ignore[no-untyped-def]
-        mode = self.runner.prepared.execution_mode.value
+        mode = self.runner.prepared.execution_mode.value.lower()
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:

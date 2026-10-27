@@ -116,7 +116,11 @@ class CliState:
         self.clear()
         self.context_pristine = not bool(blocks)
         for item in blocks:
-            if item.kind == "user":
+            if item.kind == "turn_summary" and item.finished_at is not None:
+                self.blocks.append(TurnSummaryBlock(
+                    elapsed_seconds=item.elapsed_seconds, finished_at=item.finished_at,
+                ))
+            elif item.kind == "user":
                 self.blocks.append(MessageBlock(
                     kind="user", content=item.content, attachments=item.attachments,
                 ))

@@ -59,11 +59,30 @@ def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     rendered = _capture(_message(MessageBlock(kind="user", content="hello"), False)[0], 30)
     lines = rendered.splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 5
     assert _plain(lines[0]).strip() == ""
-    assert _plain(lines[1]).lstrip().startswith("› hello")
-    assert _plain(lines[2]).strip() == ""
-    assert all("48;2;48;48;48" in line for line in lines)
+    assert _plain(lines[-1]).strip() == ""
+    assert "48;2;48;48;48" not in lines[0] + lines[-1]
+    assert _plain(lines[1]).strip() == ""
+    assert _plain(lines[2]).lstrip().startswith("› hello")
+    assert _plain(lines[3]).strip() == ""
+    assert all("48;2;48;48;48" in line for line in lines[1:-1])
+
+
+def test_user_bubbles_have_one_external_blank_row_between_messages() -> None:
+    state = CliState()
+    state.blocks.append(MessageBlock(kind="assistant", content="before"))
+    state.add_user("first")
+    state.add_user("second")
+    state.blocks.append(MessageBlock(kind="assistant", content="after"))
+    lines = render_transcript(state, 40).splitlines()
+    colored = [index for index, line in enumerate(lines) if "48;2;48;48;48" in line]
+    before = next(index for index, line in enumerate(lines) if _plain(line).strip() == "before")
+    after = next(index for index, line in enumerate(lines) if _plain(line).strip() == "after")
+    assert len(colored) == 6
+    assert colored[0] == before + 2
+    assert colored[3] == colored[2] + 2
+    assert after == colored[-1] + 2
 
 
 @pytest.mark.parametrize("content", ["长消息" * 180, "```\n" + "\n".join(f"line {i}" for i in range(12)) + "\n```"], ids=["chinese", "code"])
