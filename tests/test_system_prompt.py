@@ -1,5 +1,7 @@
 """验证系统提示词组装、原生技能目录及工具 Schema 未被运行期改写。"""
 import re
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from deepagents.backends.filesystem import FilesystemBackend
@@ -7,12 +9,50 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from agent.config import SandboxConfig
+from agent.config import SandboxConfig, Settings
 from agent.factory import create_agent
+from agent.sandbox import BackendSelection, ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 
 # 上游内置工具：描述与参数说明由工具定义提供，不应在模型请求阶段被改写。
 UPSTREAM_TOOLS = ("ls", "read_file", "write_file", "edit_file", "delete", "compact_conversation")
+
+
+@pytest.mark.parametrize('role', ['main', 'subagent'])
+@pytest.mark.parametrize('timezone_name, dates', [
+    ('Asia/Shanghai', ['2026-10-29', '2026-10-30']),
+    ('America/Los_Angeles', ['2026-10-28', '2026-10-29']),
+])
+def test_current_user_date_refreshes_in_configured_timezone(tmp_path, monkeypatch, role, timezone_name, dates):
+    now = [datetime(2026, 10, 28, 16, 30, tzinfo=timezone.utc)]
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return now[0].astimezone(tz)
+
+    monkeypatch.setattr('agent.middleware.current_time.datetime', Clock)
+    backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
+    prepared = create_agent(
+        model=scripted_model([AIMessage(content='first'), AIMessage(content='second')]),
+        backend=backend,
+        backend_selection=BackendSelection(backend, ExecutionMode.SANDBOXED),
+        settings=replace(Settings(), ui_timezone=timezone_name),
+        skills=[], role=role,
+    )
+    capture = CaptureSystem()
+    config = {'configurable': {'thread_id': 'current-date'}, 'callbacks': [capture]}
+    for day in (28, 29):
+        now[0] = now[0].replace(day=day)
+        payload = {'messages': [HumanMessage(content='hello')]}
+        prepared.graph.invoke(payload, config)
+    assert len(capture.messages) == 2
+    for message, date in zip(capture.messages, dates):
+        content = str(message.content)
+        assert f'当前日期：{date}' in content
+        assert f'用户时区：{timezone_name}' in content
+        assert content.count('# 当前用户时间') == 1
+    assert '# 当前用户时间' not in prepared.system_prompt
 
 
 class CaptureSystem(BaseCallbackHandler):

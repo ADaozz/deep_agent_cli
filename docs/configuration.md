@@ -302,7 +302,7 @@ ui:
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
+| `timezone` | `Asia/Shanghai` | 每轮结束时间和系统提示词中当前日期使用的 IANA 时区 |
 | `head_lines` | `4` | 内容折叠时保留的开头行数 |
 | `tail_lines` | `4` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
@@ -310,6 +310,16 @@ ui:
 | `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
 | `editor_max_lines` | `10` | 输入框最大行数；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
+
+每次模型请求都会在系统提示词中动态附加当前用户日期（`yyyy-mm-dd`）和 `ui.timezone` 时区名称，主 Agent 和 SubAgent 均生效。日期按配置的时区计算，长会话跨天后会在下一次模型请求时更新，无需重建 Agent。时区配置修改后需重启 CLI。
+
+例如，`ui.timezone: Asia/Shanghai` 对应的提示词片段为：
+
+```text
+# 当前用户时间
+当前日期：2026-10-28
+用户时区：Asia/Shanghai
+```
 
 ## 按键（`keybindings.json`）
 
@@ -397,3 +407,78 @@ bailian:
 ```
 
 北京公共域名仍可使用；官方建议迁移到业务空间专属域名，见 [Responses 端点说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)。协议只由 `api` 决定；所有地址均按 SDK 标准格式序列化 `extra_body`。`qwen3-vl-flash` 使用 Chat Completions，窗口按 [官方模型规格](https://help.aliyun.com/zh/model-studio/qwen3-vl-flash) 填写。示例不为旧型号推测推理强度列表。
+
+
+## SubAgent 委派
+
+默认启用 Deep Agents 原生同步 `task`，注册 `general-purpose` 子 Agent。
+只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
+例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
+或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
+这一条件写入子 Agent 的描述，供主模型判断是否委派；`isolated` 隔离消息上下文，
+不隔离共享工作区中的文件修改，也不自动检测子任务之间的依赖或冲突。
+
+配置位于顶层 `subagents`：
+
+```yaml
+subagents:
+  enabled: true
+  max_concurrent: 2
+  model: null
+  # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
+  reasoning_effort: default
+  permission: allow
+```
+
+`max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
+`model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
+`reasoning_effort` 默认 `default`，省略该项或旧配置 `null` 与它等价：使用子模型原生默认强度，
+不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
+常规路径每次委派创建独立模型客户端，默认不向 Responses API 传 `reasoning.effort`，
+也不向 Chat Completions API 传 `reasoning_effort`；任务结束后关闭子任务客户端。
+模型切换只影响下一次创建的任务，默认强度仍然独立于主 Agent。
+例如，主 Agent 通过 `/model` 选择 `high` 时，`subagents.reasoning_effort: default` 仍使用子模型原生默认；只有显式配置 `subagents.reasoning_effort: high` 才会为子任务发送 `high`。这里的 `default` 是子任务配置值，不应加入模型能力列表 `reasoning_efforts`。修改配置后重启 CLI 生效，程序不会自动覆盖已有配置。
+直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
+此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
+当前原生 `task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
+当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
+
+子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
+SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills 和 AGENTS.md，
+不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
+父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
+`task` 等待任务实际完成，没有跨轮次后台任务。
+
+`1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，数量为零时隐藏；输入框内不显示子任务数量。
+每个 `task` 在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
+
+执行摘要写入配置目录（默认 `~/.deep-agent`）下的
+`subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。
+这样可复用现有受保护配置目录，避免工作区工具直接读取其他会话摘要。
+日志只回答做了什么、是否成功、结果是什么，不是模型运行轨迹：
+
+| 事件 | 内容 |
+|---|---|
+| `start` | 运行 ID、模型、任务描述和开始时间；描述最多 1,000 字符 |
+| `tool_start` | 工具名称、关联 ID、目标路径或命令摘要；命令最多 300 字符 |
+| `tool_finish` | 工具名称、执行状态、退出码（如有）、耗时及简短结果；命令日志存在时保留路径 |
+| `tool_error` | 工具名称、耗时及最多 240 字符的错误原因 |
+| `model_error` | 模型请求错误的简短原因，不记录请求或响应正文 |
+| `error` | 子任务失败、取消或客户端清理错误的简短原因 |
+| `finish` | 子任务终态、工具调用数、总耗时及最多 1,000 字符的最终回答摘要 |
+
+不保存 `model_start`、`model_delta`、`model`、Token、思考、完整模型输入/响应，
+也不保存文件全文、补丁或原始工具输出。工具操作摘要由工具名称和结构化参数直接生成，
+不额外调用模型。execute 的成功输出不进入摘要，失败保留退出码或终止原因；
+详细 stdout/stderr 需要时查看已有命令日志。tool_start 与 tool_finish 分别追加，
+取消或进程崩溃时仍能识别最后启动的工具，不伪造未收到的工具完成事件。
+每项存储事件仍最多约 24 KB，日志顺序追加并 flush；不引入新日志格式系统。
+主 Agent 收到的正常 task 最终结果保持完整，仅落盘的回答摘要受 1,000 字符限制。
+日志只对已掌握的模型 API Key 和已配置的 Tavily API Key 做精确字符串替换。
+不按字段名或文本格式识别凭据，不扫描其他环境变量；未知的 `password=...`、`token=...`
+和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
+日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
+
+主 Agent 可按需调用 `read_subagent_log(run_id=null, offset=0, limit=100)` 查看当前会话的
+最近任务 ID；指定 ID 后分页读取事件。ID 不接受路径，查询限定父会话，单页最多 100 项、约 64 KB。
+常规 task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。

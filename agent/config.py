@@ -161,9 +161,42 @@ DEFAULT_UI_DISPLAY_LIMITS = UiDisplayLimits()
 
 
 @dataclass(frozen=True)
+class SubAgentConfig:
+    enabled: bool = True
+    max_concurrent: int = 2
+    model: str | None = None
+    reasoning_effort: str | None = "default"
+    permission: str = "allow"
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> "SubAgentConfig":
+        unknown = set(values) - cls.__dataclass_fields__.keys()
+        if unknown:
+            raise ValueError(f"Unknown subagents settings: {', '.join(sorted(unknown))}")
+        return cls(**values)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("subagents.enabled must be a boolean")
+        if type(self.max_concurrent) is not int or self.max_concurrent < 1:
+            raise ValueError("subagents.max_concurrent must be a positive integer")
+        if self.permission != "allow":
+            raise ValueError("subagents.permission must be allow")
+        for name in ("model", "reasoning_effort"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"subagents.{name} must be a non-empty string or null")
+        if self.reasoning_effort is None:
+            object.__setattr__(self, "reasoning_effort", "default")
+        if self.reasoning_effort == "auto":
+            raise ValueError("subagents.reasoning_effort auto is not supported yet")
+
+
+@dataclass(frozen=True)
 class Settings:
     llm_profiles: tuple[ModelProfile, ...] = field(default_factory=_default_profiles)
     llm_default: str = "default"
+    subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     state_path: Path | None = None
     config_dir: Path | None = None
@@ -179,6 +212,14 @@ class Settings:
     def __post_init__(self) -> None:
         if not isinstance(self.trust_env, bool):
             raise ValueError("trust_env must be a boolean")
+        profile = self.active_profile
+        if self.subagents.model is not None:
+            profile = next((p for p in self.llm_profiles if p.id == self.subagents.model), None)
+            if profile is None:
+                raise ValueError(f"Unknown subagents.model: {self.subagents.model}")
+        effort = self.subagents.reasoning_effort
+        if effort != "default" and effort not in profile.reasoning_efforts:
+            raise ValueError(f"Unsupported subagents.reasoning_effort for {profile.id}: {effort}")
         object.__setattr__(self, "sandbox", replace(self.sandbox, trust_env=self.trust_env))
         object.__setattr__(
             self, "request_timeout",
@@ -299,6 +340,7 @@ class Settings:
         result = cls(
             trust_env=trust_env,
             hidden_tools=tuple(dict.fromkeys(name.strip() for name in hidden_tools)),
+            subagents=SubAgentConfig.from_mapping(_section(raw, "subagents")),
             llm_profiles=profiles,
             llm_default=default_id,
             sandbox=_sandbox_from_mapping(sandbox_raw, base_dir=root),

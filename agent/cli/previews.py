@@ -601,7 +601,19 @@ def build_generic_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
+def build_task_preview(block: ToolBlock) -> ToolPreview:
+    """A bounded single-line title; the actual delegation stays untouched."""
+    description = " ".join(str(block.arguments.get("description") or "Delegated task").split())
+    title = description if len(description) <= 120 else description[:119] + "…"
+    return ToolPreview(
+        kind="task", verb="SubAgent", target=title,
+        detail=str(block.arguments.get("subagent_type") or "general-purpose"),
+        summary=f"SubAgent · {title}", action="expand",
+    )
+
+
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
+    "task": build_task_preview,
     "ls": build_ls_preview,
     "read_file": build_read_preview,
     "grep": build_grep_preview,
@@ -690,6 +702,8 @@ def build_failure_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT
 
 
 def build_tool_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
+    if block.name == "task":
+        return build_task_preview(block)
     if block.name == "execute":
         return build_execute_preview(block)
     if block.is_error:

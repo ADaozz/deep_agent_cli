@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from agent.attachments import ImageAttachmentRef
 from agent.runner import RunEvent, TurnTiming
-from agent.session import TranscriptBlock
+from agent.session import TranscriptBlock, subagent_result_status
 
 
 @dataclass
@@ -60,6 +60,7 @@ class CliState:
     blocks: list[Block] = field(default_factory=list)
     running: bool = False
     compacting: bool = False
+    subagent_count: int = 0
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
@@ -141,6 +142,9 @@ class CliState:
                 ))
 
     def apply(self, event: RunEvent) -> None:
+        if event.type == "subagents_changed":
+            self.subagent_count = max(0, int((event.result or {}).get("count", 0)))
+            return
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
         if event.type == "run_started":
@@ -224,6 +228,10 @@ class CliState:
                 tool.output = event.content
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
+            if tool.name == "task":
+                tool.output = event.content
+                tool.status = subagent_result_status(event.content, is_error=event.is_error)
+                tool.is_error = tool.status in {"error", "cancelled"}
             if event.name == "execute" and completed_artifact is not None:
                 code = completed_artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
@@ -280,6 +288,10 @@ class CliState:
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
                     touch(block)
+                    if block.name == "task":
+                        block.status = "cancelled"
+                        block.is_error = True
+                        continue
                     block.status = "error"
                     block.is_error = True
                     block.exit_code = 1

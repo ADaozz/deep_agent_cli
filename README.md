@@ -15,7 +15,7 @@ OpenAI 兼容接口 · Bubblewrap
   <img src="终端.png" width="760" alt="deep-agent 真实终端空闲界面，底栏显示工作区、模型来源、SANDBOXED 和 perm:ask。">
 </p>
 
-`deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
+`deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，主 Agent 默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
@@ -26,9 +26,10 @@ OpenAI 兼容接口 · Bubblewrap
 - **查代码、改文件** — 浏览、读取、正则搜索、编辑和删除；`Ctrl+R` 审阅完整改动，`F2` 处理审批。
 - **运行项目命令** — 实时查看输出，会话内复用持久沙箱；默认审批、隔离直接 IP 网络。
 - **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
+- **拆分独立任务** — 仅当问题能分解为多个独立、互不干扰的子问题时派生 SubAgent；默认最多并行 2 个，主 Agent 同步等待最终结果。TUI 为每个子任务显示独立卡片、状态及可展开的完整返回结果，内部思考和工具输出保持隔离。
 - **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
 
-支持通过 Skills 和 `AGENTS.md` 扩展项目指令。
+支持通过 Skills 和 `AGENTS.md` 扩展项目指令。SubAgent 配置、独立思考强度及日志查询见 [SubAgent 委派](docs/configuration.md#subagent-委派)。
 
 ## 快速开始
 
@@ -168,6 +169,8 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 | **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
 | 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
+SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权限，即使主 Agent 处于 `ask` 也不弹出子任务审批；子 Agent 不装载 MCP、人工输入或递归委派工具。其默认思考强度使用子模型原生默认，不继承主 Agent 的强度。
+
 只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，根级 `enabled` 是全局开关（默认开启）；用 `/mcp`、`/mcp enable`、`/mcp disable` 或 `mcp_add` / `mcp_remove` 管理。全局关闭时不连接、不启动 stdio、不打开 OAuth，也不把 MCP 工具交给模型；配置和令牌缓存仍保留。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
 
 全局开关打开时，启动会自动连接各服务里 `enabled: true` 的项。OAuth 优先使用加密缓存并刷新令牌，无法刷新时打开浏览器授权；无需鉴权的服务直接连接。`/mcp` 先显示 `MCP: Enabled` 或 `MCP: Disabled`，开启时再列出 `服务名  状态  N tools`；`connected` 为绿色，其余状态为红色。连接恢复、附件处理和后台日志见 [MCP 配置](docs/configuration.md#mcpmcpjson)，命令和状态说明见 [TUI 文档](docs/tui.md#mcp-服务)。
@@ -175,10 +178,10 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 <details>
 <summary>更多边界与当前限制</summary>
 
-- **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。会话切换及关闭时清理沙箱。
+- **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。模型与会话切换复用 Pool，关闭 Runner 或更换文件系统模式时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
-- **本地状态**：同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI 或子 Agent。
+- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，只精确替换已知模型及 Tavily Key；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。
 

@@ -18,13 +18,26 @@ agent:
   #   优先使用中文回答。
   instructions: null
 
+# 仅当问题可分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
+subagents:
+  enabled: true
+  max_concurrent: 2
+  # model 为 null：继承主 Agent 当前模型；否则必须是 llm.models 中的完整 ID。
+  model: null
+  # 默认填写 default；省略此项或旧配置 null 也使用子模型原生默认强度。
+  # default 不向 API 发送推理强度参数，不继承主 Agent 的 high/low 等强度。
+  # 可显式填写目标模型支持的 low/high 等强度；暂不支持 auto。
+  reasoning_effort: default
+  # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 task 明确失败。
+  permission: allow
+
 tools:
   # 启动时从模型请求中隐藏的工具名。这里隐藏上下文压缩工具；/compact 仍可使用。
   hidden:
     - compact_conversation
 
 ui:
-  # 每次回答结束后显示时间所使用的 IANA 时区。
+  # 回答结束时间和系统提示词中当前日期所使用的 IANA 时区。
   timezone: Asia/Shanghai
   # 内容折叠时保留的开头行数和末尾行数，均为正整数。
   # 命令、写入、差异和失败摘要使用 head_lines；思考和工具输出使用 tail_lines。
@@ -101,7 +114,8 @@ llm:
     #
     # 推理强度取决于模型、协议和端点，请按服务商文档维护列表。
     # 模型级省略的字段继承来源配置；声明列表时整表替换；null 或 [] 清除继承的列表。
-    # default 仅为命令行选项，不要写入 reasoning_efforts。
+    # reasoning_efforts 列表不要包含 default；命令行始终提供该选项。
+    # 子智能体的 subagents.reasoning_effort 可单独填写 default。
     # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
 
 

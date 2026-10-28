@@ -13,7 +13,9 @@
 | 沙箱 | `sandbox` | 真实 Bubblewrap 的路径、挂载、取消和超时 | 未安装或被策略拦住的环境 |
 | 伪终端 | `pty`（同时带 `sandbox`） | 真实 PTY 上的按键、补全和退出 | 见 `tests/test_tui_pty.py` |
 
-`pytest -m "not sandbox"` 可重复跑进程内契约。`pytest -m pty` 复验快捷键。沙箱不可用时 `sandbox` / `pty` 默认跳过；设置 `REQUIRE_BWRAP_TEST=1` 后跳过变为失败。
+部分 SubAgent 专项未设置标记，但会启动本地 HTTP 端点或真实沙箱；无标记不能作为不启动沙箱的保证。
+
+`pytest -m "not sandbox"` 可重复跑进程内契约及这些未标记的专项。`pytest -m pty` 复验快捷键。沙箱不可用时 `sandbox` / `pty` 默认跳过；设置 `REQUIRE_BWRAP_TEST=1` 后跳过变为失败。
 
 ## 三种不同动作
 
@@ -21,12 +23,25 @@
 
 | 动作 | 当前入口 | 做的事 | 不做的事 |
 |---|---|---|---|
-| Run Cancel | `Esc` 在运行中，或 `AgentRunner.request_cancel()` | 取消当前 Run 的模型流、可取消工具和图 | 不退出 TUI，不释放 Session 租约，不回滚已发生的副作用 |
+| Run Cancel | `Esc` 在运行中，或 `AgentRunner.request_cancel()` | 取消当前 Run 及关联 SubAgent 的模型流、可取消工具和图 | 不退出 TUI，不释放 Session 租约，不回滚已发生的副作用 |
 | UI Exit | `CliApplication.exit()` → `AppLifecycle.request_exit()` | 忽略重复调用；停掉鼠标、状态计时和选择滚动；通知一次 Session 等待、待连接的 MCP 和运行中的 Run；然后离开全屏 | 不关闭 Executor，不调用 `Runner.close()`，不释放租约 |
 | UI Shutdown | `AppLifecycle.shutdown()`，在 TUI 循环的 `finally` 中 | 用同一个期限取消并等待界面辅助任务，并等待已经通知过的 Run、MCP 和 Session 操作自己结束；超时记下任务名和阶段；已经失败的任务进入一次失败摘要；最后才关闭 Executor | 不取消 OBSERVE 任务，不把“Executor 已关闭”或“Task 已超时”当成底层线程已经停止，不释放租约。循环结束后仍未完成的 Task 会被事件循环取消，不能假定它们还活着 |
 | 进程 Shutdown | `main()` 在 `app.run()` 返回后调用 `Runner.close()` | 禁止新操作，排空或取消仍在进行的 Run，确认模型流关闭后释放租约并关闭 MCP 与沙箱 | Run 未排空或模型流未确认关闭时保留租约并抛出错误 |
 
 `Ctrl+D` 在输入为空时，以及 `/exit`，都进入 `CliApplication.exit()`。`Ctrl+D` 在输入非空时删除光标后面的字符；光标已经在末尾时文本不变，也不会退出。审批界面开着时同样如此。
+
+## SubAgent 契约
+
+仅当问题能分解为多个独立、互不干扰的子问题时才应派生；条件写在 `general-purpose` 描述中。
+原生同步 `task` 等待结果，每次运行使用独立消息、checkpoint 和取消作用域，默认并发上限 2；
+没有跨轮后台 SubAgent。共享工作区不自动隔离写入，依赖或冲突步骤由主 Agent 顺序处理。
+子任务固定使用已验证沙箱的 `allow`，不装载 MCP、人工输入或递归委派工具。
+
+父 Run Cancel 传播到子任务模型流及命令；任务结束释放并发许可，Pool 继续由父 Runner 持有。
+输入框上方保留实际运行数量；每个 task 独立显示任务描述、状态和完整返回结果，默认折叠、Ctrl+O 展开；实时与历史恢复状态一致。内部工具与思考仍隔离，checkpoint 不删消息。
+执行摘要独立持久化、按父会话查询，只精确替换已知模型和 Tavily Key；不保存模型请求、Token、思考或原始工具输出。tool_start 和 tool_finish 分别记录，最终回答仅落盘最多 1,000 字符，主 Agent 收到的结果保持完整。
+模型 Profile 可继承当前主模型，默认思考强度使用子模型原生默认，旧 null 等价于 default。
+实现与验证入口见 [架构](architecture.md#subagent-委派边界) 和 [开发指南](development.md#subagent-开发契约)。
 
 ## 输入决策的当前优先级
 

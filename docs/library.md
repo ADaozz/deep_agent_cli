@@ -29,6 +29,21 @@ runner.close()
 - 不传 `session_store` 时，会话只保存在内存中。持久化可参考 `agent/cli/main.py` 中的 `create_runner()`。
 - `AgentRunner` 同一时间只允许一个操作；并发调用会抛出 `RuntimeError`。
 
+## SubAgent 委派
+
+与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `task`。
+只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
+共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
+
+子任务复用工厂图和已验证的 Backend/Pool，不创建新的 Runner；默认并发 2，超限立即返回错误。
+`AgentRunner` 的单操作限制仍然有效，不能通过并发调用同一 Runner 的 `invoke()` 派生任务。
+子任务使用独立上下文和 `allow`，不装载 MCP、调用方的 `extra_tools`、人工输入或递归委派工具；
+显式注入的 `CUSTOM` Backend 无已验证沙箱身份时，委派会被拒绝。主任务取消及 Runner 关闭会传播到关联子任务。
+
+默认模型 Profile 继承主模型，思考强度 `default/null` 使用子模型原生默认；独立客户端在任务结束后关闭。
+直接注入的自定义 `BaseChatModel` 保留原对象，强度覆盖需显式指定子模型 Profile。
+执行摘要独立持久化且按父会话隔离，只精确替换已知密钥；完整配置与查询工具见 [SubAgent 配置](configuration.md#subagent-委派)。
+
 ## 处理中断
 
 `invoke()` 返回的 `RunResult.status` 可能是：
@@ -52,6 +67,10 @@ runner.close()
 ## 事件
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
+
+原生 `task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
+
+`subagents_changed` 事件的 `result["count"]` 是实际运行数量。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
 
@@ -77,4 +96,4 @@ prepared = create_agent(
 - `runner.list_sessions()`、`runner.new_session()`、`runner.switch_session(id)`。
 - 目标会话被其他进程持有时，`switch_session` 抛出 `SessionLockBusyError`。
 - 切换会话前需要先用 `runner.take_unapplied_messages()` 取回未生效的 steering / follow-up，否则抛出 `RuntimeError`。
-- 人工输入仅使用 `request_human_input`；不提供旧工具或旧数据库格式的兼容恢复。
+- 主 Agent 的人工输入仅使用 `request_human_input`；不提供旧工具或旧数据库格式的兼容恢复。

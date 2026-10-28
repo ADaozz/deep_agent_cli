@@ -57,7 +57,18 @@ class RunController:
         self._active_tools: dict[str, ToolCancelContext] = {}
         self._defer_steering = False
         self._on_control_event = on_control_event
+        self._children: set[RunController] = set()
         self._pending_config_check: Callable[[], bool] = lambda: False
+
+    def register_child(self, child: RunController) -> None:
+        with self._lock:
+            self._children.add(child)
+            if self.cancel_requested:
+                child.cancel()
+
+    def unregister_child(self, child: RunController) -> None:
+        with self._lock:
+            self._children.discard(child)
 
     def set_pending_config_check(self, check: Callable[[], bool]) -> None:
         with self._lock:
@@ -242,6 +253,9 @@ class RunController:
             control = scope.run_control
             streams = list(scope.model_streams)
             tools = list(self._active_tools.values())
+            children = list(self._children)
+        for child in children:
+            child.cancel()
         for stream in streams:
             stream.cancel()
         if control is not None:
@@ -278,6 +292,10 @@ class RunController:
         deadline = time.monotonic() + timeout
         with self._lock:
             streams = list(self._unclosed_streams)
+            children = list(self._children)
+        for child in children:
+            if not child.wait_model_streams_closed(max(0.0, deadline - time.monotonic())):
+                return False
         for stream in streams:
             if not stream.wait_closed(max(0.0, deadline - time.monotonic())):
                 return False
