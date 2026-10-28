@@ -26,10 +26,11 @@ def test_first_launch_creates_template_and_skills_then_preserves_config(
     assert initialize_user_files(workspace=workspace) is None
     assert path.read_bytes() == original
     # 主模板通过环境变量读取密钥；加载测试使用占位值，不调用真实端点。
-    monkeypatch.setenv("TOKEN_PLAN_API_KEY", "test-template-key")
+    monkeypatch.delenv("TOKEN_PLAN_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-template-key")
     loaded = Settings.load()
     assert loaded.source_path == path
-    assert loaded.active_profile.id == "token-plan/qwen3.8-flash"
+    assert loaded.active_profile.id == "deepseek/deepseek-flash"
     assert loaded.active_profile.api == "chat_completions"
 
 
