@@ -494,7 +494,7 @@ def test_busy_session_wait_preserves_sandbox(workspace: Path, tmp_path: Path, ne
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["new", "resume"])
-def test_session_switch_still_resets_changed_filesystem_mode(workspace: Path, tmp_path: Path, resume: bool) -> None:
+def test_new_inherits_filesystem_mode_while_resume_resets_it(workspace: Path, tmp_path: Path, resume: bool) -> None:
     store = SessionStore(tmp_path / "sessions.sqlite3")
     runner = _sandbox_runner(workspace, [AIMessage(content="done")], session_store=store)
     try:
@@ -513,11 +513,16 @@ def test_session_switch_still_resets_changed_filesystem_mode(workspace: Path, tm
             runner.switch_session(target)
         else:
             runner.new_session()
-        assert runner.sandbox_mode() == "restricted"
-        assert pool.sandbox(False) is None
-        assert _wait_gone(pids) == []
-        assert not _host_pids_with_arg(marker)
-        assert run(runner.prepared.backend, "echo reset").output == "reset\n"
+        if resume:
+            assert runner.sandbox_mode() == "restricted"
+            assert pool.sandbox(False) is None
+            assert _wait_gone(pids) == []
+            assert not _host_pids_with_arg(marker)
+        else:
+            assert runner.sandbox_mode() == "full-access"
+            assert _sandbox_trees(pool) == pids
+            assert _host_pids_with_arg(marker)
+        assert run(runner.prepared.backend, "echo ready").output == "ready\n"
     finally:
         runner.close()
         store.close()

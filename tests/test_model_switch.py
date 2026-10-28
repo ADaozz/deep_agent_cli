@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -603,6 +604,42 @@ def test_same_model_effort_changes_default_and_failure_rollback() -> None:
         runner.close()
 
 
+@pytest.mark.parametrize('persist_on_first_message', [False, True])
+@pytest.mark.parametrize('effort', ['default', 'low', 'max'])
+def test_new_session_inherits_effective_model_and_effort(tmp_path, persist_on_first_message, effort):
+    with closing(SessionStore(tmp_path / 'inherit.sqlite3')) as store:
+        runner = AgentRunner(
+            model=scripted_model([]), backend=StateBackend(), settings=_reasoning_settings(),
+            session_store=store, persist_on_first_message=persist_on_first_message,
+        )
+        try:
+            with patch('agent.runner.build_chat_model', return_value=scripted_model([AIMessage(content='done')])):
+                runner.request_model_change('local/beta', reasoning_effort=effort)
+                runner._apply_pending_runtime_config()
+            previous = runner.thread_id
+            model = runner._chat_model
+            permission = runner.permission_mode()
+            runner.request_model_change('local/alpha', reasoning_effort='high')
+            with patch('agent.runner.build_chat_model') as build:
+                info = runner.new_session()
+                build.assert_not_called()
+            assert info.id != previous
+            assert info.model_id == runner.current_model().id == 'local/beta'
+            assert info.reasoning_effort == runner.reasoning_effort() == effort
+            assert runner._chat_model is model
+            assert runner.permission_mode() is permission
+            assert runner.pending_model() is None
+            assert runner.pending_reasoning_effort() is None
+            assert not runner.thread_has_content()
+            if persist_on_first_message:
+                assert store.get(info.id) is None
+            assert runner.invoke('new conversation').status == 'completed'
+            saved = store.get(info.id)
+            assert saved.model_id == 'local/beta' and saved.reasoning_effort == effort
+        finally:
+            runner.close()
+
+
 def test_effort_persistence_new_session_same_model_restore_and_restart(tmp_path: Path) -> None:
     path = tmp_path / "efforts.sqlite3"
     store = SessionStore(path)
@@ -612,14 +649,18 @@ def test_effort_persistence_new_session_same_model_restore_and_restart(tmp_path:
         runner.request_model_change("local/alpha", reasoning_effort="high")
         runner._apply_pending_runtime_config()
         assert store.get(first).reasoning_effort == "high"
+        build.reset_mock()
         second = runner.new_session().id
-        assert runner.reasoning_effort() == "default"
-        assert store.get(second).reasoning_effort == "default"
+        assert runner.reasoning_effort() == "high"
+        assert store.get(second).reasoning_effort == "high"
+        build.assert_not_called()
+        runner.request_model_change("local/alpha", reasoning_effort="low")
+        runner._apply_pending_runtime_config()
         runner.switch_session(first)
         assert runner.reasoning_effort() == "high"
         assert build.call_args.kwargs["reasoning_effort"] == "high"
         runner.switch_session(second)
-        assert runner.reasoning_effort() == "default"
+        assert runner.reasoning_effort() == "low"
         runner.switch_session(first)
     runner.request_model_change("local/alpha", reasoning_effort="default")
     assert store.get(first).pending_reasoning_effort == "default"

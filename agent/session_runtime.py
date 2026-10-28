@@ -166,17 +166,22 @@ class SessionRuntime:
         self._abort_wait.set()
         self.release()
 
-    def create_new(self, *, model_id: str, permission_mode: str, title: str = "") -> SessionInfo:
+    def create_new(
+        self, *, model_id: str, permission_mode: str, title: str = "", reasoning_effort: str = "default",
+    ) -> SessionInfo:
         """Own a blank draft without a catalog row or persistent lock file."""
         if self._store is not None and not self._persist_on_first_message:
-            info = self._store.create_session(model_id=model_id, permission_mode=permission_mode, title=title)
+            info = self._store.create_session(
+                model_id=model_id, permission_mode=permission_mode, title=title,
+                reasoning_effort=reasoning_effort,
+            )
             self.adopt_new(info.id)
             return info
         now = datetime.now(timezone.utc)
         identifier = str(uuid4()) if self._store is not None else f"cli-{uuid4()}"
         info = SessionInfo(id=identifier, title=title or "New session", created_at=now,
                            updated_at=now, status="running", model_id=model_id,
-                           permission_mode=permission_mode)
+                           permission_mode=permission_mode, reasoning_effort=reasoning_effort)
         lease = self._in_process_locks.try_acquire(info.id)
         if lease is None:
             raise SessionLockBusyError(f"Session {info.id} is already open in another window")

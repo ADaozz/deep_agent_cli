@@ -955,7 +955,7 @@ class AgentRunner:
         return snapshot
 
     def _restore_configured_sandbox_mode(self) -> None:
-        """Resume and new sessions use the configured filesystem mode, not a prior /sandbox choice."""
+        """Resumed sessions use the configured filesystem mode, not a prior /sandbox choice."""
         self._pending_sandbox_mode = None
         if self._sandbox_mode == self._configured_sandbox_mode:
             return
@@ -991,18 +991,15 @@ class AgentRunner:
         self._resume_context = None
         self.control.clear_pause()
         self.control.set_defer_steering(False)
-        if self._reasoning_effort != "default" and self.settings is not None:
-            self._apply_restore_plan(RestorePlan(
-                model_id=self._current_model_id, permission_mode=self._permission_mode,
-            ))
         self._runtime.clear_pending()
         self._pending_reasoning_effort = None
         self._pending_model_id = None
         self._pending_permission_mode = None
-        self._restore_configured_sandbox_mode()
+        self._pending_sandbox_mode = None
         return self._runtime.create_new(
             title=title, model_id=self._current_model_id,
             permission_mode=self._permission_mode.value,
+            reasoning_effort=self._reasoning_effort,
         )
 
     def close(self) -> None:
