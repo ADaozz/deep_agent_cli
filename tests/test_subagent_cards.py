@@ -20,6 +20,65 @@ def start(state, identifier, description):
                          arguments={'description': description, 'subagent_type': 'general-purpose'}))
 
 
+@pytest.mark.parametrize('scheduler_first', [False, True])
+def test_counter_tracks_cards_when_scheduler_and_tool_events_arrive_separately(scheduler_first):
+    state = CliState()
+    state.apply(RunEvent(type='run_started'))
+
+    def assert_count(expected):
+        assert state.subagent_count == expected
+        assert plain(render_transcript(state, 100)).count('Running SubAgent') == expected
+
+    start(state, 'a', 'First task')
+    assert_count(1)
+    state.apply(RunEvent(type='subagents_changed', result={'count': 1}))
+    start(state, 'b', 'Second task')
+    assert_count(2)
+    state.apply(RunEvent(type='subagents_changed', result={'count': 2}))
+    for identifier, remaining in [('a', 1), ('b', 0)]:
+        events = [
+            RunEvent(type='subagents_changed', result={'count': remaining}),
+            RunEvent(type='tool_completed', name='task', tool_call_id=identifier, content='Result'),
+        ]
+        if not scheduler_first:
+            events.reverse()
+        expected = remaining + 1
+        for event in events:
+            state.apply(event)
+            if event.type == 'tool_completed':
+                expected = remaining
+            assert_count(expected)
+    # Late/replayed runtime events cannot revive a completed card's count.
+    state.apply(RunEvent(type='subagents_changed', result={'count': 2}))
+    assert_count(0)
+
+
+@pytest.mark.parametrize('terminal_event', ['run_completed', 'run_failed', 'run_cancelled', 'interaction_requested'])
+def test_counter_settles_with_cards_on_parent_terminal_event(terminal_event):
+    state = CliState()
+    state.apply(RunEvent(type='run_started'))
+    start(state, 'a', 'First task')
+    start(state, 'b', 'Second task')
+    state.apply(RunEvent(type=terminal_event))
+    assert state.subagent_count == 0
+    assert 'Running SubAgent' not in plain(render_transcript(state, 100))
+
+
+def test_counter_ignores_other_tools_duplicate_starts_and_failed_delegations():
+    state = CliState()
+    start(state, 'a', 'Task')
+    start(state, 'a', 'Task')
+    state.apply(RunEvent(type='tool_started', name='read_file', tool_call_id='file'))
+    assert state.subagent_count == 1
+    state.apply(RunEvent(type='tool_completed', tool_call_id='a',
+                         content='Subagent failed: Subagent concurrency limit reached'))
+    assert state.subagent_count == 0
+    start(state, 'b', 'Another task')
+    assert state.subagent_count == 1
+    state.clear()
+    assert state.subagent_count == 0
+
+
 def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     state = CliState()
     state.apply(RunEvent(type='run_started'))

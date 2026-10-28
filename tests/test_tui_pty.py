@@ -608,7 +608,7 @@ def _subagent_stream_probe():
         "from agent.cli.app import CliApplication\nfrom agent.cli.rendering import render_transcript",
     ).replace(
         "'running': app.state.running,",
-        "'running': app.state.running, 'subagents': app.state.subagent_count, 'rendered': render_transcript(app.state, 100),",
+        "'running': app.state.running, 'subagents': app.state.subagent_count, 'rendered': render_transcript(app.state, 100), 'status_line': ''.join(x[1] for x in app._status_text()),",
     )
 
 
@@ -625,12 +625,15 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
             tui.send('delegate task\r')
             child = server.wait_for_connection(1)
             assert child.hanging.wait(8)
-            running = tui.wait(lambda state: state['subagents'] == 1 and b'1 subagent' in tui.terminal)
+            # The terminal renderer writes the last column separately to avoid wrapping.
+            running = tui.wait(lambda state: state['subagents'] == 1 and b'1 subagen' in tui.terminal)
+            assert running['status_line'].endswith('1 subagent')
             assert 'Running SubAgent' in running['rendered']
             assert 'private child task' in running['rendered']
             tui.send(cancel_key)
             state = tui.wait(lambda state: not state['running'] and state['subagents'] == 0, timeout=8)
             assert state['live_streams'] == 0
+            assert 'subagent' not in state['status_line']
             assert child.closed.wait(2) and child.closed_by_client_at is not None
             assert 'SubAgent' in state['rendered']
             assert 'private child task' in state['rendered']
@@ -656,13 +659,16 @@ def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
             tui.wait(lambda state: state['status'] == 'Ready', timeout=20)
             tui.send('Fix two independent files\r')
             state = tui.wait(lambda state: state['subagents'] == 2, timeout=15)
+            assert state['status_line'].endswith('2 subagents')
             assert state['rendered'].count('Running SubAgent') == 2
             assert 'Fix median3' in state['rendered'] and 'Fix is_leap_year' in state['rendered']
             state = tui.wait(lambda state: state['subagents'] == 1 and 'First child result' in state['rendered'], timeout=10)
+            assert state['status_line'].endswith('1 subagent')
             assert state['rendered'].count('Running SubAgent') == 1
             assert '└ result' in state['rendered']
             state = tui.wait(lambda state: not state['running'] and 'Parent completed both fixes' in state['rendered'], timeout=10)
             assert state['subagents'] == 0 and state['live_streams'] == 0
+            assert 'subagent' not in state['status_line']
             assert state['rendered'].count('SubAgent') == 2 and 'Running SubAgent' not in state['rendered']
             assert 'First child result' in state['rendered'] and 'Second child result' in state['rendered']
             assert 'private child reasoning' not in state['rendered']

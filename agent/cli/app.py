@@ -1912,27 +1912,32 @@ class CliApplication:
         message = self._working_messages.current(active, now)
         spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(now * 10) % 10] + " " if self.state.running else ""
         width = self._width()
+        counter = ""
+        if self.state.subagent_count:
+            count = self.state.subagent_count
+            counter = _truncate_cells(f"{count} subagent" + ("s" if count != 1 else ""), width)
+        left_width = max(0, width - get_cwidth(counter) - 1) if counter else width
         label = self.state.status if self.state.running or self.state.status != "Ready" else ""
         if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
-        if self.state.subagent_count:
-            count = self.state.subagent_count
-            label += f" · {count} subagent" + ("s" if count != 1 else "")
         if pending:
             preview = " | ".join(" ".join(text.split()) for text in queued)
             queue_label = f"queued {pending} · Ctrl+B collapse" if self.state.messages_expanded else f"queued {pending}: {preview}"
             label = f"{label} · {queue_label}" if label else queue_label
         raw_status = f" {spinner}{label}"
-        if pending and not self.state.messages_expanded and get_cwidth(raw_status) > width and width >= 20:
-            hint = " · Ctrl+B expand" if width >= 32 else " · Ctrl+B"
-            status = _truncate_cells(raw_status, max(1, width - get_cwidth(hint))) + hint
-            status = _truncate_cells(status, width)
+        if pending and not self.state.messages_expanded and get_cwidth(raw_status) > left_width and left_width >= 20:
+            hint = " · Ctrl+B expand" if left_width >= 32 else " · Ctrl+B"
+            status = _truncate_cells(raw_status, max(1, left_width - get_cwidth(hint))) + hint
+            status = _truncate_cells(status, left_width)
         else:
-            status = _truncate_cells(raw_status, width)
+            status = _truncate_cells(raw_status, left_width)
         fragments = [("class:status", status)]
-        remaining = width - get_cwidth(status)
+        remaining = left_width - get_cwidth(status)
         if message is not None and remaining > 3:
             fragments.append(("class:status-message", " · " + _truncate_cells(message.display, remaining - 3)))
+        if counter:
+            used = sum(get_cwidth(text) for _, text in fragments)
+            fragments.append(("class:status", " " * max(0, width - used - get_cwidth(counter)) + counter))
         return FormattedText(fragments)
 
     def _footer_text(self):  # type: ignore[no-untyped-def]

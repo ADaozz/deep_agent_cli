@@ -642,7 +642,8 @@ def test_working_status_rotates_and_hides_messages_after_stop(monkeypatch) -> No
 
 
 @pytest.mark.parametrize("width", [1, 20, 30, 48, 80])
-def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, width) -> None:
+@pytest.mark.parametrize("count", [0, 2])
+def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, width, count) -> None:
     from prompt_toolkit.utils import get_cwidth
     from agent.cli.working_messages import load_working_messages
     FGO_LINES = load_working_messages().fgo
@@ -657,14 +658,18 @@ def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, w
         now = [100.0]
         monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
         app._apply_event(RunEvent(type="run_started"))
+        for index in range(count):
+            app._apply_event(RunEvent(type="tool_started", name="task", tool_call_id=f"child-{index}"))
         for offset in (0, 16):
             now[0] = 100 + offset
             line = "".join(value for _, value in app._status_text())
             assert get_cwidth(line) <= width
             assert "\n" not in line
-            if width >= 20:
+            if width >= (30 if count else 20):
                 assert "Working" in line
-            if width == 80 and offset == 16:
+            if count and width >= 20:
+                assert line.endswith("2 subagents")
+            if width == 80 and offset == 16 and not count:
                 assert any(message.display in line for message in FGO_LINES)
 
 
@@ -1223,7 +1228,7 @@ def test_tool_tail_has_one_blank_row_before_editor(content) -> None:
 
 
 @pytest.mark.parametrize('count, label', [(0, ''), (1, '1 subagent'), (2, '2 subagents')])
-def test_subagent_counter_shares_working_status_row(count, label):
+def test_subagent_counter_is_right_aligned_in_working_status_row(count, label):
     def scenario(app):
         def rows():
             _paint(app)
@@ -1233,7 +1238,8 @@ def test_subagent_counter_shares_working_status_row(count, label):
                     for y in range(app.application.output.get_size().rows)]
         app.state.apply(RunEvent(type='run_started'))
         before = rows()
-        app.state.apply(RunEvent(type='subagents_changed', result={'count': count}))
+        for index in range(count):
+            app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id=f'child-{index}'))
         after = rows()
         editor_y = next(y for y, row in enumerate(after) if row.startswith('› '))
         assert editor_y == next(y for y, row in enumerate(before) if row.startswith('› '))
@@ -1241,6 +1247,7 @@ def test_subagent_counter_shares_working_status_row(count, label):
         if label:
             counter_rows = [y for y, row in enumerate(after) if label in row]
             assert counter_rows == [next(y for y, row in enumerate(after) if 'Working' in row)]
+            assert after[counter_rows[0]].endswith(label)
             screen = app.application.renderer._last_screen
             counter_y = counter_rows[0]
             counter_x = after[counter_y].index(label)
@@ -1250,5 +1257,5 @@ def test_subagent_counter_shares_working_status_row(count, label):
         app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id='delegate'))
         app.state.apply(RunEvent(type='tool_completed', tool_call_id='delegate', content='private result'))
         cards = [block for block in app.state.blocks if isinstance(block, ToolBlock)]
-        assert len(cards) == 1 and cards[0].output == 'private result'
+        assert len(cards) == count + 1 and cards[-1].output == 'private result'
     _with_painted_app('subagent-counter', scenario)

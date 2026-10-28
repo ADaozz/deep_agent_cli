@@ -60,7 +60,6 @@ class CliState:
     blocks: list[Block] = field(default_factory=list)
     running: bool = False
     compacting: bool = False
-    subagent_count: int = 0
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
@@ -75,6 +74,18 @@ class CliState:
     # Separate a never-started conversation from missing model usage.
     # Clearing the visible transcript must not reset this session property.
     context_pristine: bool = True
+
+    @property
+    def subagent_count(self) -> int:
+        """Count the same running task cards rendered in the transcript.
+
+        Scheduler admission/cleanup and graph tool results arrive separately;
+        using scheduler counts here can disagree with the visible task states.
+        """
+        return sum(
+            isinstance(block, ToolBlock) and block.name == "task" and block.status == "running"
+            for block in self.blocks
+        )
 
     def add_user(
         self,
@@ -143,7 +154,8 @@ class CliState:
 
     def apply(self, event: RunEvent) -> None:
         if event.type == "subagents_changed":
-            self.subagent_count = max(0, int((event.result or {}).get("count", 0)))
+            # Runtime accounting remains available to other event consumers.
+            # Presentation counts follow task card transitions instead.
             return
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False

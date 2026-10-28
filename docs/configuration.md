@@ -449,8 +449,10 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
 `task` 等待任务实际完成，没有跨轮次后台任务。
 
-`1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，数量为零时隐藏；输入框内不显示子任务数量。
+`1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，Working 靠左，数量靠右，数量为零时隐藏；输入框内不显示子任务数量。
 每个 `task` 在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
+
+右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限仍由 `max_concurrent` 控制。
 
 执行摘要写入配置目录（默认 `~/.deep-agent`）下的
 `subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。
