@@ -36,7 +36,7 @@ tools:
     - compact_conversation
 
 ui:
-  # 每次回答结束后显示时间所使用的 IANA 时区。
+  # 回答结束时间和系统提示词中当前日期所使用的 IANA 时区。
   timezone: Asia/Shanghai
   # 内容折叠时保留的开头行数和末尾行数，均为正整数。
   # 命令、写入、差异和失败摘要使用 head_lines；思考和工具输出使用 tail_lines。

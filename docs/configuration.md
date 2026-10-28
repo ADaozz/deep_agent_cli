@@ -302,7 +302,7 @@ ui:
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
-| `timezone` | `Asia/Shanghai` | 每轮结束时 `Worked for … · HH:MM` 使用的 IANA 时区 |
+| `timezone` | `Asia/Shanghai` | 每轮结束时间和系统提示词中当前日期使用的 IANA 时区 |
 | `head_lines` | `4` | 内容折叠时保留的开头行数 |
 | `tail_lines` | `4` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
@@ -310,6 +310,16 @@ ui:
 | `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
 | `editor_max_lines` | `10` | 输入框最大行数；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
+
+每次模型请求都会在系统提示词中动态附加当前用户日期（`yyyy-mm-dd`）和 `ui.timezone` 时区名称，主 Agent 和 SubAgent 均生效。日期按配置的时区计算，长会话跨天后会在下一次模型请求时更新，无需重建 Agent。时区配置修改后需重启 CLI。
+
+例如，`ui.timezone: Asia/Shanghai` 对应的提示词片段为：
+
+```text
+# 当前用户时间
+当前日期：2026-10-28
+用户时区：Asia/Shanghai
+```
 
 ## 按键（`keybindings.json`）
 
@@ -437,7 +447,7 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
 `task` 等待任务实际完成，没有跨轮次后台任务。
 
-输入框上方现有空白行右侧只显示 `1 subagent` / `2 subagents` 等运行数量，零时隐藏。
+`1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，数量为零时隐藏；输入框内不显示子任务数量。
 每个 `task` 在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
 
 执行摘要写入配置目录（默认 `~/.deep-agent`）下的

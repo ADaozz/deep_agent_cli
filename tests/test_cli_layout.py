@@ -1223,7 +1223,7 @@ def test_tool_tail_has_one_blank_row_before_editor(content) -> None:
 
 
 @pytest.mark.parametrize('count, label', [(0, ''), (1, '1 subagent'), (2, '2 subagents')])
-def test_subagent_counter_uses_existing_editor_top_row(count, label):
+def test_subagent_counter_shares_working_status_row(count, label):
     def scenario(app):
         def rows():
             _paint(app)
@@ -1231,14 +1231,22 @@ def test_subagent_counter_uses_existing_editor_top_row(count, label):
             columns = app.application.output.get_size().columns
             return [''.join(screen.data_buffer[y][x].char for x in range(columns))
                     for y in range(app.application.output.get_size().rows)]
+        app.state.apply(RunEvent(type='run_started'))
         before = rows()
         app.state.apply(RunEvent(type='subagents_changed', result={'count': count}))
         after = rows()
         editor_y = next(y for y, row in enumerate(after) if row.startswith('› '))
         assert editor_y == next(y for y, row in enumerate(before) if row.startswith('› '))
-        assert after[editor_y - 1].strip() == label
+        assert after[editor_y - 1].strip() == ''
         if label:
-            assert after[editor_y - 1].rstrip().endswith(label)
+            counter_rows = [y for y, row in enumerate(after) if label in row]
+            assert counter_rows == [next(y for y, row in enumerate(after) if 'Working' in row)]
+            screen = app.application.renderer._last_screen
+            counter_y = counter_rows[0]
+            counter_x = after[counter_y].index(label)
+            assert 'class:editor' not in screen.data_buffer[counter_y][counter_x].style
+        else:
+            assert 'subagent' not in next(row for row in after if 'Working' in row)
         app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id='delegate'))
         app.state.apply(RunEvent(type='tool_completed', tool_call_id='delegate', content='private result'))
         cards = [block for block in app.state.blocks if isinstance(block, ToolBlock)]

@@ -662,12 +662,7 @@ class CliApplication:
             ),
             ConditionalContainer(
                 HSplit([
-                    Window(
-                        FormattedTextControl(lambda: (
-                            f"{self.state.subagent_count} subagent" + ("s" if self.state.subagent_count != 1 else "") + " "
-                            if self.state.subagent_count else ""
-                        )), height=1, align=WindowAlign.RIGHT, style="class:editor",
-                    ),
+                    Window(height=1, char=" ", style="class:editor"),
                     VSplit([
                         Window(FormattedTextControl("› "), width=2, style="class:editor"),
                         Window(
@@ -1920,6 +1915,9 @@ class CliApplication:
         label = self.state.status if self.state.running or self.state.status != "Ready" else ""
         if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
+        if self.state.subagent_count:
+            count = self.state.subagent_count
+            label += f" · {count} subagent" + ("s" if count != 1 else "")
         if pending:
             preview = " | ".join(" ".join(text.split()) for text in queued)
             queue_label = f"queued {pending} · Ctrl+B collapse" if self.state.messages_expanded else f"queued {pending}: {preview}"

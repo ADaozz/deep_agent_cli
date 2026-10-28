@@ -1,5 +1,8 @@
 ## 未发布 · 原生 SubAgent（PR #30）
 
+- SubAgent 运行数量移至 `Working…` 所在状态行，输入框顶部恢复为空白，数量为零时隐藏。
+- 每次模型请求在系统提示词中动态注入当前日期（`yyyy-mm-dd`）和用户时区，主 Agent 与 SubAgent 均使用 `ui.timezone`，跨天后自动更新。
+
 - 接入 Deep Agents 原生同步 `task` 和隔离 `CompiledSubAgent`。仅当问题可拆成多个独立、互不干扰的子问题时才应派生；默认最多同时运行 2 个子任务。
 - 子任务共享已验证的沙箱 Backend/Pool，使用 `allow`，不装载 MCP、人工输入或递归委派工具；父任务取消传播到子任务，任务结束不保留后台 SubAgent。
 - 模型 Profile 可继承主模型，思考强度 `default/null` 使用子模型原生默认；支持显式能力校验和独立客户端回收。

@@ -28,6 +28,7 @@ from agent.control import RunController
 from agent.environment import EnvironmentContextMiddleware
 from agent.llm import ProtocolChatOpenAI, build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
+from agent.middleware.current_time import CurrentTimeMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.usage import UsageIdentityMiddleware
@@ -295,6 +296,7 @@ def build_agent(
                 PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
                 RecoveryContextMiddleware(),
                 EnvironmentContextMiddleware(),
+                CurrentTimeMiddleware(cfg.ui_timezone),
                 UsageIdentityMiddleware(),
                 SteeringMiddleware(run_controller),
                 ToolCancelMiddleware(run_controller),

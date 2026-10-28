@@ -123,7 +123,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
 摘要只精确替换已知模型和 Tavily Key；未知凭据原样保存。
 主上下文仅接收最终 task 结果，主动调用 `read_subagent_log` 才读取本父会话的日志页。
-TUI 在输入框上方保留运行数量，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
+TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
 实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware
@@ -136,6 +136,7 @@ TUI 在输入框上方保留运行数量，每个 task 显示独立卡片，按 
 | `PauseGateMiddleware` | 下一次模型调用前响应暂停 |
 | `RecoveryContextMiddleware` | 异常恢复后的首次模型请求附加说明，不写入 checkpoint |
 | `EnvironmentContextMiddleware` | 每次模型调用附加当前沙箱的短快照，不写入 checkpoint |
+| `CurrentTimeMiddleware` | 每次模型调用按 `ui.timezone` 注入当前日期（`yyyy-mm-dd`）和时区，主 Agent 与 SubAgent 共用，不写入 checkpoint |
 | `UsageIdentityMiddleware` | 模型响应进入 checkpoint 前标记来源 |
 | `SteeringMiddleware` | 注入运行中指令，必要时撤销尚未执行的工具提议并重新推理 |
 | `ToolCancelMiddleware` | 为工具传递可取消上下文 |
