@@ -425,17 +425,19 @@ subagents:
   enabled: true
   max_concurrent: 2
   model: null
+  # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
   permission: allow
 ```
 
 `max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
 `model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
-`reasoning_effort` 默认 `default`，旧配置 `null` 与它等价：使用子模型原生默认强度，
+`reasoning_effort` 默认 `default`，省略该项或旧配置 `null` 与它等价：使用子模型原生默认强度，
 不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
 常规路径每次委派创建独立模型客户端，默认不向 Responses API 传 `reasoning.effort`，
 也不向 Chat Completions API 传 `reasoning_effort`；任务结束后关闭子任务客户端。
 模型切换只影响下一次创建的任务，默认强度仍然独立于主 Agent。
+例如，主 Agent 通过 `/model` 选择 `high` 时，`subagents.reasoning_effort: default` 仍使用子模型原生默认；只有显式配置 `subagents.reasoning_effort: high` 才会为子任务发送 `high`。这里的 `default` 是子任务配置值，不应加入模型能力列表 `reasoning_efforts`。修改配置后重启 CLI 生效，程序不会自动覆盖已有配置。
 直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
 此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
 当前原生 `task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
