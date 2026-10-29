@@ -104,6 +104,7 @@ class SandboxConfig:
     env_set: dict[str, str] = field(default_factory=dict)
     extra_read_only_mounts: tuple[BindMount, ...] = ()
     extra_read_write_mounts: tuple[BindMount, ...] = ()
+    network_modes: tuple[SandboxMode, ...] = ("restricted", "full-access")
     mount_skills: bool = True
     skills_dir: Path | None = None
     protected_config_dir: Path | None = None
@@ -111,6 +112,8 @@ class SandboxConfig:
     trust_env: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.network_modes, tuple) or any(mode not in _SANDBOX_MODES for mode in self.network_modes):
+            raise ValueError("sandbox.network_modes must contain valid filesystem modes")
         if type(self.mount_skills) is not bool:
             raise ValueError("sandbox.mount_skills must be a boolean")
         if self.mode not in _SANDBOX_MODES:
@@ -757,6 +760,7 @@ def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Sandbox
     workspace = _workspace_path(data.get("workspace"), base_dir=base_dir)
     return SandboxConfig(
         workspace=workspace,
+        network_modes=_as_str_tuple(data.get("network_modes", ["restricted", "full-access"]), field_name="sandbox.network_modes"),
         mount_skills=_as_bool(data.get("mount_skills", True), field_name="sandbox.mount_skills"),
         skills_dir=_workspace_path(data["skills_dir"], base_dir=base_dir) if data.get("skills_dir") is not None else None,
         bwrap_path=str(data.get("bwrap_path") or "bwrap"),

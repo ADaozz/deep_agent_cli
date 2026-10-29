@@ -1950,3 +1950,16 @@ def test_skills_mount_can_use_a_private_directory(tmp_path, monkeypatch):
     link.symlink_to(private)
     with pytest.raises(ValueError):
         BubblewrapBackend(replace(config, skills_dir=link), executable="/bin/true")
+
+
+def test_network_mode_policy_survives_native_mode_rebuilds(tmp_path):
+    work=tmp_path/"work";work.mkdir()
+    config=SandboxConfig(workspace=work, mount_skills=False, network_modes=("full-access",), protected_config_dir=tmp_path/"state")
+    executor=BubblewrapBackend(config, executable="/bin/true")
+    backend=WorkspaceCompositeBackend(executor, skills_dir=None)
+    assert "--unshare-net" in executor.command_args("true", network=True)
+    backend.apply_sandbox_mode("full-access")
+    assert "--unshare-net" not in executor.command_args("true", network=True)
+    assert "--unshare-net" in executor.command_args("true", network=False)
+    backend.apply_sandbox_mode("restricted")
+    assert "--unshare-net" in executor.command_args("true", network=True)

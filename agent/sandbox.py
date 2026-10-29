@@ -1181,6 +1181,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         return [*self.sandbox_args(network=network, extra=mount), python, "-I", "-S", WORKER_SANDBOX_PATH]
 
     def sandbox_args(self, *, network: bool = False, extra: list[str] | None = None) -> list[str]:
+        network = network and self.config.mode in self.config.network_modes
         args = [
             self.executable,
             "--die-with-parent",

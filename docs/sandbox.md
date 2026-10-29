@@ -308,3 +308,5 @@ sudo apparmor_parser -r /etc/apparmor.d/deep-agent-bwrap
 ### Embedded Skills mount policy
 
 `sandbox.mount_skills` defaults to `true`, preserving the writable `/skills` mount. Set it to `false` to disable that implicit mount and its file-tool route entirely. `sandbox.skills_dir` optionally selects a private host directory instead of the global CLI Skills directory; it uses the same symlink, containment and mount validation. Both fields survive native filesystem-mode changes. Embedders may disable the writable mount and provide their own read-only Skill snapshots through `extra_read_only_mounts`. These options do not change the Agent loop or permission mode.
+
+`sandbox.network_modes` defaults to `[restricted, full-access]`. An execution's network request is honored only in a listed filesystem mode; an empty list always keeps the private network namespace. For a local platform without API authentication, `[full-access]` prevents restricted `execute` calls (including auto-approved calls) from reaching host loopback services. The setting is retained during native mode changes and does not change tool approval.

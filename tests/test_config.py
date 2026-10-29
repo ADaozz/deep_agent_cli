@@ -932,3 +932,10 @@ def test_sandbox_skills_mount_configuration(tmp_path):
     assert Settings.from_mapping({}).sandbox.mount_skills
     with pytest.raises(ValueError):
         Settings.from_mapping({"sandbox": {"mount_skills": []}})
+
+
+def test_sandbox_network_modes_configuration():
+    assert Settings.from_mapping({"sandbox": {"network_modes": ["full-access"]}}).sandbox.network_modes == ("full-access",)
+    assert Settings.from_mapping({"sandbox": {"network_modes": []}}).sandbox.network_modes == ()
+    with pytest.raises(ValueError):
+        Settings.from_mapping({"sandbox": {"network_modes": ["invalid"]}})
