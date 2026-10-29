@@ -431,6 +431,7 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
         elif mutation.operation == "delete":
             parts.append(Text(f"delete {diff.path}", style="dim"))
         else:
+            parts.append(Text(f"edit {diff.path} · snippet line numbers", style="dim"))
             parts.append(Group(*_numbered_diff(diff.full_diff, width)))
     if len(parts) == 2:
         parts.append(Text("Nothing to review.", style="dim"))
@@ -771,14 +772,10 @@ def render_tool_preview(
     else:
         output = block.output.strip()
         if output:
-            lines = output.splitlines()
-            limit = len(lines) if expanded else limits.tail_lines
-            if len(lines) > limit:
-                skipped = len(lines) - limit
-                lines = [f"… {skipped} output lines hidden · {EXPAND_HINT}", *lines[-limit:]]
-            body.append(Text(
-                "\n".join(f"  {line}" for line in lines),
-                style="dim" if not block.is_error else "red",
+            body.extend(_output_tail(
+                output.splitlines(), Console(width=max(20, width)), width,
+                expanded=expanded, limit=limits.tail_lines, indent=2,
+                style="dim" if not block.is_error else "red", earlier=False,
             ))
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
@@ -839,15 +836,11 @@ def _command_card(
             "", display_output,
         )
     lines = display_output.strip().splitlines()
-    if not expanded and len(lines) > limits.tail_lines:
-        hidden = len(lines) - limits.tail_lines
-        lines = [f"… {hidden} earlier output lines hidden · {EXPAND_HINT}", *lines[-limits.tail_lines:]]
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:
         body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
-    for line in lines:
-        body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width, indent=4))
+    body.extend(_output_tail(lines, console, width, expanded=expanded, limit=limits.tail_lines))
 
     if preview.truncated:
         if preview.log_error:
@@ -900,6 +893,25 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
 
 def _failure_code(block: ToolBlock) -> int:
     return block.exit_code if isinstance(block.exit_code, int) and not isinstance(block.exit_code, bool) else 1
+
+
+def _output_tail(
+    lines: list[str], console: Console, width: int, *, expanded: bool, limit: int,
+    indent: int = 4, style: str = "dim", earlier: bool = True,
+) -> list[Text]:
+    """Apply the output budget after terminal wrapping, preserving the full output."""
+    rows = [
+        row for line in lines
+        for row in _wrap_failure_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
+    ]
+    if expanded or len(rows) <= limit:
+        return rows
+    hidden = len(rows) - limit
+    notice = f"… {hidden} {'earlier ' if earlier else ''}output lines hidden · {EXPAND_HINT}"
+    return [
+        *_wrap_failure_line(Text(f"{' ' * indent}{notice}", style=style), console, width, indent=indent),
+        *rows[-limit:],
+    ]
 
 
 def _wrap_failure_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:

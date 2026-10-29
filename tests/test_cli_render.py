@@ -681,7 +681,16 @@ def _assert_card_indentation(rendered: str, width: int, output: str) -> None:
     assert all(line.startswith("  ") and not line.startswith("   ") for line in lines[1:divider])
     assert len(lines[divider + 1:]) > 1
     assert all(line.startswith("    ") for line in lines[divider + 1:])
-    assert "".join(line[4:] for line in lines[divider + 1:]).replace(" ", "") == output.replace(" ", "")
+    output_rows = lines[divider + 1:]
+    joined = "".join(line[4:] for line in output_rows).replace(" ", "")
+    if "earlieroutputlineshidden" in joined:
+        notice, content = joined.split("Ctrl+Otoexpand", 1)
+        assert notice.startswith("…")
+        assert len(output_rows[-4:]) == 4
+        assert content == "".join(line[4:] for line in output_rows[-4:]).replace(" ", "")
+        assert output.replace(" ", "").endswith(content)
+    else:
+        assert joined == output.replace(" ", "")
     assert all(cell_len(line) < width for line in lines)
 
 
@@ -805,6 +814,40 @@ def test_tool_render_is_compact_then_expandable() -> None:
     expanded = render_transcript(state, 80)
     assert "line 0" in expanded
     assert "output lines hidden" not in expanded
+
+
+@pytest.mark.parametrize("width", [60, 100])
+@pytest.mark.parametrize("status", ["running", "completed", "error"])
+@pytest.mark.parametrize("payload", [".process-chevron{transition:transform .15s}" * 20, "中文输出" * 100], ids=["css", "cjk"])
+def test_execute_output_tail_counts_wrapped_terminal_rows(width, status, payload) -> None:
+    output = f"first output\n{payload}\nlast output"
+    block = ToolBlock(
+        "wrapped-output", "execute", {"command": "cat style.css"},
+        output=output, status=status, is_error=status == "error",
+        exit_code=1 if status == "error" else None,
+    )
+    collapsed = _plain(_capture(_tool(block, False, width), width))
+    tail = [line.rstrip() for line in collapsed.splitlines()]
+    tail = tail[tail.index("  └ output") + 1:]
+    assert "earlier output lines hidden" in tail[0]
+    assert len(tail[1:]) == 4
+    assert tail[-1].strip() == "last output"
+    assert all(cell_len(line) <= width - 2 for line in tail)
+    expanded = _plain(_capture(_tool(block, True, width), width))
+    assert "first output" in expanded
+    assert "lines hidden" not in expanded
+    assert payload.replace(" ", "") in "".join(line.strip() for line in expanded.splitlines()).replace(" ", "")
+    assert block.output == output
+
+
+def test_generic_tool_output_tail_counts_wrapped_terminal_rows() -> None:
+    block = ToolBlock("custom", "custom_tool", {}, output="x" * 600, status="completed")
+    collapsed = _plain(_capture(_tool(block, False, 80), 80))
+    rows = [line.rstrip() for line in collapsed.splitlines()]
+    hint_index = next(index for index, line in enumerate(rows) if "output lines hidden" in line)
+    assert "…" in rows[hint_index]
+    assert len(rows[hint_index + 1:]) == 4
+    assert "lines hidden" not in _plain(_capture(_tool(block, True, 80), 80))
 
 
 def test_execute_running_tail_and_expanded_output_update_with_stream() -> None:
@@ -1076,6 +1119,25 @@ def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
     review = _plain(render_review(calls, 100))
     for index in range(4):
         assert f"+entry {index}" in review
+
+
+def test_grouped_edits_identify_independent_snippet_line_numbers() -> None:
+    blocks = [ToolBlock(
+        f"edit-{index}", "edit_file",
+        {"file_path": "/workspace/App.vue", "old_string": old, "new_string": new},
+        status="completed",
+    ) for index, (old, new) in enumerate([
+        ("context\nold first", "context\nnew first"),
+        ("old second", "new second"),
+    ])]
+    rendered = _plain(render_transcript(CliState(blocks=blocks), 100))
+    assert rendered.count("Edited /workspace/App.vue") == 1
+    assert rendered.index("Edit 1 · snippet line numbers") < rendered.index("2 - old first")
+    assert rendered.index("2 + new first") < rendered.index("Edit 2 · snippet line numbers")
+    assert rendered.index("Edit 2 · snippet line numbers") < rendered.index("1 - old second")
+    assert "(+2 -2)" in rendered
+    review = _plain(render_review([("edit_file", block.arguments) for block in blocks], 100))
+    assert review.count("edit /workspace/App.vue · snippet line numbers") == 2
 
 
 def test_edit_group_stops_at_other_file_or_message() -> None:

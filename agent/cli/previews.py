@@ -401,7 +401,9 @@ def aggregate_file_mutations(
     rows = [PreviewLine("")]
     previous_order = previous_edit = None
     for order, (edit_index, line) in selected:
-        if previous_order is not None and (order != previous_order + 1 or edit_index != previous_edit):
+        if edit_index != previous_edit:
+            rows.append(PreviewLine(f"Edit {edit_index + 1} · snippet line numbers", "dim"))
+        elif previous_order is not None and order != previous_order + 1:
             rows.append(PreviewLine("  ⋮", "dim"))
         rows.append(line)
         previous_order, previous_edit = order, edit_index
