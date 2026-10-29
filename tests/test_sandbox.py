@@ -1915,3 +1915,38 @@ def test_single_device_can_be_configured_without_exposing_host_dev(tmp_path):
     binds = list(zip(args, args[1:], args[2:]))
     assert ("--dev-bind", "/dev/null", "/dev/ttyUSB0") in binds
     assert ("--dev-bind", "/dev", "/dev") not in binds
+
+
+def test_skills_mount_can_be_disabled_without_creating_global_directory(tmp_path, monkeypatch):
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr("agent.sandbox.default_skills_dir", lambda: global_skills)
+    work = tmp_path / "work"
+    work.mkdir()
+    backend = BubblewrapBackend(SandboxConfig(workspace=work, mount_skills=False), executable="/bin/true")
+    routed = WorkspaceCompositeBackend(backend, skills_dir=backend.skills_dir)
+    assert backend.skills_dir is None
+    assert "/skills" not in backend.command_args("true")
+    assert not global_skills.exists()
+    routed.apply_sandbox_mode("full-access")
+    assert backend.skills_dir is None
+    assert "/skills" not in backend.command_args("true")
+    assert routed.read("/skills/private.txt").error
+
+
+def test_skills_mount_can_use_a_private_directory(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    private = tmp_path / "private-skills"
+    global_skills = tmp_path / "global-skills"
+    monkeypatch.setattr("agent.sandbox.default_skills_dir", lambda: global_skills)
+    config = SandboxConfig(workspace=work, skills_dir=private)
+    backend = BubblewrapBackend(config, executable="/bin/true")
+    assert backend.skills_dir == private.resolve()
+    assert str(private) in backend.command_args("true")
+    assert not global_skills.exists()
+    with pytest.raises(ValueError):
+        BubblewrapBackend(replace(config, skills_dir=work / "nested"), executable="/bin/true")
+    link = tmp_path / "link"
+    link.symlink_to(private)
+    with pytest.raises(ValueError):
+        BubblewrapBackend(replace(config, skills_dir=link), executable="/bin/true")

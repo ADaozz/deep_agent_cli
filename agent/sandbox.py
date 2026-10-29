@@ -572,7 +572,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             raise ValueError("Sandbox mode can only be changed for a Bubblewrap backend")
         updated = replace(config, mode=mode)
         _validate_config(updated)
-        skills = _validated_skills_dir(updated.workspace)
+        skills = _validated_skills_dir(updated.workspace, updated)
         env = sandbox_environment(updated)
         # Build the next file routes before publishing. A failure here leaves
         # the live config, protection cache, and current pool alone.
@@ -1153,7 +1153,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol):
         super().__init__(root_dir=workspace, virtual_mode=True, max_file_size_mb=10)
         self.config = replace(config, workspace=workspace)
         self.workspace_root = sandbox_workspace_root(workspace)
-        self.skills_dir = _validated_skills_dir(workspace)
+        self.skills_dir = _validated_skills_dir(workspace, config)
         self.executable = executable
         self._env = sandbox_environment(self.config)
         self._sandbox_id = f"bwrap-{uuid.uuid4().hex[:8]}"
@@ -1326,11 +1326,13 @@ def sandbox_pool_of(backend: BackendProtocol | None) -> SandboxPool | None:
 
 
 def _workspace_backend(backend: SandboxBackendProtocol) -> WorkspaceCompositeBackend:
-    return WorkspaceCompositeBackend(backend, skills_dir=_validated_skills_dir(backend.config.workspace))
+    return WorkspaceCompositeBackend(backend, skills_dir=_validated_skills_dir(backend.config.workspace, backend.config))
 
 
-def _validated_skills_dir(workspace: Path) -> Path | None:
-    source = default_skills_dir()
+def _validated_skills_dir(workspace: Path, config: SandboxConfig | None = None) -> Path | None:
+    if config is not None and not config.mount_skills:
+        return None
+    source = Path(config.skills_dir).expanduser() if config is not None and config.skills_dir is not None else default_skills_dir()
     if source.is_symlink():
         raise ValueError(f"skills directory must not be a symlink: {source}")
     if source.exists() and not source.is_dir():
@@ -1538,7 +1540,7 @@ def _validate_config(config: SandboxConfig) -> Path:
         raise ValueError(f"timeout_seconds must be positive, got {config.timeout_seconds}")
     if config.max_output_bytes <= 0:
         raise ValueError(f"max_output_bytes must be positive, got {config.max_output_bytes}")
-    skills = _validated_skills_dir(workspace)
+    skills = _validated_skills_dir(workspace, config)
     home, tmp = sandbox_state_dirs(config)
     if any(path == workspace or _is_within(workspace, path) for path in (home, tmp, sandbox_config_dir(config))):
         raise ValueError("sandbox state directories must be outside the workspace")

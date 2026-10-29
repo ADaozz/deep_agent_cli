@@ -104,11 +104,15 @@ class SandboxConfig:
     env_set: dict[str, str] = field(default_factory=dict)
     extra_read_only_mounts: tuple[BindMount, ...] = ()
     extra_read_write_mounts: tuple[BindMount, ...] = ()
+    mount_skills: bool = True
+    skills_dir: Path | None = None
     protected_config_dir: Path | None = None
     protected_files: tuple[Path, ...] = ()
     trust_env: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.mount_skills) is not bool:
+            raise ValueError("sandbox.mount_skills must be a boolean")
         if self.mode not in _SANDBOX_MODES:
             raise ValueError(
                 f"sandbox.mode must be restricted or full-access, got {self.mode!r}"
@@ -753,6 +757,8 @@ def _sandbox_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Sandbox
     workspace = _workspace_path(data.get("workspace"), base_dir=base_dir)
     return SandboxConfig(
         workspace=workspace,
+        mount_skills=_as_bool(data.get("mount_skills", True), field_name="sandbox.mount_skills"),
+        skills_dir=_workspace_path(data["skills_dir"], base_dir=base_dir) if data.get("skills_dir") is not None else None,
         bwrap_path=str(data.get("bwrap_path") or "bwrap"),
         mode=_sandbox_mode(data.get("mode")),
         timeout_seconds=(

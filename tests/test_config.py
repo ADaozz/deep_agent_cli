@@ -923,3 +923,12 @@ def test_subagent_auto_is_reserved_and_rejected():
     from agent.config import SubAgentConfig
     with pytest.raises(ValueError, match='auto is not supported'):
         SubAgentConfig(reasoning_effort='auto')
+
+
+def test_sandbox_skills_mount_configuration(tmp_path):
+    configured = Settings.from_mapping({"sandbox": {"mount_skills": False, "skills_dir": str(tmp_path / "private")}})
+    assert not configured.sandbox.mount_skills
+    assert configured.sandbox.skills_dir == tmp_path / "private"
+    assert Settings.from_mapping({}).sandbox.mount_skills
+    with pytest.raises(ValueError):
+        Settings.from_mapping({"sandbox": {"mount_skills": []}})

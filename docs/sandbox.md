@@ -304,3 +304,7 @@ sudo apparmor_parser -r /etc/apparmor.d/deep-agent-bwrap
 - 已有发行版 profile 时，修改其本地 override，不要添加针对同一路径的冲突 profile。
 - 不要为 Python 或整个用户目录授权，也不要全局关闭 AppArmor 或 userns 限制。
 - 撤销：`sudo apparmor_parser -R /etc/apparmor.d/deep-agent-bwrap`，再删除该文件。
+
+### Embedded Skills mount policy
+
+`sandbox.mount_skills` defaults to `true`, preserving the writable `/skills` mount. Set it to `false` to disable that implicit mount and its file-tool route entirely. `sandbox.skills_dir` optionally selects a private host directory instead of the global CLI Skills directory; it uses the same symlink, containment and mount validation. Both fields survive native filesystem-mode changes. Embedders may disable the writable mount and provide their own read-only Skill snapshots through `extra_read_only_mounts`. These options do not change the Agent loop or permission mode.
