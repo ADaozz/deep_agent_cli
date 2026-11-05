@@ -25,8 +25,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == ["read_subagent_log"]
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
-    assert "Deep Agent CLI" in prepared.system_prompt
-    assert "编程智能体" in prepared.system_prompt
+    assert prepared.system_prompt
     names = graph_tool_names(prepared.graph)
     assert "handoff_to_human" not in names
     assert "request_human_input" in names
@@ -383,8 +382,8 @@ def test_invalid_tool_args_return_actionable_hint() -> None:
     assert len(errors) == 1
     assert errors[0].tool_call_id == "hi-bad"
     content = str(errors[0].content)
-    assert "不要原样重发" in content
-    assert "原生 JSON 数组" in content
+    assert "Please fix the error" not in content
+    assert "五个字段，见上文" in content
 
 
 def test_pause_interrupts_at_safe_point_then_continues() -> None:

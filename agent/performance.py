@@ -96,6 +96,37 @@ class GenerationTiming:
         }
 
 
+_SUBAGENT_TOOLS = frozenset({"task", "read_subagent_log"})
+
+
+def tool_usage_by_model(history: list[dict[str, Any]]) -> tuple[list[str], list[tuple[str, dict[str, int]]]]:
+    """Count requested built-in tools per model, merging reasoning efforts.
+
+    Returns models in first-seen order and rows sorted by total count, then name.
+    MCP and subagent tools are left out; skill reads are already dropped when
+    recorded. Subagent model requests never reach the main metrics history.
+    """
+    from agent.mcp.names import is_external_mcp_tool
+
+    models: list[str] = []
+    counts: dict[str, dict[str, int]] = {}
+    for metrics in history:
+        names = metrics.get("tool_calls")
+        if not isinstance(names, list):
+            continue
+        model = str(metrics.get("model") or "unknown")
+        for name in names:
+            if (not isinstance(name, str) or not name or is_external_mcp_tool(name)
+                    or name in _SUBAGENT_TOOLS):
+                continue
+            if model not in models:
+                models.append(model)
+            row = counts.setdefault(name, {})
+            row[model] = row.get(model, 0) + 1
+    rows = sorted(counts.items(), key=lambda item: (-sum(item[1].values()), item[0]))
+    return models, rows
+
+
 def model_metric_groups(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Summarize independently by requested model and reasoning effort."""
     groups: dict[tuple[str, str], dict[str, Any]] = {}

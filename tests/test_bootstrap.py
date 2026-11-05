@@ -220,6 +220,7 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
     class App:
         def __init__(self, *_args, **_kwargs):
             self.sessions = SimpleNamespace()
+            self.terminated_by = None
         def run(self):
             calls.append("ran")
         @contextmanager

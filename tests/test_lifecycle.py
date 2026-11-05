@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
+import signal
 import threading
 import warnings
 from types import SimpleNamespace
@@ -751,3 +753,97 @@ def test_shutdown_refuses_a_new_observe_task_without_await_warning() -> None:
     finally:
         pipe.__exit__(None, None, None)
         runner.close()
+
+
+def test_terminate_signal_before_ui_exits_from_pre_run_without_mcp() -> None:
+    runner = _runner()
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        started: list[str] = []
+        app._start_mcp_connections = lambda: started.append("mcp")  # type: ignore[method-assign]
+
+        app._before_ui()
+        assert started == ["mcp"]
+
+        app._on_terminate_signal(signal.SIGTERM)
+        assert app.terminated_by is signal.SIGTERM
+        assert app.lifecycle.phase is ExitPhase.ACTIVE
+        app._before_ui()
+        assert app.lifecycle.phase is ExitPhase.EXIT_REQUESTED
+        assert started == ["mcp"]
+    runner.close()
+
+
+@pytest.mark.parametrize("exit_error", [None, OSError("terminal gone")])
+def test_first_terminate_signal_requests_exit_and_second_kills(monkeypatch, exit_error) -> None:
+    import agent.cli.app as app_module
+
+    runner = _runner()
+    events: list[object] = []
+    monkeypatch.setattr(app_module, "restore_terminal_modes", lambda: events.append("restore"))
+    monkeypatch.setattr(app_module.signal, "signal", lambda sig, handler: events.append(("signal", sig, handler)))
+    monkeypatch.setattr(app_module.os, "kill", lambda pid, sig: events.append(("kill", pid, sig)))
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        app.application._is_running = True
+
+        def request_exit() -> None:
+            events.append("exit")
+            if exit_error is not None:
+                raise exit_error
+
+        app.lifecycle.request_exit = request_exit  # type: ignore[method-assign]
+        app._on_terminate_signal(signal.SIGHUP)
+        assert app.terminated_by is signal.SIGHUP
+        assert events == ["exit"]
+
+        app._on_terminate_signal(signal.SIGTERM)
+        assert app.terminated_by is signal.SIGHUP
+        assert events == [
+            "exit", "restore", ("signal", signal.SIGTERM, signal.SIG_DFL), ("kill", os.getpid(), signal.SIGTERM),
+        ]
+        app.application._is_running = False
+    runner.close()
+
+
+def test_signal_handlers_skip_unsupported_signals() -> None:
+    runner = _runner()
+    installed: list[signal.Signals] = []
+
+    class Loop:
+        def add_signal_handler(self, sig, callback, *args) -> None:
+            if sig is signal.SIGHUP:
+                raise NotImplementedError
+            installed.append(sig)
+
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        assert app._install_signal_handlers(Loop()) == [signal.SIGTERM]  # type: ignore[arg-type]
+    assert installed == [signal.SIGTERM]
+    runner.close()
+
+
+@pytest.mark.parametrize("tty,fails", [(True, False), (False, False), (True, True)])
+def test_restore_terminal_modes_only_writes_to_a_tty(monkeypatch, tty, fails) -> None:
+    from agent.cli import lifecycle
+
+    written: list[bytes] = []
+
+    def write(fd: int, data: bytes) -> int:
+        if fails:
+            raise OSError("closed")
+        written.append(data)
+        return len(data)
+
+    monkeypatch.setattr(lifecycle.sys, "__stdout__", SimpleNamespace(fileno=lambda: 99))
+    monkeypatch.setattr(lifecycle.os, "isatty", lambda fd: tty and fd == 99)
+    monkeypatch.setattr(lifecycle.os, "write", write)
+    lifecycle.restore_terminal_modes()
+    assert written == ([lifecycle._RESTORE_TERMINAL] if tty and not fails else [])
+    if written:
+        assert b"\x1b[?1000l" in written[0] and b"\x1b[?25h" in written[0]
+        assert b"\x1b[?1049" not in written[0]
+
+    monkeypatch.setattr(lifecycle.sys, "__stdout__", None)
+    lifecycle.restore_terminal_modes()

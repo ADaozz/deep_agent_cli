@@ -10,6 +10,8 @@ import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum
+import os
+import sys
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 import weakref
 
@@ -52,6 +54,23 @@ class TaskCleanupFailure:
     name: str
     stage: str
     error: BaseException | None = None
+
+
+# Idempotent only: no alternate-screen exit, which moves the cursor when the
+# terminal is not on the alternate screen.
+_RESTORE_TERMINAL = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?25h"
+
+
+def restore_terminal_modes() -> None:
+    """Turn mouse reporting off and show the cursor, whatever state the UI left."""
+    stream = sys.__stdout__
+    if stream is None:
+        return
+    try:
+        if os.isatty(stream.fileno()):
+            os.write(stream.fileno(), _RESTORE_TERMINAL)
+    except (OSError, ValueError):
+        pass
 
 
 async def _refuse_ui_task() -> None:

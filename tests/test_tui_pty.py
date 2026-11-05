@@ -200,6 +200,22 @@ def test_real_pty_exit_command_leaves_the_process(tui):
     assert tui.process.returncode == 0
 
 
+def _left_on(terminal: bytes, mode: bytes) -> bool:
+    return terminal.rfind(b'\x1b[?' + mode + b'h') > terminal.rfind(b'\x1b[?' + mode + b'l')
+
+
+@pytest.mark.parametrize('sig', [signal.SIGTERM, signal.SIGHUP])
+def test_real_pty_terminating_signal_restores_terminal(tui, sig):
+    terminal = bytes(tui.terminal)
+    assert _left_on(terminal, b'1000') and _left_on(terminal, b'1049')
+    tui.process.send_signal(sig)
+    tui.process.wait(timeout=5)
+    tui.read()
+    terminal = bytes(tui.terminal)
+    for mode in (b'1000', b'1003', b'1006', b'1049'):
+        assert not _left_on(terminal, mode), mode
+
+
 @pytest.mark.parametrize('gap,exits', [(0.3, True), (0.7, True), (1.2, False)])
 def test_real_pty_ctrl_c_window(tui, gap, exits):
     tui.send('draft\x03')

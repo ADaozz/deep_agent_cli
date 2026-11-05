@@ -1,5 +1,4 @@
 """验证系统提示词组装、原生技能目录及工具 Schema 未被运行期改写。"""
-import re
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -14,7 +13,7 @@ from agent.factory import create_agent
 from agent.sandbox import BackendSelection, ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 
-# 上游内置工具：描述与参数说明由工具定义提供，不应在模型请求阶段被改写。
+# 内置文件工具：描述与参数说明由工具定义提供，不应在模型请求阶段被改写。
 UPSTREAM_TOOLS = ("ls", "read_file", "write_file", "edit_file", "delete", "compact_conversation")
 
 
@@ -94,34 +93,12 @@ def test_system_prompt_composition_and_native_tool_schemas(tmp_path, with_skills
     bound = prepared.graph.nodes["tools"].bound.tools_by_name
     for name in UPSTREAM_TOOLS:
         assert convert_to_openai_tool(bound[name]) == convert_to_openai_tool(schemas[name])
-        function = convert_to_openai_tool(schemas[name])["function"]
-        assert not re.search(r"[\u4e00-\u9fff]", function["description"])
-        for schema in function["parameters"].get("properties", {}).values():
-            if "description" in schema:
-                assert not re.search(r"[\u4e00-\u9fff]", schema["description"])
     assert len(capture.messages) == 1
     content = str(capture.messages[0].content)
-    for expected in ("编程智能体", "# 用户指令", "保留用户约定。", "# 项目指令", "保留项目约定。"):
+    for expected in ("# 用户指令", "保留用户约定。", "# 项目指令", "保留项目约定。"):
         assert expected in content
     if with_skills:
         # 上游 SkillsMiddleware 渲染技能目录，技能可被发现并呈现。
         assert content.count("## Skills System") == 1
         assert "demo" in content and "示例技能" in content and "/skills/demo/SKILL.md" in content
     assert {"read_file", "request_human_input", "compact_conversation"} <= graph_tool_names(prepared.graph)
-
-
-def test_upstream_tool_schema_unchanged_without_localization(tmp_path):
-    """启用与未启用技能时，上游工具 Schema 均保持原样。"""
-    skill = tmp_path / "skills" / "demo" / "SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text("---\nname: demo\ndescription: 示例技能\n---\n技能正文")
-    model = scripted_model([AIMessage(content="unused")])
-    prepared = create_agent(model=model, backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True), skills=[])
-    bound = prepared.graph.nodes["tools"].bound.tools_by_name
-    for name in UPSTREAM_TOOLS:
-        function = convert_to_openai_tool(bound[name])["function"]
-        assert function["description"], name
-        assert not re.search(r"[\u4e00-\u9fff]", function["description"])
-        for schema in function["parameters"].get("properties", {}).values():
-            if "description" in schema:
-                assert not re.search(r"[\u4e00-\u9fff]", schema["description"])

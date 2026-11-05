@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 
 from rich.console import Console
 
 from agent.cli import CliApplication
 from agent.cli.app import default_config_dir
+from agent.cli.lifecycle import restore_terminal_modes
 from agent.bootstrap import initialize_user_files
 from agent.config import ConfigError, Settings, require_keybindings_outside_workspace
 from agent.runner import AgentRunner
@@ -105,19 +108,35 @@ def main(argv: list[str] | None = None) -> None:
         try:
             app.run()
         finally:
+            restore_terminal_modes()
             # run() already asked UI tasks to stop. That does not release the
             # session lease; close() still decides after the loop is gone.
             message = app.continue_session_message()
+            hung_up = app.terminated_by is signal.SIGHUP
             try:
                 runner.close()
             except RuntimeError as exc:
-                print(
-                    f"{exc}\nThe session lock is not released early; the operating "
-                    "system releases it when this process actually exits.",
-                    file=sys.stderr,
-                )
-            if message:
+                if not hung_up:
+                    print(
+                        f"{exc}\nThe session lock is not released early; the operating "
+                        "system releases it when this process actually exits.",
+                        file=sys.stderr,
+                    )
+            if message and not hung_up:
                 Console().print(message)
+    if app.terminated_by is not None:
+        _exit_by_signal(app.terminated_by)
+
+
+def _exit_by_signal(sig: signal.Signals) -> None:
+    """Die from ``sig`` after a clean shutdown so the parent sees the real cause."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
 
 
 if __name__ == "__main__":

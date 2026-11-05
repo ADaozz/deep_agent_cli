@@ -87,6 +87,30 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         runner.close()
 
 
+def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monkeypatch):
+    import agent.factory as factory
+    backend = StateBackend()
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
+    cfg = Settings(config_dir=tmp_path / 'private')
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'task', 'args': {
+            'description': 'List files', 'subagent_type': 'general-purpose'}, 'id': 'delegate'}]),
+        AIMessage(content='', tool_calls=[{'name': 'ls', 'args': {'path': '/'}, 'id': 'child-ls'}]),
+        AIMessage(content='child final'),
+        AIMessage(content='parent answer'),
+    ])
+    events = []
+    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg),
+                         settings=cfg, on_event=events.append)
+    try:
+        result = runner.invoke('delegate a listing')
+        assert result.status == 'completed', result.error
+        recorded = [e.result['tool_calls'] for e in events if e.type == 'model_metrics']
+        assert recorded == [['task'], []]
+    finally:
+        runner.close()
+
+
 def test_disabled_task_and_custom_backend_refusal(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     prepared = create_agent(model=scripted_model([AIMessage(content='done')]), backend=StateBackend(),

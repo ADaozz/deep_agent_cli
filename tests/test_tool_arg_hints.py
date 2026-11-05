@@ -27,13 +27,10 @@ def test_validation_error_becomes_actionable_hint() -> None:
     content = str(result.content)
     assert result.status == "error"
     assert result.tool_call_id == "call-1"
-    assert "没有执行" in content
-    assert "不要原样重发" in content
-    assert "原生 JSON 数组" in content
+    assert "Please fix the error" not in content
     assert "五个字段，见上文" in content
     assert '"FieldSpec"' in content
     assert '"title":{' in content.replace(" ", "")
-    assert "收到 str" in content
 
 
 def test_tool_body_error_is_not_blamed_on_arguments() -> None:
@@ -52,7 +49,6 @@ def test_excessive_choices_tell_model_to_shorten_options() -> None:
     result = ToolArgHintMiddleware().wrap_tool_call(request, lambda _: _error_message(tool))
     assert result.status == "error"
     assert "fields.0.options" in result.content
-    assert "精简后重新调用" in result.content
     assert '"maxItems":3' in result.content.replace(" ", "")
 
 

@@ -9,7 +9,12 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
 import asyncio
+from contextlib import contextmanager
 import logging
+import os
+import signal
+import sys
+from types import SimpleNamespace
 import pytest
 
 from agent.cli.interactions import InteractionController
@@ -884,6 +889,32 @@ def test_status_metrics_are_compact_indented_and_grouped_by_model_effort():
         assert text in app.state.blocks[-1].content
 
 
+def test_status_tool_usage_table_has_a_column_per_model() -> None:
+    runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
+    try:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            assert app._tool_usage_lines() == "Tool usage: none yet"
+            app.state.load_model_metrics([
+                {"model": "deepseek-flash", "reasoning_effort": "low", "tool_calls": ["execute", "read_file"]},
+                {"model": "deepseek-flash", "reasoning_effort": "high", "tool_calls": ["execute", "mcp__docs__search"]},
+                {"model": "qwen3.8-max", "reasoning_effort": "default",
+                 "tool_calls": ["read_file", "grep", "task", "read_subagent_log"]},
+                {"model": "glm-5.3", "tps": 10.0},
+            ])
+            assert app._tool_usage_lines().splitlines() == [
+                "Tool usage",
+                "  Tool       deepseek-flash  qwen3.8-max",
+                "  execute                 2            0",
+                "  read_file               1            1",
+                "  grep                    0            1",
+            ]
+            app.show_status()
+            assert app._tool_usage_lines() in app.state.blocks[-1].content
+    finally:
+        runner.close()
+
+
 def test_status_metrics_restore_on_restart_switch_and_clear(tmp_path):
     from agent.session import SessionStore
     from agent.cli.commands import _clear
@@ -994,3 +1025,50 @@ def test_python_warnings_do_not_overwrite_tui_input(capsys) -> None:
         assert warnings.showwarning is previous
         assert capsys.readouterr().err == ""
     runner.close()
+
+
+@pytest.mark.parametrize("sig,prints_resume", [(signal.SIGTERM, True), (signal.SIGHUP, False)])
+def test_main_dies_from_terminating_signal_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys, sig, prints_resume,
+) -> None:
+    from agent.cli import main as cli_main
+
+    events: list[object] = []
+
+    class FakeRunner:
+        def close(self) -> None:
+            events.append("close")
+
+    class FakeApp:
+        def __init__(self, runner, config_dir=None) -> None:
+            self.sessions = SimpleNamespace(startup_session_id=None, open_picker_on_start=False)
+            self.terminated_by = None
+
+        @contextmanager
+        def _capture_runtime_logs(self):
+            yield
+
+        def run(self) -> None:
+            self.terminated_by = sig
+
+        def continue_session_message(self) -> str:
+            return "resume-hint"
+
+    settings = SimpleNamespace(config_dir=tmp_path, sandbox=SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(cli_main, "initialize_user_files", lambda: None)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(cli_main.Settings, "load", staticmethod(lambda: settings))
+    monkeypatch.setattr(cli_main, "require_keybindings_outside_workspace", lambda *_: None)
+    monkeypatch.setattr(cli_main, "create_runner", lambda _settings: FakeRunner())
+    monkeypatch.setattr(cli_main, "CliApplication", FakeApp)
+    monkeypatch.setattr(cli_main, "restore_terminal_modes", lambda: events.append("restore"))
+    monkeypatch.setattr(cli_main.signal, "signal", lambda s, handler: events.append(("signal", s, handler)))
+    monkeypatch.setattr(cli_main.os, "kill", lambda pid, s: events.append(("kill", pid, s)))
+
+    cli_main.main([])
+
+    assert events == [
+        "restore", "close", ("signal", sig, signal.SIG_DFL), ("kill", os.getpid(), sig),
+    ]
+    assert ("resume-hint" in capsys.readouterr().out) is prints_resume

@@ -96,6 +96,8 @@ flowchart TB
 
 文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read_file`、`write_file`、`edit_file` 和 `delete`，不包含 `grep` 或 `glob`。
 
+`ls` 和 `read_file` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本，其余文件工具沿用上游说明。上游 `ls` 要求读写文件前几乎总是先列目录，`read_file` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`。调用方传入的 `custom_tool_descriptions` 优先于这两条默认值。
+
 Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `task`。关闭 `subagents.enabled` 后不提供 `task` 或 `read_subagent_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
 ### SubAgent 委派边界

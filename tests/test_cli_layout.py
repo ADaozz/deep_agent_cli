@@ -949,10 +949,14 @@ def test_git_status_parsing() -> None:
     assert clean == GitSummary(branch="main", changed=0, available=True)
     assert clean.label() == "⎇ main · clean"
 
-    dirty = parse_status("## feature/x...origin/feature/x [ahead 2]\n M a.py\n?? b.py\n")
+    dirty = parse_status("## feature/x...origin/feature/x [ahead 2]\n M a.py\nA  c.py\n?? b.py\n")
     assert dirty.branch == "feature/x"
     assert dirty.changed == 2
     assert dirty.label() == "⎇ feature/x · 2 changed"
+
+    untracked_only = parse_status("## main\n?? a.py\n?? b.py\n")
+    assert untracked_only.changed == 0
+    assert untracked_only.label() == "⎇ main · clean"
 
     assert parse_status("## No commits yet on main\n?? a.py\n").branch == "main"
     assert parse_status("## HEAD (no branch)\n").branch == "detached"

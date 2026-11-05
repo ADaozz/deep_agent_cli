@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agent.config import BindMount, SandboxConfig
 from agent.factory import DEFAULT_FS_TOOLS, create_agent
 from agent.factory import _default_skill_sources
-from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
+from agent.middleware.workspace_filesystem import TOOL_DESCRIPTIONS, WorkspaceFilesystemMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.runner import AgentRunner, RunEvent
 from agent.sandbox import (
@@ -220,6 +220,28 @@ def test_workspace_middleware_reports_executor_and_skips_shell_denial_prompt(
     filtered = seen[0]
     assert [tool["name"] for tool in filtered.tools] == ["execute", "ls"]
     assert filtered.system_message.content == "base"
+
+
+def test_workspace_middleware_local_descriptions_yield_to_caller_overrides(tmp_path: Path) -> None:
+    from tests.host_command import HostCommandBackend
+
+    composite = WorkspaceCompositeBackend(HostCommandBackend(tmp_path), skills_dir=None)
+
+    def descriptions(**kwargs) -> dict[str, str]:
+        middleware = WorkspaceFilesystemMiddleware(backend=composite, tools=list(DEFAULT_FS_TOOLS), **kwargs)
+        return {tool.name: tool.description for tool in middleware.tools}
+
+    upstream = {tool.name: tool.description for tool in FilesystemMiddleware(
+        backend=composite, tools=list(DEFAULT_FS_TOOLS),
+    ).tools}
+    defaults = descriptions()
+    for name, description in defaults.items():
+        assert description == TOOL_DESCRIPTIONS.get(name, upstream[name]), name
+
+    custom = descriptions(custom_tool_descriptions={"ls": "custom", "write_file": "custom write"})
+    assert custom["ls"] == "custom"
+    assert custom["write_file"] == "custom write"
+    assert custom["read_file"] == TOOL_DESCRIPTIONS["read_file"]
 
 
 def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:

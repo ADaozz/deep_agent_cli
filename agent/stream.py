@@ -10,6 +10,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessageChunk, BaseMessage
 
 from agent.performance import GenerationTiming
+from agent.sandbox import SKILLS_ROOT
 
 DeltaHandler = Callable[[str, str], None]
 
@@ -99,6 +100,21 @@ def _chunk_message(chunk: Any) -> BaseMessage | None:
         return chunk
     message = getattr(chunk, "message", None)
     return message if isinstance(message, BaseMessage) else None
+
+
+def requested_tool_names(message: BaseMessage | None) -> list[str]:
+    """Tool names one model response asked for, without reads of skill files."""
+    names: list[str] = []
+    for call in getattr(message, "tool_calls", None) or ():
+        name = call.get("name") if isinstance(call, dict) else None
+        if not isinstance(name, str) or not name:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        path = str(args.get("file_path") or args.get("path") or "")
+        if name == "read_file" and (path == SKILLS_ROOT or path.startswith(f"{SKILLS_ROOT}/")):
+            continue
+        names.append(name)
+    return names
 
 
 class StreamDeltaCallback(BaseCallbackHandler):
@@ -237,14 +253,21 @@ class StreamDeltaCallback(BaseCallbackHandler):
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
         if self._finish_summary(kwargs.get("run_id")):
             return
-        usage = self._message.usage_metadata if self._message is not None else None
-        # Non-streaming models report usage on the final generation instead.
-        if not isinstance(usage, dict) and args:
+        final: BaseMessage | None = self._message
+        if args:
             generations = getattr(args[0], "generations", [])
             if generations and generations[0]:
-                usage = getattr(getattr(generations[0][0], "message", None), "usage_metadata", None)
+                generated = getattr(generations[0][0], "message", None)
+                if isinstance(generated, BaseMessage):
+                    final = generated
+        usage = self._message.usage_metadata if self._message is not None else None
+        # Non-streaming models report usage on the final generation instead.
+        if not isinstance(usage, dict) and final is not None:
+            usage = getattr(final, "usage_metadata", None)
         if self._on_metrics and self._timing is not None:
-            self._on_metrics(self._timing.snapshot(usage))
+            metrics = self._timing.snapshot(usage)
+            metrics["tool_calls"] = requested_tool_names(final)
+            self._on_metrics(metrics)
         self._timing = None
         if self._on_end:
             self._on_end(self._assistant, self._reasoning)

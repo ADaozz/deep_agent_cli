@@ -19,7 +19,7 @@ _NO_BRANCH_PREFIX = "No commits yet on "
 
 @dataclass(frozen=True)
 class GitSummary:
-    """Branch name plus changed-path count; empty when this is not a repository."""
+    """Branch name plus changed tracked-path count; empty when this is not a repository."""
 
     branch: str = ""
     changed: int = 0
@@ -51,7 +51,7 @@ def parse_status(output: str) -> GitSummary:
             branch = head.split("...", 1)[0].strip()
     return GitSummary(
         branch=branch or "unknown",
-        changed=sum(1 for line in lines if line.strip()),
+        changed=sum(1 for line in lines if line.strip() and not line.startswith("??")),
         available=True,
     )
 
@@ -68,7 +68,7 @@ class GitProbe:
         spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                "git", "status", "--porcelain", "--branch",
+                "git", "status", "--porcelain", "--branch", "--untracked-files=no",
                 cwd=str(self.workspace),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

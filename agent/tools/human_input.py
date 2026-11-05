@@ -49,7 +49,7 @@ class FieldSpec(BaseModel):
     options: list[FieldOption] = Field(
         default_factory=list,
         max_length=3,
-        description="single_select / multi_select 的候选项，最多 3 个；Other 由系统另行添加，不要自行提供。其他类型留空数组",
+        description="single_select / multi_select 的候选项，最多 3 个，保留最相关的；系统会另加 Other 自定义输入，不要自行提供",
     )
 
     @field_validator("type", mode="before")
@@ -158,15 +158,8 @@ def _plain(value: Any) -> Any:
 
 def _request_description() -> str:
     return (
-        "请求用户提供继续执行所需的信息或决策，并暂停直到收到响应。"
-        "仅在继续执行必需的信息或决策无法合理确定时调用；能自行判断的技术细节应自主处理。"
-        "任务完成后介绍可选后续操作时无需调用。"
-        "只声明交互语义，不要指定前端组件。"
-        "fields / recommendation / impact 必须传原生 JSON 结构，不要序列化成字符串。"
-        "有可选项时必须用 single_select 或 multi_select，选项写进该字段的 options，"
-        "每题最多提供 3 个候选项，优先保留最相关的选择。"
-        "不要把选项写成 question 里的 Markdown 列表。"
-        "选择题会自动附加 Other: 自定义输入选项，不计入这 3 个候选项，无需自行提供。"
-        "question 只保留简短题干。"
-        "recommendation 与 impact 可选。这不是工具权限确认。"
+        "暂停并请用户提供继续执行所必需、且无法自行合理确定的信息或决策；"
+        "能自行判断的技术细节自主处理，任务完成后介绍后续选项时不要调用。这不是工具权限确认。"
+        "有可选项时用 single_select / multi_select 字段的 options 提供，不要写进 question。"
+        "fields / recommendation / impact 传原生 JSON 结构，不要序列化成字符串。"
     )

@@ -7,6 +7,7 @@ from contextvars import ContextVar, copy_context
 from functools import partial
 import logging
 import os
+import signal
 import time
 import warnings
 from time import monotonic
@@ -82,7 +83,7 @@ from agent.permission import (
     allow_mode_unavailable_reason,
     parse_permission_mode,
 )
-from agent.cli.lifecycle import AppLifecycle, TaskStop
+from agent.cli.lifecycle import AppLifecycle, TaskStop, restore_terminal_modes
 from agent.cli.mcp_controller import MCPController
 from agent.cli.input_actions import (
     EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
@@ -90,7 +91,7 @@ from agent.cli.input_actions import (
     InputActionRouter,
     InputView,
 )
-from agent.performance import model_metric_groups
+from agent.performance import model_metric_groups, tool_usage_by_model
 from agent.mcp.logging import MCPLogHandler
 from agent.runner import AgentRunner, InterruptKind, RunEvent, RunResult, UnknownInterruptError
 
@@ -466,6 +467,7 @@ class CliApplication:
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
         self.lifecycle = AppLifecycle(self)
+        self.terminated_by: signal.Signals | None = None
         self.mcp_controller = MCPController()
         self._mcp_draft: dict[str, str] = {}
         self._transcript_line_count = 1
@@ -729,13 +731,53 @@ class CliApplication:
 
     async def run_async(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._start_git_watch()
-        with self._capture_runtime_logs():
+        installed = self._install_signal_handlers(self._loop)
+        try:
+            self._start_git_watch()
+            with self._capture_runtime_logs():
+                try:
+                    await self.sessions.start()
+                    await self.application.run_async(pre_run=self._before_ui)
+                finally:
+                    await self.lifecycle.shutdown()
+        finally:
+            # Removing a handler restores SIG_DFL, so a signal during
+            # runner.close() terminates the process directly.
+            for sig in installed:
+                self._loop.remove_signal_handler(sig)
+
+    def _install_signal_handlers(self, loop: asyncio.AbstractEventLoop) -> list[signal.Signals]:
+        installed: list[signal.Signals] = []
+        for sig in (signal.SIGTERM, signal.SIGHUP):
             try:
-                await self.sessions.start()
-                await self.application.run_async(pre_run=self._start_mcp_connections)
-            finally:
-                await self.lifecycle.shutdown()
+                loop.add_signal_handler(sig, self._on_terminate_signal, sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue
+            installed.append(sig)
+        return installed
+
+    def _on_terminate_signal(self, sig: signal.Signals) -> None:
+        """First signal leaves through the normal exit path; a second one stops now."""
+        if self.terminated_by is None:
+            self.terminated_by = sig
+            if not self.application.is_running:
+                # application.exit() needs a running UI; pre_run exits instead.
+                return
+            try:
+                self.lifecycle.request_exit()
+            except OSError:
+                # SIGHUP: the terminal may already be gone.
+                pass
+            return
+        restore_terminal_modes()
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+
+    def _before_ui(self) -> None:
+        if self.terminated_by is not None:
+            self.lifecycle.request_exit()
+            return
+        self._start_mcp_connections()
 
     def _start_mcp_connections(self) -> None:
         manager = getattr(self.runner, "mcp", None)
@@ -996,8 +1038,24 @@ class CliApplication:
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
             f"{tool_line}\n"
-            f"{self._model_metrics_lines()}"
+            f"{self._model_metrics_lines()}\n\n"
+            f"{self._tool_usage_lines()}"
         )
+
+    def _tool_usage_lines(self) -> str:
+        models, rows = tool_usage_by_model(self.state.model_metrics_history)
+        if not rows:
+            return "Tool usage: none yet"
+        header = ["Tool", *models]
+        table = [header, *([name, *(str(row.get(model, 0)) for model in models)] for name, row in rows)]
+        widths = [max(get_cwidth(line[index]) for line in table) for index in range(len(header))]
+
+        def format_line(cells: list[str]) -> str:
+            name = cells[0] + " " * (widths[0] - get_cwidth(cells[0]))
+            values = (" " * (widths[i] - get_cwidth(cell)) + cell for i, cell in enumerate(cells[1:], 1))
+            return "  " + "  ".join([name, *values]).rstrip()
+
+        return "Tool usage\n" + "\n".join(format_line(line) for line in table)
 
     def _model_metrics_lines(self) -> str:
         groups = model_metric_groups(self.state.model_metrics_history)

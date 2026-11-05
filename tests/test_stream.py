@@ -216,6 +216,25 @@ def test_tool_argument_chunks_count_as_generated_output(monkeypatch):
     cb.on_llm_end(None)
     assert reports[0]["ttft"] == 2
     assert reports[0]["tps"] == reports[0]["answer_tps"] == 10
+    assert reports[0]["tool_calls"] == ["execute"]
+
+
+def test_metrics_record_requested_tools_without_skill_reads():
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    reports = []
+    cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
+    cb.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
+    cb.on_llm_end(LLMResult(generations=[[ChatGeneration(message=AIMessage(content="", tool_calls=[
+        {"id": "1", "name": "read_file", "args": {"file_path": "/skills/pptx/SKILL.md"}},
+        {"id": "2", "name": "read_file", "args": {"file_path": "/workspace/a.py"}},
+        {"id": "3", "name": "execute", "args": {"command": "ls"}},
+        {"id": "4", "name": "mcp__docs__search", "args": {}},
+    ]))]]))
+    assert reports[0]["tool_calls"] == ["read_file", "execute", "mcp__docs__search"]
+    cb.on_llm_start({})
+    cb.on_llm_end(None)
+    assert reports[1]["tool_calls"] == []
 
 
 def test_metrics_capture_reasoning_effort_for_both_protocols():

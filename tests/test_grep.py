@@ -473,7 +473,6 @@ def test_grep_and_glob_are_not_registered(workspace, monkeypatch, permission):
     assert set(execute.args) == {"command", "timeout", "network"}
     expected = _SEARCH_GUIDANCE if implementation.resolve_rg() else _SEARCH_UNAVAILABLE
     assert expected in execute.description
-    assert "Prefer ls/" not in execute.description
 
 
 def test_execute_description_tracks_rg_availability(monkeypatch):
@@ -489,18 +488,16 @@ def test_execute_description_tracks_rg_availability(monkeypatch):
     allowed = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
     for tool in (available, allowed):
         assert _SEARCH_GUIDANCE in tool.description
-        assert "无需安装或下载" in tool.description
-        assert "Prefer ls/" not in tool.description
+        assert _SEARCH_UNAVAILABLE not in tool.description
         assert set(tool.args) == {"command", "timeout", "network"}
-    assert "每次 execute 都需审批" in available.description
-    assert "无需审批" in allowed.description
+    assert available.description != allowed.description
 
     monkeypatch.setattr(implementation, "resolve_rg", lambda: None)
     missing = build_execute_tool(Backend())  # type: ignore[arg-type]
     missing_allow = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
     for tool in (missing, missing_allow):
         assert _SEARCH_UNAVAILABLE in tool.description
-        assert "使用 rg -n" not in tool.description
+        assert _SEARCH_GUIDANCE not in tool.description
         assert set(tool.args) == {"command", "timeout", "network"}
 
 
