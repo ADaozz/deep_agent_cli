@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from typing import Any, TypeGuard
 from zoneinfo import ZoneInfo
@@ -120,16 +120,43 @@ def _render_unit(renderable: Any, width: int) -> RenderedUnit:
     return RenderedUnit(fragments, text.count("\n") + 1)
 
 
+@dataclass
+class TranscriptUnitMemo:
+    """The previous structural pass, reused up to the first block that changed.
+
+    Rebuilding a descriptor per block on every frame allocates enough
+    short-lived objects in long sessions to trigger full GC passes.
+    """
+
+    settings: tuple[Any, ...] = ()
+    header: TranscriptUnit | None = None
+    blocks: list[Any] = field(default_factory=list)
+    revisions: list[int] = field(default_factory=list)
+    units: list[TranscriptUnit] = field(default_factory=list)
+    # Exclusive end index into ``blocks`` of each unit, ascending.
+    ends: list[int] = field(default_factory=list)
+
+    def first_changed(self, blocks: list[Any]) -> int:
+        """Index of the first block that is new, mutated or still animating."""
+        limit = min(len(blocks), len(self.blocks))
+        for index in range(limit):
+            block = blocks[index]
+            if (
+                block is not self.blocks[index]
+                or getattr(block, "revision", 0) != self.revisions[index]
+                or (isinstance(block, ToolBlock) and block.status == "running")
+            ):
+                return index
+        return limit
+
+
 def transcript_units(
     state: CliState, timezone: ZoneInfo | None = None, width: int = 80,
     *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    memo: TranscriptUnitMemo | None = None,
 ) -> list[TranscriptUnit]:
     """Structural pass over the timeline. Cheap: builds no Rich renderables."""
     timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
-    units: list[TranscriptUnit] = [
-        TranscriptUnit("header", (), lambda: Group(*_header())),
-    ]
-    index = 0
     # Streaming can create an assistant block before any visible text arrives.
     # An empty Rich Group still occupies a row, adding a second gap above the
     # editor. Keep these placeholders out of the layout until they have content.
@@ -140,65 +167,96 @@ def transcript_units(
             and not block.content.strip() and not block.thinking.strip()
         )
     ]
+    if memo is None:
+        units, _ends = _units_from(blocks, 0, state, timezone, width, limits)
+        return [TranscriptUnit("header", (), lambda: Group(*_header())), *units]
+    settings = (
+        width, timezone.key, limits, state.thinking_collapsed, state.messages_expanded, state.tools_expanded,
+    )
+    kept = 0
+    if memo.settings == settings:
+        changed = memo.first_changed(blocks)
+        # A unit ending right at a changed block may absorb it into its group.
+        kept = bisect_left(memo.ends, changed) if changed < len(blocks) else bisect_right(memo.ends, changed)
+    else:
+        memo.settings = settings
+    if memo.header is None:
+        memo.header = TranscriptUnit("header", (), lambda: Group(*_header()))
+    start = memo.ends[kept - 1] if kept else 0
+    units, ends = _units_from(blocks, start, state, timezone, width, limits)
+    del memo.units[kept:], memo.ends[kept:]
+    memo.units.extend(units)
+    memo.ends.extend(ends)
+    memo.blocks = blocks
+    memo.revisions = [getattr(block, "revision", 0) for block in blocks]
+    return [memo.header, *memo.units]
+
+
+def _units_from(
+    blocks: list[Any], index: int, state: CliState, timezone: ZoneInfo, width: int, limits: UiDisplayLimits,
+) -> tuple[list[TranscriptUnit], list[int]]:
+    units: list[TranscriptUnit] = []
+    ends: list[int] = []
     while index < len(blocks):
         block = blocks[index]
         previous = blocks[index - 1] if index else None
         # The user bubble already carries one blank row below it; the next unit
         # drops its own top margin so exactly one blank line separates them.
         after_user = isinstance(previous, MessageBlock) and previous.kind == "user"
-        if isinstance(block, MessageBlock):
-            units.append(_message_unit(
-                block, state.thinking_collapsed, limits, state.messages_expanded,
-                after_user=after_user,
-            ))
-            index += 1
-            continue
-        if isinstance(block, TurnSummaryBlock):
-            units.append(TranscriptUnit(
-                key=("turn_summary", id(block)),
-                fingerprint=timezone.key,
-                build=lambda block=block: _turn_summary(block, timezone),
-                owner=block,
-            ))
-            index += 1
-            continue
-        if _created_file_path(block) is not None:
-            group = [block]
-            while index + len(group) < len(blocks):
-                candidate = blocks[index + len(group)]
-                if _created_file_path(candidate) is None:
-                    break
-                group.append(candidate)
-            if len(group) > 1:
-                units.append(_create_group_unit(group, state.tools_expanded, width, limits=limits, after_user=after_user))
-                index += len(group)
-                continue
-        if not state.tools_expanded and _is_explore(block):
-            group = [block]
-            index += 1
-            while index < len(blocks):
-                next_block = blocks[index]
-                if not _is_explore(next_block):
-                    break
-                group.append(next_block)
-                index += 1
-            units.append(_explore_unit(group, width, limits=limits, after_user=after_user))
-            continue
-        edit_path = _mergeable_modify_path(block)
-        if edit_path is not None:
-            group = [block]
-            while index + len(group) < len(blocks):
-                candidate = blocks[index + len(group)]
-                if _mergeable_modify_path(candidate) != edit_path:
-                    break
-                group.append(candidate)
-            if len(group) > 1:
-                units.append(_modify_group_unit(group, width, limits=limits, after_user=after_user))
-                index += len(group)
-                continue
-        units.append(_tool_unit(block, state.tools_expanded, width, limits=limits, after_user=after_user))
+        unit, index = _next_unit(blocks, index, block, after_user, state, timezone, width, limits)
+        units.append(unit)
+        ends.append(index)
+    return units, ends
+
+
+def _next_unit(
+    blocks: list[Any], index: int, block: Any, after_user: bool,
+    state: CliState, timezone: ZoneInfo, width: int, limits: UiDisplayLimits,
+) -> tuple[TranscriptUnit, int]:
+    """The unit starting at ``index`` and the index just past it."""
+    if isinstance(block, MessageBlock):
+        return _message_unit(
+            block, state.thinking_collapsed, limits, state.messages_expanded, after_user=after_user,
+        ), index + 1
+    if isinstance(block, TurnSummaryBlock):
+        return TranscriptUnit(
+            key=("turn_summary", id(block)),
+            fingerprint=timezone.key,
+            build=lambda block=block: _turn_summary(block, timezone),
+            owner=block,
+        ), index + 1
+    if _created_file_path(block) is not None:
+        group = [block]
+        while index + len(group) < len(blocks):
+            candidate = blocks[index + len(group)]
+            if _created_file_path(candidate) is None:
+                break
+            group.append(candidate)
+        if len(group) > 1:
+            return _create_group_unit(
+                group, state.tools_expanded, width, limits=limits, after_user=after_user,
+            ), index + len(group)
+    if not state.tools_expanded and _is_explore(block):
+        group = [block]
         index += 1
-    return units
+        while index < len(blocks):
+            next_block = blocks[index]
+            if not _is_explore(next_block):
+                break
+            group.append(next_block)
+            index += 1
+        return _explore_unit(group, width, limits=limits, after_user=after_user), index
+    edit_path = _mergeable_modify_path(block)
+    if edit_path is not None:
+        group = [block]
+        while index + len(group) < len(blocks):
+            candidate = blocks[index + len(group)]
+            if _mergeable_modify_path(candidate) != edit_path:
+                break
+            group.append(candidate)
+        if len(group) > 1:
+            return _modify_group_unit(group, width, limits=limits, after_user=after_user), index + len(group)
+    return _tool_unit(block, state.tools_expanded, width, limits=limits, after_user=after_user), index + 1
 
 
 def _message_unit(
@@ -318,7 +376,8 @@ class TranscriptRenderer:
 
     def __init__(self, timezone: ZoneInfo | None = None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> None:
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
-        self._documents: dict[bool, tuple[Any, tuple[Any, ...], TranscriptDocument]] = {}
+        self._units: dict[bool, TranscriptUnitMemo] = {}
+        self._documents: dict[bool, tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
         self._width = 0
         self._timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
         self._limits = limits
@@ -327,17 +386,21 @@ class TranscriptRenderer:
         if width != self._width:
             self.clear()
             self._width = width
-        units = transcript_units(state, self._timezone, width, limits=self._limits)
+        mode = state.tools_expanded
+        memo = self._units.setdefault(mode, TranscriptUnitMemo())
+        units = transcript_units(state, self._timezone, width, limits=self._limits, memo=memo)
         live_ids = {id(block) for block in state.blocks}
         live = {"header"}
         live.update(key for key in self._cache if isinstance(key, tuple) and len(key) > 1 and key[1] in live_ids)
         for key in [key for key in self._cache if key not in live]:
             del self._cache[key]
-        signature = tuple((unit.key, unit.fingerprint) for unit in units)
-        mode = state.tools_expanded
+        # Units before the first changed block are the same objects as last frame.
+        signature = tuple(units)
         document_entry = self._documents.get(mode)
-        if document_entry is not None and document_entry[0] == signature:
-            return document_entry[2]
+        if document_entry is not None and len(document_entry[0]) == len(signature) and all(
+            previous is current for previous, current in zip(document_entry[0], signature)
+        ):
+            return document_entry[1]
         rendered_units: list[RenderedUnit] = []
         starts: list[int] = []
         line_count = 0
@@ -356,7 +419,8 @@ class TranscriptRenderer:
             line_count += rendered.line_count
             rendered_units.append(rendered)
         document = TranscriptDocument(tuple(rendered_units), tuple(starts), line_count)
-        self._documents[mode] = (signature, tuple(unit.owner for unit in units), document)
+        # Units hold their owners, so cached block ids cannot be recycled.
+        self._documents[mode] = (signature, document)
         return document
 
     def render(self, state: CliState, width: int) -> tuple[FormattedText, int]:
@@ -370,6 +434,7 @@ class TranscriptRenderer:
 
     def clear(self) -> None:
         self._cache.clear()
+        self._units.clear()
         self._documents.clear()
 
 
