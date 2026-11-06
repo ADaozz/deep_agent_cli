@@ -2004,6 +2004,8 @@ class CliApplication:
 
     def _footer_text(self):  # type: ignore[no-untyped-def]
         mode = self.runner.prepared.execution_mode.value.lower()
+        if mode == "sandboxed":
+            mode = "sandbox"
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
