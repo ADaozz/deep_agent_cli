@@ -623,8 +623,22 @@ def _subagent_stream_probe():
         "from agent.cli.app import CliApplication",
         "from agent.cli.app import CliApplication\nfrom agent.cli.rendering import render_transcript",
     ).replace(
+        "app = CliApplication(runner)",
+        "app = CliApplication(runner)\n"
+        "    samples = []\n"
+        "    _apply_state = app.state.apply\n"
+        "    def _apply_state_and_sample(event):\n"
+        "        _apply_state(event)\n"
+        "        if len(samples) < 400:\n"
+        "            samples.append({'subagents': app.state.subagent_count,\n"
+        "                            'rendered': render_transcript(app.state, 100),\n"
+        "                            'status_line': ''.join(part[1] for part in app._status_text())})\n"
+        "    app.state.apply = _apply_state_and_sample",
+    ).replace(
         "'running': app.state.running,",
-        "'running': app.state.running, 'subagents': app.state.subagent_count, 'rendered': render_transcript(app.state, 100), 'status_line': ''.join(x[1] for x in app._status_text()),",
+        "'running': app.state.running, 'subagents': app.state.subagent_count,"
+        " 'rendered': render_transcript(app.state, 100),"
+        " 'status_line': ''.join(x[1] for x in app._status_text()), 'samples': samples,",
     )
 
 
@@ -678,10 +692,20 @@ def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
             assert state['status_line'].endswith('2 subagents')
             assert state['rendered'].count('Running SubAgent') == 2
             assert 'Fix median3' in state['rendered'] and 'Fix is_leap_year' in state['rendered']
-            state = tui.wait(lambda state: state['subagents'] == 1 and 'First child result' in state['rendered'], timeout=10)
-            assert state['status_line'].endswith('1 subagent')
-            assert state['rendered'].count('Running SubAgent') == 1
-            assert '└ result' in state['rendered']
+            # Tool completions are posted back to back. A 20ms snapshot can miss
+            # the frame where exactly one card is still running, so the probe
+            # records every state update.
+            state = tui.wait(lambda state: any(
+                item['subagents'] == 1 and 'First child result' in item['rendered']
+                for item in state.get('samples', [])
+            ), timeout=15)
+            sample = next(
+                item for item in state['samples']
+                if item['subagents'] == 1 and 'First child result' in item['rendered']
+            )
+            assert sample['status_line'].endswith('1 subagent')
+            assert sample['rendered'].count('Running SubAgent') == 1
+            assert '└ result' in sample['rendered']
             state = tui.wait(lambda state: not state['running'] and 'Parent completed both fixes' in state['rendered'], timeout=10)
             assert state['subagents'] == 0 and state['live_streams'] == 0
             assert 'subagent' not in state['status_line']
