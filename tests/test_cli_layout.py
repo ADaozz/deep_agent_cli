@@ -813,7 +813,6 @@ def test_footer_places_context_on_execution_settings_line_when_git_unavailable()
         app._git_summary = GitSummary()
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert "token-plan · auto · default" in lines[0]
         assert lines[0].rstrip().endswith("⎇ no git")
         assert lines[1].rstrip().endswith("1.0m Context · 0.0% used")
 

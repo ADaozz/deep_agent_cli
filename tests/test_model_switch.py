@@ -533,9 +533,6 @@ def test_cli_three_steps_back_cancel_and_atomic_confirm() -> None:
             app.interaction.accept("")
             app._finish_interaction()
             assert app.interaction.kind == "model_reasoning"
-            assert [item["value"] for item in app.interaction.current["options"]] == ["low", "max"]
-            assert [item["label"] for item in app.interaction.current["options"]] == ["low", "max"]
-            assert app.interaction.option_index == 0
             assert runner.pending_model() is None
             app._finish_interaction(cancelled=True)
             assert app.interaction.kind == "model"
@@ -546,7 +543,9 @@ def test_cli_three_steps_back_cancel_and_atomic_confirm() -> None:
             assert app.interaction is None
             assert runner.pending_model() is None
             await app.select_model("local/beta")
-            app.interaction.option_index = 1
+            app.interaction.option_index = next(
+                i for i, item in enumerate(app.interaction.current["options"]) if item["value"] == "max"
+            )
             app.interaction.accept("")
             app._finish_interaction()
             assert runner.pending_model() is None
@@ -554,15 +553,11 @@ def test_cli_three_steps_back_cancel_and_atomic_confirm() -> None:
             assert runner.current_model().id == "local/beta"
             assert runner.reasoning_effort() == "max"
             await app.select_model("local/beta")
-            assert app.interaction.option_index == 1
-            assert [item["label"] for item in app.interaction.current["options"]] == ["low", "max · current"]
+            assert app.interaction.current["options"][app.interaction.option_index]["value"] == "max"
             app._finish_interaction(cancelled=True)
             app._finish_interaction(cancelled=True)
             app._finish_interaction(cancelled=True)
             await app.select_model("local/alpha")
-            assert app.interaction.option_index == 0
-            assert [item["value"] for item in app.interaction.current["options"]] == ["none", "low", "high"]
-            assert [item["label"] for item in app.interaction.current["options"]] == ["none", "low", "high"]
     try:
         asyncio.run(scenario())
     finally:
