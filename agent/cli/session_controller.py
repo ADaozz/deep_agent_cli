@@ -107,7 +107,7 @@ class SessionController:
         app.interaction = InteractionController(
             kind="resume",
             title="Resume session",
-            question="Select a session to restore",
+            question="",
             fields=[{
                 "id": "session",
                 "type": "single_select",

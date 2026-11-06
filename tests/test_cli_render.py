@@ -55,6 +55,26 @@ from tests.cli_support import (
 from tests.conftest import scripted_model
 
 
+def test_interaction_headings_and_navigation_are_concise() -> None:
+    field = {"id": "effort", "label": "Reasoning effort", "type": "single_select",
+             "options": [{"value": "default", "label": "default"}]}
+    controller = InteractionController(kind="model_reasoning", title="Reasoning effort", question="", fields=[field])
+    rendered = _plain(render_interaction(controller, 80))
+    assert "1/1" not in rendered
+    assert rendered.count("Reasoning effort") == 1
+    assert "Esc back" in rendered
+    controller.fields.append({"id": "other", "label": "Other", "type": "text"})
+    assert "1/2  Reasoning effort" in _plain(render_interaction(controller, 80))
+
+
+def test_interaction_keeps_user_context() -> None:
+    controller = InteractionController.human({"title": "Input required", "question": "Which environment?",
+                                              "reason": "Deployment requires a target"})
+    rendered = _plain(render_interaction(controller, 80))
+    assert "Which environment?" in rendered
+    assert "Deployment requires a target" in rendered
+
+
 def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     rendered = _capture(_message(MessageBlock(kind="user", content="hello"), False)[0], 30)

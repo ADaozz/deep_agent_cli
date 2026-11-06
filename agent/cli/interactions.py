@@ -349,7 +349,8 @@ class InteractionController:
         if self.impact:
             parts.append(Text("Impact:\n" + "\n".join(f"• {item}" for item in self.impact), style="yellow"))
         field = self.current
-        parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {field.get('label') or field.get('id')}", style="bold"))
+        if len(self.fields) > 1:
+            parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {field.get('label') or field.get('id')}", style="bold"))
         options_start = len(parts)
         options = [] if self.custom_entry else field.get("options") or []
         selected = self.values.get(str(field.get("id") or "")) or []
@@ -383,7 +384,7 @@ class InteractionController:
             parts.append(Text("Other: enter your answer", style="cyan"))
         if self.custom_entry:
             hint = "Enter submit  Ctrl+J newline  Esc back"
-        elif self.kind == "model" and self.values.get("source"):
+        elif self.kind == "model_reasoning" or (self.kind == "model" and self.values.get("source")):
             hint = "↑↓ select  Enter confirm  Esc back"
         elif self.kind in {"approval", "human", "pause"} and options:
             hint = "↑↓ select  Enter confirm  Esc cancel · F2 to reopen"

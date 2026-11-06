@@ -1216,7 +1216,7 @@ class CliApplication:
             for source in sources
         ]
         self.interaction = InteractionController(
-            kind="model_source", title="Select model source", question="Choose a model source",
+            kind="model_source", title="Select model source", question="",
             fields=[{"id": "source", "type": "single_select", "label": "Source", "required": True, "options": options}],
         )
         if current_source in sources:
@@ -1241,7 +1241,7 @@ class CliApplication:
             })
         self.interaction = InteractionController(
             kind="model", title=f"Select model · {source}" if source else "Select model",
-            question="Choose a model", values={"source": source} if source else {},
+            question="", values={"source": source} if source else {},
             fields=[{"id": "model", "type": "single_select", "label": "Model", "required": True, "options": options}],
         )
         for index, option in enumerate(options):
@@ -1258,15 +1258,15 @@ class CliApplication:
         pending = self.runner.pending_model() or current
         if pending and pending.id == profile.id and self.runner.pending_reasoning_effort() is not None:
             selected = self.runner.pending_reasoning_effort()
-        efforts = list(profile.reasoning_efforts) or ["default"]
+        efforts = ["default", *(effort for effort in profile.reasoning_efforts if effort != "default")]
         self.interaction = InteractionController(
             kind="model_reasoning", title=f"Reasoning effort · {model_display_name(profile)}",
-            question="Choose reasoning effort",
+            question="",
             values={"model": profile.id, "source": source},
             fields=[{"id": "effort", "type": "single_select", "label": "Reasoning effort",
                      "required": True, "options": [
                          {"value": effort, "label": effort + (" · current" if effort == current_effort else ""),
-                          "description": "Use model default" if effort == "default" else ""}
+                          "description": ""}
                          for effort in efforts
                      ]}],
         )
@@ -1925,8 +1925,10 @@ class CliApplication:
         return FormattedText(fragments)
 
     def _status_visible(self) -> bool:
+        status = self.state.status
+        interaction_hint = self.interaction is not None and " · Enter confirm · Esc " in status
         return bool(
-            self.state.running or self.state.status != "Ready"
+            self.state.running or (status != "Ready" and not interaction_hint)
             or self.runner.control.pending_steering_count()
             or self.runner.control.pending_follow_up_count()
         )
@@ -1976,6 +1978,8 @@ class CliApplication:
             counter = _truncate_cells(f"{count} subagent" + ("s" if count != 1 else ""), width)
         left_width = max(0, width - get_cwidth(counter) - 1) if counter else width
         label = self.state.status if self.state.running or self.state.status != "Ready" else ""
+        if self.interaction is not None and " · Enter confirm · Esc " in label:
+            label = ""
         if (self._compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
         if pending:
@@ -2006,12 +2010,12 @@ class CliApplication:
             perm += f"→{pending_permission.value}(pending)"
         width = self._width()
         model = self.runner.current_model()
-        model_label = model_display_name(model) if model is not None else "fixed model"
+        model_label = model.model if model is not None else "fixed model"
         model_label += f" · {self.runner.reasoning_effort()}"
         pending_model = self.runner.pending_model()
         pending_effort = self.runner.pending_reasoning_effort()
         if pending_model is not None:
-            model_label += f" → {model_display_name(pending_model)} · {pending_effort or 'default'} (pending)"
+            model_label += f" → {pending_model.model} · {pending_effort or 'default'} (pending)"
         elif pending_effort is not None:
             model_label += f" → {pending_effort} (pending)"
         resume_id = self.runner.thread_id[:8]
