@@ -292,7 +292,7 @@ def test_cancelled_model_stream_keeps_lease_until_runner_closes(tmp_path: Path, 
     from deepagents.backends import StateBackend
     from agent.config import ModelProfile, Settings
     from agent.llm_stream import live_stream_count
-    from agent.runner import AgentRunner
+    from agent.runner import MODEL_STREAM_CLOSE_SECONDS, AgentRunner
     from agent.session import SessionStore
     from tests.model_stream_server import ScriptedSSEServer, Turn
 
@@ -320,8 +320,11 @@ def test_cancelled_model_stream_keeps_lease_until_runner_closes(tmp_path: Path, 
                 other_runner()
             started = time.monotonic()
             runner.request_cancel()
-            worker.join(5)
-            assert not worker.is_alive() and time.monotonic() - started < 5
+            # Close confirmation is allowed to use the full stream-close budget.
+            # The extra second covers graph unwind after that wait returns.
+            limit = MODEL_STREAM_CLOSE_SECONDS + 1
+            worker.join(limit)
+            assert not worker.is_alive() and time.monotonic() - started < limit
             assert results[0].status == "cancelled"
             assert server.connections[0].closed.wait(2)
             assert live_stream_count() == 0
