@@ -2303,3 +2303,57 @@ def test_execute_single_line_inline_code_is_folded_after_terminal_wrapping() -> 
     assert "last_statement" not in collapsed
     expanded = _plain(_capture(_tool(block, True, 80, limits=limits), 80))
     assert "last_statement" in "".join(line.strip() for line in expanded.splitlines())
+
+
+def _explore_tool(call_id: str, status: str = "completed") -> ToolBlock:
+    return ToolBlock(call_id, "read_file", {"file_path": f"/workspace/{call_id}.py"}, output="x = 1", status=status)
+
+
+def test_incremental_units_match_a_fresh_render_through_mutations() -> None:
+    from agent.cli.state import touch
+
+    state = CliState()
+    renderer = TranscriptRenderer(ZoneInfo("UTC"))
+
+    def check() -> None:
+        assert renderer.render(state, 80) == TranscriptRenderer(ZoneInfo("UTC")).render(state, 80)
+
+    state.add_user("first")
+    state.blocks.append(_explore_tool("a"))
+    check()
+    # A new explore tool must merge into the group that ended at the old tail.
+    state.blocks.append(_explore_tool("b"))
+    check()
+    state.blocks.append(MessageBlock(kind="assistant", content="answer"))
+    state.blocks.append(_explore_tool("c", status="running"))
+    check()
+    touch(state.blocks[1]).output = "changed"
+    check()
+    state.blocks[-1].status = "completed"
+    touch(state.blocks[-1])
+    check()
+    state.blocks = [block for block in state.blocks if not isinstance(block, MessageBlock) or block.kind != "user"]
+    check()
+    state.tools_expanded = True
+    check()
+    state.tools_expanded = False
+    del state.blocks[-1]
+    check()
+    assert renderer.render(state, 60) == TranscriptRenderer(ZoneInfo("UTC")).render(state, 60)
+
+
+def test_unchanged_transcript_prefix_reuses_unit_objects() -> None:
+    from agent.cli.rendering import TranscriptUnitMemo, transcript_units
+
+    state = CliState()
+    for index in range(5):
+        state.add_user(f"question {index}")
+        state.blocks.append(MessageBlock(kind="assistant", content=f"answer {index}"))
+    memo = TranscriptUnitMemo()
+    first = transcript_units(state, memo=memo)
+    state.blocks.append(MessageBlock(kind="assistant", content="streaming"))
+    second = transcript_units(state, memo=memo)
+    assert len(second) == len(first) + 1
+    # The unit at the old tail is rebuilt in case the new block joins its group.
+    assert all(left is right for left, right in zip(first[:-1], second))
+    assert transcript_units(state, memo=memo) == second

@@ -1,9 +1,11 @@
-"""Provider-neutral output throughput measured at stream chunk arrival times."""
+"""Provider-neutral output throughput measured at stream chunk arrival times,
+and per-run time accounting derived from run events."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any
+from time import monotonic
+from typing import Any, Callable
 
 
 def _count(value: Any) -> int | None:
@@ -147,3 +149,95 @@ def model_metric_groups(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             sample_count=len(samples),
         )
     return list(groups.values())
+
+
+_RUN_END_EVENTS = frozenset({"run_completed", "run_failed", "run_cancelled", "interaction_requested"})
+
+
+def _union_seconds(intervals: list[tuple[float, float]]) -> float:
+    total = 0.0
+    current_start: float | None = None
+    current_end = 0.0
+    for start, end in sorted(intervals):
+        if current_start is None or start > current_end:
+            if current_start is not None:
+                total += current_end - current_start
+            current_start, current_end = start, end
+        else:
+            current_end = max(current_end, end)
+    if current_start is not None:
+        total += current_end - current_start
+    return total
+
+
+class RunMetrics:
+    """Wall, model, tool and scheduling time of one run, derived from RunEvents.
+
+    Use it as (or in front of) a Runner ``on_event`` handler; it never changes
+    the events it forwards. Tool time is the union of tool intervals so
+    parallel calls are not counted twice; scheduling is the rest of wall time.
+    """
+
+    def __init__(self, forward: Callable[[Any], None] | None = None, *,
+                 clock: Callable[[], float] = monotonic) -> None:
+        self._forward = forward
+        self._clock = clock
+        self._reset()
+
+    def _reset(self) -> None:
+        self._started: float | None = None
+        self._finished: float | None = None
+        self._model_started: float | None = None
+        self._open_tools: dict[str, tuple[str, float]] = {}
+        self._tool_intervals: list[tuple[float, float]] = []
+        self.model_calls = 0
+        self.model_seconds = 0.0
+        self.ttft: list[float] = []
+        self.tool_seconds: dict[str, list[float]] = {}
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def __call__(self, event: Any) -> None:
+        now = self._clock()
+        kind = event.type
+        if kind == "run_started":
+            self._reset()
+            self._started = now
+        elif kind == "assistant_started":
+            self._model_started = now
+        elif kind == "assistant_completed" and self._model_started is not None:
+            self.model_calls += 1
+            self.model_seconds += now - self._model_started
+            self._model_started = None
+        elif kind == "model_metrics" and isinstance(event.result, dict):
+            ttft = event.result.get("ttft")
+            if type(ttft) is float and isfinite(ttft) and ttft >= 0:
+                self.ttft.append(ttft)
+            self.input_tokens += _count(event.result.get("input_tokens")) or 0
+            self.output_tokens += _count(event.result.get("output_tokens")) or 0
+        elif kind == "tool_started":
+            self._open_tools.setdefault(event.tool_call_id, (event.name or "tool", now))
+        elif kind == "tool_completed":
+            name, started = self._open_tools.pop(event.tool_call_id, (event.name or "tool", now))
+            self._tool_intervals.append((started, now))
+            self.tool_seconds.setdefault(name, []).append(now - started)
+        elif kind in _RUN_END_EVENTS:
+            self._finished = now
+        if self._forward is not None:
+            self._forward(event)
+
+    def summary(self) -> dict[str, Any]:
+        wall = _span(self._started, self._finished)
+        tool_total = _union_seconds(self._tool_intervals)
+        return {
+            "wall_seconds": wall,
+            "model_calls": self.model_calls,
+            "model_seconds": self.model_seconds,
+            "ttft_seconds": list(self.ttft),
+            "tool_calls": sum(len(items) for items in self.tool_seconds.values()),
+            "tool_seconds": tool_total,
+            "tool_seconds_by_name": {name: sum(items) for name, items in sorted(self.tool_seconds.items())},
+            "scheduling_seconds": max(0.0, wall - self.model_seconds - tool_total) if wall is not None else None,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
