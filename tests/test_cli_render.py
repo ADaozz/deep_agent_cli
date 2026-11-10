@@ -2317,9 +2317,11 @@ def _explore_tool(call_id: str, status: str = "completed") -> ToolBlock:
     return ToolBlock(call_id, "read_file", {"file_path": f"/workspace/{call_id}.py"}, output="x = 1", status=status)
 
 
-def test_incremental_units_match_a_fresh_render_through_mutations() -> None:
+def test_incremental_units_match_a_fresh_render_through_mutations(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent.cli.state import touch
 
+    # Both renders must see the same spinner frame; it advances every 100 ms.
+    monkeypatch.setattr("agent.cli.rendering._spinner_tick", lambda: 0)
     state = CliState()
     renderer = TranscriptRenderer(ZoneInfo("UTC"))
 
