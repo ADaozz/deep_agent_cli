@@ -1,4 +1,5 @@
 """Keep long pasted input compact in the editor without changing submitted text."""
+
 from __future__ import annotations
 
 import re

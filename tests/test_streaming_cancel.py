@@ -8,13 +8,14 @@ import re
 
 import pytest
 
-from agent.cancel import ToolCancelContext, set_cancel_context, set_output_emitter
+from agent.runtime.cancellation import ToolCancelContext, set_cancel_context, set_output_emitter
 from agent.cli.rendering import render_transcript
 from agent.cli.state import CliState
-from agent.control import RunController
-from agent.sandbox import WorkspaceCompositeBackend, _run_process
+from agent.runtime.control import RunController
+from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.process import _run_process
 from tests.host_command import HostCommandBackend
-from agent.runner import RunEvent
+from agent.runtime.contracts import RunEvent
 from agent.tools.execute import build_execute_tool
 
 
@@ -349,7 +350,7 @@ def test_log_symlink_is_rejected_without_losing_tail(tmp_path: Path) -> None:
 
 
 def test_log_creation_failure_reports_missing_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent import sandbox
+    from agent.execution import process as sandbox
 
     def cannot_create(_workspace: Path) -> tuple[int, int, str]:
         raise PermissionError("log directory is not writable")

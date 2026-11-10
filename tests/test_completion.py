@@ -7,10 +7,11 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from agent.cli.app import CliApplication, SlashCompleter
+from agent.cli.app import CliApplication
+from agent.cli.completion import SlashCompleter
 from agent.cli.commands import command_table
-from agent.config import ModelProfile
-from agent.runner import AgentRunner
+from agent.models.profile import ModelProfile
+from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
 

@@ -6,10 +6,22 @@ from pathlib import Path
 import pytest
 from langchain_openai import ChatOpenAI
 
-from agent.config import Settings, UiDisplayLimits, require_keybindings_outside_workspace, resolve_config_path
-from agent.llm import ResponsesChatOpenAI, build_chat_model
+from agent.bootstrap.config import Settings, require_keybindings_outside_workspace, resolve_config_path
+from agent.cli.display import UiDisplayLimits
+from agent.models.client import ResponsesChatOpenAI, build_chat_model
 
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.1, True, None, "0.6"])
+def test_compaction_threshold_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="agent.compaction_threshold"):
+        Settings.from_mapping({"agent": {"compaction_threshold": value}})
+
+
+def test_compaction_threshold_defaults_and_loads() -> None:
+    assert Settings.from_mapping({}).compaction_threshold == 0.85
+    assert Settings.from_mapping({"agent": {"compaction_threshold": 0.6}}).compaction_threshold == 0.6
 
 
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -716,7 +728,7 @@ def test_stream_chunk_timeout_is_not_a_top_level_llm_field():
 
 
 def test_stream_chunk_timeout_defaults_inheritance_and_override():
-    from agent.config import DEFAULT_STREAM_CHUNK_TIMEOUT
+    from agent.models.profile import DEFAULT_STREAM_CHUNK_TIMEOUT
 
     assert Settings().active_profile.stream_chunk_timeout == DEFAULT_STREAM_CHUNK_TIMEOUT
     settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
@@ -752,7 +764,7 @@ def test_request_timeout_is_not_per_model(placed):
 
 
 def test_request_timeout_is_shared_by_every_model():
-    from agent.config import DEFAULT_REQUEST_TIMEOUT
+    from agent.bootstrap.config import DEFAULT_REQUEST_TIMEOUT
 
     assert Settings().request_timeout == DEFAULT_REQUEST_TIMEOUT == 60.0
     settings = Settings.from_mapping({"llm": {
@@ -875,7 +887,8 @@ def test_template_and_code_share_four_line_defaults() -> None:
 
 
 def test_subagents_defaults_and_validation():
-    from agent.config import ModelProfile, SubAgentConfig
+    from agent.models.profile import ModelProfile
+    from agent.subagents.configuration import SubAgentConfig
     from dataclasses import replace
     cfg = Settings.from_mapping({})
     assert cfg.subagents == SubAgentConfig()
@@ -904,14 +917,15 @@ def test_subagent_default_effort_loads_without_model_capabilities(effort):
 
 def test_subagent_example_uses_model_default_effort():
     import yaml
-    from agent.config import SubAgentConfig
+    from agent.subagents.configuration import SubAgentConfig
     template = yaml.safe_load((Path(__file__).parents[1] / 'agent/config.example.yaml').read_text())
     assert template['subagents']['reasoning_effort'] == SubAgentConfig().reasoning_effort == 'default'
 
 
 @pytest.mark.parametrize('effort', ['low', 'high'])
 def test_subagent_static_effort_is_validated(effort):
-    from agent.config import ModelProfile, SubAgentConfig
+    from agent.models.profile import ModelProfile
+    from agent.subagents.configuration import SubAgentConfig
     profile = ModelProfile('default', 'test', reasoning_efforts=('low', 'high'))
     cfg = Settings(llm_profiles=(profile,), subagents=SubAgentConfig(reasoning_effort=effort))
     assert cfg.subagents.reasoning_effort == effort
@@ -920,6 +934,6 @@ def test_subagent_static_effort_is_validated(effort):
 
 
 def test_subagent_auto_is_reserved_and_rejected():
-    from agent.config import SubAgentConfig
+    from agent.subagents.configuration import SubAgentConfig
     with pytest.raises(ValueError, match='auto is not supported'):
         SubAgentConfig(reasoning_effort='auto')

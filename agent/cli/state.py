@@ -5,9 +5,10 @@ from datetime import datetime
 from typing import Any, Callable
 from uuid import uuid4
 
-from agent.attachments import ImageAttachmentRef
-from agent.runner import RunEvent, TurnTiming
-from agent.session import TranscriptBlock, subagent_result_status
+from agent.sessions.images import ImageAttachmentRef
+from agent.runtime.contracts import RunEvent, TurnTiming
+from agent.sessions.transcript import subagent_result_status
+from agent.sessions.contracts import TranscriptBlock
 
 
 @dataclass
@@ -23,6 +24,8 @@ class MessageBlock:
     # block from the one still being streamed into.
     revision: int = 0
     styled_spans: tuple[tuple[int, int, str], ...] = ()
+    left_padding: int = 1
+    status_marker: str | None = None
 
 
 @dataclass
@@ -107,10 +110,13 @@ class CliState:
     def add_system(
         self, text: str, *, error: bool = False,
         styled_spans: tuple[tuple[int, int, str], ...] = (),
+        left_padding: int = 1,
+        status_marker: str | None = None,
     ) -> None:
         self.blocks.append(MessageBlock(
             kind="error" if error else "system", content=text,
-            is_error=error, styled_spans=styled_spans,
+            is_error=error, styled_spans=styled_spans, left_padding=left_padding,
+            status_marker=status_marker,
         ))
 
     def clear(self, *, preserve_model_metrics: bool = False) -> None:
@@ -248,13 +254,7 @@ class CliState:
                 code = completed_artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "steering_queued":
-            mode = ""
-            if isinstance(event.result, dict):
-                mode = str(event.result.get("mode") or "")
-            if mode == "steer" and event.content:
-                self.status = "Steering queued"
-            elif mode == "followUp":
-                self.status = "Follow-up queued"
+            pass  # Pending input is rendered separately until it is applied.
         elif event.type == "steering_applied":
             message_id = ""
             if isinstance(event.result, dict):
@@ -310,7 +310,6 @@ class CliState:
                     if block.name == "execute":
                         artifact = block.artifact if isinstance(block.artifact, dict) else {}
                         block.artifact = {**artifact, "termination_reason": "cancelled"}
-            self.add_system("Operation cancelled.", error=True)
         elif event.type == "run_failed":
             self.running = False
             self.status = "Failed"

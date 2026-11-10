@@ -1,4 +1,5 @@
 """Small, dependency-free system clipboard adapter for the TUI."""
+
 from __future__ import annotations
 
 import base64

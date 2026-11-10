@@ -10,10 +10,10 @@ from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
 
-from agent.config import Settings
-from agent.runner import AgentRunner
-from agent.session import SessionStore
-from agent.session_lock import SessionLockBusyError
+from agent.bootstrap.config import Settings
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
+from agent.sessions.locks import SessionLockBusyError
 from tests.conftest import scripted_model
 
 
@@ -331,7 +331,7 @@ def test_close_timeout_never_releases_the_lease_early(
     worker.start()
     assert entered.wait(5)
 
-    monkeypatch.setattr("agent.runner.CLOSE_DRAIN_SECONDS", 0.2)
+    monkeypatch.setattr("agent.runtime.runner.CLOSE_DRAIN_SECONDS", 0.2)
     with pytest.raises(RuntimeError, match="timed out"):
         runner.close()
 
@@ -413,7 +413,7 @@ def test_switch_restore_failure_rolls_back_model_and_keeps_old_session(
     with pytest.raises(RuntimeError, match="rebuild failed"):
         waiter.begin_session_switch(target)
 
-    assert waiter._current_model_id == "local/alpha"
+    assert waiter.configuration.current_model_id == "local/alpha"
     assert waiter.thread_id == old_thread
     assert waiter._runtime.lease is not None
     assert waiter._runtime.lease.thread_id == old_thread

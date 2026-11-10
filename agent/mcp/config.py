@@ -3,6 +3,7 @@
 The file is an internal catalog. It is not passed through to MCPAdapter.
 Tokens stay in the environment; this file only records where to read them.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

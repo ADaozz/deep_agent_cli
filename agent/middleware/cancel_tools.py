@@ -1,4 +1,5 @@
 """Establish per-tool cancel contexts and optional cancellable tool hooks."""
+
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -6,7 +7,7 @@ from typing import Any, Callable
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
-from agent.control import RunController
+from agent.runtime.control import RunController
 
 
 class ToolCancelMiddleware(AgentMiddleware):

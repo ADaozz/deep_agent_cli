@@ -1,11 +1,12 @@
 """Host-side public web search through Tavily's fixed Search endpoint."""
+
 from __future__ import annotations
 
 from typing import Annotated, Literal
-
 import httpx
-from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from pydantic import Field
+
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"

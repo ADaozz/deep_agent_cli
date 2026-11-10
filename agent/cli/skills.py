@@ -1,4 +1,5 @@
 """通过原生技能加载器获取目录，并管理输入框中的紧凑技能引用。"""
+
 from __future__ import annotations
 
 import re
@@ -7,8 +8,9 @@ from typing import TYPE_CHECKING
 from deepagents.middleware.skills import SkillsMiddleware, SkillsStateUpdate
 from langgraph.runtime import Runtime
 
+
 if TYPE_CHECKING:
-    from agent.factory import PreparedAgent
+    from agent.bootstrap.factory import PreparedAgent
 
 
 _SKILL_INSTRUCTION = re.compile(

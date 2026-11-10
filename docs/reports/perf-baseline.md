@@ -1,6 +1,6 @@
 # 性能基线（2026-11-06）
 
-环境：WSL2、Python 3.12.16、Bubblewrap 可用。所有数字由 `examples/benchmark.py` 采集，单位为毫秒，格式为 P50 / P95。时间统计由 `agent.performance.RunMetrics` 从 RunEvent 推出，不改变事件本身。
+环境：WSL2、Python 3.12.16、Bubblewrap 可用。所有数字由 `examples/benchmark.py` 采集，单位为毫秒，格式为 P50 / P95。时间统计由 `agent.runtime.metrics.RunMetrics` 从 RunEvent 推出，不改变事件本身。
 
 ## Agent 外围（`benchmark.py agent --repeat 20`）
 

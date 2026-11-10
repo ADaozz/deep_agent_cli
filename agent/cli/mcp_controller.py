@@ -4,6 +4,7 @@ The UI reads and renders. This object owns whether a connect or mutation is
 in progress, which operation generation it belongs to, and the switch lock.
 Tool visibility and host execution stay on MCPManager.
 """
+
 from __future__ import annotations
 
 import asyncio

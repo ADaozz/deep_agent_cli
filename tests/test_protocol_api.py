@@ -7,10 +7,11 @@ import openai
 import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
-from agent.attachments import ATTACHMENT_META_KEY, AttachmentStore, image_attachment_from_bytes
-from agent.config import ModelProfile
-from agent.llm import build_chat_model, normalize_responses_event
-from agent.stream import reasoning_text, visible_text
+from agent.sessions.attachments import AttachmentStore
+from agent.sessions.images import ATTACHMENT_META_KEY, image_attachment_from_bytes
+from agent.models.profile import ModelProfile
+from agent.models.client import build_chat_model, normalize_responses_event
+from agent.models.messages import reasoning_text, visible_text
 
 
 def response_body(usage):
@@ -27,7 +28,7 @@ def make_model(api, handler, *, profile=None, **kwargs):
     asynchronous = httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
     sync_sdk = openai.OpenAI(api_key="test", base_url="https://standard.example/v1", http_client=sync, max_retries=0)
     async_sdk = openai.AsyncOpenAI(api_key="test", base_url="https://standard.example/v1", http_client=asynchronous, max_retries=0)
-    from agent.llm import _ResponsesClient
+    from agent.models.client import _ResponsesClient
     model.root_client = _ResponsesClient(sync_sdk) if api == "responses" else sync_sdk
     model.root_async_client = _ResponsesClient(async_sdk) if api == "responses" else async_sdk
     model.client = sync_sdk.chat.completions
@@ -222,8 +223,8 @@ def test_protocol_selection_depends_only_on_api(api, name, endpoint):
 @pytest.mark.parametrize("api", ["responses", "chat_completions"])
 def test_new_model_runs_in_existing_agent_from_configuration_only(api):
     from deepagents.backends import StateBackend
-    from agent.config import Settings
-    from agent.runner import AgentRunner
+    from agent.bootstrap.config import Settings
+    from agent.runtime.runner import AgentRunner
     settings = Settings.from_mapping({"llm": {
         "default": "new-provider/new-model", "models": {"new-provider": {
             "api": api, "base_url": "https://new-provider.example/v1", "api_key": "test",
@@ -384,10 +385,10 @@ def test_sdk_responses_parse_resource_normalizes_missing_input(asynchronous, raw
 @pytest.mark.parametrize("reasoning_count", [2000, 0, None])
 def test_provider_neutral_metrics_preserve_actual_reasoning_usage(api, asynchronous, reasoning_count, monkeypatch):
     import itertools
-    from agent.stream import StreamDeltaCallback
+    from agent.models.messages import StreamDeltaCallback
 
     clock = itertools.count()
-    monkeypatch.setattr("agent.stream.monotonic", lambda: float(next(clock)))
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: float(next(clock)))
     reports = []
     cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     def serve(request):
@@ -440,10 +441,10 @@ def test_provider_neutral_metrics_preserve_actual_reasoning_usage(api, asynchron
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_responses_reasoning_summary_is_not_full_reasoning_generation(asynchronous, monkeypatch):
     import itertools
-    from agent.stream import StreamDeltaCallback
+    from agent.models.messages import StreamDeltaCallback
 
     clock = itertools.count()
-    monkeypatch.setattr("agent.stream.monotonic", lambda: float(next(clock)))
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: float(next(clock)))
     reports = []
     def serve(request):
         events = [

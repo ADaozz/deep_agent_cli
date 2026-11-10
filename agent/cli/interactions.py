@@ -173,7 +173,7 @@ class InteractionController:
 
     @classmethod
     def approval(cls, calls: list[dict[str, Any]]) -> "InteractionController":
-        from agent.network import network_requested
+        from agent.execution.network import network_requested
 
         details: list[str] = []
         for call in calls:

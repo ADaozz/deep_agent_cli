@@ -4,6 +4,8 @@
 
 本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)；Python 接入见 [library.md](library.md)。
 
+代码按领域目录组织；状态归属、依赖约束和模块接口见 [领域设计](domain-design.md)。
+
 ## 职责与设计约束
 
 Harness 的职责包括图装配、运行控制、工具审批、命令隔离、状态持久化和终端事件转换。其中有几个需要始终分开的概念：
@@ -44,13 +46,13 @@ flowchart TB
 | 层 | 实现 | 职责 |
 |---|---|---|
 | 交互入口 | `agent/cli/` | 输入、渲染、审批与提问界面 |
-| 运行控制 | `agent/runner.py`、`control.py` | Run 生命周期、中断恢复、取消、steering、统一事件 |
+| 运行控制 | `agent/runtime/` | Run 生命周期、中断恢复、取消、steering、统一事件 |
 | 子任务 | `agent/subagents/` | 独立图执行、并发许可、取消关联和日志持久化 |
-| 图装配 | `agent/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
-| 模型适配 | `agent/llm.py`、`llm_stream.py`、`stream.py` | API 协议、思考流、工具调用、附件与 usage |
+| 图装配 | `agent/bootstrap/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
+| 模型适配 | `agent/models/` | API 协议、思考流、工具调用、附件与 usage |
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
-| 文件与执行环境 | `agent/sandbox.py`、`sandbox_pool.py`、`sandbox_worker.py` | 工作区真实路径、命名空间、持久进程、超时与清理 |
-| 会话状态 | `agent/session.py`、`session_runtime.py`、`session_lock.py` | Checkpoint、元数据、附件、独占租约与恢复 |
+| 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久进程、超时与清理 |
+| 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约与恢复 |
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
@@ -180,7 +182,7 @@ sequenceDiagram
     R->>S: 记录结束原因或待恢复状态
 ```
 
-`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。中断分类、消息文本和 `RunEvent` 的构造在 `agent/run_events.py`；`RunResult` 与 `RunEvent` 仍从 `agent.runner` 导入。Runner 负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。`RunController` 仍是取消当前 Run 的唯一入口。
+`AgentRunner._stream()` 驱动图，使用 `stream_mode=["updates", "values"]` 和 `durability="sync"`。中断分类、消息文本和 `RunEvent` 的构造在 `agent/runtime/events.py`；`RunResult` 与 `RunEvent` 仍从 `agent.runtime.runner` 导入。Runner 负责运行边界、待生效配置、恢复与后续消息。流式回答和思考通过既有流回调转发。`RunController` 仍是取消当前 Run 的唯一入口。
 
 终端侧的所有者也是分开的：`Keymap` 只做按键映射，`InputActionRouter` 决定 Ctrl+C、Esc、Ctrl+D 和 `/exit`，`CliApplication` 执行界面动作，`AppLifecycle` 在离开全屏之后收尾界面任务，`Runner.close()` 才释放 Session 租约。离开 `ACTIVE` 之后不再登记新的 Run、Session 等待或 MCP 操作；已经在跑的工作仍由各自的所有者取消。MCP 的忙闲和工具表发布状态在 `MCPController`，连接和宿主执行仍在 `MCPManager`。`Esc` 取消 Session 等待会回到选择器；CLI 退出只取消等待，不打开选择器。
 
@@ -201,7 +203,7 @@ sequenceDiagram
 
 | 概念 | 决定什么 | 实现位置 |
 |---|---|---|
-| `ask` / `allow` | 工具调用前是否审批 | `agent/permission.py`、Deep Agents HITL |
+| `ask` / `allow` | 工具调用前是否审批 | `agent/runtime/permissions.py`、Deep Agents HITL |
 | `SANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
@@ -234,10 +236,10 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 | 模块 | 负责 | 不负责 |
 |---|---|---|
-| `agent/sandbox_mounts.py` | 按当前模式筛选用户挂载，并生成有效启动策略清单 | 启动沙箱、读取内核挂载表 |
-| `agent/sandbox.py` | 路径校验、挂载参数、文件工具路由、单次命令的输出收集与取消 | 跨会话复用沙箱进程 |
-| `agent/sandbox_pool.py` | 有网和无网实例的懒启动、复用、失效替换，以及关闭 Runner 时的清理 | 改写 restricted / full-access 的挂载规则 |
-| `agent/sandbox_worker.py` | 沙箱内常驻进程，按 request id 执行一条 shell 或 argv；`kill` 只作用于该命令 | import `agent`，或在 Worker 丢失后自动重放命令 |
+| `agent/execution/mounts.py` | 按当前模式筛选用户挂载，并生成有效启动策略清单 | 启动沙箱、读取内核挂载表 |
+| `agent/execution/backend.py` | 路径校验、挂载参数、文件工具路由、单次命令的输出收集与取消 | 跨会话复用沙箱进程 |
+| `agent/execution/pool.py` | 有网和无网实例的懒启动、复用、失效替换，以及关闭 Runner 时的清理 | 改写 restricted / full-access 的挂载规则 |
+| `agent/execution/worker.py` | 沙箱内常驻进程，按 request id 执行一条 shell 或 argv；`kill` 只作用于该命令 | import `agent`，或在 Worker 丢失后自动重放命令 |
 
 `SandboxPool` 负责懒启动、复用、失效替换与 Runner 关闭时的清理；`PersistentSandbox` / `RemoteCommand` 通过控制管道、request ID 和输出事件管理每条命令。取消一条命令不会关闭 Pool，也不会影响另一个网络实例。
 
@@ -306,7 +308,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 两者继承 `ProtocolChatOpenAI`，统一同步/异步 HTTP 客户端、超时、重试、请求序列化和附件解析。Responses 继续复用 LangChain 的完整解析循环、工具调用拼接与异常映射；SDK 的结构化 parse 与 create 路径共用 usage 规范化。模型客户端统一使用协议类名，不保留旧厂商别名。
 
-图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/stream.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
+图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/models/messages.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
 
 `UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以 API 返回的 `input_tokens` 展示占用，缺失时显示 Unknown，不将估算数当成实际用量；取消、切换和压缩时清除旧值，恢复只读取当前来源的有效 usage。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
 
@@ -314,9 +316,11 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 ## 上下文压缩
 
-自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时约在窗口 85% 触发，保留最近约 10% 上下文；没有该 profile 信息时，约 170,000 tokens 触发，保留最近 6 条消息。具体阈值取决于上游版本。
+自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `agent.compaction_threshold` 与 0.85 的较小值触发，通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85。示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
 
 `/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
+
+`PayloadRecoveryMiddleware` 在模型请求前将工具结果中的内嵌媒体限制在约 2 MiB，优先保留最近的媒体，并以提示替代超出部分，防止大请求在网关返回 413 前断开。收到 HTTP 413 时，还会尝试移除工具结果中的剩余内嵌媒体、截短超长工具文本并重试一次。原始 checkpoint 不变；用户消息和附件不会被移除。若没有可缩减的工具结果，或重试仍然超限，则报告请求失败。
 
 ## 会话存储
 
@@ -359,12 +363,12 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 依赖
 
-主要依赖范围见 [pyproject.toml](../pyproject.toml)。`deepagents>=0.7.17,<0.8.0`、`langchain-openai>=1.6.2,<1.7.0` 的部分内部接口用于协议适配、文件系统能力和压缩；升级需针对这些契约回归验证，不以修改上游源码或建立平行执行引擎替代。
+主要依赖范围见 [pyproject.toml](../pyproject.toml)。`deepagents>=0.7.35,<0.8.0`、`langchain-openai>=1.7.4,<1.8.0` 的部分内部接口用于协议适配、文件系统能力和压缩；升级需针对这些契约回归验证，不以修改上游源码或建立平行执行引擎替代。
 
 ## 源码入口
 
-- 图与运行控制：[factory.py](../agent/factory.py)、[runner.py](../agent/runner.py)、[run_events.py](../agent/run_events.py)、[control.py](../agent/control.py)、[permission.py](../agent/permission.py)。
-- 文件与进程：[sandbox.py](../agent/sandbox.py)、[sandbox_pool.py](../agent/sandbox_pool.py)、[sandbox_worker.py](../agent/sandbox_worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
+- 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)。
+- 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
 - 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
 - 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_controller.py](../agent/cli/mcp_controller.py)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
-- 会话与模型：[session.py](../agent/session.py)、[session_runtime.py](../agent/session_runtime.py)、[session_lock.py](../agent/session_lock.py)、[llm.py](../agent/llm.py)。
+- 会话与模型：[store.py](../agent/sessions/store.py)、[lifecycle.py](../agent/sessions/lifecycle.py)、[locks.py](../agent/sessions/locks.py)、[client.py](../agent/models/client.py)。

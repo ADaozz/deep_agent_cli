@@ -8,9 +8,11 @@ import pytest
 from agent.cli.previews import build_task_preview
 from agent.cli.rendering import _tool_status_marker, render_transcript
 from agent.cli.state import CliState, ToolBlock
-from agent.config import UiDisplayLimits
-from agent.runner import AgentRunner, RunEvent
-from agent.session import SessionStore, messages_to_transcript
+from agent.cli.display import UiDisplayLimits
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.sessions.store import SessionStore
+from agent.sessions.transcript import messages_to_transcript
 from tests.cli_support import plain, with_painted_app
 from tests.conftest import scripted_model
 
@@ -206,9 +208,10 @@ def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
 
 
 def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, monkeypatch):
-    import agent.factory as factory
-    from agent.config import Settings
-    from agent.sandbox import BackendSelection, ExecutionMode
+    import agent.bootstrap.factory as factory
+    from agent.bootstrap.config import Settings
+    from agent.execution.backend import BackendSelection
+    from agent.execution.types import ExecutionMode
     backend = StateBackend()
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     model = scripted_model([

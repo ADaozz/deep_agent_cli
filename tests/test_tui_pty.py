@@ -30,8 +30,8 @@ import asyncio, json, sys
 from pathlib import Path
 from langchain_core.messages import AIMessage
 from agent.cli.app import CliApplication
-from agent.config import SandboxConfig
-from agent.runner import AgentRunner
+from agent.bootstrap.config import SandboxConfig
+from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
 async def main():
@@ -56,8 +56,8 @@ async def main():
                 'completion':app.buffer.complete_state is not None,
                 'permission':runner.permission_mode().value,
                 'pending':runner.pending_permission_mode().value if runner.pending_permission_mode() else None,
-                'interaction':app.interaction.kind if app.interaction else None,
-                'question':app.interaction.question if app.interaction else '',
+                'interaction':app.dialogs.current.kind if app.dialogs.current else None,
+                'question':app.dialogs.current.question if app.dialogs.current else '',
                 'status':app.state.status,
                 'footer':''.join(x[1] for x in app._footer_text()),
                 'transcript':'\n'.join(str(getattr(b,'content','')) for b in app.state.blocks),
@@ -258,10 +258,10 @@ import asyncio, json, sys, threading
 from pathlib import Path
 from deepagents.backends import StateBackend
 from agent.cli.app import CliApplication
-from agent.config import ModelProfile, Settings
-from agent.llm_stream import live_stream_count
-from agent.runner import AgentRunner
-from agent.session import SessionStore
+from agent.bootstrap.config import ModelProfile, Settings
+from agent.models.stream_lifecycle import live_stream_count
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
 
 async def main():
     workspace, target, base_url, api = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
@@ -279,6 +279,7 @@ async def main():
     def snapshot():
         info = store.get(runner.thread_id)
         data = {'status': app.state.status, 'running': app.state.running,
+                'summary': info.summary if info else None,
                 'transcript': '\n'.join(str(getattr(b, 'content', '')) for b in app.state.blocks),
                 'cancel_requests': len(requests), 'live_streams': live_stream_count(),
                 'busy': runner._busy, 'last_run': info.last_run_status.value if info and info.last_run_status else None,
@@ -325,12 +326,17 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             assert state['live_streams'] == 0
             assert state['cancel_requests'] == 1
             assert state['last_run'] == 'aborted'
-            assert 'Operation cancelled.' in state['transcript']
+            assert 'Operation cancelled.' not in state['transcript']
             # Esc while idle neither cancels nor disturbs the next run.
             tui.send('\x1b')
             tui.send('second task\r')
             state = tui.wait(lambda s: 'second answer' in s['transcript'] and s['status'] == 'Ready')
             assert state['cancel_requests'] == 1 and state['live_streams'] == 0
+            state = tui.wait(lambda s: bool(s['summary']))
+            assert state['summary'] == '修复会话恢复流程中的异常中断问题'
+            assert len(server.summary_connections) == 1
+            summary_body = json.dumps(server.summary_connections[0].body, ensure_ascii=False)
+            assert 'second task' in summary_body and 'first task' not in summary_body
             assert len(server.connections) == 2
             assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
@@ -407,7 +413,7 @@ _MCP_TUI_PROBE = _PROBE.replace(
     """'status':app.state.status,
                 'mcp_settled':app.mcp_controller.quiet_settled,
                 'expanded':app.state.tools_expanded,
-                'rendered_interaction':render_interaction(app.interaction, 60) if app.interaction else '',
+                'rendered_interaction':render_interaction(app.dialogs.current, 60) if app.dialogs.current else '',
                 'rendered_transcript':render_transcript(app.state, 60),""",
 ).replace(
     "from agent.cli.app import CliApplication",
@@ -536,13 +542,13 @@ from fastmcp.client.logging import LogMessage, default_log_handler
 from agent.cli.app import CliApplication
 from agent.cli.interactions import InteractionController
 from agent.cli.rendering import render_interaction
-from agent.runner import AgentRunner
+from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
 async def main():
     runner = AgentRunner(model=scripted_model([AIMessage(content='done')]), backend=StateBackend())
     app = CliApplication(runner)
-    app.interaction = InteractionController.human({'question':'这个标识是什么用途？', 'fields':[{
+    app.dialogs.current = InteractionController.human({'question':'这个标识是什么用途？', 'fields':[{
         'id':'purpose', 'type':'single_select', 'options':[
             {'value':'auth','label':'是 OAuth 授权码或标识，需要进一步操作',
              'description':'授权流程里的 code / client_id / session_id，想检查或验证'},
@@ -552,7 +558,7 @@ async def main():
     target = Path(sys.argv[2])
     app._mcp_log_path = target.parent / 'mcp.log'
     def snapshot():
-        current = app.interaction
+        current = app.dialogs.current
         data = {'status':app.state.status, 'input':app.buffer.text,
                 'option':current.option_index if current else -1,
                 'custom':bool(current and current.custom_entry),
@@ -615,7 +621,7 @@ def _subagent_stream_probe():
         "runner = AgentRunner(settings=settings, backend=StateBackend(), session_store=store, thread_id='pty-cancel')",
         """
     from dataclasses import replace
-    from agent.config import SandboxConfig
+    from agent.bootstrap.config import SandboxConfig
     settings = replace(settings, sandbox=SandboxConfig(workspace=workspace), config_dir=workspace.parent/'private')
     runner = AgentRunner(settings=settings, session_store=store, thread_id='pty-cancel')
 """.strip(),

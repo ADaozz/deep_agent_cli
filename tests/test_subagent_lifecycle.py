@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.control import RunController
+from agent.runtime.control import RunController
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import SubAgentManager
 from agent.subagents.runtime import SubAgentRuntime
@@ -107,12 +107,13 @@ def test_child_stream_is_cancelled_and_parent_waits_for_close():
 def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch):
     from dataclasses import replace
     from deepagents.backends import StateBackend
-    import agent.factory as factory
-    from agent.factory import create_agent
-    from agent.runner import AgentRunner
-    from agent.sandbox import BackendSelection, ExecutionMode
-    from agent.llm import build_chat_model
-    from agent.llm_stream import close_model_http_clients, live_stream_count
+    import agent.bootstrap.factory as factory
+    from agent.bootstrap.factory import create_agent
+    from agent.runtime.runner import AgentRunner
+    from agent.execution.backend import BackendSelection
+    from agent.execution.types import ExecutionMode
+    from agent.models.client import build_chat_model
+    from agent.models.stream_lifecycle import close_model_http_clients, live_stream_count
     from tests.model_stream_server import ScriptedSSEServer, Turn
     from tests.test_model_stream_cancel import Harness, settings_for
     call = {'id': 'delegate', 'name': 'task', 'args': {
@@ -159,12 +160,15 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
 
 @pytest.mark.parametrize('api', ['responses', 'chat_completions'])
 def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
     from deepagents.backends import StateBackend
-    from agent.config import ModelProfile, Settings, SubAgentConfig
-    from agent.llm import build_chat_model
-    from agent.runner import AgentRunner
-    from agent.sandbox import BackendSelection, ExecutionMode
+    from agent.models.profile import ModelProfile
+    from agent.bootstrap.config import Settings
+    from agent.subagents.configuration import SubAgentConfig
+    from agent.models.client import build_chat_model
+    from agent.runtime.runner import AgentRunner
+    from agent.execution.backend import BackendSelection
+    from agent.execution.types import ExecutionMode
     from tests.conftest import scripted_model
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'parent'), ModelProfile('child', 'child', api=api)),
                    subagents=SubAgentConfig(model='child'))

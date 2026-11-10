@@ -74,8 +74,9 @@ def generate(root: Path) -> None:
 def _backend(kind: str, workspace: Path):
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from agent.config import SandboxConfig
-    from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend
+    from agent.execution.policy import SandboxConfig
+    from agent.execution.backend import BubblewrapBackend
+    from agent.execution.filesystem import WorkspaceCompositeBackend
     from tests.host_command import HostCommandBackend
 
     if kind == "python":
@@ -168,7 +169,7 @@ def _child(engine: str, workspace: Path, query: str, repeat: int, source: Path |
 
 def cancel_probe(workspace: Path) -> dict:
     """Cancel a full-scan sandboxed search shortly after start and verify reaping."""
-    from agent.cancel import ToolCancelContext, clear_cancel_context, set_cancel_context
+    from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
     from agent.tools import grep as implementation
 
     backend = _backend("rg", workspace)

@@ -1,12 +1,14 @@
 """Resolve image references only in model requests, leaving checkpoints compact."""
+
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
-from agent.attachments import AttachmentStore
-from agent.llm import materialize_attachment_refs
+
+from agent.sessions.attachments import AttachmentStore
+from agent.models.client import materialize_attachment_refs
 
 
 _active_store: ContextVar[AttachmentStore | None] = ContextVar("attachment_store", default=None)

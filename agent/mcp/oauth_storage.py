@@ -1,17 +1,18 @@
 """Encrypted OAuth credentials scoped to the MCP configuration directory."""
+
 from __future__ import annotations
 
 import fcntl
 import os
 from pathlib import Path
-
-from cryptography.fernet import Fernet
 from key_value.aio.stores.filetree import (
     FileTreeStore,
     FileTreeV1CollectionSanitizationStrategy,
     FileTreeV1KeySanitizationStrategy,
 )
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+
+from cryptography.fernet import Fernet
 
 
 def oauth_token_storage(directory: Path) -> FernetEncryptionWrapper:

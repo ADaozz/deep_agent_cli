@@ -8,11 +8,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 
-from agent.factory import create_agent
+from agent.bootstrap.factory import create_agent
 from agent.mcp.manager import MCPManager
-from agent.permission import ASK_INTERRUPT_ON, PermissionMode
-from agent.runner import AgentRunner
-from agent.sandbox import BackendSelection, ExecutionMode
+from agent.runtime.permissions import ASK_INTERRUPT_ON, PermissionMode
+from agent.runtime.runner import AgentRunner
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 from tests.mcp_fixture import HttpFixture
 
@@ -249,7 +250,7 @@ def test_permission_controls_mcp_calls_management_and_sandbox_switch(
     try:
         assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
         with patch(
-            "agent.factory.select_backend",
+            "agent.bootstrap.factory.select_backend",
             return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED),
         ):
             prepared = create_agent(model=scripted_model(messages), interrupt_on={}, mcp=manager)
@@ -327,7 +328,7 @@ def test_no_manager_matches_the_current_native_tool_set() -> None:
 
 
 def test_registry_change_during_build_retains_old_graph_and_allows_retry(tmp_path, http_mcp, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
 
     manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
     assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
@@ -362,7 +363,7 @@ def test_registry_change_during_build_retains_old_graph_and_allows_retry(tmp_pat
 
 
 def test_failed_build_keeps_published_client_until_successful_retry(tmp_path, http_mcp, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
 
     manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
     assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
@@ -434,7 +435,7 @@ def test_runner_close_timeout_keeps_mcp_bridge_and_session_lease(tmp_path, http_
     from concurrent.futures import ThreadPoolExecutor
     import threading
     import pytest
-    from agent.session import SessionStore
+    from agent.sessions.store import SessionStore
 
     manager = MCPManager(tmp_path / "mcp.json", connect_timeout=5)
     assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
@@ -451,7 +452,7 @@ def test_runner_close_timeout_keeps_mcp_bridge_and_session_lease(tmp_path, http_
         with ThreadPoolExecutor() as pool:
             pending = pool.submit(runner.invoke, "hold", on_event=hold)
             assert entered.wait(5)
-            monkeypatch.setattr("agent.runner.CLOSE_DRAIN_SECONDS", .05)
+            monkeypatch.setattr("agent.runtime.runner.CLOSE_DRAIN_SECONDS", .05)
             with pytest.raises(RuntimeError, match="timed out"):
                 runner.close()
             assert not manager._closed and not manager._bridge._closed

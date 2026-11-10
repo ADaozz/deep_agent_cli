@@ -1,0 +1,1 @@
+"""Models bounded context."""

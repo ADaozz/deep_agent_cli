@@ -3,6 +3,7 @@
 The footer repaints several times a second, so git is probed on a timer in the
 background and the UI only ever reads the last known summary.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +11,7 @@ import os
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
+
 
 REFRESH_SECONDS = 5.0
 TIMEOUT_SECONDS = 10.0

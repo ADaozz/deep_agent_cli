@@ -10,10 +10,11 @@ from deepagents.backends import StateBackend
 from fastmcp import FastMCP
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.factory import create_agent
+from agent.bootstrap.factory import create_agent
 from agent.mcp.manager import MCPManager
-from agent.runner import AgentRunner
-from agent.sandbox import BackendSelection, ExecutionMode
+from agent.runtime.runner import AgentRunner
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
 from tests.conftest import scripted_model
 from tests.mcp_fixture import HttpFixture, text_of
 
@@ -69,7 +70,7 @@ def test_six_tool_model_batch_is_safe_and_next_call_still_works(tmp_path, concur
     ])
     runner = None
     try:
-        with patch('agent.factory.select_backend', return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        with patch('agent.bootstrap.factory.select_backend', return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
             prepared = create_agent(model=model, interrupt_on={}, mcp=manager)
             runner = AgentRunner(prepared=prepared, mcp_manager=manager)
             first = runner.invoke('run the six tools together')

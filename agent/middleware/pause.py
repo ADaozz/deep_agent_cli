@@ -1,10 +1,11 @@
-# Pause at the next model-call safe point via LangGraph interrupt().
-# Do not build a custom pause engine; the checkpointer stores state and resume uses Command(resume=...).
 from collections.abc import Callable
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.types import interrupt
+
+# Pause at the next model-call safe point via LangGraph interrupt().
+# Do not build a custom pause engine; the checkpointer stores state and resume uses Command(resume=...).
 
 
 class PauseGateMiddleware(AgentMiddleware):

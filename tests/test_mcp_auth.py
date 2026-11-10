@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-from agent.mcp.manager import MCPManager, ServerStatus
+from agent.mcp.manager import MCPManager
+from agent.mcp.contracts import ServerStatus
 from tests.mcp_fixture import HttpFixture, text_of
 
 

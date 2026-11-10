@@ -1,4 +1,5 @@
 """Stop before a new model call so the runner can rebuild its graph safely."""
+
 from collections.abc import Callable
 from typing import Any
 

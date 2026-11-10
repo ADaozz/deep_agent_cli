@@ -16,7 +16,7 @@ import zlib
 
 import pytest
 
-from agent.attachments import AttachmentStore, image_attachment_from_path
+from agent.sessions.attachments import AttachmentStore, image_attachment_from_path
 from agent.cli.clipboard import ClipboardAdapter, ClipboardUnavailable, _is_wsl
 import tests.test_tui_pty as pty_probe
 
@@ -100,7 +100,7 @@ sandbox:
   workspace: {tmp_path / 'workspace'}
 ''')
     monkeypatch.setenv('DEEP_AGENT_CONFIG', str(config))
-    code = pty_probe._PROBE.replace('from agent.config import SandboxConfig', 'from agent.config import SandboxConfig, Settings')
+    code = pty_probe._PROBE.replace('from agent.bootstrap.config import SandboxConfig', 'from agent.bootstrap.config import SandboxConfig, Settings')
     code = code.replace('config = SandboxConfig(workspace=workspace)', 'config = Settings.load().sandbox')
     code = code.replace('runner = AgentRunner(model=scripted_model(messages), sandbox_config=config)',
                         'runner = AgentRunner(settings=Settings.load(), sandbox_config=config)')
@@ -122,9 +122,9 @@ sandbox:
             target = workspace / 'clipboard-export.png'
             shutil.copyfile({str(PNG.resolve())!r}, target)
             return target
-    app.clipboard = FixtureBitmapClipboard()"""
+    app.attachments_controller.clipboard = FixtureBitmapClipboard()"""
         code = code.replace('app = CliApplication(runner)', replacement)
-        code = code.replace("'tools':[", "'clipboard_exports':app.clipboard.exported,\n                'clipboard_export_exists':(workspace/'clipboard-export.png').exists(),\n                'tools':[")
+        code = code.replace("'tools':[", "'clipboard_exports':app.attachments_controller.clipboard.exported,\n                'clipboard_export_exists':(workspace/'clipboard-export.png').exists(),\n                'tools':[")
     monkeypatch.setattr(pty_probe, '_PROBE', code)
     tui = pty_probe.Tui(tmp_path)
     try:

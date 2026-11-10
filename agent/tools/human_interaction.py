@@ -1,7 +1,9 @@
-# Semantic Human Interaction Schema — Agent declares what information it needs, not UI widgets.
 from __future__ import annotations
 
 from typing import Any, Literal, get_args
+
+# Semantic Human Interaction Schema — Agent declares what information it needs, not UI widgets.
+
 
 FieldType = Literal["text", "textarea", "single_select", "multi_select", "boolean"]
 InteractionType = Literal["clarification", "decision", "confirmation", "review"]

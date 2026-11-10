@@ -19,11 +19,14 @@ from agent.cli.mcp_ui import handle_mcp_command
 from agent.cli.state import CliState
 from agent.mcp.adapter import LoadedServer
 from agent.mcp.config import atomic_write_text
-from agent.mcp.manager import MCPManager, MCPResult, ServerStatus
+from agent.mcp.manager import MCPManager
+from agent.mcp.contracts import MCPResult, ServerStatus
 from agent.mcp.middleware import MCP_HOST_PROMPT
-from agent.permission import PermissionMode
-from agent.runner import AgentRunner, InterruptKind
-from agent.sandbox import BackendSelection, ExecutionMode
+from agent.runtime.permissions import PermissionMode
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import InterruptKind
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 from tests.mcp_fixture import HttpFixture, stdio_argv, text_of
 
@@ -35,13 +38,17 @@ def async_test(func):
     return run
 
 
+from agent.cli.view_state import DialogState
+
+
 class _App:
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
         self.state = CliState()
-        self.interaction = None
+        self.dialogs = DialogState()
         self._mcp_draft: dict[str, str] = {}
         self.mcp_controller = MCPController()
+        self.run_events = SimpleNamespace(_apply_event=self._apply_event)
         self.status = ""
         self.application = SimpleNamespace(invalidate=lambda: None)
 
@@ -271,7 +278,7 @@ def test_permission_and_sandbox_switches_do_not_change_the_mcp_switch(
     try:
         assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
         with patch(
-            "agent.factory.select_backend",
+            "agent.bootstrap.factory.select_backend",
             return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED),
         ):
             runner = AgentRunner(
@@ -873,7 +880,7 @@ def test_old_connect_batch_stops_for_a_new_enable_round(tmp_path: Path, monkeypa
 
 @async_test
 async def test_switch_publish_queues_when_busy_and_does_not_retry_failure(tmp_path: Path, monkeypatch) -> None:
-    from agent.runner import RunEvent
+    from agent.runtime.contracts import RunEvent
 
     manager = MCPManager(tmp_path / "mcp.json")
     manager.load()

@@ -8,13 +8,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from agent.cli.state import CliState, MessageBlock
-from agent.config import ModelProfile, Settings
-from agent.factory import create_agent
-from agent.llm import build_chat_model
-from agent.llm_stream import live_stream_count
-from agent.runner import AgentRunner
-from agent.session import SessionStore
-from agent.stream import StreamDeltaCallback
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.bootstrap.factory import create_agent
+from agent.models.client import build_chat_model
+from agent.models.stream_lifecycle import live_stream_count
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
+from agent.models.messages import StreamDeltaCallback
 from tests.model_stream_server import ScriptedSSEServer, Turn
 from tests.test_model_stream_cancel import Harness
 
@@ -131,7 +132,7 @@ def test_retry_does_not_reexecute_completed_tool(api, runner_factory):
             if event.type in {"tool_started", "tool_completed"}:
                 tools_seen += 1
                 assert state.model_metrics_history[-1]["tps"] == rates[0]
-                from agent.performance import model_metric_groups
+                from agent.runtime.metrics import model_metric_groups
                 group = model_metric_groups(state.model_metrics_history)[0]
                 assert group["tps_low"] == group["tps_top"] == group["tps_average"] == rates[0]
         assert tools_seen >= 2
@@ -209,7 +210,7 @@ def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, r
             listed = ", ".join(runner.prepared.model_tool_names)
             assert f"Tools: {len(names)} · {listed}" in app.state.blocks[-1].content
         # Hiding is a schema choice; the ASK rules are unchanged.
-        from agent.permission import PermissionMode, interrupt_on_for_mode
+        from agent.runtime.permissions import PermissionMode, interrupt_on_for_mode
         assert runner.prepared.interrupt_on == interrupt_on_for_mode(PermissionMode.ASK)
 
 
@@ -271,8 +272,8 @@ def test_async_model_retry_resets_callback_and_accumulator(api):
 @pytest.mark.parametrize("outcome", ["success", "http_failure", "stream_failure"])
 def test_mixed_failures_share_six_request_budget(api, asynchronous, outcome, runner_factory, monkeypatch):
     import asyncio
-    import agent.llm as llm_module
-    import agent.llm_stream as stream_module
+    import agent.models.client as llm_module
+    import agent.models.stream_lifecycle as stream_module
 
     # Verify the request budget without spending time on exponential backoff.
     monkeypatch.setattr(llm_module, "stream_retry_delay", lambda attempt: 0)
@@ -328,8 +329,8 @@ def test_mixed_failures_share_six_request_budget(api, asynchronous, outcome, run
 
 
 def _no_backoff(monkeypatch) -> None:
-    import agent.llm as llm_module
-    import agent.llm_stream as stream_module
+    import agent.models.client as llm_module
+    import agent.models.stream_lifecycle as stream_module
 
     monkeypatch.setattr(llm_module, "stream_retry_delay", lambda _attempt: 0)
     monkeypatch.setattr(stream_module, "stream_retry_delay", lambda _attempt: 0)
@@ -347,7 +348,7 @@ def _invoke(runner, prompt: str, *, timeout: float = 6):
 
 @pytest.mark.parametrize("api", APIS)
 def test_build_pins_idle_timeout_even_when_env_is_short(api, monkeypatch):
-    from agent.config import DEFAULT_STREAM_CHUNK_TIMEOUT
+    from agent.models.profile import DEFAULT_STREAM_CHUNK_TIMEOUT
 
     monkeypatch.setenv("LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S", "0.5")
     model = build_chat_model(ModelProfile("local/idle", "test", api=api))

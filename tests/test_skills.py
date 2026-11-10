@@ -10,21 +10,23 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from agent.cli.app import CliApplication, SlashCompleter
+from agent.cli.app import CliApplication
+from agent.cli.completion import SlashCompleter
 from agent.cli.commands import command_table
 from agent.cli.skills import SkillDraft, load_skill_catalog
 from agent.cli.rendering import _capture, _message, render_transcript
 from agent.cli.state import CliState, MessageBlock
-from agent.factory import create_agent
-from agent.runner import AgentRunner, RunEvent
-from agent.session import messages_to_transcript
-from agent.sandbox import WorkspaceCompositeBackend
+from agent.bootstrap.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.sessions.transcript import messages_to_transcript
+from agent.execution.filesystem import WorkspaceCompositeBackend
 from tests.conftest import scripted_model
 
 
 async def select_skill(app):
     """定时驱动测试事件循环，避免未启动的终端界面缺少刷新唤醒。"""
-    task = asyncio.create_task(app.select_skill())
+    task = asyncio.create_task(app.skills.select_skill())
     try:
         for _ in range(500):
             if task.done():
@@ -85,23 +87,23 @@ def test_picker_inserts_without_running_then_submits(tmp_path, monkeypatch, suff
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         calls = []
-        monkeypatch.setattr(app, "_start_run", lambda text, **kwargs: calls.append((text, kwargs)))
+        monkeypatch.setattr(app.run_dispatch, "_start_run", lambda text, **kwargs: calls.append((text, kwargs)))
         asyncio.run(select_skill(app))
-        assert app.interaction.kind == "skill"
-        assert [item["label"] for item in app.interaction.fields[0]["options"]] == ["alpha", "beta"]
-        app.interaction.move(1)
-        app._submit_buffer("steer")
-        assert app.interaction is None
+        assert app.dialogs.current.kind == "skill"
+        assert [item["label"] for item in app.dialogs.current.fields[0]["options"]] == ["alpha", "beta"]
+        app.dialogs.current.move(1)
+        app.run_dispatch._submit_buffer("steer")
+        assert app.dialogs.current is None
         assert app.buffer.text == "[Skill: beta] "
         assert not calls
         app.buffer.text += suffix
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert len(calls) == 1
         assert "/skills/beta/SKILL.md" in calls[0][0]
         assert "[Skill:" not in calls[0][0]
         assert calls[0][0].endswith(suffix.strip())
         assert app.buffer.text == ""
-        assert not app._skill_draft.has_blocks
+        assert not app.drafts.skill.has_blocks
         assert app.buffer.history.get_strings()[-1] == calls[0][0]
 
 
@@ -110,17 +112,17 @@ def test_picker_cancel_preserves_skill_and_paste_draft(tmp_path):
     runner = make_runner(tmp_path)
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        label = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
-        paste = app._pasted_content.display("甲" * 600)
+        label = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
+        paste = app.drafts.pasted.display("甲" * 600)
         original = f"{label} {paste}"
         app.buffer.text = original
         app.buffer.cursor_position = 3
         asyncio.run(select_skill(app))
-        app._finish_interaction(cancelled=True)
+        app.interaction_flow._finish_interaction(cancelled=True)
         assert app.buffer.text == original
         assert app.buffer.cursor_position == 3
-        assert app._skill_draft.is_present(original)
-        assert app._pasted_content.expand(original).endswith("甲" * 600)
+        assert app.drafts.skill.is_present(original)
+        assert app.drafts.pasted.expand(original).endswith("甲" * 600)
 
 
 def test_reselection_preserves_paste_and_replaces_skill(tmp_path, monkeypatch):
@@ -129,18 +131,18 @@ def test_reselection_preserves_paste_and_replaces_skill(tmp_path, monkeypatch):
     runner = make_runner(tmp_path)
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        label = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
-        paste = app._pasted_content.display("甲" * 600)
+        label = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
+        paste = app.drafts.pasted.display("甲" * 600)
         app.buffer.text = f"{label} {paste}"
         app.buffer.cursor_position = len(app.buffer.text)
         asyncio.run(select_skill(app))
-        app.interaction.move(1)
-        app._submit_buffer("steer")
+        app.dialogs.current.move(1)
+        app.run_dispatch._submit_buffer("steer")
         assert "[Skill: alpha]" not in app.buffer.text
         assert "[Skill: beta]" in app.buffer.text
         calls = []
-        monkeypatch.setattr(app, "_start_run", lambda text, **kwargs: calls.append(text))
-        app._submit_buffer("steer")
+        monkeypatch.setattr(app.run_dispatch, "_start_run", lambda text, **kwargs: calls.append(text))
+        app.run_dispatch._submit_buffer("steer")
         assert "甲" * 600 in calls[0]
         assert "/skills/beta/SKILL.md" in calls[0]
 
@@ -151,18 +153,18 @@ def test_missing_skill_and_edited_marker_block_submission(tmp_path, monkeypatch)
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         calls = []
-        monkeypatch.setattr(app, "_start_run", lambda text, **kwargs: calls.append(text))
-        label = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
+        monkeypatch.setattr(app.run_dispatch, "_start_run", lambda text, **kwargs: calls.append(text))
+        label = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
         app.buffer.text = "[Skill: alph]"
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert not calls
         app.buffer.text = label
         path.unlink()
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert not calls
         assert app.buffer.text == label
         app.buffer.text = "普通输入"
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert calls == ["普通输入"]
 
 
@@ -171,7 +173,7 @@ def test_empty_catalog_does_not_start_interaction(tmp_path):
     with create_pipe_input() as pipe:
         app = CliApplication(make_runner(tmp_path), input=pipe, output=DummyOutput())
         asyncio.run(select_skill(app))
-        assert app.interaction is None
+        assert app.dialogs.current is None
         assert any("No valid skills" in block.content for block in app.state.blocks)
 
 
@@ -224,14 +226,14 @@ def test_keyboard_enter_opens_picker_and_ctrl_c_clears_block(tmp_path):
                 pipe.send_text("/skill")
                 await wait_until(lambda: app.buffer.text == "/skill")
                 pipe.send_text("\r")
-                await wait_until(lambda: app.interaction is not None)
-                assert app.interaction.kind == "skill"
+                await wait_until(lambda: app.dialogs.current is not None)
+                assert app.dialogs.current.kind == "skill"
                 pipe.send_text("\r")
                 await wait_until(lambda: "[Skill: alpha]" in app.buffer.text)
                 assert not app.state.running
                 pipe.send_text("\x03")
                 await wait_until(lambda: app.buffer.text == "")
-                assert not app._skill_draft.has_blocks
+                assert not app.drafts.skill.has_blocks
             finally:
                 app.exit()
                 await asyncio.wait_for(task, timeout=3)
@@ -247,16 +249,16 @@ def test_skill_keeps_image_attachments_and_queues_expanded_text(tmp_path, monkey
         calls = []
         image = object()
         app.state.attachments.append(image)
-        app.buffer.text = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
-        monkeypatch.setattr(app, "_start_run", lambda text, **kwargs: calls.append(kwargs))
-        app._submit_buffer("steer")
+        app.buffer.text = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
+        monkeypatch.setattr(app.run_dispatch, "_start_run", lambda text, **kwargs: calls.append(kwargs))
+        app.run_dispatch._submit_buffer("steer")
         assert calls[0]["image_refs"] == (image,)
         app.state.attachments.clear()
         app.state.running = True
-        app.buffer.text = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
+        app.buffer.text = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
         queued = []
         monkeypatch.setattr(runner, "follow_up", queued.append)
-        app._submit_buffer("followUp")
+        app.run_dispatch._submit_buffer("followUp")
         assert "/skills/alpha/SKILL.md" in queued[0]
         assert "[Skill:" not in queued[0]
 
@@ -265,9 +267,9 @@ def test_session_change_clears_marker_without_losing_text(tmp_path):
     write_skill(tmp_path, "alpha")
     with create_pipe_input() as pipe:
         app = CliApplication(make_runner(tmp_path), input=pipe, output=DummyOutput())
-        app.buffer.text = app._skill_draft.display("alpha", "/skills/alpha/SKILL.md") + " 检查项目"
+        app.buffer.text = app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md") + " 检查项目"
         app.new_session()
-        assert not app._skill_draft.has_blocks
+        assert not app.drafts.skill.has_blocks
         assert "[Skill:" not in app.buffer.text
         assert app.buffer.text.endswith("检查项目")
 

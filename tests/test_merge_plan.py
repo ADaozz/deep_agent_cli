@@ -17,23 +17,27 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from agent.attachments import ATTACHMENT_META_KEY, AttachmentStore, image_attachment_from_bytes
-from agent.cli.app import CliApplication, SlashCompleter
+from agent.sessions.attachments import AttachmentStore
+from agent.sessions.images import ATTACHMENT_META_KEY, image_attachment_from_bytes
+from agent.cli.app import CliApplication
+from agent.cli.completion import SlashCompleter
 from agent.cli.commands import command_table
-from agent.config import ModelProfile, SandboxConfig, Settings
-from agent.control import RunController
-from agent.factory import AgentSpec, build_agent, create_agent
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.execution.policy import SandboxConfig
+from agent.runtime.control import RunController
+from agent.bootstrap.factory import AgentSpec, build_agent, create_agent
 from agent.middleware.attachments import (
     AttachmentMaterializationMiddleware, reset_attachment_store, set_attachment_store,
 )
-from agent.middleware.recovery import (
-    RecoveryContext, RecoveryContextMiddleware, reset_recovery_context, set_recovery_context,
-)
-from agent.permission import PermissionMode
+from agent.middleware.recovery import RecoveryContextMiddleware, reset_recovery_context, set_recovery_context
+from agent.sessions.recovery import RecoveryContext
+from agent.runtime.permissions import PermissionMode
 from agent.tools.examples import build_example_tools
-from agent.runner import AgentRunner
-from agent.sandbox import ExecutionMode
-from agent.session import SessionStore, StopReason
+from agent.runtime.runner import AgentRunner
+from agent.execution.types import ExecutionMode
+from agent.sessions.store import SessionStore
+from agent.sessions.contracts import StopReason
 from tests.conftest import ScriptedToolModel, profiled_scripted, scripted_model
 
 
@@ -70,7 +74,7 @@ def test_spec_rebuild_keeps_static_inputs_and_rereads_project_instructions(
     assert "custom_lookup" in prepared.exposed_tool_names
     (tmp_path / "AGENTS.md").write_text("规则二", encoding="utf-8")
     runner.switch_model("beta")
-    with patch("agent.runner.build_chat_model",
+    with patch("agent.runtime.runner.build_chat_model",
                side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
         assert runner.invoke("rebuild").status == "completed"
     assert "model-b" in runner.prepared.system_prompt
@@ -95,7 +99,7 @@ def test_configured_instructions_reach_runner_and_create_agent(tmp_path: Path) -
                          backend=StateBackend(), settings=settings)
     assert "# 用户指令\n配置说明" in runner.prepared.system_prompt
     runner.switch_model("beta")
-    with patch("agent.runner.build_chat_model",
+    with patch("agent.runtime.runner.build_chat_model",
                side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
         assert runner.invoke("switch").status == "completed"
     assert "# 用户指令\n配置说明" in runner.prepared.system_prompt
@@ -119,7 +123,7 @@ def test_session_restores_model(tmp_path: Path) -> None:
     thread = runner.thread_id
     runner.switch_model("beta")
     assert store.get(thread).pending_model_id == "beta"
-    with patch("agent.runner.build_chat_model",
+    with patch("agent.runtime.runner.build_chat_model",
                side_effect=lambda profile, **_kw: profiled_scripted([AIMessage(content="unused")], profile)):
         assert runner.invoke("apply").status == "completed"
     assert store.get(thread).model_id == "beta"
@@ -287,7 +291,7 @@ def test_recovery_survives_pause_before_first_model_call(tmp_path: Path) -> None
 def test_resume_restores_saved_allow_when_sandbox_is_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("agent.factory.select_backend", lambda _config: SimpleNamespace(
+    monkeypatch.setattr("agent.bootstrap.factory.select_backend", lambda _config: SimpleNamespace(
         backend=StateBackend(), mode=ExecutionMode.SANDBOXED, warning="",
     ))
     db = tmp_path / "allow.sqlite3"
@@ -412,7 +416,7 @@ def test_slash_candidates_match_substrings_and_accept_without_submit(tmp_path: P
         completions = list(app.slash_completer.get_completions(app.buffer.document, CompleteEvent()))
         app.buffer.complete_while_typing = lambda: False
         app.buffer.complete_state = CompletionState(app.buffer.document, completions)
-        assert app._accept_command_completion(app.buffer)
+        assert app.run_dispatch._accept_command_completion(app.buffer)
         assert app.buffer.text == "/resume"
         assert app.buffer.complete_state is None
         assert list(app.slash_completer.get_completions(app.buffer.document, CompleteEvent())) == []

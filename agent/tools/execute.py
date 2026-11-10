@@ -1,4 +1,5 @@
 """本地 execute 工具，可声明 NETWORK 能力。"""
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -6,7 +7,9 @@ from pydantic import Field
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
-from agent.network import reset_execute_network, set_execute_network
+
+from agent.execution.network import reset_execute_network, set_execute_network
+
 
 _PERSISTENCE = (
     "每次调用启动新的 Shell，cd 和 Shell 变量不会保留；沙箱环境在会话内复用。"

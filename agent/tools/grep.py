@@ -5,6 +5,7 @@ rg walks the tree itself (ignore files, hidden files, binary and size filtering)
 Without rg, or for a non-Bubblewrap executor: one Python worker that opens every
 component relative to a directory descriptor with O_NOFOLLOW.
 """
+
 from __future__ import annotations
 
 import base64
@@ -25,10 +26,13 @@ from typing import Callable, Literal
 
 from langchain_core.tools import StructuredTool
 
-from agent.cancel import get_cancel_context
-from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend, SEARCH_BINARY_PATH, KILL_CONFIRM_SECONDS
-from agent.sandbox_pool import PersistentSandbox, SandboxLostError, SandboxStartError
+from agent.runtime.cancellation import get_cancel_context
+from agent.execution.backend import BubblewrapBackend, KILL_CONFIRM_SECONDS
+from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.layout import SEARCH_BINARY_PATH
+from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxStartError
 from agent.tools import _grep_worker as rules_engine
+
 
 SEARCH_TIMEOUT = 10.0
 DEFAULT_MAX_COUNT = 1000

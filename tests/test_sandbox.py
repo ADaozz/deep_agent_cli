@@ -9,20 +9,17 @@ from deepagents.middleware.filesystem import FilesystemMiddleware, _route_host_p
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agent.config import BindMount, SandboxConfig
-from agent.factory import DEFAULT_FS_TOOLS, create_agent
-from agent.factory import _default_skill_sources
+from agent.execution.policy import BindMount, SandboxConfig
+from agent.bootstrap.factory import DEFAULT_FS_TOOLS, create_agent
+from agent.bootstrap.factory import _default_skill_sources
 from agent.middleware.workspace_filesystem import TOOL_DESCRIPTIONS, WorkspaceFilesystemMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
-from agent.runner import AgentRunner, RunEvent
-from agent.sandbox import (
-    BubblewrapBackend,
-    SandboxUnavailableError,
-    WorkspaceCompositeBackend,
-    ensure_sandbox_state_dirs,
-    sandbox_environment,
-    select_backend,
-)
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.execution.backend import BubblewrapBackend, select_backend
+from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.layout import ensure_sandbox_state_dirs, sandbox_environment
+from agent.execution.types import SandboxUnavailableError
 from tests.conftest import graph_tool_names, scripted_model
 
 
@@ -158,7 +155,7 @@ def test_timeout_is_a_hard_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_default_execute_has_no_timeout_cap() -> None:
-    from agent.sandbox import _effective_timeout
+    from agent.execution.process import _effective_timeout
 
     assert _effective_timeout(None, None) is None
     assert _effective_timeout(3, None) == 3
@@ -454,7 +451,7 @@ def test_missing_bwrap_has_installation_diagnostic(tmp_path):
 
 
 def test_worker_args_mount_worker_read_only_and_keep_isolation(tmp_path: Path) -> None:
-    from agent.sandbox import WORKER_SANDBOX_PATH, WORKER_SOURCE_PATH
+    from agent.execution.backend import WORKER_SANDBOX_PATH, WORKER_SOURCE_PATH
 
     backend = BubblewrapBackend(replace(config_for(tmp_path), bwrap_path="/bin/true"), executable="/bin/true")
     offline = backend.worker_args(network=False)
@@ -473,7 +470,7 @@ def test_extra_mount_cannot_replace_worker(tmp_path: Path) -> None:
 
 def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
     from agent.tools import grep
-    from agent.sandbox import SEARCH_BINARY_PATH
+    from agent.execution.layout import SEARCH_BINARY_PATH
 
     binary = tmp_path / "bin" / "rg"
     binary.parent.mkdir()
@@ -493,11 +490,11 @@ def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
 def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch, caplog):
     import logging
     from agent.tools import grep
-    from agent.sandbox import SEARCH_BINARY_PATH
+    from agent.execution.layout import SEARCH_BINARY_PATH
 
     monkeypatch.setattr(grep, "resolve_rg", lambda: None)
     backend = BubblewrapBackend(config_for(tmp_path), executable="/usr/bin/bwrap")
-    with caplog.at_level(logging.WARNING, logger="agent.sandbox"):
+    with caplog.at_level(logging.WARNING, logger="agent.execution.backend"):
         args = backend.worker_args()
     assert SEARCH_BINARY_PATH not in args
     assert any("code search is unavailable" in record.message for record in caplog.records)
@@ -896,7 +893,7 @@ def test_exact_file_mount_does_not_expose_its_directory(tmp_path: Path) -> None:
 
 
 def test_optional_missing_mount_is_not_authorized(tmp_path: Path) -> None:
-    from agent.config import Settings
+    from agent.bootstrap.config import Settings
 
     workspace = tmp_path / "workspace"
     present = tmp_path / "present"
@@ -1256,7 +1253,7 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
     import shutil
     import subprocess
 
-    from agent.network import reset_execute_network, set_execute_network
+    from agent.execution.network import reset_execute_network, set_execute_network
     from agent.tools.grep import resolve_rg
 
     executable = _bwrap_executable()
@@ -1412,7 +1409,7 @@ def test_one_shot_sandbox_has_builtin_rg_with_custom_path(tmp_path, network):
 
 
 def test_full_access_mounts_the_host_and_masks_agent_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent.sandbox import agent_install_paths
+    from agent.execution.layout import agent_install_paths
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -1524,7 +1521,7 @@ def test_mode_scoped_dev_bind_is_absent_from_restricted_args(
 
 
 def test_launch_manifest_names_policy_not_a_live_mount_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent.sandbox_mounts import render_launch_manifest
+    from agent.execution.mounts import render_launch_manifest
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "work"
@@ -1646,7 +1643,7 @@ def test_route_build_failure_leaves_protections_and_does_not_stop_the_pool(
     def stopped(reason: str) -> None:
         stops.append(reason)
 
-    monkeypatch.setattr("agent.sandbox._directory_backend", mid)
+    monkeypatch.setattr("agent.execution.filesystem._directory_backend", mid)
     monkeypatch.setattr(composite.executor.pool, "shutdown", stopped)
     with pytest.raises(RuntimeError, match="route failed mid-build"):
         composite.apply_sandbox_mode("restricted")
@@ -1660,7 +1657,7 @@ def test_route_build_failure_leaves_protections_and_does_not_stop_the_pool(
 def test_failed_switch_to_full_access_does_not_open_the_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agent.sandbox_mounts import render_launch_manifest
+    from agent.execution.mounts import render_launch_manifest
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -1694,7 +1691,7 @@ def test_failed_switch_to_full_access_does_not_open_the_host(
 def test_successful_mode_round_trip_publishes_matching_protections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agent.sandbox_mounts import render_launch_manifest
+    from agent.execution.mounts import render_launch_manifest
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -1730,9 +1727,9 @@ def test_runner_reports_sandbox_switch_failure_without_applying_it(
 ) -> None:
     from langchain_core.messages import AIMessage
 
-    from agent.control import RunController
-    from agent.factory import AgentSpec, build_agent
-    from agent.permission import PermissionMode
+    from agent.runtime.control import RunController
+    from agent.bootstrap.factory import AgentSpec, build_agent
+    from agent.runtime.permissions import PermissionMode
     from tests.conftest import scripted_model
 
     home = tmp_path / "home"
@@ -1777,7 +1774,7 @@ def test_sandbox_mode_publish_stays_on_the_runner_operation() -> None:
     """
     import inspect
 
-    from agent.runner import AgentRunner as Runner
+    from agent.runtime.runner import AgentRunner as Runner
 
     assert "_apply_sandbox_mode" in inspect.getsource(Runner._apply_pending_runtime_config)
     assert "apply_sandbox_mode" in inspect.getsource(Runner._restore_configured_sandbox_mode)
@@ -1816,9 +1813,9 @@ def test_sandbox_mode_switch_keeps_permission_mode(
 ) -> None:
     from langchain_core.messages import AIMessage
 
-    from agent.control import RunController
-    from agent.factory import AgentSpec, build_agent
-    from agent.permission import PermissionMode
+    from agent.runtime.control import RunController
+    from agent.bootstrap.factory import AgentSpec, build_agent
+    from agent.runtime.permissions import PermissionMode
     from tests.conftest import scripted_model
 
     home = tmp_path / "home"

@@ -13,8 +13,9 @@ from agent.cli.app import (
     CliApplication,
 )
 from agent.cli.state import ToolBlock
-from agent.runner import AgentRunner, RunEvent
-from agent.session import SessionStore
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.sessions.store import SessionStore
 from tests.cli_support import (
     paint as _paint,
     with_painted_app as _with_painted_app,
@@ -112,25 +113,25 @@ def test_escape_closes_interrupt_ui_without_resuming() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.runner.approve_tool = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("approve"))
             app.runner.reject_tool = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reject"))
-            app._handle_result(waiting)
-            assert app.interaction is not None
-            app._finish_interaction(cancelled=True)
-            assert app.interaction is None
+            app.run_events._handle_result(waiting)
+            assert app.dialogs.current is not None
+            app.interaction_flow._finish_interaction(cancelled=True)
+            assert app.dialogs.current is None
             assert runner.current_interrupt().kind.value == "waiting_confirmation"
             assert not any("F2 to decide" in block.content for block in app.state.blocks)
             assert app.state.status == "Approval still pending · F2 to decide"
             assert app._status_visible()
             assert "Approval still pending · F2 to decide" in "".join(value for _, value in app._status_text())
 
-            app._reopen_pending_interaction()
-            assert app.interaction is not None
-            assert app.interaction.kind == "approval"
+            app.interaction_flow._reopen_pending_interaction()
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.kind == "approval"
             assert app.state.status == "Waiting for input"
 
             app._toggle_review()
-            assert app._reviewing
+            assert app.dialogs.reviewing
             app._close_review()
-            assert app.interaction is not None
+            assert app.dialogs.current is not None
             assert runner.current_interrupt().kind.value == "waiting_confirmation"
 
     asyncio.run(scenario())
@@ -146,7 +147,7 @@ def test_dismissed_interrupt_hint_uses_working_status_position(kind, label) -> N
         expected = f"{label} still pending · F2 to decide"
         for _ in range(3):
             app.state.running = True
-            app._dismiss_pending_interrupt(kind)
+            app.interaction_flow._dismiss_pending_interrupt(kind)
             assert app.state.blocks == original
             assert not app.state.running
             fragments = app._status_text()
@@ -188,24 +189,24 @@ def test_ctrl_c_dismisses_approval_to_status_and_f2_can_finish_decision(approve)
 
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._handle_result(waiting)
+            app.run_events._handle_result(waiting)
             task = asyncio.create_task(app.run_async())
             try:
                 await wait_until(lambda: app.application.is_running)
                 pipe.send_text("\x03")
-                await wait_until(lambda: app.interaction is None)
+                await wait_until(lambda: app.dialogs.current is None)
                 assert app.state.status == "Approval still pending · F2 to decide"
                 assert not any("still pending" in getattr(block, "content", "") for block in app.state.blocks)
                 assert runner.current_interrupt() is not None
                 pipe.send_text("\x1bOQ")
-                await wait_until(lambda: app.interaction is not None)
-                assert app.interaction.kind == "approval"
+                await wait_until(lambda: app.dialogs.current is not None)
+                assert app.dialogs.current.kind == "approval"
                 assert app.state.status == "Waiting for input"
                 if approve:
                     pipe.send_text("\x1b[B")
-                    await wait_until(lambda: app.interaction.option_index == 1)
+                    await wait_until(lambda: app.dialogs.current.option_index == 1)
                 pipe.send_text("\r")
-                await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                await wait_until(lambda: app.run_view.task is not None and app.run_view.task.done())
                 assert runner.current_interrupt() is None
                 assert not app.state.running
                 assert "still pending" not in app.state.status
@@ -230,8 +231,8 @@ def test_f2_and_resume_without_interrupt_are_views_only() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.runner.approve_tool = lambda *a, **k: calls.__setitem__("approve", calls["approve"] + 1)
             app.runner.continue_run = lambda *a, **k: calls.__setitem__("continue", calls["continue"] + 1)
-            app._reopen_pending_interaction()
-            assert app.interaction is None
+            app.interaction_flow._reopen_pending_interaction()
+            assert app.dialogs.current is None
             assert app.state.status == "No pending interaction"
             assert calls == {"approve": 0, "continue": 0}
 
@@ -239,7 +240,7 @@ def test_f2_and_resume_without_interrupt_are_views_only() -> None:
 
 
 def test_unknown_interrupt_reopen_reports_without_guessing(monkeypatch) -> None:
-    from agent.runner import UnknownInterruptError
+    from agent.runtime.contracts import UnknownInterruptError
 
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="unused")]),
@@ -254,8 +255,8 @@ def test_unknown_interrupt_reopen_reports_without_guessing(monkeypatch) -> None:
                 app.runner, "current_interrupt",
                 lambda: (_ for _ in ()).throw(UnknownInterruptError("Unsupported interrupt type: 'mystery'")),
             )
-            app._reopen_pending_interaction()
-            assert app.interaction is None
+            app.interaction_flow._reopen_pending_interaction()
+            assert app.dialogs.current is None
             assert any("Unsupported interrupt type" in block.content for block in app.state.blocks)
 
     asyncio.run(scenario())
@@ -305,7 +306,7 @@ def test_restored_human_interaction_accepts_keyboard_selection_after_ctrl_c(tmp_
     async def close_original() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(holder, input=pipe, output=DummyOutput())
-            app._handle_result(waiting)
+            app.run_events._handle_result(waiting)
             task = asyncio.create_task(app.run_async())
             try:
                 await wait_until(lambda: app.application.is_running)
@@ -328,15 +329,15 @@ def test_restored_human_interaction_accepts_keyboard_selection_after_ctrl_c(tmp_
             app.sessions.startup_session_id = target
             task = asyncio.create_task(app.run_async())
             try:
-                await wait_until(lambda: app.application.is_running and app.interaction is not None)
-                assert app.interaction.kind == "human"
+                await wait_until(lambda: app.application.is_running and app.dialogs.current is not None)
+                assert app.dialogs.current.kind == "human"
                 pipe.send_text("\x1b[B")
-                await wait_until(lambda: app.interaction.option_index == 1)
+                await wait_until(lambda: app.dialogs.current.option_index == 1)
                 pipe.send_text("\r")
-                await wait_until(lambda: app.interaction.index == 1)
-                assert app.interaction.values == {"annex_gap": "other_repo"}
+                await wait_until(lambda: app.dialogs.current.index == 1)
+                assert app.dialogs.current.values == {"annex_gap": "other_repo"}
                 pipe.send_text("\r")
-                await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                await wait_until(lambda: app.run_view.task is not None and app.run_view.task.done())
                 assert runner.current_interrupt() is None
                 state = runner.prepared.graph.get_state(runner._thread_config())
                 answer = next(m for m in state.values["messages"] if isinstance(m, ToolMessage) and m.tool_call_id == "ask-annex")
@@ -386,8 +387,8 @@ def test_restored_submitted_human_answer_is_history_after_cancel(tmp_path) -> No
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.sessions.apply_snapshot(snapshot)
-            assert app.interaction is None
-            assert not app._reopen_pending_interaction()
+            assert app.dialogs.current is None
+            assert not app.interaction_flow._reopen_pending_interaction()
             answered = next(b for b in app.state.blocks if isinstance(b, ToolBlock) and b.tool_call_id == "ask-annex")
             assert answered.status == "completed"
             assert '"annex_gap": "other_repo"' in answered.output
@@ -401,7 +402,7 @@ def test_restored_submitted_human_answer_is_history_after_cancel(tmp_path) -> No
 
 def test_working_notice_expires_without_removing_transcript(monkeypatch) -> None:
     """权限排队提示只在状态栏短暂显示，聊天记录和原工作状态保留。"""
-    from agent.permission import PermissionMode
+    from agent.runtime.permissions import PermissionMode
 
     async def scenario() -> None:
         runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
@@ -412,7 +413,7 @@ def test_working_notice_expires_without_removing_transcript(monkeypatch) -> None
                 app.set_status("Working…  Esc to cancel", transient=False)
                 monkeypatch.setattr(runner, "request_permission_change", lambda mode: None)
                 monkeypatch.setattr(runner, "pending_permission_mode", lambda: PermissionMode.ALLOW)
-                app._request_permission_mode(PermissionMode.ALLOW)
+                app.access_selection._request_permission_mode(PermissionMode.ALLOW)
                 notice = app.state.status
                 assert notice.startswith("Permission switch queued: ask → allow")
                 assert any(getattr(block, "content", "") == notice for block in app.state.blocks)
@@ -441,9 +442,12 @@ def test_status_notices_replace_each_other_and_keep_new_events() -> None:
                 assert app.state.status == "Tool output: expanded"
                 await asyncio.sleep(0.5)
                 assert app.state.status == "Approval still pending · F2 to decide"
-                app._apply_event(RunEvent(type="run_started"))
-                app._apply_event(RunEvent(type="steering_queued", content="继续", result={"mode": "steer", "id": "message"}))
-                assert app.state.status == "Steering queued"
+                app.run_events._apply_event(RunEvent(type="run_started"))
+                runner.steer("继续")
+                assert app.state.status == "Working…  Esc to cancel"
+                assert app._queue_expanded()
+                assert "↳ 继续" in "".join(text for _, text in app._queue_text())
+                assert not any(getattr(block, "kind", None) == "user" for block in app.state.blocks)
                 await asyncio.sleep(1.1)
                 assert app.state.status == "Working…  Esc to cancel"
                 app.set_status("Model queued: next")
@@ -464,8 +468,8 @@ def test_input_cleared_hint_expires_and_keeps_later_status() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.buffer.text = "未发送的文字"
-            app._pasted_content.display("甲" * 600)
-            app._skill_draft.display("alpha", "/skills/alpha/SKILL.md")
+            app.drafts.pasted.display("甲" * 600)
+            app.drafts.skill.display("alpha", "/skills/alpha/SKILL.md")
             app.state.attachments.append(object())
             original_blocks = list(app.state.blocks)
             binding = next(item for item in app.bindings.bindings if item.keys == ("c-c",))
@@ -475,7 +479,7 @@ def test_input_cleared_hint_expires_and_keeps_later_status() -> None:
 
             binding.handler(Event())
             assert app.buffer.text == ""
-            assert not app._pasted_content.has_blocks and not app._skill_draft.has_blocks
+            assert not app.drafts.pasted.has_blocks and not app.drafts.skill.has_blocks
             assert not app.state.attachments
             assert app.state.blocks == original_blocks
             assert "Input cleared" in "".join(value for _, value in app._status_text())
@@ -483,7 +487,7 @@ def test_input_cleared_hint_expires_and_keeps_later_status() -> None:
             assert app.state.status == "Ready"
             assert not app._status_visible()
             app._show_input_cleared_hint()
-            app._apply_event(RunEvent(type="run_started"))
+            app.run_events._apply_event(RunEvent(type="run_started"))
             await asyncio.sleep(1.1)
             assert "Working" in "".join(value for _, value in app._status_text())
             assert "Input cleared" not in app.state.status

@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from agent.config import ModelProfile, Settings
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
 from examples import e2e_live_smoke as live
 from examples import stream_smoke as stream
 

@@ -17,6 +17,9 @@ agent:
   # instructions: |
   #   优先使用中文回答。
   instructions: null
+  # 自动压缩阈值占模型上下文窗口的比例（0 到 1，不含 0）。
+  # 未配置时为 0.85；实际取此值与 0.85 的较小值。需要模型提供 context_window。
+  compaction_threshold: 0.60
 
 # 仅当问题可分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 subagents:

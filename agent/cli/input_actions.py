@@ -4,13 +4,18 @@ Keymap owns the mapping from keys to actions. This router owns the policy:
 which UI state wins, and when a second Ctrl+C is an exit. CliApplication
 performs the chosen action. Run cancellation stays on RunController.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
 
 
-EXIT_WINDOW_SECONDS = 1.0
+DOUBLE_PRESS_WINDOW_SECONDS = 1.0
+
+
+def is_double_press(previous: float | None, now: float, *, window: float = DOUBLE_PRESS_WINDOW_SECONDS) -> bool:
+    return previous is not None and 0 <= now - previous < window
 
 
 class InputAction(Enum):
@@ -56,7 +61,7 @@ class InputView:
 class InputActionRouter:
     """Single policy for Ctrl+C, Esc, Ctrl+D, and /exit."""
 
-    def __init__(self, *, exit_window_seconds: float = EXIT_WINDOW_SECONDS) -> None:
+    def __init__(self, *, exit_window_seconds: float = DOUBLE_PRESS_WINDOW_SECONDS) -> None:
         self.exit_window_seconds = exit_window_seconds
         self.last_ctrl_c: float | None = None
 
@@ -98,7 +103,7 @@ class InputActionRouter:
     def decide_clear_or_exit(self, view: InputView, now: float) -> InputAction:
         if view.has_interaction:
             return InputAction.CANCEL_INTERACTION
-        if self.last_ctrl_c is not None and now - self.last_ctrl_c < self.exit_window_seconds:
+        if is_double_press(self.last_ctrl_c, now, window=self.exit_window_seconds):
             return InputAction.REQUEST_EXIT
         return InputAction.CLEAR_INPUT
 

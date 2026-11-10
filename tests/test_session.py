@@ -11,9 +11,11 @@ from deepagents.backends import StateBackend
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
 
-from agent.factory import create_agent
-from agent.runner import AgentRunner
-from agent.session import SessionStore, StopReason, messages_to_transcript, settle_restored_tools, workspace_state_path
+from agent.bootstrap.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore, workspace_state_path
+from agent.sessions.transcript import messages_to_transcript, settle_restored_tools
+from agent.sessions.contracts import StopReason
 from tests.conftest import scripted_model
 
 
@@ -21,7 +23,7 @@ from tests.conftest import scripted_model
 def test_turn_timings_survive_restart_and_restore_after_each_answer(tmp_path: Path, queued: bool) -> None:
     from agent.cli.rendering import render_transcript
     from agent.cli.state import CliState, TurnSummaryBlock
-    from agent.runner import TurnTiming
+    from agent.runtime.contracts import TurnTiming
 
     path = tmp_path / "timings.sqlite3"
     store = SessionStore(path)
@@ -92,7 +94,8 @@ def test_draft_restarts_and_new_sessions_do_not_persist(tmp_path: Path) -> None:
 
 def test_draft_first_message_persists_config_once_and_can_resume(tmp_path: Path) -> None:
     from unittest.mock import patch
-    from agent.config import ModelProfile, Settings
+    from agent.models.profile import ModelProfile
+    from agent.bootstrap.config import Settings
     settings = Settings(llm_profiles=(ModelProfile("local/test", "test", reasoning_efforts=("low",)),),
                         llm_default="local/test")
     store = SessionStore(tmp_path / "first-message.sqlite3")
@@ -101,7 +104,7 @@ def test_draft_first_message_persists_config_once_and_can_resume(tmp_path: Path)
     identifier = runner.thread_id
     try:
         runner.request_model_change("local/test", reasoning_effort="low")
-        with patch("agent.runner.build_chat_model", return_value=scripted_model([AIMessage(content="one"), AIMessage(content="two")])):
+        with patch("agent.runtime.runner.build_chat_model", return_value=scripted_model([AIMessage(content="one"), AIMessage(content="two")])):
             runner._apply_pending_runtime_config()
         assert store.get(identifier) is None
         assert runner.invoke("first message").status == "completed"
@@ -118,7 +121,7 @@ def test_draft_first_message_persists_config_once_and_can_resume(tmp_path: Path)
                           settings=settings, persist_on_first_message=True)
     try:
         draft_id = resumed.thread_id
-        with patch("agent.runner.build_chat_model", return_value=scripted_model([])):
+        with patch("agent.runtime.runner.build_chat_model", return_value=scripted_model([])):
             snapshot = resumed.switch_session(identifier)
         assert snapshot.info.id == identifier
         assert resumed.reasoning_effort() == "low"
@@ -205,9 +208,9 @@ def test_approval_interrupt_survives_actual_process_exit(tmp_path: Path) -> None
 from pathlib import Path
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage
-from agent.factory import create_agent
-from agent.runner import AgentRunner
-from agent.session import SessionStore
+from agent.bootstrap.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
 from tests.conftest import scripted_model
 import sys
 store = SessionStore(Path(sys.argv[1]))
@@ -400,7 +403,8 @@ def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path)
 
 @pytest.mark.parametrize("aborted", [False, True])
 def test_context_usage_restore_requires_completed_current_model(tmp_path, aborted):
-    from agent.config import ModelProfile, Settings
+    from agent.models.profile import ModelProfile
+    from agent.bootstrap.config import Settings
     settings = Settings(llm_profiles=(ModelProfile("source/m", "m"),), llm_default="source/m")
     path = tmp_path / "usage.sqlite3"
     store = SessionStore(path)
@@ -423,7 +427,7 @@ def test_context_usage_restore_requires_completed_current_model(tmp_path, aborte
         else:
             assert resumed.latest_usage()["input_tokens"] == 17
             # Two sources may use the same model name; the source ID matters.
-            resumed._current_model_id = "other/m"
+            resumed.configuration.current_model_id = "other/m"
             assert resumed.latest_usage() == {}
     finally:
         resumed.close()

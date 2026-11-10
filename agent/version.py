@@ -1,4 +1,5 @@
 """Shared package version for CLI output and terminal presentation."""
+
 from importlib.metadata import PackageNotFoundError, version
 
 

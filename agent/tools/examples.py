@@ -1,5 +1,6 @@
-# Optional documentation lookup example. It is not part of the default agent.
 from langchain_core.tools import BaseTool, StructuredTool
+
+# Optional documentation lookup example. It is not part of the default agent.
 
 DOCS = {
     "deep-agent": "Deep Agents 以 create_deep_agent() 装配 LangGraph 图，中间件负责文件系统、HITL、Skills 与重试。",

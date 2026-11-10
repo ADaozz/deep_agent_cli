@@ -1,16 +1,17 @@
 """MCP server catalog, connections, and the tool snapshot handed to the agent."""
+
 from __future__ import annotations
 
 import atexit
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from pathlib import Path
 import threading
 from typing import Any, NamedTuple
 
 from langchain_core.tools import BaseTool
 
+from agent.mcp.contracts import ServerStatus, MCPResult
 from agent.mcp.adapter import close_client, open_server
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import (
@@ -26,14 +27,6 @@ from agent.mcp.config import (
 )
 
 
-class ServerStatus(StrEnum):
-    DISABLED = "disabled"
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    AUTH_REQUIRED = "auth_required"
-    ERROR = "error"
-
-
 @dataclass
 class ServerState:
     config: MCPServerConfig
@@ -46,14 +39,6 @@ class ServerState:
     @property
     def tool_count(self) -> int:
         return len(self.tools)
-
-
-@dataclass(frozen=True)
-class MCPResult:
-    ok: bool
-    changed: bool
-    message: str
-    pending: bool = False
 
 
 class _Snapshot(NamedTuple):
@@ -709,4 +694,3 @@ def _public_error(exc: BaseException) -> str:
 def _auth_text(message: str) -> bool:
     folded = message.lower()
     return any(token in folded for token in ("401", "unauthorized", "invalid_token", "oauth", "not set"))
-

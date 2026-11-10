@@ -18,14 +18,16 @@ import uuid
 import pytest
 from langchain_core.messages import AIMessage
 
-from agent.cancel import ToolCancelContext, clear_cancel_context, set_cancel_context
-from agent.config import SandboxConfig
-from agent.factory import create_agent
-from agent.network import reset_execute_network, set_execute_network
-from agent.runner import AgentRunner
-from agent.sandbox import SandboxUnavailableError, WorkspaceCompositeBackend, select_backend
-from agent.sandbox_pool import SandboxPool
-from agent.session import SessionStore
+from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
+from agent.execution.policy import SandboxConfig
+from agent.bootstrap.factory import create_agent
+from agent.execution.network import reset_execute_network, set_execute_network
+from agent.runtime.runner import AgentRunner
+from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.backend import select_backend
+from agent.execution.types import SandboxUnavailableError
+from agent.execution.pool import SandboxPool
+from agent.sessions.store import SessionStore
 from tests.conftest import scripted_model
 
 pytestmark = pytest.mark.sandbox
@@ -554,7 +556,7 @@ def test_permission_change_keeps_sandboxes(workspace: Path) -> None:
         AIMessage(content="done"),
     ])
     try:
-        from agent.permission import PermissionMode
+        from agent.runtime.permissions import PermissionMode
 
         pool = runner.sandbox_pool
         runner.set_permission_mode("allow")
@@ -643,7 +645,7 @@ def test_continuous_background_output_has_fixed_drain(backend, timeout) -> None:
 
 
 def test_foreground_output_streams_until_shell_exit(backend) -> None:
-    from agent.cancel import set_output_emitter
+    from agent.runtime.cancellation import set_output_emitter
 
     chunks = []
     ctx = ToolCancelContext("execute", "stream-worker", threading.Event())
@@ -750,7 +752,7 @@ def test_worker_argv_and_shell_share_ids_and_keep_streams_separate(backend, work
 
 
 def test_persistent_rg_mount_is_read_only(backend):
-    from agent.sandbox import SEARCH_BINARY_PATH
+    from agent.execution.layout import SEARCH_BINARY_PATH
 
     sandbox = _pool(backend).run(False, lambda current: current)
     result = _command_events(sandbox.start_argv([SEARCH_BINARY_PATH, "--version"], backend.workspace_root))
@@ -760,7 +762,7 @@ def test_persistent_rg_mount_is_read_only(backend):
 
 def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypatch):
     import json
-    from agent.sandbox_pool import PersistentSandbox
+    from agent.execution.pool import PersistentSandbox
 
     (workspace / "a.py").write_text("needle\n")
     def call(identifier, name, args):
@@ -818,7 +820,7 @@ def test_grep_execute_permission_switch_and_session_cleanup(workspace, monkeypat
 @pytest.mark.parametrize("name", ["deep-agent", "another project", "usr"])
 def test_named_workspace_pwd_matches_file_tools(workspace, name):
     import shlex
-    from agent.sandbox import sandbox_workspace_root
+    from agent.execution.backend import sandbox_workspace_root
 
     project = workspace / name
     project.mkdir()

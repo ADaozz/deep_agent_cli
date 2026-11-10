@@ -1,4 +1,5 @@
 """Persist model identity with API usage without changing graph execution."""
+
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware

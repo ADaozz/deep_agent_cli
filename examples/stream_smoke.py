@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent.config import Settings  # noqa: E402
-from agent.llm import build_chat_model  # noqa: E402
-from agent.factory import create_agent  # noqa: E402
-from agent.runner import AgentRunner  # noqa: E402
+from agent.bootstrap.config import Settings  # noqa: E402
+from agent.models.client import build_chat_model  # noqa: E402
+from agent.bootstrap.factory import create_agent  # noqa: E402
+from agent.runtime.runner import AgentRunner  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

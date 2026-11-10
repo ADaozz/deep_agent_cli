@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from agent.session import SessionStore
-from agent.session_lock import (
+from agent.sessions.store import SessionStore
+from agent.sessions.locks import (
     InProcessSessionLockManager,
     SessionLockBusyError,
     SessionLockManager,
@@ -149,7 +149,7 @@ def test_killed_process_releases_its_lock(tmp_path: Path) -> None:
     script = (
         "import os, signal, sys\n"
         "from pathlib import Path\n"
-        "from agent.session_lock import SessionLockManager\n"
+        "from agent.sessions.locks import SessionLockManager\n"
         "manager = SessionLockManager(Path(sys.argv[1]))\n"
         "lease = manager.try_acquire('held-thread')\n"
         "assert lease is not None\n"
@@ -175,7 +175,7 @@ def test_live_process_keeps_the_thread_busy(tmp_path: Path) -> None:
     script = (
         "import sys, time\n"
         "from pathlib import Path\n"
-        "from agent.session_lock import SessionLockManager\n"
+        "from agent.sessions.locks import SessionLockManager\n"
         "manager = SessionLockManager(Path(sys.argv[1]))\n"
         "lease = manager.try_acquire('held-thread')\n"
         "assert lease is not None\n"
@@ -290,10 +290,11 @@ def test_cancelled_model_stream_keeps_lease_until_runner_closes(tmp_path: Path, 
     import time
 
     from deepagents.backends import StateBackend
-    from agent.config import ModelProfile, Settings
-    from agent.llm_stream import live_stream_count
-    from agent.runner import MODEL_STREAM_CLOSE_SECONDS, AgentRunner
-    from agent.session import SessionStore
+    from agent.models.profile import ModelProfile
+    from agent.bootstrap.config import Settings
+    from agent.models.stream_lifecycle import live_stream_count
+    from agent.runtime.runner import MODEL_STREAM_CLOSE_SECONDS, AgentRunner
+    from agent.sessions.store import SessionStore
     from tests.model_stream_server import ScriptedSSEServer, Turn
 
     with ScriptedSSEServer(api, [Turn(mode="hang")]) as server:

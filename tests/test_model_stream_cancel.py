@@ -18,10 +18,13 @@ import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.config import ModelProfile, Settings
-from agent.runner import AgentRunner, RunEvent, RunResult
-from agent.session import SessionStore, StopReason
-from agent.stream import message_text
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent, RunResult
+from agent.sessions.store import SessionStore
+from agent.sessions.contracts import StopReason
+from agent.models.messages import message_text
 from tests.model_stream_server import ScriptedSSEServer, Turn
 
 pytestmark = pytest.mark.integration
@@ -32,7 +35,7 @@ CANCEL_BUDGET = 5.0
 
 def _live_bridges() -> int | None:
     try:
-        from agent.llm_stream import live_stream_count
+        from agent.models.stream_lifecycle import live_stream_count
     except ImportError:
         return None
     return live_stream_count()
@@ -540,7 +543,7 @@ def test_idle_cancel_does_not_affect_next_run(make_runner) -> None:
 # Bridge and controller units
 # ---------------------------------------------------------------------------
 def _bridge(factory, **kwargs):
-    from agent.llm_stream import CancellableStreamBridge
+    from agent.models.stream_lifecycle import CancellableStreamBridge
     return CancellableStreamBridge(factory, **kwargs)
 
 
@@ -592,7 +595,7 @@ def test_bridge_propagates_errors_and_natural_completion_is_not_cancel() -> None
 def test_bridge_cancel_interrupts_a_blocked_await_from_another_thread() -> None:
     import asyncio
 
-    from agent.llm_stream import ModelStreamCancelled
+    from agent.models.stream_lifecycle import ModelStreamCancelled
 
     cleaned = threading.Event()
 
@@ -618,7 +621,7 @@ def test_bridge_cancel_interrupts_a_blocked_await_from_another_thread() -> None:
 
 
 def test_bridge_cancelled_before_start_never_runs() -> None:
-    from agent.llm_stream import ModelStreamCancelled
+    from agent.models.stream_lifecycle import ModelStreamCancelled
 
     started = threading.Event()
 
@@ -667,7 +670,7 @@ class _FakeStream:
 
 
 def test_controller_stream_registration_is_scoped_to_the_active_run() -> None:
-    from agent.control import RunController
+    from agent.runtime.control import RunController
 
     events = []
     controller = RunController(on_control_event=lambda kind, _payload: events.append(kind))
@@ -699,7 +702,7 @@ def test_controller_stream_registration_is_scoped_to_the_active_run() -> None:
 
 
 def test_controller_reservation_keeps_early_cancel_and_isolates_generations() -> None:
-    from agent.control import RunController
+    from agent.runtime.control import RunController
 
     controller = RunController()
     token = controller.reserve_run()
@@ -736,7 +739,7 @@ def test_controller_reservation_keeps_early_cancel_and_isolates_generations() ->
 
 
 def test_controller_unclosed_stream_is_reported() -> None:
-    from agent.control import RunController
+    from agent.runtime.control import RunController
 
     controller = RunController()
     controller.begin_run()
@@ -751,7 +754,7 @@ def test_controller_unclosed_stream_is_reported() -> None:
 
 
 def test_runner_close_keeps_lease_while_model_stream_unclosed(make_runner, tmp_path: Path) -> None:
-    from agent.session_lock import SessionLockBusyError
+    from agent.sessions.locks import SessionLockBusyError
 
     with ScriptedSSEServer("chat_completions", []) as server:
         runner = make_runner(server)
@@ -774,7 +777,7 @@ def test_runner_close_keeps_lease_while_model_stream_unclosed(make_runner, tmp_p
 
 
 def test_unclosed_stream_reports_cleanup_failure(make_runner, monkeypatch) -> None:
-    import agent.runner as runner_module
+    import agent.runtime.runner as runner_module
 
     with ScriptedSSEServer("chat_completions", [Turn(mode="hang")]) as server:
         runner = make_runner(server)
@@ -848,9 +851,9 @@ def test_cancelling_one_session_leaves_concurrent_streams_intact(api: str, make_
 _EXIT_PROBE = r'''
 import sys, threading, time
 from deepagents.backends import StateBackend
-from agent.config import ModelProfile, Settings
-from agent.runner import AgentRunner
-from agent.llm_stream import live_stream_count, shutdown_stream_loop
+from agent.bootstrap.config import ModelProfile, Settings
+from agent.runtime.runner import AgentRunner
+from agent.models.stream_lifecycle import live_stream_count, shutdown_stream_loop
 
 base_url, api, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 settings = Settings(llm_profiles=(ModelProfile("l/s", "s", api_key="k", base_url=base_url, api=api),),
