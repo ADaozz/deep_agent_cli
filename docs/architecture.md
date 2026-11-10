@@ -320,6 +320,8 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 `/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
+`PayloadRecoveryMiddleware` 在模型请求前将工具结果中的内嵌媒体限制在约 2 MiB，优先保留最近的媒体，并以提示替代超出部分，防止大请求在网关返回 413 前断开。收到 HTTP 413 时，还会尝试移除工具结果中的剩余内嵌媒体、截短超长工具文本并重试一次。原始 checkpoint 不变；用户消息和附件不会被移除。若没有可缩减的工具结果，或重试仍然超限，则报告请求失败。
+
 ## 会话存储
 
 默认每个工作区对应 `~/.deep-agent/sessions/` 中的一份 SQLite 数据库；作为库使用且未传入持久 checkpointer 时，工厂使用 `InMemorySaver`。持久会话包含：

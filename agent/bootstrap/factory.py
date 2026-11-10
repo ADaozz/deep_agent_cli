@@ -30,6 +30,7 @@ from agent.models.client import ProtocolChatOpenAI, build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
 from agent.middleware.current_time import CurrentTimeMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
+from agent.middleware.payload_recovery import PayloadRecoveryMiddleware
 from agent.middleware.pause import PauseGateMiddleware
 from agent.middleware.usage import UsageIdentityMiddleware
 from agent.middleware.recovery import RecoveryContextMiddleware
@@ -321,6 +322,7 @@ def build_agent(
                 ToolArgHintMiddleware(),
                 WriteOperationMiddleware(fs_backend),
                 AttachmentMaterializationMiddleware(),
+                PayloadRecoveryMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
                 summarization,
                 compact_middleware,
