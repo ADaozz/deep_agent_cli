@@ -14,6 +14,35 @@ from agent.runtime.contracts import InterruptKind, UnknownInterruptError
 from tests.conftest import graph_tool_names, scripted_model
 
 
+@pytest.mark.parametrize(("configured", "window", "expected"), [
+    (0.6, 128_000, {"fraction": 0.6}),
+    (0.95, 128_000, {"fraction": 0.85}),
+    (0.6, None, {"tokens": 170_000}),
+])
+def test_auto_and_manual_compaction_share_configured_trigger(monkeypatch, configured, window, expected) -> None:
+    import agent.bootstrap.factory as factory
+
+    model = scripted_model([AIMessage(content="done")])
+    model.profile = {"max_input_tokens": window} if window else None
+    settings = Settings.from_mapping({"agent": {"compaction_threshold": configured}})
+    original = factory.create_deep_agent
+    captured = {}
+
+    def capture(**kwargs):
+        captured["middleware"] = kwargs["middleware"]
+        return original(**kwargs)
+
+    monkeypatch.setattr(factory, "create_deep_agent", capture)
+    prepared = create_agent(model=model, backend=StateBackend(), skills=[], settings=settings)
+    engine = prepared.compact_middleware._summarization
+    assert engine in captured["middleware"]
+    assert engine._lc_helper._trigger_clauses == [expected]
+    if window:
+        threshold = int(window * expected["fraction"])
+        assert not engine._lc_helper._should_summarize([], threshold - 1)
+        assert engine._lc_helper._should_summarize([], threshold)
+
+
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])

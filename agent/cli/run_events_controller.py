@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.cli.completion import model_display_name
 from agent.runtime.contracts import RunEvent, RunResult
+from agent.sessions.summary import SessionSummaryRequest
 
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 class RunEventsController:
     def __init__(
         self, *,
+        request_summary: Callable[[SessionSummaryRequest], None],
         _allow_confirm_open: Callable[..., Any],
         _announce_mcp_switch: Callable[..., Any],
         _note_interrupt_behind_allow_confirm: Callable[..., Any],
@@ -34,6 +36,7 @@ class RunEventsController:
         state: CliState,
         invalidate: Callable[[], None],
     ) -> None:
+        self.request_summary = request_summary
         self._allow_confirm_open = _allow_confirm_open
         self._announce_mcp_switch = _announce_mcp_switch
         self._note_interrupt_behind_allow_confirm = _note_interrupt_behind_allow_confirm
@@ -50,6 +53,8 @@ class RunEventsController:
 
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
+        if event.type == "session_summary_requested" and isinstance(event.result, SessionSummaryRequest):
+            self.request_summary(event.result)
         previous_status = self.state.status
         self.state.apply(event)
         if self.state.status != previous_status:

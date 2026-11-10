@@ -18,6 +18,7 @@ from langgraph.types import Command
 from deepagents.backends.protocol import BackendProtocol
 
 from agent.sessions.reader import read_snapshot
+from agent.sessions.summary import SummaryEligibility, redact_summary_input
 from agent.sessions.snapshots import SessionSnapshot, SessionSwitchResult
 from agent.runtime.cancellation import set_output_emitter
 from agent.sessions.attachments import AttachmentStore
@@ -155,6 +156,7 @@ class AgentRunner:
         self._seen_tool_calls: set[str] = set()
         self._subagent_tool_ids: set[str] = set()
         self.settings = settings
+        self._summary_eligibility = SummaryEligibility()
         self._sandbox_config = sandbox_config or (settings.sandbox if settings else None)
         self._busy = False
         self._operation_lock = Lock()
@@ -710,6 +712,15 @@ class AgentRunner:
     def take_unapplied_messages(self) -> list[str]:
         return [item.text for item in self.control.take_unapplied()]
 
+    def summary_secrets(self) -> tuple[str, ...]:
+        settings = self.settings
+        if settings is None:
+            return ()
+        return tuple(value for value in (
+            *(profile.api_key for profile in settings.llm_profiles),
+            settings.tavily_api_key, os.environ.get("TAVILY_API_KEY"),
+        ) if value)
+
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         assert self._runtime is not None
         return self._runtime.list_sessions(limit=limit)
@@ -1036,6 +1047,17 @@ class AgentRunner:
         if self._resume_context is not None:
             self._resume_context.armed = True
         if self.session_store is not None:
+            if (self.settings is not None and isinstance(self._chat_model, ChatOpenAI)
+                    and self._summary_eligibility.accepts_request(self.thread_id)):
+                request_text = redact_summary_input(text, self.summary_secrets())[:2000]
+                if self._summary_eligibility.needs_inspection(self.thread_id):
+                    info = self.session_store.get(self.thread_id)
+                    self._summary_eligibility.begin(
+                        self.thread_id, request_text, has_content=self.thread_has_content(),
+                        has_summary=bool(info and info.summary),
+                    )
+                else:
+                    self._summary_eligibility.update_request(self.thread_id, request_text)
             self._runtime.persist_for_message(
                 model_id=self.configuration.current_model_id, permission_mode=self.configuration.permission_mode.value,
                 reasoning_effort=self.configuration.reasoning_effort,
@@ -1317,6 +1339,16 @@ class AgentRunner:
                 content=output,
                 result=timing,
             ))
+            summary = self._summary_eligibility.complete(
+                self.thread_id, output, self.configuration.current_model_id,
+            )
+            if summary is not None:
+                secrets = self.summary_secrets()
+                summary = replace(
+                    summary, user_request=redact_summary_input(summary.user_request, secrets)[:2000],
+                    agent_result=redact_summary_input(summary.agent_result, secrets)[:4000],
+                )
+                _emit(event_handler, RunEvent(type="session_summary_requested", result=summary))
 
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)

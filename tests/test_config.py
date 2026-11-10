@@ -13,6 +13,17 @@ from agent.models.client import ResponsesChatOpenAI, build_chat_model
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
 
 
+@pytest.mark.parametrize("value", [0, -1, 1.1, True, None, "0.6"])
+def test_compaction_threshold_rejects_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError, match="agent.compaction_threshold"):
+        Settings.from_mapping({"agent": {"compaction_threshold": value}})
+
+
+def test_compaction_threshold_defaults_and_loads() -> None:
+    assert Settings.from_mapping({}).compaction_threshold == 0.85
+    assert Settings.from_mapping({"agent": {"compaction_threshold": 0.6}}).compaction_threshold == 0.6
+
+
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)

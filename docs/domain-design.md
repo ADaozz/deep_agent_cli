@@ -22,6 +22,7 @@
 - `RuntimeConfiguration` 管理当前配置及待切换请求；请求不立即改变当前值。Runner 在操作锁和模型安全边界内协调图重建、存储及发布，失败时保留既有执行语义。
 - `GraphExecution` 将图流、框架中断及取消结果转换为运行结果；Runner 负责资源、会话所有权及收尾。
 - 模型传输通过 `ImageReader` 读取附件，不依赖附件文件存储实现。
+- 会话摘要的首轮资格、脱敏和标题校验由 `sessions.summary` 管理；`models.session_summary` 发起独立标题请求，CLI 控制后台任务和显示缓存。摘要以真实 thread_id 进行一次性写入。
 - `SessionRuntime` 通过 `SessionRepository` 访问会话和租约，通过 `ModelCatalog` 决定恢复方案。快照读取不更改活动会话租约。
 - `WorkspaceCompositeBackend` 先准备文件路由，再调用 `ManagedExecutor.reconfigure` 停止旧 Worker 并发布执行配置；失败时不发布新路由。
 - CLI 功能控制器接收所需服务、状态和回调，不保存 `CliApplication`。`DialogState`、`InputDrafts`、`RunPresentation` 保存共享展示状态，导航状态由 `TranscriptNavigation` 管理。跨功能调用保留显式依赖，延迟绑定处理界面组装顺序。

@@ -116,7 +116,7 @@ llm:
 <summary>恢复会话、升级与虚拟环境安装</summary>
 
 ```bash
-deep-agent resume           # 选择已保存的会话
+deep-agent resume           # 按中文摘要选择会话，无摘要时显示 ID
 deep-agent resume 01a08aae   # 换成已有会话的 ID 或前缀
 pipx upgrade deep-agent-cli
 ```

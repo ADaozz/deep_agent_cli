@@ -86,6 +86,7 @@ from agent.cli.rendering import (
     render_review,
 )
 from agent.cli.session_controller import SessionController
+from agent.cli.session_summaries import SessionSummaries
 from agent.cli.state import CliState, ToolBlock
 from agent.cli.working_messages import WorkingMessageRotation, load_working_messages
 from agent.bootstrap.config import require_keybindings_outside_workspace
@@ -269,7 +270,12 @@ class CliApplication:
             invalidate=lambda: self.application.invalidate(),
             _call_in_run_epoch=_call_in_run_epoch,
         )
+        self.session_summaries = SessionSummaries(
+            runner=self.runner, lifecycle=lambda: self.lifecycle,
+            invalidate=lambda: self.application.invalidate(),
+        )
         self.run_events = RunEventsController(
+            request_summary=self.session_summaries.request,
             _allow_confirm_open=lambda *args, **kwargs: self.access_selection._allow_confirm_open(*args, **kwargs),
             _announce_mcp_switch=lambda *args, **kwargs: self._announce_mcp_switch(*args, **kwargs),
             _note_interrupt_behind_allow_confirm=lambda *args, **kwargs: self.access_selection._note_interrupt_behind_allow_confirm(*args, **kwargs),
@@ -301,6 +307,7 @@ class CliApplication:
             finish_mcp=lambda interaction, **kwargs: finish_mcp_interaction(self, interaction, **kwargs),
         )
         self.sessions = SessionController(
+            summaries=lambda: self.session_summaries,
             _restore_queued_to_editor=lambda *args, **kwargs: self._restore_queued_to_editor(*args, **kwargs),
             _run_blocking=lambda *args, **kwargs: self._run_blocking(*args, **kwargs),
             buffer=self.buffer,
@@ -861,7 +868,7 @@ class CliApplication:
         info = store.get(self.runner.thread_id)
         status = info.status if info else "unknown"
         stop_reason = info.last_run_status.value if info else "unknown"
-        title = info.title if info else ""
+        title = info.summary if info and info.summary else ""
         created_at = info.created_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         updated_at = info.updated_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
         self.state.add_system(
@@ -1170,7 +1177,7 @@ class CliApplication:
             model_label += f" → {pending_model.model} · {pending_effort or 'default'} (pending)"
         elif pending_effort is not None:
             model_label += f" → {pending_effort} (pending)"
-        resume_id = self.runner.thread_id[:8]
+        resume_id = self.session_summaries.label(self.runner.thread_id)
         context = format_context_usage(
             self.state.usage, self.runner.context_window(),
             empty_session=self.state.context_pristine and not self.state.running,
@@ -1226,7 +1233,9 @@ class CliApplication:
 
     def _apply_run_event(self, event: RunEvent, epoch: int | None) -> None:
         # Events without an epoch come from the UI thread (steering, control).
-        if epoch is not None and epoch != self.run_view.epoch:
+        # Summary metadata carries its own thread_id and survives a later UI run.
+        if (epoch is not None and epoch != self.run_view.epoch
+                and event.type != "session_summary_requested"):
             return
         self.run_events._apply_event(event)
 

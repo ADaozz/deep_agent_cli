@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from agent.cli.state import CliState
     from agent.cli.view_state import DialogState
     from agent.cli.interaction_flow import InteractionFlow
+    from agent.cli.session_summaries import SessionSummaries
 
 
 # Shown while the runner waits for a session held by another window.
@@ -31,6 +32,7 @@ WAIT_STATUS = "Waiting for session {} · Esc cancels"
 class SessionController:
     def __init__(
         self, *,
+        summaries: Callable[[], SessionSummaries],
         _restore_queued_to_editor: Callable[..., Any],
         _run_blocking: Callable[..., Awaitable[Any]],
         buffer: Buffer,
@@ -43,6 +45,7 @@ class SessionController:
         state: CliState,
         invalidate: Callable[[], None],
     ) -> None:
+        self.summaries = summaries
         self._restore_queued_to_editor = _restore_queued_to_editor
         self._run_blocking = _run_blocking
         self.buffer = buffer
@@ -96,6 +99,7 @@ class SessionController:
         except RuntimeError as exc:
             self.state.add_system(str(exc), error=True)
             return
+        self.summaries().remember(info)
         self.reset_session_view()
         self.state.clear()
         self.state.context_pristine = True
@@ -126,10 +130,12 @@ class SessionController:
         if not sessions:
             self.state.add_system("No sessions with conversation content.", error=True)
             return
+        for item in sessions:
+            self.summaries().remember(item)
         options = [
             {
                 "value": item.id,
-                "label": f"{item.id[:8]} · {item.last_run_status.value} · {item.title[:40]}",
+                "label": item.summary or item.id,
                 "right_label": item.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
             }
             for item in sessions
@@ -164,6 +170,7 @@ class SessionController:
         self.apply_snapshot(result.snapshot)
 
     def apply_snapshot(self, snapshot: Any) -> None:
+        self.summaries().remember(snapshot.info)
         self.reset_session_view()
         self.state.load_transcript(snapshot.transcript)
         self.state.load_model_metrics(snapshot.model_metrics_history)

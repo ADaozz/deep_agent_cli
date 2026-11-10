@@ -279,6 +279,7 @@ async def main():
     def snapshot():
         info = store.get(runner.thread_id)
         data = {'status': app.state.status, 'running': app.state.running,
+                'summary': info.summary if info else None,
                 'transcript': '\n'.join(str(getattr(b, 'content', '')) for b in app.state.blocks),
                 'cancel_requests': len(requests), 'live_streams': live_stream_count(),
                 'busy': runner._busy, 'last_run': info.last_run_status.value if info and info.last_run_status else None,
@@ -331,6 +332,11 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             tui.send('second task\r')
             state = tui.wait(lambda s: 'second answer' in s['transcript'] and s['status'] == 'Ready')
             assert state['cancel_requests'] == 1 and state['live_streams'] == 0
+            state = tui.wait(lambda s: bool(s['summary']))
+            assert state['summary'] == '修复会话恢复流程中的异常中断问题'
+            assert len(server.summary_connections) == 1
+            summary_body = json.dumps(server.summary_connections[0].body, ensure_ascii=False)
+            assert 'second task' in summary_body and 'first task' not in summary_body
             assert len(server.connections) == 2
             assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:

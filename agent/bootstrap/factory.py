@@ -12,8 +12,9 @@ from deepagents import (
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
 from deepagents.middleware.subagents import CompiledSubAgent
 from deepagents.middleware.summarization import (
+    SummarizationMiddleware,
     SummarizationToolMiddleware,
-    create_summarization_tool_middleware,
+    compute_summarization_defaults,
 )
 from deepagents._models import get_model_identifier, get_model_provider
 from langchain.agents.middleware import AgentMiddleware
@@ -205,7 +206,20 @@ def build_agent(
     )
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     saver = checkpointer if checkpointer is not None else InMemorySaver()
-    compact_middleware = create_summarization_tool_middleware(model, fs_backend)
+    cfg = settings or spec.settings or Settings()
+    summary_defaults = compute_summarization_defaults(model)
+    trigger = summary_defaults["trigger"]
+    keep = summary_defaults["keep"]
+    if trigger[0] == "fraction":
+        trigger = ("fraction", min(trigger[1], cfg.compaction_threshold))
+        if keep[0] == "fraction" and keep[1] >= trigger[1]:
+            keep = ("fraction", trigger[1] / 2)
+    summarization = SummarizationMiddleware(
+        model=model, backend=fs_backend, trigger=trigger,
+        keep=keep, trim_tokens_to_summarize=None,
+        truncate_args_settings=summary_defaults["truncate_args_settings"],
+    )
+    compact_middleware = SummarizationToolMiddleware(summarization)
     mcp_revision: int | None = None
     mcp_tools: list[Any] = []
     include_mcp = False
@@ -221,7 +235,6 @@ def build_agent(
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
     subagents: list[CompiledSubAgent] = []
     manager = None
-    cfg = settings or spec.settings or Settings()
     if spec.role == "main" and cfg.subagents.enabled:
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
@@ -309,6 +322,7 @@ def build_agent(
                 WriteOperationMiddleware(fs_backend),
                 AttachmentMaterializationMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+                summarization,
                 compact_middleware,
                 *([MCPMiddleware(mcp, mcp_tools)] if include_mcp else []),
                 *([HiddenToolsMiddleware(spec.hidden_tools)] if spec.hidden_tools else []),

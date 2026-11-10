@@ -59,8 +59,13 @@ class Settings:
     tavily_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
+    compaction_threshold: float = 0.85
 
     def __post_init__(self) -> None:
+        if (isinstance(self.compaction_threshold, bool)
+                or not isinstance(self.compaction_threshold, (int, float))
+                or not 0 < self.compaction_threshold <= 1):
+            raise ValueError("agent.compaction_threshold must be a number greater than 0 and at most 1")
         if not isinstance(self.trust_env, bool):
             raise ValueError("trust_env must be a boolean")
         profile = self.active_profile
@@ -191,6 +196,7 @@ class Settings:
             config_dir=_optional_path(paths.get("config_dir"), base_dir=root),
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
+            compaction_threshold=agent.get("compaction_threshold", 0.85),
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(

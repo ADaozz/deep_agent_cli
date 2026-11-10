@@ -48,17 +48,18 @@ class ContextCompaction:
             self.state.running = False
             self.invalidate()
         if result.status == "ineligible":
+            threshold = min(0.85, self.runner.settings.compaction_threshold if self.runner.settings else 0.85) * 50
             if result.percent is not None:
                 notice = (
-                    "Manual compaction is allowed at about 42.5% of the context window; "
+                    f"Manual compaction is allowed at about {threshold:g}% of the context window; "
                     f"current usage: {result.percent:.1f}%."
                 )
-                if result.percent >= 42.5:
+                if result.percent >= threshold:
                     notice += " Deep Agents has not accepted the latest model usage as eligible."
                 self.state.add_system(notice)
             elif result.window_tokens > 0:
                 self.state.add_system(
-                    "Manual compaction is allowed at about 42.5% of the context window; "
+                    f"Manual compaction is allowed at about {threshold:g}% of the context window; "
                     "current usage is unknown because the model has not reported token usage."
                 )
             else:

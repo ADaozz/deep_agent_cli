@@ -84,6 +84,7 @@ class ScriptedSSEServer:
         self._turns: deque[Turn] = deque(turns or [])
         self._lock = threading.Lock()
         self.connections: list[Connection] = []
+        self.summary_connections: list[Connection] = []
         self.errors: list[str] = []
         self._stop = threading.Event()
         self._request_seen = threading.Condition(self._lock)
@@ -145,12 +146,44 @@ class ScriptedSSEServer:
 
     def open_connections(self) -> list[Connection]:
         with self._lock:
-            return [item for item in self.connections if not item.closed.is_set()]
+            return [item for item in [*self.connections, *self.summary_connections] if not item.closed.is_set()]
 
     # -- serving --------------------------------------------------------------------
     def _serve(self, handler: BaseHTTPRequestHandler, body: dict[str, Any]) -> None:
         expected = "/v1/chat/completions" if self.api == "chat_completions" else "/v1/responses"
         connection = Connection(handler.path, body, time.monotonic())
+        # Optional non-streaming title requests do not consume scripted coding turns.
+        is_summary = "根据用户请求和 Coding Agent 当前执行结果" in json.dumps(body, ensure_ascii=False)
+        if body.get("stream") is not True and is_summary and handler.path == expected:
+            with self._lock:
+                self.summary_connections.append(connection)
+            title = "修复会话恢复流程中的异常中断问题"
+            model = str(body.get("model") or "local")
+            if self.api == "chat_completions":
+                response = {
+                    "id": "summary", "object": "chat.completion", "created": 0, "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": title},
+                                 "finish_reason": "stop"}],
+                }
+            else:
+                response = {
+                    "id": "summary", "object": "response", "created_at": 0, "model": model,
+                    "status": "completed", "usage": None,
+                    "output": [{"id": "title", "type": "message", "role": "assistant",
+                                "status": "completed",
+                                "content": [{"type": "output_text", "text": title, "annotations": []}]}],
+                }
+            encoded = json.dumps(response, ensure_ascii=False).encode()
+            try:
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(encoded)))
+                handler.end_headers()
+                handler.wfile.write(encoded)
+                connection.finished_at = time.monotonic()
+            finally:
+                connection.closed.set()
+            return
         with self._request_seen:
             number = len(self.connections)
             self.connections.append(connection)

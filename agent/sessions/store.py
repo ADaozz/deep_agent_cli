@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     pending_permission_mode TEXT,
     reasoning_effort TEXT NOT NULL DEFAULT 'default',
     pending_reasoning_effort TEXT,
-    last_run_status TEXT NOT NULL
+    last_run_status TEXT NOT NULL,
+    summary TEXT
 );
 CREATE INDEX IF NOT EXISTS session_catalog_updated_idx
     ON session_catalog (updated_at DESC);
@@ -148,17 +149,21 @@ class SessionStore:
 
 
     def _initialize_catalog(self) -> None:
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
         expected = {
             "id", "title", "created_at", "updated_at", "model_id", "permission_mode",
             "pending_model_id", "pending_permission_mode", "reasoning_effort",
-            "pending_reasoning_effort", "last_run_status",
+            "pending_reasoning_effort", "last_run_status", "summary",
         }
-        if columns and columns != expected:
-            raise ValueError(
-                "Unsupported session catalog schema; automatic migration is not supported. "
-                "Use a separate state database for this version."
-            )
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(session_catalog)")}
+            if columns == expected - {"summary"}:
+                self._conn.execute("ALTER TABLE session_catalog ADD COLUMN summary TEXT")
+            elif columns and columns != expected:
+                raise ValueError(
+                    "Unsupported session catalog schema; automatic migration is not supported. "
+                    "Use a separate state database for this version."
+                )
         self._conn.executescript(_CATALOG_DDL)
 
     def attachment_storage_keys(self) -> set[str]:
@@ -206,6 +211,16 @@ class SessionStore:
             )
             self._conn.commit()
         return info
+
+    def set_summary_if_empty(self, session_id: str, summary: str) -> bool:
+        """Publish metadata once without changing session ordering or its identity."""
+        with self.checkpointer.lock:
+            cursor = self._conn.execute(
+                "UPDATE session_catalog SET summary = ? WHERE id = ? AND (summary IS NULL OR summary = '')",
+                (summary, session_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
 
     def touch(
         self,
@@ -286,7 +301,7 @@ class SessionStore:
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort "
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort, summary "
                 "FROM session_catalog ORDER BY updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -295,7 +310,7 @@ class SessionStore:
     def get(self, session_id: str) -> SessionInfo | None:
         with self.checkpointer.lock:
             row = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort FROM session_catalog WHERE id = ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort, summary FROM session_catalog WHERE id = ?",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -311,7 +326,7 @@ class SessionStore:
             return exact
         with self.checkpointer.lock:
             rows = self._conn.execute(
-                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort FROM session_catalog WHERE id LIKE ?",
+                "SELECT id, title, created_at, updated_at, model_id, permission_mode, last_run_status, pending_model_id, pending_permission_mode, reasoning_effort, pending_reasoning_effort, summary FROM session_catalog WHERE id LIKE ?",
                 (f"{prefix}%",),
             ).fetchall()
         if len(rows) != 1:
@@ -325,7 +340,7 @@ def _session_info(row: Any) -> SessionInfo:
         id=row[0], title=row[1], created_at=_parse_dt(row[2]), updated_at=_parse_dt(row[3]),
         status=_status_for_reason(reason), model_id=row[4], permission_mode=row[5], last_run_status=reason,
         pending_model_id=row[7], pending_permission_mode=row[8],
-        reasoning_effort=row[9], pending_reasoning_effort=row[10],
+        reasoning_effort=row[9], pending_reasoning_effort=row[10], summary=row[11],
     )
 
 

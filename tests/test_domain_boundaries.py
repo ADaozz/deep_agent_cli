@@ -22,7 +22,7 @@ PURE_MODULES = (
     "models/profile.py", "models/catalog.py", "execution/policy.py", "execution/types.py",
     "runtime/contracts.py", "runtime/configuration.py", "runtime/permissions.py",
     "sessions/contracts.py", "sessions/images.py", "sessions/recovery.py", "sessions/ports.py",
-    "sessions/snapshots.py", "mcp/contracts.py", "subagents/configuration.py",
+    "sessions/snapshots.py", "sessions/summary.py", "mcp/contracts.py", "subagents/configuration.py",
 )
 
 
@@ -45,7 +45,7 @@ def test_domain_rules_do_not_import_infrastructure(module):
 @pytest.mark.parametrize("module", (
     "model_selection", "access_selection", "attachments_controller", "transcript_navigation",
     "run_dispatch", "run_events_controller", "interaction_flow", "session_controller", "lifecycle",
-    "skill_selection", "context_compaction",
+    "skill_selection", "context_compaction", "session_summaries",
 ))
 def test_ui_workflows_do_not_depend_on_the_application(module):
     tree = ast.parse(Path(f"agent/cli/{module}.py").read_text())

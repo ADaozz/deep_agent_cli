@@ -309,7 +309,7 @@ def test_resume_menu_lists_sessions_with_content(tmp_path) -> None:
                     option = next(option for option in options if option["value"] == info.id)
                     timestamp = info.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
                     assert option["right_label"] == timestamp
-                    assert info.title[:40] in option["label"]
+                    assert option["label"] == (info.summary or info.id)
                     line = next(line for line in rendered.splitlines() if info.id[:8] in line)
                     assert line.endswith(timestamp)
                     positions.append(line.index(timestamp))

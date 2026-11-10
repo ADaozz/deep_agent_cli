@@ -723,7 +723,7 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypa
         assert first_line.startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-c")
         assert first_line.rstrip().endswith("⎇ checking git")
         assert any(style == "class:footer-workspace" and format_workspace_path(app._workspace()) in value for style, value in fragments)
-        assert ("class:footer-resume-id", "footer-c") in fragments
+        assert ("class:footer-resume-id", "footer-colors") in fragments
         assert ("class:footer-model", "qwen3.5-plus · default") in fragments
         for label, color in (
             ("footer-workspace", "ansigreen"),
@@ -858,6 +858,26 @@ def test_compact_command_reports_threshold_and_current_usage() -> None:
             assert "42.5%" in notice
             assert "0.8%" in notice
             assert app.state.running is False
+
+    asyncio.run(scenario())
+
+
+def test_compact_command_reports_configured_threshold() -> None:
+    model = scripted_model([AIMessage(content="unused")])
+    model.profile = {"max_input_tokens": 128_000}
+    runner = AgentRunner(
+        model=model, backend=StateBackend(),
+        settings=Settings.from_mapping({
+            "agent": {"compaction_threshold": 0.6},
+            "llm": {"default": "local/test", "models": {"local": {"context_window": "128k", "models": {"test": {}}}}},
+        }),
+    )
+
+    async def scenario() -> None:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            await app.run_dispatch._dispatch_command("/compact")
+            assert "30%" in app.state.blocks[-1].content
 
     asyncio.run(scenario())
 

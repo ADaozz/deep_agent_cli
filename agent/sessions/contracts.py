@@ -37,6 +37,7 @@ class SessionInfo:
     reasoning_effort: str = "default"
     pending_reasoning_effort: str | None = None
     last_run_status: StopReason = StopReason.PENDING
+    summary: str | None = None
 
 
 @dataclass

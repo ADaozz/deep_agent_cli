@@ -316,7 +316,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 ## 上下文压缩
 
-自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时约在窗口 85% 触发，保留最近约 10% 上下文；没有该 profile 信息时，约 170,000 tokens 触发，保留最近 6 条消息。具体阈值取决于上游版本。
+自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `agent.compaction_threshold` 与 0.85 的较小值触发，通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85。示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
 
 `/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
