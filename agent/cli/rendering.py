@@ -1044,6 +1044,8 @@ def _capture(renderable: Any, width: int) -> str:
         # an inherited NO_COLOR from the shell must not erase them.
         no_color=False,
         width=max(20, width),
+        # Rich ignores an explicit width on TERM=dumb/unknown unless height is also set.
+        height=25,
     )
     console.print(renderable)
     return stream.getvalue().rstrip("\n")

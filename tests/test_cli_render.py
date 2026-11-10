@@ -14,6 +14,7 @@ import logging
 import re
 import pytest
 from rich.cells import cell_len
+from rich.text import Text
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -838,6 +839,13 @@ def test_tool_render_is_compact_then_expandable() -> None:
     expanded = render_transcript(state, 80)
     assert "line 0" in expanded
     assert "output lines hidden" not in expanded
+
+
+@pytest.mark.parametrize("term", ["dumb", "unknown", "xterm-256color"])
+def test_capture_uses_requested_width_on_any_term(monkeypatch, term) -> None:
+    monkeypatch.setenv("TERM", term)
+    rendered = [line.rstrip() for line in _plain(_capture(Text("x" * 150), 120)).splitlines()]
+    assert rendered == ["x" * 120, "x" * 30]
 
 
 @pytest.mark.parametrize("width", [60, 100])

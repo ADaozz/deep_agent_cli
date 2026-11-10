@@ -1,26 +1,36 @@
-## v0.2.1 更新内容
+## v0.2.2 更新内容
 
-### 原生 SubAgent（PR #30）
+### 会话中文摘要（PR #33）
 
-- SubAgent 运行数量移至 `Working…` 所在状态行，输入框顶部恢复为空白，数量为零时隐藏。
-- 每次模型请求在系统提示词中动态注入当前日期（`yyyy-mm-dd`）和用户时区，主 Agent 与 SubAgent 均使用 `ui.timezone`，跨天后自动更新。
+- 新会话首次成功完成一轮后，后台额外请求一次中文标题（目标 12～25 个汉字），用于 `/resume`、`deep-agent resume` 列表和底栏；无摘要时显示 thread_id，选择项始终绑定真实会话 ID。
+- 标题生成使用独立客户端，不调用工具、不写入聊天历史、不计入 TPS、不阻塞输入；超时 10 秒且不重试，请求和结果均先脱敏并限长。
+- 历史会话不自动补全摘要；数据库初始化时自动补齐摘要列，已有记录保持不变。
 
-- 接入 Deep Agents 原生同步 `task` 和隔离 `CompiledSubAgent`。仅当问题可拆成多个独立、互不干扰的子问题时才应派生；默认最多同时运行 2 个子任务。
-- 子任务共享已验证的沙箱 Backend/Pool，使用 `allow`，不装载 MCP、人工输入或递归委派工具；父任务取消传播到子任务，任务结束不保留后台 SubAgent。
-- 模型 Profile 可继承主模型，思考强度 `default/null` 使用子模型原生默认；支持显式能力校验和独立客户端回收。
-- 每个 task 独立显示 SubAgent 卡片，展示任务描述、状态及可展开的完整返回结果，支持失败、取消和历史恢复；内部流仍隔离；独立 JSONL 执行摘要只记录任务起止、工具操作/状态/耗时及有界最终回答，不保存模型 Token、思考或原始工具输出；仅精确替换已知模型和 Tavily Key，支持有界、按父会话隔离的查询。
-- 现有用户配置不会自动覆盖；配置项和派生条件见 [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.1/docs/configuration.md#subagent-委派)。
+### 上下文压缩与超大请求恢复
 
-### TUI 输出与差异预览
+- 新增 `agent.compaction_threshold`，按模型上下文窗口比例触发自动压缩（取值大于 0 且不超过 1，省略时为 0.85，实际取其与 0.85 的较小值）。示例配置设为 0.60。
+- 新增请求体恢复中间件：工具结果中的内嵌媒体在请求前限制在约 2 MiB，优先保留最近的媒体；收到 HTTP 413 时移除剩余内嵌媒体、截短超长工具文本并重试一次。原始 checkpoint、用户消息和附件均不改动，修复超大工具结果导致会话无法继续的问题。
 
-- 修复长 CSS、中文等工具输出自动换行后超过折叠行数的问题。命令输出和普通工具的原始输出按终端实际显示行数保留末尾 4 行，标题与隐藏提示另计，`Ctrl+O` 仍可展开完整输出。
-- 连续编辑同一文件的合并 diff 以 `Edit N` 标明各次编辑，并注明行号相对于各自的替换片段；完整审阅也注明相对行号，避免将每次重新计数误读为文件行号倒序。
-- 补充自动换行、中文宽字符、流式输出及多次编辑的渲染回归测试，更新折叠规则文档。
+### 追加消息队列与中断发送
 
-### 会话与默认配置
+- 排队的 steering / follow-up 改为在独立区域逐条显示，可滚动查看，不再挤在状态栏中。
+- 有排队消息时 `Esc` 或 `Alt+Up` 将队列撤回到输入框，不中断当前任务；连续按两次 `Enter` 则中断当前任务并在停止后立即发送队列。
+- `Ctrl+B` 只负责展开 / 收起已发送的长消息。
 
-- 新建会话继承当前模型、推理强度、权限和沙箱配置。
-- 示例默认模型改为 DeepSeek Flash，同步首次启动测试的配置断言。
+### TUI 与状态栏
+
+- 长会话转录渲染改为增量复用未变化的单元，5000 块场景下 `render_document` P95 由约 220 ms 降至约 18 ms（PR #32）。
+- 底栏显示模型原始名称；推理强度选单始终把 `default` 放在首位；选择类弹窗精简冗余提示；沙箱模式显示为 `sandbox`。
+- `/status` 新增按模型统计的工具调用表（子智能体请求不计入主会话）。
+- 收到 SIGTERM / SIGHUP 时走正常退出流程并恢复终端模式，第二次信号立即退出；Git 改动数不再统计未跟踪文件。
+- 修复 `TERM=dumb` / `unknown` 终端（部分 IDE 内嵌终端、Emacs shell 等）下转录区固定按 80 列折行、忽略实际终端宽度的问题。
+- 精简内置提示词与 `ls` / `read_file` / `request_human_input` 工具说明，减少多余调用轮次。
+
+### 内部重构与依赖
+
+- 按领域边界拆分核心模块：模型、会话、运行控制、执行环境与启动装配各自独立，CLI 控制器通过显式依赖协作；不保留旧模块路径转发，直接引用内部模块的 Python 代码需按 [架构文档](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/architecture.md) 调整导入路径。
+- 新增 `RunMetrics` 与 `examples/benchmark.py`，用于对照 agent、cli、sandbox 耗时。
+- 升级依赖：`deepagents>=0.7.35`、`langchain-core>=1.7.7`、`langchain-openai>=1.7.4,<1.8.0`，同步提高 `langchain[mcp]`、`langgraph`、`langgraph-checkpoint-sqlite` 下限。
 
 ### 安装与升级
 
@@ -32,6 +42,6 @@ pipx install deep-agent-cli
 pipx upgrade deep-agent-cli
 ```
 
-已有用户配置不会自动覆盖。
+已有用户配置不会自动覆盖；如需调整压缩阈值，请手动在 `agent` 段加入 `compaction_threshold`。
 
-更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.1/docs/tui.md)和[配置参考](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.1/docs/configuration.md)。
+更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/tui.md)和[配置参考](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/configuration.md)。
