@@ -1,4 +1,5 @@
 """Private, bounded JSONL event storage, separate from conversation checkpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import threading
 from typing import Any
+
 
 _ID = re.compile(r"^[0-9a-f]{32}$")
 MAX_EVENT_BYTES = 24_000

@@ -41,11 +41,15 @@ from agent.cli.rendering import (
     render_transcript,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
-from agent.config import Settings, UiDisplayLimits
-from agent.runner import AgentRunner, RunEvent, RunResult, TurnTiming
-from agent.session import SessionStore, TranscriptBlock, messages_to_transcript
+from agent.bootstrap.config import Settings
+from agent.cli.display import UiDisplayLimits
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent, RunResult, TurnTiming
+from agent.sessions.store import SessionStore
+from agent.sessions.transcript import messages_to_transcript
+from agent.sessions.contracts import TranscriptBlock
 from agent.tools.examples import build_example_tools
-from agent.factory import DEFAULT_FS_TOOLS, create_agent
+from agent.bootstrap.factory import DEFAULT_FS_TOOLS, create_agent
 from tests.cli_support import (
     paint as _paint,
     plain as _plain,
@@ -207,14 +211,14 @@ def test_interaction_divider_only_appears_for_interactive_screens() -> None:
             app.buffer.text = "/"
             app.buffer.complete_state = CompletionState(app.buffer.document, [Completion("/help")])
             assert not divider.filter()
-            app.interaction = InteractionController(
+            app.dialogs.current = InteractionController(
                 kind="model", title="Select model", question="Choose a model",
                 fields=[{"id": "model", "type": "single_select", "label": "Model", "options": []}],
             )
             assert divider.filter()
-            app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+            app.dialogs.current = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
             assert divider.filter()
-            app.interaction = None
+            app.dialogs.current = None
             app.buffer.reset()
             assert not divider.filter()
 
@@ -294,12 +298,12 @@ def test_resume_menu_lists_sessions_with_content(tmp_path) -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             await app.resume_session()
-            assert app.interaction is not None
-            assert app.interaction.kind == "resume"
-            options = app.interaction.fields[0]["options"]
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.kind == "resume"
+            options = app.dialogs.current.fields[0]["options"]
             assert {option["value"] for option in options} == {item.id for item in sessions}
             for width in (50, 100):
-                rendered = re.sub(r"\x1b\[[0-9;]*m", "", render_interaction(app.interaction, width))
+                rendered = re.sub(r"\x1b\[[0-9;]*m", "", render_interaction(app.dialogs.current, width))
                 positions = []
                 for info in sessions:
                     option = next(option for option in options if option["value"] == info.id)
@@ -328,7 +332,7 @@ def test_resume_menu_skips_empty_new_sessions(tmp_path) -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             await app.resume_session()
-            assert app.interaction is None
+            assert app.dialogs.current is None
             assert any("No sessions with conversation content" in block.content for block in app.state.blocks)
 
     asyncio.run(scenario())
@@ -1132,8 +1136,10 @@ def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
     assert "+ entry 2" not in rendered
     assert "4 changed lines hidden" in rendered
     app = CliApplication.__new__(CliApplication)
+    from agent.cli.view_state import DialogState
+    app.dialogs = DialogState()
     app.state = state
-    app.interaction = None
+    app.dialogs.current = None
     calls = app._review_calls()
     assert len(calls) == 4
     review = _plain(render_review(calls, 100))
@@ -1357,8 +1363,10 @@ def test_consecutive_creates_collapse_and_ctrl_o_expands_file_list() -> None:
     assert "more" not in expanded
     assert "Ctrl+O to expand" not in expanded
     app = CliApplication.__new__(CliApplication)
+    from agent.cli.view_state import DialogState
+    app.dialogs = DialogState()
     app.state = state
-    app.interaction = None
+    app.dialogs.current = None
     review = _plain(render_review(app._review_calls(), 100))
     assert "+content 0" in review
     assert "+content 17" in review
@@ -2266,7 +2274,7 @@ def test_transcript_header_avoids_duplicate_runtime_context() -> None:
 @pytest.mark.parametrize("limit", [1, 3, 6])
 @pytest.mark.parametrize("status", ["running", "completed", "error", "waiting", "interrupted"])
 def test_execute_command_and_output_reuse_configured_fold_limit(limit, status) -> None:
-    from agent.config import UiDisplayLimits
+    from agent.cli.display import UiDisplayLimits
 
     command = "python - <<'PY'\n" + "\n".join(f"print('code_{i:02}')" for i in range(10)) + "\nPY"
     block = ToolBlock(
@@ -2291,7 +2299,7 @@ def test_execute_command_and_output_reuse_configured_fold_limit(limit, status) -
 
 
 def test_execute_single_line_inline_code_is_folded_after_terminal_wrapping() -> None:
-    from agent.config import UiDisplayLimits
+    from agent.cli.display import UiDisplayLimits
 
     command = 'python -c "' + "print('payload');" * 50 + 'print(\'last_statement\')"'
     block = ToolBlock("python-c", "execute", {"command": command}, status="completed")

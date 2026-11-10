@@ -10,8 +10,9 @@ from pathlib import Path
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
 
-from agent.config import SandboxConfig
-from agent.sandbox import _effective_timeout, _run_process, sandbox_workspace_root
+from agent.execution.policy import SandboxConfig
+from agent.execution.backend import sandbox_workspace_root
+from agent.execution.process import _effective_timeout, _run_process
 
 
 class HostCommandBackend(LocalShellBackend):

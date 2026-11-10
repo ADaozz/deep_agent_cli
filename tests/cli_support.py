@@ -14,7 +14,7 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent
 from prompt_toolkit.output import DummyOutput
 
 from agent.cli.app import CliApplication
-from agent.runner import AgentRunner
+from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
 

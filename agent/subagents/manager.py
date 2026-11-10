@@ -1,11 +1,12 @@
 """Admission and lifetime tracking; the parent owns all shared resources."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
 import threading
 from uuid import uuid4
 
-from agent.control import RunController
+from agent.runtime.control import RunController
 
 
 class SubAgentManager:

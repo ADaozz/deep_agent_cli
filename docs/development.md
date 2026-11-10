@@ -14,6 +14,8 @@ pip install -e ".[dev]"
 
 修改 `agent/config.example.yaml` 只会影响首次生成的用户配置。已有配置不会被升级或重装覆盖，验证新模板时使用临时 HOME 或独立测试配置。Node、Rustup、X11 等默认工具挂载的说明见 [配置参考](configuration.md#默认工具挂载)。
 
+Python 导入位置和依赖约束见 [领域设计](domain-design.md)。
+
 ## 测试
 
 ```bash
@@ -36,7 +38,7 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 ## SubAgent 开发契约
 
 只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent；
-这条条件位于 `agent/factory.py` 中 `general-purpose` 的描述，由主模型判断，
+这条条件位于 `agent/bootstrap/factory.py` 中 `general-purpose` 的描述，由主模型判断，
 不增加原生 `task` 参数，也不自动检测共享文件的修改冲突。实现边界见 [架构](architecture.md#subagent-委派边界)。
 
 修改相关逻辑后运行现有回归：

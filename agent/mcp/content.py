@@ -1,4 +1,5 @@
 """Keep generic embedded MCP resources visible to text-only model inputs."""
+
 from __future__ import annotations
 
 import base64

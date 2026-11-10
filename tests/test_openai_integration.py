@@ -11,9 +11,10 @@ import threading
 import pytest
 from deepagents.backends import StateBackend
 
-from agent.config import ModelProfile, Settings
-from agent.runner import AgentRunner
-from agent.session import SessionStore
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
 
 pytestmark = pytest.mark.integration
 

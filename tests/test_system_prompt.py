@@ -8,9 +8,11 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from agent.config import SandboxConfig, Settings
-from agent.factory import create_agent
-from agent.sandbox import BackendSelection, ExecutionMode
+from agent.bootstrap.config import Settings
+from agent.execution.policy import SandboxConfig
+from agent.bootstrap.factory import create_agent
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 
 # 内置文件工具：描述与参数说明由工具定义提供，不应在模型请求阶段被改写。

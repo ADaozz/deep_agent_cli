@@ -2,18 +2,9 @@
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.llm_stream import ModelStreamCancelled
-from agent.run_events import (
-    UnknownInterruptError,
-    cancelled_result,
-    classify_interrupt,
-    completed_result,
-    failed_result,
-    final_answer_committed,
-    interaction_result,
-    normalize_stream_error,
-    update_tool_events,
-)
+from agent.models.stream_lifecycle import ModelStreamCancelled
+from agent.runtime.events import cancelled_result, classify_interrupt, completed_result, failed_result, final_answer_committed, interaction_result, normalize_stream_error, update_tool_events
+from agent.runtime.contracts import UnknownInterruptError
 
 
 def test_final_answer_is_committed_only_after_a_new_answer_without_tools() -> None:

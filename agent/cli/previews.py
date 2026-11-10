@@ -7,6 +7,7 @@ content lines, hint action. The renderer owns *how* it looks: spinner, status
 colors, terminal width, folding limits. ToolPreview is a UI-derived object and
 is never persisted; sessions keep the raw ToolMessage artifact instead.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,8 +19,9 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
-from agent.file_mutation import FileMutationOperation
-from agent.config import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
+from agent.execution.mutations import FileMutationOperation
+from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
+
 
 PreviewStyle = Literal["plain", "dim", "add", "delete", "error", "url"]
 PreviewGroup = Literal["explore", "mutation", "command", "web", "other"]

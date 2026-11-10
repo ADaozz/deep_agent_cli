@@ -7,17 +7,14 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, HumanMessage
 from deepagents.backends import StateBackend
 
-from agent.attachments import (
-    ATTACHMENT_META_KEY,
-    AttachmentStore,
-    ImageAttachmentRef,
-    find_attachment_storage_keys,
-    image_attachment_from_bytes,
-)
-from agent.config import ModelProfile, Settings
-from agent.llm import build_chat_model
-from agent.runner import AgentRunner
-from agent.session import SessionStore, messages_to_transcript
+from agent.sessions.attachments import AttachmentStore
+from agent.sessions.images import ATTACHMENT_META_KEY, ImageAttachmentRef, find_attachment_storage_keys, image_attachment_from_bytes
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.models.client import build_chat_model
+from agent.runtime.runner import AgentRunner
+from agent.sessions.store import SessionStore
+from agent.sessions.transcript import messages_to_transcript
 from tests.conftest import scripted_model
 
 
@@ -96,7 +93,7 @@ def test_pending_model_switch_unlocks_image_input() -> None:
     ref = runner.store_image(_image())
     fake = scripted_model([AIMessage(content="done")])
     object.__setattr__(fake, "materializes_attachment_refs", True)
-    with patch("agent.runner.build_chat_model", return_value=fake):
+    with patch("agent.runtime.runner.build_chat_model", return_value=fake):
         result = runner.invoke_with_attachment_refs("look", image_refs=(ref,))
     assert result.status == "completed"
     assert runner.current_model().id == "vision"

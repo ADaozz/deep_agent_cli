@@ -4,19 +4,13 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from deepagents.backends import StateBackend
-from agent.factory import create_agent
-from agent.config import Settings
+from agent.bootstrap.factory import create_agent
+from agent.bootstrap.config import Settings
 from tests.host_command import HostCommandBackend
 from agent.tools.examples import build_example_tools
-from agent.permission import ASK_INTERRUPT_ON
-from agent.runner import (
-    AgentRunner,
-    InterruptKind,
-    UnknownInterruptError,
-    _tool_decisions,
-    classify_interrupt,
-    is_valid_hitl_interrupt,
-)
+from agent.runtime.permissions import ASK_INTERRUPT_ON
+from agent.runtime.runner import AgentRunner, _tool_decisions, classify_interrupt, is_valid_hitl_interrupt
+from agent.runtime.contracts import InterruptKind, UnknownInterruptError
 from tests.conftest import graph_tool_names, scripted_model
 
 
@@ -560,8 +554,8 @@ def test_usage_identity_is_checkpointed_and_invalidated_on_cancel():
     runner.invoke("first")
     assert runner.latest_usage()["input_tokens"] == 0
     last = runner.prepared.graph.get_state(runner._thread_config()).values["messages"][-1]
-    assert last.response_metadata["deep_agent_model_id"] == runner._current_model_id
-    from agent.session import StopReason
+    assert last.response_metadata["deep_agent_model_id"] == runner.configuration.current_model_id
+    from agent.sessions.contracts import StopReason
     runner._touch_status(StopReason.ABORTED)
     assert runner.latest_usage() == {}
 
@@ -741,7 +735,7 @@ def test_runner_cancels_running_execute_tool(tmp_path) -> None:
 
 
 def test_model_stream_cancelled_without_cancel_request_is_a_failure() -> None:
-    from agent.llm_stream import ModelStreamCancelled
+    from agent.models.stream_lifecycle import ModelStreamCancelled
 
     class StoppedModel(type(scripted_model([]))):
         def _generate(self, *args, **kwargs):
@@ -760,7 +754,7 @@ def test_model_stream_cancelled_without_cancel_request_is_a_failure() -> None:
 
 @pytest.mark.parametrize("api", ["chat_completions", "responses"])
 def test_http_errors_stay_failures_and_respect_retry_budget(api) -> None:
-    from agent.config import ModelProfile
+    from agent.models.profile import ModelProfile
     from tests.model_stream_server import ScriptedSSEServer
 
     with ScriptedSSEServer(api, []) as server:

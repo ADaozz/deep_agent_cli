@@ -19,17 +19,16 @@ import pytest
 
 from agent.cli.interactions import InteractionController
 from agent.cli.clipboard import ClipboardImage, ClipboardText
-from agent.cli.app import (
-    CliApplication,
-    format_context_usage,
-)
+from agent.cli.app import CliApplication
+from agent.cli.formatting import format_context_usage
 from agent.cli.state import MessageBlock, ToolBlock
 from agent.cli.pasted_content import PASTED_CONTENT_MIN_CHARS
-from agent.config import Settings
-from agent.config import ModelProfile
-from agent.runner import AgentRunner, RunEvent, RunResult
-from agent.session import SessionStore
-from agent.factory import create_agent
+from agent.bootstrap.config import Settings
+from agent.models.profile import ModelProfile
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent, RunResult
+from agent.sessions.store import SessionStore
+from agent.bootstrap.factory import create_agent
 from tests.cli_support import (
     await_cli_io as _await_cli_io,
     escape as _escape,
@@ -48,11 +47,11 @@ def test_cli_steer_and_follow_up_use_run_controller() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         app.state.running = True
         app.buffer.text = "steer now"
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert runner.control.pending_steering_count() == 1
         assert not app.state.blocks
         app.buffer.text = "later"
-        app._submit_buffer("followUp")
+        app.run_dispatch._submit_buffer("followUp")
         assert runner.control.pending_follow_up_count() == 1
         assert not app.state.blocks
         assert "queued 2: steer now | later" in "".join(value for _, value in app._status_text())
@@ -98,15 +97,15 @@ def test_cli_enter_during_stream_replans_before_tools(monkeypatch, propose_tools
     async def scenario():
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._loop = asyncio.get_running_loop()
+            app.run_view.loop = asyncio.get_running_loop()
             try:
-                app._start_run("start")
+                app.run_dispatch._start_run("start")
                 assert await _await_cli_io(asyncio.to_thread(streaming.wait, 5), timeout=6)
                 app.buffer.text = "change direction"
-                app._submit_buffer("steer")
+                app.run_dispatch._submit_buffer("steer")
                 assert runner.control.pending_steering_count() == 1
                 submitted.set()
-                await _await_cli_io(app._run_task, timeout=10)
+                await _await_cli_io(app.run_view.task, timeout=10)
                 assert len(calls) == 2, runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
                 assert any(isinstance(m, HumanMessage) and m.content == "change direction" for m in calls[1])
                 assert runner.control.pending_steering_count() == 0
@@ -129,17 +128,17 @@ def test_cli_drains_input_arriving_after_worker_completion(mode) -> None:
     async def scenario():
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._loop = asyncio.get_running_loop()
+            app.run_view.loop = asyncio.get_running_loop()
             try:
                 result = runner.invoke("first")
                 # The worker returned, but the UI has not handled its result.
                 app.state.running = True
                 app.buffer.text = "late input"
-                app._submit_buffer(mode)
+                app.run_dispatch._submit_buffer(mode)
                 assert runner.control.pending_message_texts() == ["late input"]
-                app._handle_result(result)
-                assert app._run_task is not None
-                await _await_cli_io(app._run_task)
+                app.run_events._handle_result(result)
+                assert app.run_view.task is not None
+                await _await_cli_io(app.run_view.task)
                 assert runner.control.pending_message_texts() == []
                 messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
                 assert messages[-1].content == "queued done"
@@ -155,10 +154,10 @@ def test_cli_new_input_appends_to_existing_queue_when_idle(monkeypatch) -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        monkeypatch.setattr(app, "_start_queued_run", lambda: None)
+        monkeypatch.setattr(app.run_dispatch, "_start_queued_run", lambda: None)
         runner.follow_up("older")
         app.buffer.text = "newer"
-        app._submit_buffer("steer")
+        app.run_dispatch._submit_buffer("steer")
         assert runner.control.pending_message_texts() == ["older", "newer"]
         assert not app.state.blocks
         assert app.buffer.text == ""
@@ -195,7 +194,7 @@ def test_cli_esc_requests_cancel() -> None:
 
 
 def test_cli_resume_prefix_switches_session(tmp_path) -> None:
-    from agent.session import SessionStore
+    from agent.sessions.store import SessionStore
 
     store = SessionStore(tmp_path / "cli-resume.sqlite3")
     runner = AgentRunner(
@@ -267,14 +266,14 @@ def test_exact_single_image_path_paste_becomes_attachment(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._handle_pasted_text(str(image_path))
+            app.attachments_controller._handle_pasted_text(str(image_path))
             for _ in range(50):
                 if app.state.attachments:
                     break
                 await asyncio.sleep(0.02)
             assert len(app.state.attachments) == 1
             assert app.buffer.text == ""
-            app._handle_pasted_text(f"Please inspect {image_path}")
+            app.attachments_controller._handle_pasted_text(f"Please inspect {image_path}")
             assert app.buffer.text == f"Please inspect {image_path}"
             app._io_executor.shutdown(wait=True)
 
@@ -291,7 +290,7 @@ def test_image_path_paste_stays_text_for_text_model(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._handle_pasted_text(str(image_path))
+            app.attachments_controller._handle_pasted_text(str(image_path))
             assert app.buffer.text == str(image_path)
             assert "pasted as text" in app.state.status
 
@@ -309,18 +308,18 @@ def test_long_paste_displays_block_but_submits_full_text() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.buffer.complete_while_typing = lambda: False
             submitted: list[str] = []
-            app._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
+            app.run_dispatch._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
             app.buffer.insert_text("请检查 ")
-            app._handle_pasted_text(pasted)
+            app.attachments_controller._handle_pasted_text(pasted)
             app.buffer.insert_text(" 谢谢")
             assert app.buffer.text == f"请检查 [Pasted Content {len(pasted)} chars] 谢谢"
             with set_app(app.application):
                 line = app.editor_control.create_content(80, 10).get_line(0)
             assert any("class:pasted-content" in fragment[0] for fragment in line)
-            app._submit_buffer("steer")
+            app.run_dispatch._submit_buffer("steer")
             assert submitted == [f"请检查 {pasted} 谢谢"]
             assert app.buffer.text == ""
-            assert not app._pasted_content.has_blocks
+            assert not app.drafts.pasted.has_blocks
             assert f"请检查 {pasted} 谢谢" in app.buffer.history.get_strings()
 
     asyncio.run(scenario())
@@ -337,10 +336,10 @@ def test_edited_paste_marker_blocks_submit_until_restored() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.buffer.complete_while_typing = lambda: False
             submitted: list[str] = []
-            app._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
-            app._handle_pasted_text(pasted)
+            app.run_dispatch._start_run = lambda text, **_kwargs: submitted.append(text)  # type: ignore[method-assign]
+            app.attachments_controller._handle_pasted_text(pasted)
             app.buffer.text = f"[Pasted Content {len(pasted) + 1} chars]"
-            app._submit_buffer("steer")
+            app.run_dispatch._submit_buffer("steer")
             assert submitted == []
             assert app.buffer.text == f"[Pasted Content {len(pasted) + 1} chars]"
             assert any(
@@ -348,7 +347,7 @@ def test_edited_paste_marker_blocks_submit_until_restored() -> None:
                 for block in app.state.blocks
             )
             app.buffer.text = f"[Pasted Content {len(pasted)} chars]"
-            app._submit_buffer("steer")
+            app.run_dispatch._submit_buffer("steer")
             assert submitted == [pasted]
 
     asyncio.run(scenario())
@@ -371,10 +370,10 @@ def test_attach_gate_considers_pending_vision_model(tmp_path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            assert not await app._attach_path(str(image_path))
+            assert not await app.attachments_controller._attach_path(str(image_path))
             assert "Current or pending model does not support image input" in app.state.status
             runner.switch_model("vision")
-            assert await app._attach_path(str(image_path))
+            assert await app.attachments_controller._attach_path(str(image_path))
             assert [ref.filename for ref in app.state.attachments] == ["shot.png"]
             app._io_executor.shutdown(wait=True)
 
@@ -396,10 +395,10 @@ def test_long_clipboard_text_uses_same_compact_paste_path() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.buffer.complete_while_typing = lambda: False
-            app.clipboard = FakeClipboard()  # type: ignore[assignment]
-            await app._paste_clipboard()
+            app.attachments_controller.clipboard = FakeClipboard()  # type: ignore[assignment]
+            await app.attachments_controller._paste_clipboard()
             assert app.buffer.text == f"[Pasted Content {len(pasted)} chars]"
-            assert app._pasted_content.expand(app.buffer.text) == pasted
+            assert app.drafts.pasted.expand(app.buffer.text) == pasted
             app._io_executor.shutdown(wait=True)
 
     asyncio.run(scenario())
@@ -425,8 +424,8 @@ def test_clipboard_image_is_not_exported_for_text_model() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             fake = FakeClipboard()
-            app.clipboard = fake  # type: ignore[assignment]
-            await app._paste_clipboard()
+            app.attachments_controller.clipboard = fake  # type: ignore[assignment]
+            await app.attachments_controller._paste_clipboard()
             assert fake.exported is False
             assert "does not support image" in app.state.status
             app._io_executor.shutdown(wait=True)
@@ -455,11 +454,11 @@ def test_cli_waits_for_a_busy_session_and_takes_over(tmp_path) -> None:
             await _await_cli_io(app.resume_session(target[:8]))
             assert app.sessions.wait_target == target
             assert "Waiting for session" in app.state.status
-            assert app.interaction is None
+            assert app.dialogs.current is None
 
             # Input cannot reach the runner while the wait is active.
             app.buffer.text = "blocked during wait"
-            app._submit_buffer("steer")
+            app.run_dispatch._submit_buffer("steer")
             assert waiter.control.pending_steering_count() == 0
             assert app.state.running is False
 
@@ -508,8 +507,8 @@ def test_cli_esc_cancels_wait_and_returns_to_picker(tmp_path) -> None:
             assert app.sessions.wait_target is None
             # Esc keeps the runner detached and reopens the picker.
             assert waiter._runtime.lease is None
-            assert app.interaction is not None
-            assert app.interaction.kind == "resume"
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.kind == "resume"
             waiter.close()
 
     asyncio.run(scenario())
@@ -555,8 +554,8 @@ def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
 
 def test_status_omits_permission_session_and_sandbox_details(tmp_path) -> None:
     from dataclasses import replace as dc_replace
-    from agent.config import SandboxConfig
-    from agent.sandbox import select_backend
+    from agent.execution.policy import SandboxConfig
+    from agent.execution.backend import select_backend
 
     config = dc_replace(SandboxConfig(workspace=tmp_path), bwrap_path="/bin/true")
     backend = select_backend(config, check=False).backend
@@ -679,17 +678,17 @@ def test_escape_before_worker_starts_cancels_the_dispatched_run() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._loop = asyncio.get_running_loop()
+            app.run_view.loop = asyncio.get_running_loop()
             gate = threading.Event()
             blockers = [app._io_executor.submit(gate.wait, 5) for _ in range(2)]
-            app._start_run("dispatched")
+            app.run_dispatch._start_run("dispatched")
             assert app.state.running
             _escape(app)
             _escape(app)
             gate.set()
             for blocker in blockers:
                 blocker.result(5)
-            await asyncio.wait_for(app._run_task, 5)
+            await asyncio.wait_for(app.run_view.task, 5)
             assert not app.state.running
             assert app.state.status == "Cancelled"
             assert calls == []
@@ -714,7 +713,7 @@ def test_repeated_escape_sends_one_cancel_per_run() -> None:
             _escape(app)
         assert sent == [1]
         assert "Cancelling" in app.state.status
-        app._cancel_sent = False
+        app.run_view.cancel_sent = False
         app.state.running = False
     runner.close()
 
@@ -724,7 +723,7 @@ def test_stale_run_events_do_not_reach_the_current_run() -> None:
                          thread_id="stale-events")
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        app._run_epoch = 2
+        app.run_view.epoch = 2
         app.state.running = True
         app._apply_run_event(RunEvent(type="run_cancelled"), 1)
         app._apply_run_event(RunEvent(type="assistant_delta", content="old run text"), 1)
@@ -744,7 +743,7 @@ def test_unconfirmed_cancel_cleanup_is_reported() -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         app.state.running = True
-        app._handle_result(RunResult(status="cancelled", error="Cancelled, but the model request did not confirm it stopped"))
+        app.run_events._handle_result(RunResult(status="cancelled", error="Cancelled, but the model request did not confirm it stopped"))
         assert not app.state.running
         assert app.state.status == "Cancel cleanup not confirmed"
         assert any("did not confirm" in getattr(block, "content", "") for block in app.state.blocks)
@@ -795,29 +794,29 @@ def test_arriving_approval_keeps_typing_and_restores_draft_after_f2(decision) ->
                 await wait_until(lambda: app.application.is_running)
                 pipe.send_text("draft")
                 await wait_until(lambda: app.buffer.text == "draft")
-                app._handle_result(waiting)
-                assert app.interaction is None
+                app.run_events._handle_result(waiting)
+                assert app.dialogs.current is None
                 assert "F2" in app.state.status
                 pipe.send_text(" 中文\x1b[D")
                 await wait_until(lambda: app.buffer.text == "draft 中文" and app.buffer.cursor_position == 7)
                 document = app.buffer.document
                 pipe.send_text("\x1bOQ")
-                await wait_until(lambda: app.interaction is not None)
-                assert app.interaction.kind == "approval"
+                await wait_until(lambda: app.dialogs.current is not None)
+                assert app.dialogs.current.kind == "approval"
                 assert app.buffer.text == ""
                 if decision == "dismiss":
                     pipe.send_text("\x03")
-                    await wait_until(lambda: app.interaction is None)
+                    await wait_until(lambda: app.dialogs.current is None)
                     assert runner.current_interrupt() is not None
                 else:
                     if decision == "approve":
                         pipe.send_text("\x1b[B")
-                        await wait_until(lambda: app.interaction.option_index == 1)
+                        await wait_until(lambda: app.dialogs.current.option_index == 1)
                     pipe.send_text("\r")
-                    await wait_until(lambda: app._run_task is not None and app._run_task.done())
+                    await wait_until(lambda: app.run_view.task is not None and app.run_view.task.done())
                     assert runner.current_interrupt() is None
                 assert app.buffer.document == document
-                assert app._approval_draft is None
+                assert app.dialogs.approval_draft is None
             finally:
                 app.exit()
                 await asyncio.wait_for(task, timeout=3)
@@ -839,19 +838,19 @@ def test_approval_preserves_pasted_content_and_queues_new_input() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             try:
                 payload = "long pasted content\n" * 100
-                app._handle_pasted_text(payload)
+                app.attachments_controller._handle_pasted_text(payload)
                 displayed = app.buffer.text
-                assert app._pasted_content.has_blocks
-                app._handle_result(waiting)
-                assert app.interaction is None
-                app._reopen_pending_interaction()
-                app._finish_interaction(cancelled=True)
+                assert app.drafts.pasted.has_blocks
+                app.run_events._handle_result(waiting)
+                assert app.dialogs.current is None
+                app.interaction_flow._reopen_pending_interaction()
+                app.interaction_flow._finish_interaction(cancelled=True)
                 assert app.buffer.text == displayed
-                assert app._pasted_content.expand(displayed) == payload
-                app._submit_buffer("steer")
+                assert app.drafts.pasted.expand(displayed) == payload
+                app.run_dispatch._submit_buffer("steer")
                 assert runner.control.pending_message_texts() == [payload]
                 assert app.buffer.text == ""
-                assert app._run_task is None
+                assert app.run_view.task is None
                 assert runner.current_interrupt() is not None
                 assert "F2" in app.state.status
             finally:
@@ -916,7 +915,7 @@ def test_status_tool_usage_table_has_a_column_per_model() -> None:
 
 
 def test_status_metrics_restore_on_restart_switch_and_clear(tmp_path):
-    from agent.session import SessionStore
+    from agent.sessions.store import SessionStore
     from agent.cli.commands import _clear
 
     path = tmp_path / "metrics.sqlite3"
@@ -945,7 +944,7 @@ def test_status_metrics_restore_on_restart_switch_and_clear(tmp_path):
             assert app._model_metrics_lines().startswith("qwen\n")
             assert "  Average TPS: 200.0" in app._model_metrics_lines()
             assert "deepseek" not in app._model_metrics_lines()
-            app._apply_session_snapshot(runner.switch_session(first_id))
+            app.sessions.apply_snapshot(runner.switch_session(first_id))
             assert "  Average TPS: 15.0" in app._model_metrics_lines()
             app.sessions.new_session()
             assert app.state.model_metrics_history == []
@@ -991,7 +990,7 @@ def test_long_chinese_choices_have_one_selected_row_and_no_second_wrap() -> None
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        app.interaction = InteractionController.human({"question": "这个标识是什么用途？", "fields": [{
+        app.dialogs.current = InteractionController.human({"question": "这个标识是什么用途？", "fields": [{
             "id": "purpose", "type": "single_select", "options": [
                 {"value": "auth", "label": "是 OAuth 授权码或标识，需要进一步操作", "description": "授权流程里的 code / client_id / session_id，想检查或验证"},
                 {"value": "typo", "label": "贴错了，不用理", "description": "忽略这次粘贴，继续之前的任务"},
@@ -1001,8 +1000,8 @@ def test_long_chinese_choices_have_one_selected_row_and_no_second_wrap() -> None
         window = next(w for w in app.application.layout.find_all_windows() if w.content is app.interaction_control)
         assert not window.wrap_lines()
         for index in range(4):
-            app.interaction.option_index = index
-            fragments = to_formatted_text(ANSI(render_interaction(app.interaction, 40)))
+            app.dialogs.current.option_index = index
+            fragments = to_formatted_text(ANSI(render_interaction(app.dialogs.current, 40)))
             text = "".join(item[1] for item in fragments)
             assert text.count("→") == 1
             assert "Other:" in text

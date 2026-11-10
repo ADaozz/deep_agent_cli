@@ -1,42 +1,38 @@
-from agent.config import BindMount, ModelProfile, SandboxConfig
-from agent.control import RunController
-from agent.factory import AgentSpec, PreparedAgent, build_agent, create_agent
-from agent.permission import PermissionMode
-from agent.runner import (
-    AgentRunner,
-    InterruptKind,
-    InterruptState,
-    RunEvent,
-    RunResult,
-    UnknownInterruptError,
-)
-from agent.sandbox import ExecutionMode, SandboxUnavailableError
-from agent.attachments import ImageAttachment, ImageAttachmentRef
-from agent.session import SessionInfo, SessionStore, StopReason
-from agent.stream import StreamDeltaCallback
+"""Public application API with lazy adapter loading."""
+from importlib import import_module
 
-__all__ = [
-    "AgentRunner",
-    "InterruptKind",
-    "InterruptState",
-    "UnknownInterruptError",
-    "AgentSpec",
-    "BindMount",
-    "ExecutionMode",
-    "ModelProfile",
-    "PermissionMode",
-    "PreparedAgent",
-    "RunController",
-    "RunResult",
-    "RunEvent",
-    "SandboxConfig",
-    "SandboxUnavailableError",
-    "SessionInfo",
-    "SessionStore",
-    "StopReason",
-    "ImageAttachment",
-    "ImageAttachmentRef",
-    "StreamDeltaCallback",
-    "create_agent",
-    "build_agent",
-]
+_EXPORTS = {
+    'ModelProfile': ('agent.models.profile', 'ModelProfile'),
+    'BindMount': ('agent.execution.policy', 'BindMount'),
+    'SandboxConfig': ('agent.execution.policy', 'SandboxConfig'),
+    'RunController': ('agent.runtime.control', 'RunController'),
+    'AgentSpec': ('agent.bootstrap.factory', 'AgentSpec'),
+    'PreparedAgent': ('agent.bootstrap.factory', 'PreparedAgent'),
+    'build_agent': ('agent.bootstrap.factory', 'build_agent'),
+    'create_agent': ('agent.bootstrap.factory', 'create_agent'),
+    'PermissionMode': ('agent.runtime.permissions', 'PermissionMode'),
+    'AgentRunner': ('agent.runtime.runner', 'AgentRunner'),
+    'InterruptKind': ('agent.runtime.contracts', 'InterruptKind'),
+    'InterruptState': ('agent.runtime.contracts', 'InterruptState'),
+    'RunEvent': ('agent.runtime.contracts', 'RunEvent'),
+    'RunResult': ('agent.runtime.contracts', 'RunResult'),
+    'UnknownInterruptError': ('agent.runtime.contracts', 'UnknownInterruptError'),
+    'ExecutionMode': ('agent.execution.types', 'ExecutionMode'),
+    'SandboxUnavailableError': ('agent.execution.types', 'SandboxUnavailableError'),
+    'ImageAttachment': ('agent.sessions.images', 'ImageAttachment'),
+    'ImageAttachmentRef': ('agent.sessions.images', 'ImageAttachmentRef'),
+    'SessionStore': ('agent.sessions.store', 'SessionStore'),
+    'SessionInfo': ('agent.sessions.contracts', 'SessionInfo'),
+    'StopReason': ('agent.sessions.contracts', 'StopReason'),
+    'StreamDeltaCallback': ('agent.models.messages', 'StreamDeltaCallback'),
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    module, symbol = _EXPORTS[name]
+    value = getattr(import_module(module), symbol)
+    globals()[name] = value
+    return value

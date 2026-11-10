@@ -14,14 +14,14 @@ from prompt_toolkit.output import DummyOutput
 
 from agent.cli.app import CliApplication
 from agent.cli.interactions import InteractionController
-from agent.config import SandboxConfig
-from agent.factory import create_agent
+from agent.execution.policy import SandboxConfig
+from agent.bootstrap.factory import create_agent
 from agent.tools.examples import build_example_tools
-from agent.network import network_requested
-from agent.network import get_execute_network
+from agent.execution.network import network_requested
+from agent.execution.network import get_execute_network
 from agent.tools.execute import build_execute_tool
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
-from agent.permission import (
+from agent.runtime.permissions import (
     ASK_INTERRUPT_ON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -31,8 +31,10 @@ from agent.permission import (
     permission_mode_label,
     permission_mode_from_interrupt_on,
 )
-from agent.runner import AgentRunner, RunEvent
-from agent.sandbox import BackendSelection, ExecutionMode, SandboxUnavailableError, select_backend
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.execution.backend import BackendSelection, select_backend
+from agent.execution.types import ExecutionMode, SandboxUnavailableError
 from tests.conftest import scripted_model
 
 
@@ -135,7 +137,7 @@ def test_custom_interrupt_mapping_is_applied() -> None:
 
 
 def test_custom_approval_survives_permission_round_trip() -> None:
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         prepared = create_agent(
             model=scripted_model([AIMessage(content="a"), AIMessage(content="b")]),
             interrupt_on={"lookup_docs": True},
@@ -159,7 +161,7 @@ def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() 
                                           "args": {"file_path": "/workspace/new.txt", "content": "new"}}]),
         AIMessage(content="done"),
     ]
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(prepared=create_agent(model=scripted_model(messages)), thread_id="deferred-allow")
         waiting = runner.invoke("write")
         assert waiting.status == "waiting_confirmation"
@@ -178,19 +180,19 @@ def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() 
 
 def test_cli_allow_confirm_stays_when_approval_arrives() -> None:
     async def scenario() -> None:
-        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
             runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("new-execute"))))
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, input=pipe, output=DummyOutput())
-                await app.select_permission("allow")
-                confirm = app.interaction
+                await app.access_selection.select_permission("allow")
+                confirm = app.dialogs.current
                 assert confirm is not None and confirm.kind == "permission_confirm"
                 waiting = runner.invoke("run")
                 assert waiting.status == "waiting_confirmation"
-                app._apply_event(RunEvent(type="interaction_requested", result=waiting))
-                app._handle_result(waiting)
-                assert app.interaction is confirm
-                assert app._deferred_config_interaction is None
+                app.run_events._apply_event(RunEvent(type="interaction_requested", result=waiting))
+                app.run_events._handle_result(waiting)
+                assert app.dialogs.current is confirm
+                assert app.dialogs.deferred is None
                 assert app.state.status == "Type ALLOW to confirm · Esc cancel · approval pending · F2"
                 assert any(
                     "This ALLOW prompt stays open" in getattr(block, "content", "")
@@ -199,19 +201,19 @@ def test_cli_allow_confirm_stays_when_approval_arrives() -> None:
                 assert runner.permission_mode() is PermissionMode.ASK
                 assert runner.pending_permission_mode() is None
 
-                assert app._reopen_pending_interaction_preserving_allow()
-                assert app.interaction is not None and app.interaction.kind == "approval"
-                assert app._deferred_config_interaction is confirm
-                app._finish_interaction(cancelled=True)
-                assert app.interaction is confirm
-                assert app._deferred_config_interaction is None
+                assert app.interaction_flow._reopen_pending_interaction_preserving_allow()
+                assert app.dialogs.current is not None and app.dialogs.current.kind == "approval"
+                assert app.dialogs.deferred is confirm
+                app.interaction_flow._finish_interaction(cancelled=True)
+                assert app.dialogs.current is confirm
+                assert app.dialogs.deferred is None
                 assert "approval pending" in app.state.status
 
                 assert confirm.accept("ALLOW")
-                app._finish_interaction()
+                app.interaction_flow._finish_interaction()
                 assert runner.permission_mode() is PermissionMode.ASK
                 assert runner.pending_permission_mode() is PermissionMode.ALLOW
-                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert app.dialogs.current is not None and app.dialogs.current.kind == "approval"
                 assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "new-execute"
 
     asyncio.run(scenario())
@@ -219,50 +221,50 @@ def test_cli_allow_confirm_stays_when_approval_arrives() -> None:
 
 def test_cli_allow_confirm_cancel_and_wrong_token_reopen_approval() -> None:
     async def scenario() -> None:
-        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
             runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("cancel-execute"))))
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, input=pipe, output=DummyOutput())
-                await app.select_permission("allow")
+                await app.access_selection.select_permission("allow")
                 waiting = runner.invoke("run")
-                app._handle_result(waiting)
-                app._finish_interaction(cancelled=True)
+                app.run_events._handle_result(waiting)
+                app.interaction_flow._finish_interaction(cancelled=True)
                 assert runner.pending_permission_mode() is None
                 assert any("ALLOW mode cancelled" in getattr(block, "content", "") for block in app.state.blocks)
-                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert app.dialogs.current is not None and app.dialogs.current.kind == "approval"
                 assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "cancel-execute"
 
             runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("wrong-execute"))))
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, input=pipe, output=DummyOutput())
-                await app.select_permission("allow")
-                confirm = app.interaction
+                await app.access_selection.select_permission("allow")
+                confirm = app.dialogs.current
                 assert confirm is not None
                 waiting = runner.invoke("run")
-                app._handle_result(waiting)
+                app.run_events._handle_result(waiting)
                 assert confirm.accept("yes")
-                app._finish_interaction()
+                app.interaction_flow._finish_interaction()
                 assert runner.permission_mode() is PermissionMode.ASK
                 assert runner.pending_permission_mode() is None
                 assert any("ALLOW not enabled" in getattr(block, "content", "") for block in app.state.blocks)
-                assert app.interaction is not None and app.interaction.kind == "approval"
+                assert app.dialogs.current is not None and app.dialogs.current.kind == "approval"
 
     asyncio.run(scenario())
 
 
 def test_cli_allow_queue_prompt_preserves_old_approval() -> None:
     async def scenario() -> None:
-        with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+        with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
             runner = AgentRunner(prepared=create_agent(model=scripted_model(_execute_messages("old-execute"))))
             waiting = runner.invoke("run")
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, input=pipe, output=DummyOutput())
-                app._handle_result(waiting)
-                app._finish_interaction(cancelled=True)
-                await app.select_permission("allow")
-                assert app.interaction is not None and app.interaction.kind == "permission_confirm"
-                assert app.interaction.accept("ALLOW")
-                app._finish_interaction()
+                app.run_events._handle_result(waiting)
+                app.interaction_flow._finish_interaction(cancelled=True)
+                await app.access_selection.select_permission("allow")
+                assert app.dialogs.current is not None and app.dialogs.current.kind == "permission_confirm"
+                assert app.dialogs.current.accept("ALLOW")
+                app.interaction_flow._finish_interaction()
                 assert runner.permission_mode() is PermissionMode.ASK
                 assert runner.pending_permission_mode() is PermissionMode.ALLOW
                 assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-execute"
@@ -279,7 +281,7 @@ def test_permission_argument_completion_follows_available_modes() -> None:
         complete = lambda value: list(app.slash_completer.get_completions(Document(value), None))
         assert [item.text for item in complete("/permission ")] == ["ask"]
         assert complete("/permission al") == []
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         sandboxed = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
         with create_pipe_input() as pipe:
             app = CliApplication(sandboxed, input=pipe, output=DummyOutput())
@@ -289,7 +291,7 @@ def test_permission_argument_completion_follows_available_modes() -> None:
 
 
 def test_set_permission_mode_queues_while_busy() -> None:
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
     with runner._operation_lock:
         mode = runner.set_permission_mode(PermissionMode.ALLOW)
@@ -300,14 +302,14 @@ def test_set_permission_mode_queues_while_busy() -> None:
 
 def test_set_permission_mode_deferred_keeps_pending_approval_recoverable() -> None:
     messages = _execute_messages("old-legacy")
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(prepared=create_agent(model=scripted_model(messages)), thread_id="legacy-allow")
     assert runner.invoke("run").status == "waiting_confirmation"
     runner.set_permission_mode("allow")
     assert runner.permission_mode() is PermissionMode.ASK
     assert runner.pending_permission_mode() is PermissionMode.ALLOW
     assert runner.current_interrupt().pending_tools[0]["toolCallId"] == "old-legacy"
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         resumed = runner.approve_tool("old-legacy")
     assert resumed.status == "completed"
     assert resumed.output == "done"
@@ -432,7 +434,7 @@ def test_allow_mode_opens_network_without_per_call_declaration() -> None:
     backend = _RecordingSandboxBackend()
     messages = [*_execute_messages("ex-allow-open"), *_execute_messages("ex-ask-closed")]
     with patch(
-        "agent.factory.select_backend",
+        "agent.bootstrap.factory.select_backend",
         return_value=BackendSelection(backend, ExecutionMode.SANDBOXED),
     ):
         prepared = create_agent(model=scripted_model(messages))
@@ -503,7 +505,7 @@ def test_cli_permission_ask_direct() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.select_permission("ask")
+            await app.access_selection.select_permission("ask")
             assert app.runner.permission_mode() is PermissionMode.ASK
             assert any("ask" in getattr(block, "content", "") for block in app.state.blocks)
 
@@ -520,9 +522,9 @@ def test_cli_permission_allow_rejected_when_not_sandboxed() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.select_permission("allow")
+            await app.access_selection.select_permission("allow")
             assert app.runner.permission_mode() is PermissionMode.ASK
-            assert app.interaction is None
+            assert app.dialogs.current is None
             assert any("SANDBOXED" in getattr(block, "content", "") for block in app.state.blocks)
 
     asyncio.run(scenario())
@@ -538,8 +540,8 @@ def test_cli_permission_selector_locked_when_not_sandboxed() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.select_permission("")
-            assert app.interaction is None
+            await app.access_selection.select_permission("")
+            assert app.dialogs.current is None
             assert any("locked to ask" in getattr(block, "content", "") for block in app.state.blocks)
 
     asyncio.run(scenario())
@@ -552,27 +554,27 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.select_permission("allow")
+            await app.access_selection.select_permission("allow")
             assert app.runner.permission_mode() is PermissionMode.ASK
-            assert app.interaction is not None
-            assert app.interaction.kind == "permission_confirm"
-            assert "HIGH RISK" in app.interaction.question
-            assert "network" in app.interaction.question.lower()
-            assert app.interaction.accept("ALLOW")
-            app._finish_interaction()
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.kind == "permission_confirm"
+            assert "HIGH RISK" in app.dialogs.current.question
+            assert "network" in app.dialogs.current.question.lower()
+            assert app.dialogs.current.accept("ALLOW")
+            app.interaction_flow._finish_interaction()
             assert app.runner.permission_mode() is PermissionMode.ALLOW
             assert app.runner.pending_permission_mode() is None
-            assert app.interaction is None
+            assert app.dialogs.current is None
             assert "perm:allow" in "".join(text for _, text in app._footer_text())
             app.show_status()
             assert "pending" not in getattr(app.state.blocks[-1], "content", "").lower()
-            await app.select_permission("ask")
+            await app.access_selection.select_permission("ask")
             assert runner.permission_mode() is PermissionMode.ASK
             assert runner.pending_permission_mode() is None
             assert "perm:ask" in "".join(text for _, text in app._footer_text())
-            await app.select_permission("allow")
-            assert app.interaction.accept("ALLOW")
-            app._finish_interaction()
+            await app.access_selection.select_permission("allow")
+            assert app.dialogs.current.accept("ALLOW")
+            app.interaction_flow._finish_interaction()
 
     asyncio.run(scenario())
     resumed = runner.invoke("continue")
@@ -588,10 +590,10 @@ def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app.select_permission("allow")
-            assert app.interaction is not None
-            assert app.interaction.accept("yes")
-            app._finish_interaction()
+            await app.access_selection.select_permission("allow")
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.accept("yes")
+            app.interaction_flow._finish_interaction()
             assert app.runner.permission_mode() is PermissionMode.ASK
             assert any("ALLOW not enabled" in getattr(block, "content", "") for block in app.state.blocks)
 
@@ -628,7 +630,7 @@ def test_approval_multiple_tools_truncation_and_redaction() -> None:
 
 @pytest.mark.parametrize("busy", ["running", "locked"])
 def test_cli_permission_change_defers_while_busy(busy) -> None:
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
         try:
             with create_pipe_input() as pipe:
@@ -637,7 +639,7 @@ def test_cli_permission_change_defers_while_busy(busy) -> None:
                 if busy == "locked":
                     runner._operation_lock.acquire()
                 try:
-                    app._request_permission_mode(PermissionMode.ALLOW)
+                    app.access_selection._request_permission_mode(PermissionMode.ALLOW)
                 finally:
                     if busy == "locked":
                         runner._operation_lock.release()
@@ -649,7 +651,7 @@ def test_cli_permission_change_defers_while_busy(busy) -> None:
 
 
 def test_cli_idle_permission_failure_keeps_original(monkeypatch) -> None:
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content="unused")])))
         try:
             original = runner.prepared
@@ -658,7 +660,7 @@ def test_cli_idle_permission_failure_keeps_original(monkeypatch) -> None:
             monkeypatch.setattr(runner, "_rebuild_prepared", fail)
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, input=pipe, output=DummyOutput())
-                app._request_permission_mode(PermissionMode.ALLOW)
+                app.access_selection._request_permission_mode(PermissionMode.ALLOW)
                 assert runner.permission_mode() is PermissionMode.ASK
                 assert runner.prepared is original
                 assert runner.pending_permission_mode() is None
@@ -671,7 +673,7 @@ def test_cli_idle_permission_failure_keeps_original(monkeypatch) -> None:
 @pytest.mark.sandbox
 @pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.ALLOW])
 def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
-    from agent.session import SessionStore
+    from agent.sessions.store import SessionStore
     store = SessionStore(tmp_path / "sessions.sqlite3")
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]),
                          sandbox_config=SandboxConfig(workspace=tmp_path), session_store=store)
@@ -679,8 +681,8 @@ def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
     try:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app._request_permission_mode(PermissionMode.ALLOW)
-            app._request_permission_mode(mode)
+            app.access_selection._request_permission_mode(PermissionMode.ALLOW)
+            app.access_selection._request_permission_mode(mode)
         assert store.get(thread_id).permission_mode == mode.value
         assert store.get(thread_id).pending_permission_mode is None
     finally:

@@ -1,4 +1,5 @@
 """Attach the pre-write file state to successful write_file results."""
+
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
@@ -7,7 +8,7 @@ from deepagents.backends.protocol import BackendProtocol, LsResult
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
-from agent.file_mutation import WriteOperation
+from agent.execution.mutations import WriteOperation
 
 
 def _operation(result: LsResult) -> WriteOperation | None:

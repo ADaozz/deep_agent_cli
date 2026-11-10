@@ -1,13 +1,14 @@
 """Use cached OAuth credentials first and limit repeated browser authorization."""
+
 from __future__ import annotations
 
 import time
 from typing import Any
-
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import ClientNotFoundError
 
 from agent.mcp.config import MCPAuthError
+
 
 _BROWSER_RETRY_INTERVAL = 60
 

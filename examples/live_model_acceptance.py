@@ -41,13 +41,16 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage  # n
 from langchain_core.tools import tool  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
-from agent.config import ModelProfile, SandboxConfig, Settings  # noqa: E402
-from agent.llm import build_chat_model  # noqa: E402
-from agent.llm_stream import live_stream_count  # noqa: E402
-from agent.permission import PermissionMode  # noqa: E402
-from agent.runner import AgentRunner, RunEvent  # noqa: E402
-from agent.session import SessionStore  # noqa: E402
-from agent.stream import message_text, reasoning_text  # noqa: E402
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.execution.policy import SandboxConfig
+from agent.models.client import build_chat_model  # noqa: E402
+from agent.models.stream_lifecycle import live_stream_count  # noqa: E402
+from agent.runtime.permissions import PermissionMode  # noqa: E402
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.sessions.store import SessionStore  # noqa: E402
+from agent.models.messages import message_text, reasoning_text  # noqa: E402
 
 TOKEN_PLAN = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 FIB = "0 1 1 2 3 5 8 13 21 34"

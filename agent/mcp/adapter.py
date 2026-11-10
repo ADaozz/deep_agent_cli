@@ -1,4 +1,5 @@
 """Wrap official MCPAdapter tools with shared sync/async bridge safeguards."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -14,14 +15,22 @@ from typing import Any
 from langchain_core._api import LangChainBetaWarning
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
-warnings.filterwarnings("ignore", category=LangChainBetaWarning)
-from langchain.mcp import MCPAdapter  # noqa: E402
+# The supported adapter's namespace announces its beta status on import.
+# Keep this suppression local so other dependency warnings remain visible.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`langchain\.mcp` is in beta\..*",
+        category=LangChainBetaWarning,
+    )
+    from langchain.mcp import MCPAdapter
 
-from agent.cancel import get_cancel_context
+from agent.runtime.cancellation import get_cancel_context
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import MCPAuthError, MCPServerConfig
 from agent.mcp.content import preserve_generic_resources
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
+
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _RESERVED = MANAGEMENT_TOOLS | {
@@ -138,7 +147,7 @@ def build_transport(
         raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
     env = {name: os.environ[name] for name in server.env_passthrough}
     secrets.extend(env.values())
-    from agent.http_environment import apply_http_environment
+    from agent.models.http import apply_http_environment
 
     env = apply_http_environment(env, os.environ, trust_env=trust_env)
     return StdioTransport(

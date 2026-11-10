@@ -27,11 +27,11 @@ from prompt_toolkit.input.defaults import create_pipe_input  # noqa: E402
 from prompt_toolkit.output import DummyOutput  # noqa: E402
 
 from agent.cli.app import CliApplication, default_config_dir  # noqa: E402
-from agent.config import Settings, require_keybindings_outside_workspace  # noqa: E402
-from agent.permission import PermissionMode, allow_mode_available  # noqa: E402
-from agent.runner import AgentRunner  # noqa: E402
-from agent.sandbox import ExecutionMode, SandboxUnavailableError  # noqa: E402
-from agent.session import SessionStore  # noqa: E402
+from agent.bootstrap.config import Settings, require_keybindings_outside_workspace  # noqa: E402
+from agent.runtime.permissions import PermissionMode, allow_mode_available  # noqa: E402
+from agent.runtime.runner import AgentRunner  # noqa: E402
+from agent.execution.types import ExecutionMode, SandboxUnavailableError
+from agent.sessions.store import SessionStore  # noqa: E402
 
 
 CODING_PROMPT = """在项目工作区创建 hello_lib.py：函数 greet(name) 返回 "Hello, {name}!"。

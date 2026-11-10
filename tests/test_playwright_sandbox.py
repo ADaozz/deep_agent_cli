@@ -21,9 +21,10 @@ import threading
 import pytest
 from langchain_core.messages import AIMessage
 
-from agent.config import BindMount, SandboxConfig
-from agent.runner import AgentRunner
-from agent.sandbox import FIXED_PATH, SandboxUnavailableError
+from agent.execution.policy import BindMount, SandboxConfig
+from agent.runtime.runner import AgentRunner
+from agent.execution.layout import FIXED_PATH
+from agent.execution.types import SandboxUnavailableError
 from agent.tools.execute import build_execute_tool
 from tests.conftest import scripted_model
 from tests.test_persistent_sandbox import _descendants, _wait_gone

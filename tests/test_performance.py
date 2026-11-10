@@ -1,6 +1,6 @@
 """Throughput policy for providers with partial or hidden reasoning metadata."""
 import pytest
-from agent.performance import GenerationTiming
+from agent.runtime.metrics import GenerationTiming
 
 
 @pytest.mark.parametrize("details", [{"reasoning": 20}, {"priority_reasoning": 20}, {"flex_reasoning": 20}])
@@ -34,7 +34,7 @@ def test_single_chunk_does_not_invent_generation_duration():
 
 
 def test_metrics_group_by_model_and_effort_with_independent_percentiles():
-    from agent.performance import model_metric_groups
+    from agent.runtime.metrics import model_metric_groups
 
     history = [{"model": "deepseek-flash", "reasoning_effort": "low", "tps": float(n)} for n in range(1, 22)]
     history += [{"model": "deepseek-flash", "reasoning_effort": "high", "tps": 100.0},
@@ -51,8 +51,8 @@ def test_metrics_group_by_model_and_effort_with_independent_percentiles():
 
 
 def test_run_metrics_splits_wall_time_without_double_counting_parallel_tools():
-    from agent.performance import RunMetrics
-    from agent.runner import RunEvent
+    from agent.runtime.metrics import RunMetrics
+    from agent.runtime.contracts import RunEvent
 
     clock = iter([0.0, 1.0, 2.0, 3.0, 3.0, 3.5, 4.5, 5.0, 6.0, 7.0, 8.0])
     forwarded = []

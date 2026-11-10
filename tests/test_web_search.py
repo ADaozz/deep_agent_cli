@@ -9,13 +9,14 @@ import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.config import Settings
+from agent.bootstrap.config import Settings
 from agent.cli.rendering import _capture, _tool
 from agent.cli.state import ToolBlock
-from agent.factory import create_agent
-from agent.runner import AgentRunner
-from agent.permission import ASK_INTERRUPT_ON
-from agent.sandbox import BackendSelection, ExecutionMode
+from agent.bootstrap.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.runtime.permissions import ASK_INTERRUPT_ON
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
 from agent.tools.web_search import TAVILY_SEARCH_URL, build_web_search_tool
 from tests.conftest import scripted_model
 
@@ -197,7 +198,7 @@ def test_search_approval_returns_after_allow_to_ask_switch(monkeypatch):
     """切回 ask 后恢复每次搜索的审批，allow 下继续自动执行。"""
     requests = _mock_tavily(monkeypatch)
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(model=scripted_model([
             AIMessage(content="", tool_calls=[{"id": "allow-search", "name": "web_search", "args": {"query": "first"}}]),
             AIMessage(content="done"),
@@ -227,7 +228,7 @@ def test_old_search_policy_waits_for_other_tools_in_the_same_batch(monkeypatch):
     requests = _mock_tavily(monkeypatch)
     monkeypatch.setenv("TAVILY_API_KEY", "test-key")
     old_policy = {name: rule for name, rule in ASK_INTERRUPT_ON.items() if name != "web_search"}
-    with patch("agent.factory.interrupt_on_for_mode", return_value=old_policy):
+    with patch("agent.bootstrap.factory.interrupt_on_for_mode", return_value=old_policy):
         prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[
                 {"id": "old-search", "name": "web_search", "args": {"query": "x"}},

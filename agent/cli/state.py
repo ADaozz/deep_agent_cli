@@ -5,9 +5,10 @@ from datetime import datetime
 from typing import Any, Callable
 from uuid import uuid4
 
-from agent.attachments import ImageAttachmentRef
-from agent.runner import RunEvent, TurnTiming
-from agent.session import TranscriptBlock, subagent_result_status
+from agent.sessions.images import ImageAttachmentRef
+from agent.runtime.contracts import RunEvent, TurnTiming
+from agent.sessions.transcript import subagent_result_status
+from agent.sessions.contracts import TranscriptBlock
 
 
 @dataclass

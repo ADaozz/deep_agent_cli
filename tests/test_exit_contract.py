@@ -17,8 +17,9 @@ from prompt_toolkit.output import DummyOutput
 from agent.cli.app import INPUT_CLEARED_HINT, CliApplication
 from agent.cli.interactions import InteractionController
 from agent.cli.lifecycle import TaskStop
-from agent.runner import AgentRunner, RunResult
-from agent.session import SessionStore
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunResult
+from agent.sessions.store import SessionStore
 from tests.conftest import scripted_model
 
 
@@ -126,9 +127,9 @@ def test_running_ctrl_c_then_exit_cancels_once_per_exit(cli: Harness, monkeypatc
 
 def test_ctrl_c_dismisses_interaction_without_arming_exit(cli: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _clock(monkeypatch)
-    cli.app.interaction = InteractionController.approval(_APPROVAL)
+    cli.app.dialogs.current = InteractionController.approval(_APPROVAL)
     cli.press(("c-c",))
-    assert cli.app.interaction is None
+    assert cli.app.dialogs.current is None
     assert cli.app._last_ctrl_c is None
     assert not cli.app._exiting
     assert cli.decisions == []
@@ -165,12 +166,12 @@ def test_ctrl_d_edits_nonempty_input_and_exits_when_empty(cli: Harness) -> None:
     assert cli.app.buffer.text == "ab"
     assert not cli.app._exiting
 
-    cli.app.interaction = InteractionController.approval(_APPROVAL)
+    cli.app.dialogs.current = InteractionController.approval(_APPROVAL)
     cli.app.buffer.text = ""
     cli.press(("c-d",))
     assert cli.app._exiting
     assert cli.left == [True]
-    assert cli.app.interaction is not None
+    assert cli.app.dialogs.current is not None
     assert cli.decisions == []
     assert cli.cancels == []
 
@@ -224,47 +225,47 @@ def test_escape_after_exit_requests_cancel_again_while_running(cli: Harness) -> 
     cli.app.exit()
     cli.press(("escape",))
     assert cli.cancels == [1, 1]
-    assert cli.app._cancel_sent
+    assert cli.app.run_view.cancel_sent
 
 
 def test_escape_prefers_slash_line_over_scroll(cli: Harness) -> None:
-    cli.app._transcript_line_count = 500
-    cli.app._transcript_anchor = 0
+    cli.app.transcript.transcript_line_count = 500
+    cli.app.transcript.transcript_anchor = 0
     cli.app.buffer.text = "/status"
     cli.press(("escape",))
     assert cli.app.buffer.text == ""
-    assert cli.app._transcript_anchor == 0
+    assert cli.app.transcript.transcript_anchor == 0
     assert cli.cancels == []
 
     cli.app.buffer.text = "hello"
     cli.press(("escape",))
     assert cli.app.buffer.text == "hello"
-    assert cli.app._transcript_anchor is None
+    assert cli.app.transcript.transcript_anchor is None
 
 
 def test_escape_closes_review_before_approval(cli: Harness) -> None:
-    cli.app.interaction = InteractionController.approval(_APPROVAL)
-    cli.app._reviewing = True
+    cli.app.dialogs.current = InteractionController.approval(_APPROVAL)
+    cli.app.dialogs.reviewing = True
     cli.press(("escape",))
-    assert not cli.app._reviewing
-    assert cli.app.interaction is not None
+    assert not cli.app.dialogs.reviewing
+    assert cli.app.dialogs.current is not None
     assert cli.decisions == []
 
     cli.press(("escape",))
-    assert cli.app.interaction is None
+    assert cli.app.dialogs.current is None
     assert cli.app.state.status == "Approval still pending · F2 to decide"
     assert cli.decisions == []
 
 
 def test_escape_backs_out_of_a_picker_without_applying_it(cli: Harness) -> None:
-    cli.app.interaction = InteractionController(
+    cli.app.dialogs.current = InteractionController(
         kind="resume",
         title="Resume session",
         question="Select a session",
         fields=[],
     )
     cli.press(("escape",))
-    assert cli.app.interaction is None
+    assert cli.app.dialogs.current is None
     assert cli.app.state.status == "Resume cancelled"
     assert not cli.app._exiting
 
@@ -314,7 +315,7 @@ def test_escape_during_mcp_background_does_not_cancel_a_run(cli: Harness) -> Non
 
 
 def test_escape_during_compaction_does_not_cancel(cli: Harness) -> None:
-    cli.app._compacting = True
+    cli.app.run_view.compacting = True
     cli.press(("escape",))
     assert cli.cancels == []
     assert cli.app.state.status == "Wait for compaction to finish"
@@ -361,11 +362,11 @@ def test_completed_run_does_not_start_follow_up_after_exit() -> None:
     try:
         runner.follow_up("still queued")
         app.state.running = True
-        epoch = app._run_epoch
+        epoch = app.run_view.epoch
         app.exit()
-        app._handle_result(RunResult(status="completed", output="done"))
+        app.run_events._handle_result(RunResult(status="completed", output="done"))
         assert reservations == []
-        assert app._run_epoch == epoch
+        assert app.run_view.epoch == epoch
         assert runner.control.pending_follow_up_count() == 1
         assert runner.control.pending_message_texts() == ["still queued"]
     finally:
@@ -379,7 +380,7 @@ def test_exit_does_not_mark_a_queued_follow_up_applied() -> None:
         runner.control.follow_up("keep me")
         app.state.running = True
         app.exit()
-        app._start_queued_run()
+        app.run_dispatch._start_queued_run()
         assert runner.control.pending_follow_up_count() == 1
         assert runner.control.pending_message_texts() == ["keep me"]
         assert all(getattr(block, "content", None) != "keep me" for block in app.state.blocks)
@@ -397,9 +398,9 @@ def test_exit_does_not_reserve_another_run() -> None:
         runner.follow_up("second")
         app.state.running = True
         app.exit()
-        app._start_run("direct")
-        app._start_queued_run()
-        app._handle_result(RunResult(status="completed", output="done"))
+        app.run_dispatch._start_run("direct")
+        app.run_dispatch._start_queued_run()
+        app.run_events._handle_result(RunResult(status="completed", output="done"))
         assert reservations == []
         assert runner.control.pending_message_texts() == ["first", "second"]
     finally:
@@ -410,7 +411,7 @@ def test_completed_run_still_starts_steering_before_follow_up() -> None:
     harness, pipe = _open()
     app, runner = harness.app, harness.runner
     started: list[str] = []
-    real_start = app._start_run
+    real_start = app.run_dispatch._start_run
 
     def start(text: str, **kwargs: object) -> None:
         resume = kwargs.get("resume_call")
@@ -419,15 +420,15 @@ def test_completed_run_still_starts_steering_before_follow_up() -> None:
         if kwargs.get("resume_call") is None:
             real_start(text, **kwargs)  # type: ignore[arg-type]
 
-    app._start_run = start  # type: ignore[method-assign]
+    app.run_dispatch._start_run = start  # type: ignore[method-assign]
     try:
         runner.steer("steer-first")
         runner.follow_up("follow-second")
-        app._handle_result(RunResult(status="completed", output="done"))
+        app.run_events._handle_result(RunResult(status="completed", output="done"))
         assert started == ["steer-first"]
         assert runner.control.pending_steering_count() == 0
         assert runner.control.pending_message_texts() == ["follow-second"]
-        app._handle_result(RunResult(status="completed", output="again"))
+        app.run_events._handle_result(RunResult(status="completed", output="again"))
         assert started == ["steer-first", "follow-second"]
         assert runner.control.pending_message_texts() == []
     finally:

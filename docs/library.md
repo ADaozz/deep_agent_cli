@@ -2,11 +2,21 @@
 
 `agent` 包可以脱离终端界面使用。这是在其他 Python 程序中复用运行核心的方式。公开 API 在第一个稳定版之前可能变化。
 
+## 导入方式
+
+应用级类型和工厂函数从根包导入：
+
+```python
+from agent import AgentRunner, ModelProfile, RunEvent, create_agent
+```
+
+配置加载使用 `from agent.bootstrap.config import Settings`。需要直接引用领域模块时，参见 [领域模块与接口](domain-design.md#模块与接口)。
+
 ## 基本用法
 
 ```python
 from agent import AgentRunner, create_agent
-from agent.config import Settings
+from agent.bootstrap.config import Settings
 
 settings = Settings.load()                 # 读取 ~/.deep-agent/config.yaml 或 DEEP_AGENT_CONFIG
 prepared = create_agent(settings=settings)

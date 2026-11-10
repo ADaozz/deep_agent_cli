@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Installed entry point for the interactive Deep Agent CLI."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,11 +13,11 @@ from rich.console import Console
 from agent.cli import CliApplication
 from agent.cli.app import default_config_dir
 from agent.cli.lifecycle import restore_terminal_modes
-from agent.bootstrap import initialize_user_files
-from agent.config import ConfigError, Settings, require_keybindings_outside_workspace
-from agent.runner import AgentRunner
-from agent.sandbox import SandboxUnavailableError
-from agent.session import SessionStore
+from agent.bootstrap.setup import initialize_user_files
+from agent.bootstrap.config import ConfigError, Settings, require_keybindings_outside_workspace
+from agent.runtime.runner import AgentRunner
+from agent.execution.types import SandboxUnavailableError
+from agent.sessions.store import SessionStore
 from agent.version import package_version
 from agent.mcp.manager import MCPManager
 

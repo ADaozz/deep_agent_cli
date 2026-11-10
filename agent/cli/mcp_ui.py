@@ -1,4 +1,5 @@
 """`/mcp` uses the same InteractionController as the other slash commands."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,9 +9,10 @@ from typing import Any
 from agent.cli.interactions import InteractionController
 from agent.cli.lifecycle import TaskStop
 from agent.cli.mcp_controller import MCPController
-from agent.mcp.manager import ServerStatus
-from agent.permission import PermissionMode
-from agent.runner import InterruptKind
+from agent.mcp.contracts import ServerStatus
+from agent.runtime.permissions import PermissionMode
+from agent.runtime.contracts import InterruptKind
+
 
 _USAGE = "Usage: /mcp, /mcp enable, /mcp disable, /mcp add, /mcp remove <name>, /mcp test <name>, /mcp tools <name>"
 _DISABLED_HINT = "MCP is disabled. Run /mcp enable first."
@@ -76,7 +78,7 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
 def finish_mcp_interaction(app: Any, interaction: InteractionController, *, cancelled: bool) -> None:
     """The add-wizard draft stays on the app. It is form state, not a live connection."""
     if cancelled or str(interaction.values.get("confirm") or "") == "cancel":
-        app.interaction = None
+        app.dialogs.current = None
         app._mcp_draft = {}
         app.set_status("MCP add cancelled")
         return
@@ -85,7 +87,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
     if kind == "mcp_name":
         draft["name"] = str(interaction.values.get("name") or "").strip()
         app._mcp_draft = draft
-        app.interaction = InteractionController(
+        app.dialogs.current = InteractionController(
             kind="mcp_transport",
             title="Add MCP server",
             question=f"How should {draft['name']} connect?",
@@ -108,7 +110,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         else:
             question = "URL, for example https://mcp.example.com/mcp"
             label = "URL"
-        app.interaction = InteractionController(
+        app.dialogs.current = InteractionController(
             kind="mcp_target",
             title="Add MCP server",
             question=question,
@@ -122,7 +124,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         if draft.get("transport") == "stdio":
             _ask_confirm(app, draft)
             return
-        app.interaction = InteractionController(
+        app.dialogs.current = InteractionController(
             kind="mcp_auth",
             title="Add MCP server",
             question="Bearer uses an environment variable. OAuth opens a browser.",
@@ -141,7 +143,7 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         draft["auth"] = str(interaction.values.get("auth") or "none")
         app._mcp_draft = draft
         if draft["auth"] == "bearer":
-            app.interaction = InteractionController(
+            app.dialogs.current = InteractionController(
                 kind="mcp_token",
                 title="Add MCP server",
                 question="Environment variable name. Do not paste the token.",
@@ -157,20 +159,20 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
         _ask_confirm(app, draft)
         return
     if kind == "mcp_confirm":
-        app.interaction = None
+        app.dialogs.current = None
         app._mcp_draft = {}
         _commit_add(app, draft)
         return
-    app.interaction = None
+    app.dialogs.current = None
     app._mcp_draft = {}
 
 
 def _begin_add(app: Any) -> None:
-    if app.interaction is not None:
+    if app.dialogs.current is not None:
         app.set_status("Finish the current interaction before adding an MCP server")
         return
     app._mcp_draft = {}
-    app.interaction = InteractionController(
+    app.dialogs.current = InteractionController(
         kind="mcp_name",
         title="Add MCP server",
         question="Unique server name.",
@@ -181,12 +183,12 @@ def _begin_add(app: Any) -> None:
 
 def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
     if app.runner.permission_mode() is PermissionMode.ALLOW:
-        app.interaction = None
+        app.dialogs.current = None
         app._mcp_draft = {}
         _commit_add(app, draft)
         return
     app._mcp_draft = draft
-    app.interaction = InteractionController(
+    app.dialogs.current = InteractionController(
         kind="mcp_confirm",
         title="Add this MCP server?",
         question=_summary(draft),
@@ -479,7 +481,7 @@ async def _publish_mcp_toolset(app: Any) -> str:
     if events is None:
         return "queued"
     for event in events:
-        app._apply_event(event, announce=False)
+        app.run_events._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
         return "failed"
     if app.runner.mcp.toolset_dirty():
@@ -592,7 +594,7 @@ async def _apply_when_idle(app: Any, *, announce_status: bool = True) -> bool:
             app.set_status("MCP change queued until the current run reaches a safe point", transient=False)
         return False
     for event in events:
-        app._apply_event(event, announce=False)
+        app.run_events._apply_event(event, announce=False)
     if any(getattr(event, "type", "") == "runtime_config_failed" for event in events):
         if announce_status and not _switch_status_visible(app):
             app.set_status("MCP tool update failed; retry at the next safe point", transient=False)

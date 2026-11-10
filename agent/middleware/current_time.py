@@ -1,4 +1,5 @@
 """Refresh the user's local date and time zone on every model request."""
+
 from datetime import datetime
 from typing import Any, Callable
 from zoneinfo import ZoneInfo

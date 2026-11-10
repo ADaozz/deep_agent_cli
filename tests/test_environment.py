@@ -10,8 +10,8 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agent.config import BindMount, SandboxConfig
-from agent.environment import (
+from agent.execution.policy import BindMount, SandboxConfig
+from agent.execution.environment import (
     EnvironmentCache,
     EnvironmentContextMiddleware,
     classify_runtime,
@@ -22,7 +22,7 @@ from agent.environment import (
     reset_environment_cache,
     set_environment_cache,
 )
-from agent.permission import PermissionMode
+from agent.runtime.permissions import PermissionMode
 from tests.conftest import scripted_model
 
 
@@ -199,7 +199,8 @@ def test_probe_uses_offline_command_and_survives_a_missing_executable() -> None:
 def test_restricted_probe_reads_os_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agent.sandbox import BubblewrapBackend, _resolve_executable
+    from agent.execution.backend import BubblewrapBackend
+    from agent.execution.layout import _resolve_executable
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     executable = _resolve_executable("bwrap")

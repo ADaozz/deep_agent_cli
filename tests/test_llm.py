@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_openai import ChatOpenAI
 
-from agent.llm import ResponsesChatOpenAI, ChatCompletionsChatOpenAI, normalize_responses_event
+from agent.models.client import ResponsesChatOpenAI, ChatCompletionsChatOpenAI, normalize_responses_event
 
 
 def _convert(event: object):
@@ -77,7 +77,7 @@ def test_adapter_astream_emits_multiple_reasoning_deltas_before_text() -> None:
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
-    from agent.llm import _ResponsesClient
+    from agent.models.client import _ResponsesClient
     object.__setattr__(llm, "root_async_client", _ResponsesClient(FakeClient()))
 
     async def collect():
@@ -145,7 +145,7 @@ def test_adapter_stream_emits_reasoning_deltas_before_text() -> None:
         model="qwen3.5-plus", api_key="sk-local", base_url="http://localhost:8000/v1",
         use_responses_api=True, output_version="responses/v1", include_response_headers=True,
     )
-    from agent.llm import _ResponsesClient
+    from agent.models.client import _ResponsesClient
     object.__setattr__(llm, "root_client", _ResponsesClient(FakeClient()))
     object.__setattr__(llm, "root_async_client", _ResponsesClient(FakeAsyncClient()))
 
@@ -200,8 +200,8 @@ def test_qwen_stream_preserves_context_overflow_error_mapping() -> None:
 
 
 def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_differ() -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
 
     qwen = build_chat_model(ModelProfile("qwen", "qwen3.5-plus"))
     compatible = build_chat_model(ModelProfile("generic", "qwen3.5-plus", api="chat_completions"))
@@ -213,8 +213,8 @@ def test_qwen_subclass_keeps_chatopenai_interface_but_provider_wire_shapes_diffe
 
 
 def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
 
     model = build_chat_model(ModelProfile(
         "plan/auto", "auto", api="chat_completions",
@@ -235,7 +235,7 @@ def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
     })
     message = result.generations[0].message
     assert message.additional_kwargs["reasoning_content"] == "先分析"
-    from agent.stream import StreamDeltaCallback, reasoning_text
+    from agent.models.messages import StreamDeltaCallback, reasoning_text
 
     assert reasoning_text(message) == "先分析"
     deltas: list[tuple[str, str]] = []
@@ -248,8 +248,8 @@ def test_token_plan_preserves_streamed_and_saved_reasoning() -> None:
 
 
 def test_compatible_profiles_preserve_reasoning_for_all_hosts() -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
 
     token_plan = build_chat_model(ModelProfile(
         "plan/auto", "auto", api="chat_completions",
@@ -265,8 +265,8 @@ def test_compatible_profiles_preserve_reasoning_for_all_hosts() -> None:
 
 @pytest.mark.parametrize("provider", ["responses", "chat_completions"])
 def test_configured_context_window_drives_deepagents_compaction(provider: str) -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
     from deepagents.middleware.summarization import compute_summarization_defaults
 
     configured = build_chat_model(ModelProfile(
@@ -286,8 +286,8 @@ def test_configured_context_window_drives_deepagents_compaction(provider: str) -
 @pytest.mark.parametrize("provider", ["responses", "chat_completions"])
 @pytest.mark.parametrize("effort", [None, "none", "low", "max"])
 def test_reasoning_effort_request_payload(provider, effort) -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
     from langchain_core.messages import HumanMessage
 
     profile = ModelProfile("test", "test", api=provider, reasoning_efforts=("none", "low", "max"))
@@ -306,8 +306,8 @@ def test_reasoning_effort_request_payload(provider, effort) -> None:
 
 
 def test_unconfigured_reasoning_effort_is_rejected() -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
     with pytest.raises(ValueError, match="Unsupported reasoning effort"):
         build_chat_model(ModelProfile("test", "test"), reasoning_effort="none")
 
@@ -318,8 +318,8 @@ def test_baseline_standard_responses_event_is_unchanged() -> None:
 
 
 def test_baseline_chat_tool_chunks_and_usage() -> None:
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
     model = build_chat_model(ModelProfile("test", "test", api="chat_completions"))
     first = model._convert_chunk_to_generation_chunk({"choices": [{"delta": {
         "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
@@ -342,10 +342,10 @@ def test_bridged_stream_matches_sync_stream_over_real_http(api) -> None:
     """Reasoning, text, tool calls, usage and callback tokens survive the async bridge unchanged."""
     from langchain_core.callbacks import BaseCallbackHandler
 
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
-    from agent.llm_stream import live_stream_count
-    from agent.stream import reasoning_text, visible_text
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
+    from agent.models.stream_lifecycle import live_stream_count
+    from agent.models.messages import reasoning_text, visible_text
     from tests.model_stream_server import ScriptedSSEServer, Turn
 
     call = {"id": "call_1", "name": "read_file", "args": {"path": "a"}}

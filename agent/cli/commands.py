@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+
 if TYPE_CHECKING:
     from agent.cli.app import CliApplication
 
@@ -55,7 +56,7 @@ async def _help(app: "CliApplication", _arg: str) -> None:
 
 
 async def _clear(app: "CliApplication", _arg: str) -> None:
-    app.clear_transcript_selection()
+    app.transcript.clear_transcript_selection()
     app.state.clear(preserve_model_metrics=True)
     app.set_status("Transcript cleared; agent context was preserved")
 
@@ -82,31 +83,31 @@ async def _resume(app: "CliApplication", arg: str) -> None:
 
 
 async def _model(app: "CliApplication", arg: str) -> None:
-    await app.select_model(arg)
+    await app.model_selection.select_model(arg)
 
 
 async def _skill(app: "CliApplication", arg: str) -> None:
-    await app.select_skill(arg)
+    await app.skills.select_skill(arg)
 
 
 async def _compact(app: "CliApplication", arg: str) -> None:
-    await app.compact_command(arg)
+    await app.context_compaction.compact_command(arg)
 
 
 async def _image(app: "CliApplication", arg: str) -> None:
-    await app.image_command(arg)
+    await app.attachments_controller.image_command(arg)
 
 
 async def _attachments(app: "CliApplication", arg: str) -> None:
-    await app.attachments_command(arg)
+    await app.attachments_controller.attachments_command(arg)
 
 
 async def _permission(app: "CliApplication", arg: str) -> None:
-    await app.select_permission(arg)
+    await app.access_selection.select_permission(arg)
 
 
 async def _sandbox(app: "CliApplication", arg: str) -> None:
-    await app.select_sandbox(arg)
+    await app.access_selection.select_sandbox(arg)
 
 
 async def _mcp(app: "CliApplication", arg: str) -> None:

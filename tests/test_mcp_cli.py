@@ -10,14 +10,14 @@ from langchain_core.messages import AIMessage
 from deepagents.backends import StateBackend
 from prompt_toolkit.document import Document
 
-from agent.cli.app import SlashCompleter
+from agent.cli.completion import SlashCompleter
 from agent.cli.commands import command_table
 from agent.cli.interactions import InteractionController
 from agent.cli.mcp_controller import MCPController
 from agent.cli.mcp_ui import finish_mcp_interaction, handle_mcp_command
 from agent.cli.state import CliState
 from agent.mcp.manager import MCPManager
-from agent.runner import AgentRunner
+from agent.runtime.runner import AgentRunner
 from tests.conftest import graph_tool_names, scripted_model
 from tests.mcp_fixture import HttpFixture
 
@@ -29,13 +29,17 @@ def async_test(func):
     return run
 
 
+from agent.cli.view_state import DialogState
+
+
 class _App:
     def __init__(self, runner: AgentRunner) -> None:
         self.runner = runner
         self.state = CliState()
-        self.interaction: InteractionController | None = None
+        self.dialogs = DialogState()
         self._mcp_draft: dict[str, str] = {}
         self.mcp_controller = MCPController()
+        self.run_events = SimpleNamespace(_apply_event=self._apply_event)
         self.status = ""
         self.application = SimpleNamespace(invalidate=lambda: None)
 
@@ -50,7 +54,7 @@ class _App:
 
 
 def _advance(app: _App, text: str = "", *, option: int | None = None) -> None:
-    interaction = app.interaction
+    interaction = app.dialogs.current
     assert interaction is not None
     if option is not None:
         interaction.option_index = option
@@ -114,8 +118,8 @@ async def test_cancel_and_missing_remove_do_not_write(tmp_path: Path) -> None:
     app = _App(runner)
     try:
         await handle_mcp_command(app, "add")
-        finish_mcp_interaction(app, app.interaction, cancelled=True)
-        assert app.interaction is None
+        finish_mcp_interaction(app, app.dialogs.current, cancelled=True)
+        assert app.dialogs.current is None
         assert path.read_bytes() == before
         await handle_mcp_command(app, "remove missing")
         assert path.read_bytes() == before
@@ -186,7 +190,7 @@ async def test_real_prompt_toolkit_loop_remains_responsive_and_busy_until_worker
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
     from agent.cli.app import CliApplication
-    from agent.mcp.manager import MCPResult
+    from agent.mcp.contracts import MCPResult
 
     started, release = threading.Event(), threading.Event()
     calls = []
@@ -398,16 +402,17 @@ def test_mcp_confirm_preserves_multiline_plain_text_and_other_panels_use_markdow
     from agent.cli.rendering import render_interaction
     from types import SimpleNamespace
 
-    from agent.permission import PermissionMode
+    from agent.runtime.permissions import PermissionMode
 
     app = SimpleNamespace(
+        dialogs=DialogState(),
         set_status=lambda *a, **kw: None,
         runner=SimpleNamespace(permission_mode=lambda: PermissionMode.ASK),
     )
     draft = {"name": "tui_e2e", "transport": "stdio",
              "target": "/path/to/python /tmp/mcp-e2e/server_with_[brackets].py"}
     _ask_confirm(app, draft)
-    panel = app.interaction
+    panel = app.dialogs.current
     assert isinstance(list(panel.render().renderables)[1], Text)
     for width in (45, 100):
         rendered = render_interaction(panel, width)
@@ -425,11 +430,12 @@ def test_mcp_confirm_preserves_multiline_plain_text_and_other_panels_use_markdow
 @async_test
 async def test_allow_add_wizard_saves_without_final_approval(tmp_path: Path, http_mcp: HttpFixture) -> None:
     from unittest.mock import patch
-    from agent.factory import create_agent
-    from agent.sandbox import BackendSelection, ExecutionMode
+    from agent.bootstrap.factory import create_agent
+    from agent.execution.backend import BackendSelection
+    from agent.execution.types import ExecutionMode
 
     manager = MCPManager(tmp_path / "mcp.json", call_timeout=8, connect_timeout=5)
-    with patch("agent.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         prepared = create_agent(model=scripted_model([AIMessage(content="done")]), interrupt_on={}, mcp=manager)
         runner = AgentRunner(prepared=prepared, mcp_manager=manager)
         app = _App(runner)
@@ -439,7 +445,7 @@ async def test_allow_add_wizard_saves_without_final_approval(tmp_path: Path, htt
             _advance(app)  # Streamable HTTP
             _advance(app, http_mcp.url)
             _advance(app)  # No authentication; final save is automatic in allow.
-            assert app.interaction is None
+            assert app.dialogs.current is None
             await app.mcp_controller.operation
             assert manager.get("local") is not None
             assert "mcp__local__echo" in runner.prepared.model_tool_names

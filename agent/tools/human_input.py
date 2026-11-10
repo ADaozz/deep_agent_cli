@@ -1,15 +1,12 @@
-# request_human_input — local LangGraph interrupt tool.
-# The tool body only builds a Semantic Interaction Schema and calls interrupt().
-# Resume hands the human's values back to the agent. No side effects before interrupt().
 from __future__ import annotations
 
 import json
 from typing import Any
 from uuid import uuid4
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import interrupt
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent.tools.human_interaction import (
     FIELD_TYPES,
@@ -19,6 +16,10 @@ from agent.tools.human_interaction import (
     normalize_interaction_request,
     resume_values,
 )
+
+# request_human_input — local LangGraph interrupt tool.
+# The tool body only builds a Semantic Interaction Schema and calls interrupt().
+# Resume hands the human's values back to the agent. No side effects before interrupt().
 
 
 REQUEST_TOOL_NAME = "request_human_input"

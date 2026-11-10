@@ -4,20 +4,25 @@ Key handlers only ask to leave. This object signals the owners of live work,
 then waits for CLI tasks until one deadline. Runner.close() still releases the
 session lease, model streams, MCP clients, and sandboxes; nothing here calls it.
 """
+
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Callable
 import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import Enum
 import os
 import sys
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import Any, TypeVar, cast
 import weakref
 
 
 if TYPE_CHECKING:
-    from agent.cli.app import CliApplication
+    from agent.runtime.runner import AgentRunner
+    from agent.cli.state import CliState
+    from prompt_toolkit.output import Output
+
 
 _TaskResult = TypeVar("_TaskResult")
 
@@ -79,8 +84,18 @@ async def _refuse_ui_task() -> None:
 
 
 class AppLifecycle:
-    def __init__(self, app: CliApplication) -> None:
-        self._app = app
+    def __init__(self, *, state: CliState, runner: AgentRunner, notify_session_exit: Callable[..., Any],
+                 stop_status_notice: Callable[..., Any], stop_selection: Callable[..., Any], output: Callable[[], Output],
+                 exit_ui: Callable[..., Any], shutdown_io: Callable[..., Any], finish_shutdown: Callable[..., Any]) -> None:
+        self.state = state
+        self.runner = runner
+        self.notify_session_exit = notify_session_exit
+        self.stop_status_notice = stop_status_notice
+        self.stop_selection = stop_selection
+        self.output = output
+        self.exit_ui = exit_ui
+        self.shutdown_io = shutdown_io
+        self.finish_shutdown = finish_shutdown
         self.phase = ExitPhase.ACTIVE
         self._tracked: list[tuple[asyncio.Task[object], TaskStop]] = []
         self._owners_signalled = False
@@ -137,29 +152,25 @@ class AppLifecycle:
         if self.phase is not ExitPhase.ACTIVE:
             return
         self.phase = ExitPhase.EXIT_REQUESTED
-        app = self._app
-        if app._status_notice_handle is not None:
-            app._status_notice_handle.cancel()
-            app._status_notice_handle = None
-        app._stop_selection_scroll()
+        self.stop_status_notice()
+        self.stop_selection()
         # Stop mouse reports before prompt_toolkit leaves the alternate screen.
         # Otherwise motion generated during shutdown can reach the shell.
-        app.application.output.disable_mouse_support()
-        app.application.output.flush()
+        self.output().disable_mouse_support()
+        self.output().flush()
         self._signal_owners()
-        app.application.exit()
+        self.exit_ui()
 
     def _signal_owners(self) -> None:
         """Tell run, MCP, and session-wait owners to stop. Once per process."""
         if self._owners_signalled:
             return
-        app = self._app
-        app.sessions.notify_exit()
-        manager = getattr(app.runner, "mcp", None)
+        self.notify_session_exit()
+        manager = getattr(self.runner, "mcp", None)
         if manager is not None:
             manager.cancel_pending_connections()
-        if app.state.running:
-            app.runner.request_cancel()
+        if self.state.running:
+            self.runner.request_cancel()
         self._owners_signalled = True
 
     async def shutdown(self, *, task_timeout: float = 2.0) -> None:
@@ -171,7 +182,6 @@ class AppLifecycle:
         """
         if self.phase is ExitPhase.STOPPED:
             return
-        app = self._app
         try:
             if self.phase is ExitPhase.ACTIVE:
                 self._signal_owners()
@@ -182,9 +192,9 @@ class AppLifecycle:
             self.failures = tuple([*self._failure_log, *failures])
         finally:
             try:
-                app._io_executor.shutdown(wait=False, cancel_futures=True)
+                self.shutdown_io()
             finally:
-                app._git_task = None
+                self.finish_shutdown()
                 self.phase = ExitPhase.STOPPED
 
     async def _drain_tasks(

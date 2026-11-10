@@ -1,4 +1,5 @@
 """Inject the current MCP tool snapshot without putting those tools on AgentSpec."""
+
 from __future__ import annotations
 
 from langchain.agents.middleware import AgentMiddleware
@@ -6,6 +7,7 @@ from langchain_core.tools import BaseTool
 
 from agent.mcp.manager import MCPManager
 from agent.mcp.tools import build_management_tools
+
 
 MCP_HOST_PROMPT = (
     "MCP 服务器在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略约束。"

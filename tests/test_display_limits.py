@@ -13,8 +13,9 @@ from agent.cli.app import CliApplication
 from agent.cli.previews import build_failure_preview, build_tool_preview
 from agent.cli.rendering import TranscriptRenderer, _capture, _message, render_transcript
 from agent.cli.state import CliState, MessageBlock, ToolBlock
-from agent.config import Settings
-from agent.runner import AgentRunner, RunEvent
+from agent.bootstrap.config import Settings
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
 from tests.conftest import scripted_model
 
 

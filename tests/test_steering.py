@@ -7,10 +7,10 @@ from deepagents.backends import StateBackend
 import pytest
 from unittest.mock import patch
 
-from agent.control import RunController
+from agent.runtime.control import RunController
 from agent.middleware.steering import SteeringMiddleware
-from agent.runner import AgentRunner
-from agent.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.bootstrap.factory import create_agent
 from agent.tools.examples import build_example_tools
 from tests.conftest import scripted_model
 

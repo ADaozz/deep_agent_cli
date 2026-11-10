@@ -1,4 +1,5 @@
 """Filesystem middleware capability check for the workspace shell wrapper."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -7,7 +8,8 @@ from typing import Any
 from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 
-from agent.sandbox import WorkspaceCompositeBackend
+from agent.execution.filesystem import WorkspaceCompositeBackend
+
 
 LS_DESCRIPTION = (
     "列出目录中的文件和子目录。path 必须是绝对路径。\n"

@@ -16,16 +16,18 @@ import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.cancel import ToolCancelContext, clear_cancel_context, set_cancel_context
-from agent.config import SandboxConfig
-from agent.factory import AgentSpec, build_agent, create_agent
-from agent.control import RunController
-from agent.permission import PermissionMode
-from agent.sandbox import BackendSelection, ExecutionMode, BubblewrapBackend, WorkspaceCompositeBackend
+from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
+from agent.execution.policy import SandboxConfig
+from agent.bootstrap.factory import AgentSpec, build_agent, create_agent
+from agent.runtime.control import RunController
+from agent.runtime.permissions import PermissionMode
+from agent.execution.backend import BackendSelection, BubblewrapBackend
+from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.types import ExecutionMode
 from tests.host_command import HostCommandBackend
 from agent.tools import grep as implementation
 from tests.conftest import graph_tool_names, scripted_model
-from agent.sandbox_pool import PersistentSandbox, _POOLS
+from agent.execution.pool import PersistentSandbox, _POOLS
 
 
 def _legacy_workspace_path(path: str | None, root: str) -> str | None:
@@ -1004,7 +1006,7 @@ def test_grep_worker_loss_is_not_retried_and_next_search_recovers(tmp_path, monk
 
 @pytest.mark.parametrize("engine_name", ["python", "rg"])
 def test_grep_searches_declared_mounts_and_rejects_the_rest(engine_name, tmp_path, monkeypatch):
-    from agent.config import BindMount
+    from agent.execution.policy import BindMount
 
     if engine_name == "rg":
         assert implementation.resolve_rg()

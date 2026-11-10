@@ -1,4 +1,5 @@
 """Built-in MCP catalog tools. These are not tools from an external MCP server."""
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -8,6 +9,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.mcp.manager import MCPManager
 from agent.mcp.names import MCP_ADD, MCP_LIST, MCP_REMOVE
+
 
 _NOT_YET = (
     "在当前结果返回前，不要声称服务工具已经可用。"

@@ -63,7 +63,7 @@ def test_cli_exit_waits_for_git_cleanup():
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
     from agent.cli.app import CliApplication
-    from agent.runner import AgentRunner
+    from agent.runtime.runner import AgentRunner
     from tests.conftest import scripted_model
 
     async def scenario():

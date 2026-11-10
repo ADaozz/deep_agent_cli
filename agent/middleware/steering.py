@@ -1,14 +1,20 @@
 """Inject steering before the next model or proposed tool call."""
+
 from __future__ import annotations
 
 from typing import Any, Callable, NotRequired
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import AgentState, ExtendedModelResponse, ModelResponse, hook_config
+from langchain.agents.middleware.types import (
+    AgentState,
+    ExtendedModelResponse,
+    ModelResponse,
+    hook_config,
+)
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
-from agent.control import RunController
+from agent.runtime.control import RunController
 
 
 class SteeringState(AgentState):

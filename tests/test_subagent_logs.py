@@ -90,8 +90,8 @@ def test_runtime_logs_operations_without_model_trace_or_raw_tool_output(tmp_path
     from types import SimpleNamespace
     from langchain_core.messages import AIMessage, HumanMessage
     from langchain_core.tools import StructuredTool
-    from agent.cancel import emit_tool_output, get_output_emitter, set_output_emitter
-    from agent.control import RunController
+    from agent.runtime.cancellation import emit_tool_output, get_output_emitter, set_output_emitter
+    from agent.runtime.control import RunController
     from agent.subagents.manager import SubAgentManager
     from agent.subagents.runtime import SubAgentRuntime
     from tests.conftest import scripted_model
@@ -182,7 +182,7 @@ def test_callback_bounds_arguments_errors_and_keeps_parallel_tool_identity():
 def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp_path, cancelled):
     from types import SimpleNamespace
     from langchain_core.messages import HumanMessage
-    from agent.control import RunController
+    from agent.runtime.control import RunController
     from agent.subagents.manager import SubAgentManager
     from agent.subagents.runtime import SubAgentRuntime
     class Graph:
@@ -212,7 +212,7 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
 def test_known_keys_are_replaced_before_summary_limits(tmp_path):
     from types import SimpleNamespace
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-    from agent.control import RunController
+    from agent.runtime.control import RunController
     from agent.subagents.manager import SubAgentManager
     from agent.subagents.runtime import SubAgentRuntime
 

@@ -79,9 +79,9 @@ def _workspace(root: Path) -> None:
 def bench_agent(repeat: int) -> dict[str, Any]:
     from deepagents.backends import FilesystemBackend
 
-    from agent.factory import create_agent
-    from agent.performance import RunMetrics
-    from agent.runner import AgentRunner
+    from agent.bootstrap.factory import create_agent
+    from agent.runtime.metrics import RunMetrics
+    from agent.runtime.runner import AgentRunner
 
     build: list[float] = []
     runs: list[dict[str, Any]] = []
@@ -110,8 +110,9 @@ def bench_agent(repeat: int) -> dict[str, Any]:
 def bench_sandbox(repeat: int) -> dict[str, Any]:
     import shutil
 
-    from agent.config import SandboxConfig
-    from agent.sandbox import BubblewrapBackend, WorkspaceCompositeBackend, sandbox_pool_of
+    from agent.execution.policy import SandboxConfig
+    from agent.execution.backend import BubblewrapBackend, sandbox_pool_of
+    from agent.execution.filesystem import WorkspaceCompositeBackend
 
     report: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="deep-agent-bench-") as directory:
@@ -141,8 +142,8 @@ def bench_sandbox(repeat: int) -> dict[str, Any]:
 
 def bench_live(prompt: str, repeat: int) -> dict[str, Any]:
     from agent.cli.main import create_runner
-    from agent.config import Settings
-    from agent.performance import RunMetrics
+    from agent.bootstrap.config import Settings
+    from agent.runtime.metrics import RunMetrics
 
     settings = Settings.load()
     runs: list[dict[str, Any]] = []
@@ -213,7 +214,7 @@ def _time(repeat: int, step: Callable[[int], None]) -> dict[str, float | None]:
 
 def bench_cli(blocks: int, repeat: int) -> dict[str, Any]:
     from agent.cli.rendering import TranscriptRenderer
-    from agent.runner import RunEvent
+    from agent.runtime.contracts import RunEvent
 
     report: dict[str, Any] = {"blocks": blocks}
     tracemalloc.start()
@@ -257,7 +258,7 @@ async def _bench_footer(repeat: int) -> dict[str, float | None]:
     from prompt_toolkit.output import DummyOutput
 
     from agent.cli.app import CliApplication
-    from agent.runner import AgentRunner
+    from agent.runtime.runner import AgentRunner
 
     runner = AgentRunner(model=_scripted_model([AIMessage(content="unused")]), backend=StateBackend(),
                          thread_id="bench-footer")

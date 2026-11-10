@@ -5,16 +5,18 @@ import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.config import Settings, SubAgentConfig
-from agent.factory import create_agent
-from agent.runner import AgentRunner
-from agent.sandbox import BackendSelection, ExecutionMode
-from agent.session import messages_to_transcript
+from agent.bootstrap.config import Settings
+from agent.subagents.configuration import SubAgentConfig
+from agent.bootstrap.factory import create_agent
+from agent.runtime.runner import AgentRunner
+from agent.execution.backend import BackendSelection
+from agent.execution.types import ExecutionMode
+from agent.sessions.transcript import messages_to_transcript
 from tests.conftest import graph_tool_names, scripted_model
 
 
 def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
     backend = StateBackend()
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path / 'private')
@@ -88,7 +90,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
 
 
 def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
     backend = StateBackend()
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path / 'private')
@@ -138,8 +140,8 @@ def test_real_sandbox_native_concurrency_and_command_cancel(tmp_path):
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import HumanMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
-    from agent.config import SandboxConfig
-    from agent.sandbox import SandboxUnavailableError
+    from agent.execution.policy import SandboxConfig
+    from agent.execution.types import SandboxUnavailableError
     from tests.test_model_stream_cancel import Harness
 
     class ParallelModel(BaseChatModel):
@@ -216,8 +218,8 @@ def test_log_tool_reads_only_its_parent_after_restart(tmp_path):
 
 
 def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeypatch):
-    import agent.factory as factory
-    from agent.config import ModelProfile
+    import agent.bootstrap.factory as factory
+    from agent.models.profile import ModelProfile
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     def responses(label):
         return scripted_model([
@@ -234,7 +236,7 @@ def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeyp
             seen.append(model)
         return original(spec, model, *args, **kwargs)
     monkeypatch.setattr(factory, 'build_agent', capture)
-    monkeypatch.setattr('agent.runner.build_chat_model', lambda *args, **kwargs: second)
+    monkeypatch.setattr('agent.runtime.runner.build_chat_model', lambda *args, **kwargs: second)
     runner = AgentRunner(model=first, settings=cfg)
     try:
         manager = runner.prepared.subagent_manager
@@ -248,8 +250,8 @@ def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeyp
 
 
 def test_subagent_model_and_effort_override(tmp_path, monkeypatch):
-    import agent.factory as factory
-    from agent.config import ModelProfile
+    import agent.bootstrap.factory as factory
+    from agent.models.profile import ModelProfile
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     parent = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
@@ -283,7 +285,7 @@ def test_prepared_runner_honors_subagent_disable_setting(tmp_path):
 
 
 def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
     from agent.cli.state import CliState, ToolBlock
     from langchain_core.messages import HumanMessage
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
@@ -318,10 +320,10 @@ def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch
 def test_child_request_effort_is_independent_of_parent(
     api, override_model, parent_effort, child_effort, expected, tmp_path, monkeypatch,
 ):
-    import agent.factory as factory
-    from agent.config import ModelProfile
-    from agent.llm import build_chat_model
-    from agent.llm_stream import close_model_http_clients
+    import agent.bootstrap.factory as factory
+    from agent.models.profile import ModelProfile
+    from agent.models.client import build_chat_model
+    from agent.models.stream_lifecycle import close_model_http_clients
     from tests.model_stream_server import ScriptedSSEServer, Turn
     call = {'name': 'task', 'id': 'delegate', 'args': {
         'description': 'child-only task', 'subagent_type': 'general-purpose'}}
@@ -371,7 +373,7 @@ def test_child_request_effort_is_independent_of_parent(
 
 
 def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monkeypatch):
-    import agent.factory as factory
+    import agent.bootstrap.factory as factory
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     def unexpected_build(*args, **kwargs):
         pytest.fail('custom injected model silently replaced by configured default')
@@ -388,8 +390,8 @@ def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monk
 
 
 def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, monkeypatch):
-    import agent.factory as factory
-    from agent.config import ModelProfile
+    import agent.bootstrap.factory as factory
+    from agent.models.profile import ModelProfile
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'configured', reasoning_efforts=('low',)),),
                    subagents=SubAgentConfig(reasoning_effort='low'))
@@ -407,8 +409,8 @@ def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, mo
 
 
 def test_log_redacts_only_configured_model_and_tavily_keys(tmp_path, monkeypatch):
-    import agent.factory as factory
-    from agent.config import ModelProfile
+    import agent.bootstrap.factory as factory
+    from agent.models.profile import ModelProfile
     monkeypatch.delenv('TAVILY_API_KEY', raising=False)
     monkeypatch.setenv('UNKNOWN_SERVICE_TOKEN', 'unknown-output-key')
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))

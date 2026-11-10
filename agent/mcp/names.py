@@ -1,9 +1,11 @@
 """Names that keep MCP tools out of the native tool and approval sets."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
 import hashlib
 import re
+
 
 MCP_ADD = "mcp_add"
 MCP_LIST = "mcp_list"

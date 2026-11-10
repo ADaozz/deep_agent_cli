@@ -1,4 +1,5 @@
 """Private, bounded background logs that never write logging errors to the TUI."""
+
 from __future__ import annotations
 
 import os

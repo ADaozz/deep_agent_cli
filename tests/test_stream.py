@@ -3,8 +3,8 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 
-from agent.stream import StreamDeltaCallback, reasoning_text, visible_text
-from agent.session import messages_to_transcript
+from agent.models.messages import StreamDeltaCallback, reasoning_text, visible_text
+from agent.sessions.transcript import messages_to_transcript
 
 
 def test_summary_callback_reports_lifecycle_and_keeps_summary_out_of_answer() -> None:
@@ -127,7 +127,7 @@ def test_usage_only_chunk_is_forwarded_and_summary_usage_is_ignored():
 
 def test_output_metrics_include_thinking_and_exclude_ttft_and_usage_tail(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: now[0])
     reports = []
     cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     cb.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
@@ -151,10 +151,10 @@ def test_output_metrics_include_thinking_and_exclude_ttft_and_usage_tail(monkeyp
 
 
 def test_output_metrics_retry_resets_failed_spans_and_preserves_thinking_counts(monkeypatch):
-    from agent.llm_stream import ModelStreamInterrupted, stream_retry_state
+    from agent.models.stream_lifecycle import ModelStreamInterrupted, stream_retry_state
 
     now = [0.0]
-    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: now[0])
     reports = []
     cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     cb.on_llm_start({})
@@ -198,7 +198,7 @@ def test_output_metrics_ignore_compaction_and_nonstreaming_has_no_fake_timings(m
 
 def test_tool_argument_chunks_count_as_generated_output(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: now[0])
     reports = []
     cb = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     cb.on_llm_start({})
@@ -250,10 +250,10 @@ def test_metrics_capture_reasoning_effort_for_both_protocols():
 
 @pytest.mark.parametrize("kind", [{}, {"full": True}])
 def test_reasoning_summary_kwargs_exclude_full_output_throughput(monkeypatch, kind):
-    from agent.performance import model_metric_groups
+    from agent.runtime.metrics import model_metric_groups
 
     now = [0.0]
-    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: now[0])
     reports = []
     callback = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     callback.on_llm_start({})
@@ -289,7 +289,7 @@ def test_reasoning_summary_kwargs_exclude_full_output_throughput(monkeypatch, ki
 ])
 def test_summary_detection_follows_reasoning_text_precedence(monkeypatch, extra):
     now = [0.0]
-    monkeypatch.setattr("agent.stream.monotonic", lambda: now[0])
+    monkeypatch.setattr("agent.models.messages.monotonic", lambda: now[0])
     reports = []
     callback = StreamDeltaCallback(lambda *_: None, on_metrics=reports.append)
     callback.on_llm_start({})

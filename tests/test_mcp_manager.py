@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 import pytest
 
-from agent.mcp.manager import MCPManager, ServerStatus
+from agent.mcp.manager import MCPManager
+from agent.mcp.contracts import ServerStatus
 from tests.mcp_fixture import HttpFixture, stdio_argv, text_of
 
 

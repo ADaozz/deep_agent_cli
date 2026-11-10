@@ -17,8 +17,9 @@ from prompt_toolkit.output import DummyOutput
 
 from agent.cli.app import CliApplication
 from agent.cli.lifecycle import ExitPhase, TaskStop
-from agent.runner import AgentRunner, RunResult
-from agent.session import SessionStore
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunResult
+from agent.sessions.store import SessionStore
 from tests.conftest import scripted_model
 
 
@@ -342,7 +343,7 @@ def test_session_wait_exit_ignores_a_late_switch_result(tmp_path) -> None:
         assert task is not None
         await asyncio.wait_for(task, 2)
         assert not app.sessions.waiting
-        assert app.interaction is None
+        assert app.dialogs.current is None
         assert all("Resumed session" not in getattr(block, "content", "") for block in app.state.blocks)
         assert store.try_acquire_session(target) is None
 
@@ -374,7 +375,7 @@ def test_session_wait_escape_reopens_the_picker(tmp_path) -> None:
         await asyncio.wait_for(app.sessions.wait_task, 2)
         assert not app.sessions.waiting
         assert app.lifecycle.phase is ExitPhase.ACTIVE
-        assert app.interaction is not None and app.interaction.kind == "resume"
+        assert app.dialogs.current is not None and app.dialogs.current.kind == "resume"
         assert store.try_acquire_session(target) is None
 
     try:
@@ -403,7 +404,7 @@ def test_session_wait_exit_cancels_the_wait_and_keeps_the_holder(tmp_path) -> No
         app.exit()
         await app.lifecycle.shutdown(task_timeout=2)
         assert not app.sessions.waiting
-        assert app.interaction is None
+        assert app.dialogs.current is None
         assert waiter._runtime.lease is None
         assert store.try_acquire_session(target) is None
 
@@ -516,7 +517,7 @@ def test_exit_during_a_blocked_run_keeps_the_queue_and_the_thread() -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         app.application.exit = lambda *args, **kwargs: None  # type: ignore[method-assign]
         runner.follow_up("after this")
-        app._start_run("hello")
+        app.run_dispatch._start_run("hello")
         assert await asyncio.to_thread(started.wait, 2)
         app.exit()
         await app.lifecycle.shutdown(task_timeout=0.15)

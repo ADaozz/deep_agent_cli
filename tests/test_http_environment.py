@@ -8,12 +8,13 @@ from threading import Thread
 
 import pytest
 
-from agent.config import ModelProfile, Settings
-from agent.http_environment import HTTP_ENV_VARS
-from agent.llm import build_chat_model
+from agent.models.profile import ModelProfile
+from agent.bootstrap.config import Settings
+from agent.models.http import HTTP_ENV_VARS
+from agent.models.client import build_chat_model
 from agent.mcp.adapter import build_transport
 from agent.mcp.config import parse_server
-from agent.sandbox import sandbox_environment
+from agent.execution.layout import sandbox_environment
 from agent.tools.web_search import build_web_search_tool
 
 
@@ -134,7 +135,7 @@ def test_socks_environment_allows_model_and_mcp_startup(monkeypatch, scheme):
 def test_runner_preserves_policy_when_switching_models(monkeypatch, enabled):
     from deepagents.backends import StateBackend
     from langchain_core.messages import AIMessage
-    from agent.runner import AgentRunner
+    from agent.runtime.runner import AgentRunner
     from tests.conftest import scripted_model
 
     settings = Settings(trust_env=enabled, llm_profiles=(
@@ -146,7 +147,7 @@ def test_runner_preserves_policy_when_switching_models(monkeypatch, enabled):
         policies.append(kwargs["trust_env"])
         return scripted_model([AIMessage(content="ok")])
 
-    monkeypatch.setattr("agent.runner.build_chat_model", build)
+    monkeypatch.setattr("agent.runtime.runner.build_chat_model", build)
     runner = AgentRunner(settings=settings, backend=StateBackend())
     try:
         assert runner._spec.trust_env is enabled

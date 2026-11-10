@@ -13,7 +13,7 @@ from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, Im
 
 from agent.mcp.content import preserve_generic_resources
 from agent.mcp.manager import MCPManager
-from agent.runner import AgentRunner
+from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 from tests.mcp_fixture import HttpFixture, text_of
 

@@ -6,14 +6,15 @@ arguments with only the prose reworded, and the call fails identically. This
 middleware re-validates the arguments on the error path and replaces the content
 with the offending value, the expectation, and the parameter schema.
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any, Callable
+from pydantic import BaseModel, ValidationError
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
-from pydantic import BaseModel, ValidationError
 
 
 _MAX_INPUT_CHARS = 160

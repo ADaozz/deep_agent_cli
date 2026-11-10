@@ -13,21 +13,17 @@ import pytest
 
 from agent.cli.gitinfo import GitSummary, parse_status
 from agent.cli.interactions import InteractionController
-from agent.cli.app import (
-    FOOTER_LINES,
-    CliApplication,
-    format_context_usage,
-    format_context_window,
-    format_workspace_path,
-)
+from agent.cli.app import FOOTER_LINES, CliApplication
+from agent.cli.formatting import format_context_usage, format_context_window, format_workspace_path
 from agent.cli.rendering import (
     TranscriptRenderer,
     render_transcript,
 )
 from agent.cli.state import CliState, ToolBlock, touch
-from agent.config import Settings
-from agent.runner import AgentRunner, RunEvent
-from agent.session import TranscriptBlock
+from agent.bootstrap.config import Settings
+from agent.runtime.runner import AgentRunner
+from agent.runtime.contracts import RunEvent
+from agent.sessions.contracts import TranscriptBlock
 from tests.cli_support import (
     escape as _escape,
     paint as _paint,
@@ -43,11 +39,11 @@ def test_tui_mouse_scroll_updates_transcript_anchor() -> None:
 
     def scenario(app: CliApplication) -> None:
         assert app.application.mouse_support()
-        assert app.transcript_rows() > app.transcript_viewport_rows()
+        assert app.transcript.transcript_rows() > app.transcript.transcript_viewport_rows()
 
-        assert app._transcript_anchor is None
+        assert app.transcript.transcript_anchor is None
         assert app.transcript_control.mouse_handler(_wheel(MouseEventType.SCROLL_UP)) is None
-        assert app._transcript_anchor == app.transcript_max_scroll() - 3
+        assert app.transcript.transcript_anchor == app.transcript.transcript_max_scroll() - 3
 
         click = MouseEvent(
             position=Point(x=0, y=0),
@@ -79,9 +75,9 @@ def test_drag_selection_scrolls_history_and_copies_selected_text(monkeypatch) ->
             for index in range(80):
                 app.state.add_system(f"历史 filler line {index}")
             _paint(app)
-            app.scroll_transcript_to(0)
+            app.transcript.scroll_transcript_to(0)
             _paint(app)
-            bottom = app.transcript_viewport_rows() - 1
+            bottom = app.transcript.transcript_viewport_rows() - 1
 
             def mouse(kind, row):  # type: ignore[no-untyped-def]
                 return MouseEvent(
@@ -91,16 +87,16 @@ def test_drag_selection_scrolls_history_and_copies_selected_text(monkeypatch) ->
 
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1))
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, bottom))
-            assert app.transcript_top() >= 3
+            assert app.transcript.transcript_top() >= 3
             for _ in range(5):
-                app._scroll_selection_edge()
-            assert app.transcript_top() >= 15
-            assert app._selection_end is not None and app._selection_end[0] > bottom
-            assert "transcript-selection" in str(app._selected_transcript_line(1, app._transcript_document().get_line(1)))
+                app.transcript._scroll_selection_edge()
+            assert app.transcript.transcript_top() >= 15
+            assert app.transcript.selection_end is not None and app.transcript.selection_end[0] > bottom
+            assert "transcript-selection" in str(app.transcript._selected_transcript_line(1, app._transcript_document().get_line(1)))
             app.editor_control.mouse_handler(mouse(MouseEventType.MOUSE_UP, 0))
             await asyncio.sleep(0.01)
             assert app.state.status == "Selection copied to clipboard"
-            assert app._selection_scroll_handle is None
+            assert app.transcript.selection_scroll_handle is None
 
     asyncio.run(driver())
     assert len(copied) == 1
@@ -132,17 +128,17 @@ def _drag(app: CliApplication, start: tuple[int, int], end: tuple[int, int]) -> 
             button=MouseButton.LEFT, modifiers=frozenset(),
         )
 
-    app._select_transcript(mouse(MouseEventType.MOUSE_DOWN, *start))
-    app._selection_end = (end[0], app._selection_column(end[0], end[1]))
-    return app._selected_transcript_text()
+    app.transcript._select_transcript(mouse(MouseEventType.MOUSE_DOWN, *start))
+    app.transcript.selection_end = (end[0], app.transcript._selection_column(end[0], end[1]))
+    return app.transcript._selected_transcript_text()
 
 
 def test_selection_maps_character_index_to_cells_after_wide_characters() -> None:
     app = _selection_app(["历史 filler line"])
     # prompt_toolkit reports character indexes: "f" is index 3 but cell 5.
-    assert app._selection_column(0, 3) == 5
+    assert app.transcript._selection_column(0, 3) == 5
     assert _drag(app, (0, 3), (0, 8)) == "filler"
-    styled = app._selected_transcript_line(0, app._transcript_document().get_line(0))
+    styled = app.transcript._selected_transcript_line(0, app._transcript_document().get_line(0))
     marked = "".join(text for style, text, *_ in styled if "transcript-selection" in style)
     assert marked == "filler"
 
@@ -151,11 +147,11 @@ def test_selection_keeps_zero_width_characters_with_their_base() -> None:
     app = _selection_app(["ae\u0301x"])
     # "e\u0301" is one cell: the combining accent must travel with the "e".
     assert _drag(app, (0, 0), (0, 1)) == "ae\u0301"
-    styled = app._selected_transcript_line(0, app._transcript_document().get_line(0))
+    styled = app.transcript._selected_transcript_line(0, app._transcript_document().get_line(0))
     marks = {text: "transcript-selection" in style for style, text, *_ in styled}
     assert marks == {"a": True, "e": True, "\u0301": True, "x": False}
     # "x" follows the accent at index 3 but sits in cell 2.
-    assert app._selection_column(0, 3) == 2
+    assert app.transcript._selection_column(0, 3) == 2
 
 
 def test_selection_includes_last_character_of_each_line() -> None:
@@ -169,7 +165,7 @@ def test_selection_rows_are_document_rows_after_scrolling() -> None:
     from prompt_toolkit.mouse_events import MouseEventType
 
     def scenario(app: CliApplication) -> None:
-        app.scroll_transcript_to(40)
+        app.transcript.scroll_transcript_to(40)
         _paint(app)
         app.application.layout.update_parents_relations()
         renderer = app.application.renderer
@@ -180,7 +176,7 @@ def test_selection_rows_are_document_rows_after_scrolling() -> None:
                 position=Point(x=where.xpos, y=where.ypos), event_type=MouseEventType.MOUSE_DOWN,
                 button=MouseButton.LEFT, modifiers=frozenset(),
             ))
-        assert app._selection_start is not None and app._selection_start[0] == 40
+        assert app.transcript.selection_start is not None and app.transcript.selection_start[0] == 40
 
     _with_painted_app("select-document-rows", scenario)
 
@@ -198,9 +194,9 @@ def test_drag_selection_stops_when_release_is_lost_outside_window(monkeypatch) -
             for index in range(40):
                 app.state.add_system(f"历史 filler line {index}")
             _paint(app)
-            app.scroll_transcript_to(0)
+            app.transcript.scroll_transcript_to(0)
             _paint(app)
-            bottom = app.transcript_viewport_rows() - 1
+            bottom = app.transcript.transcript_viewport_rows() - 1
 
             def mouse(kind, row, button):  # type: ignore[no-untyped-def]
                 return MouseEvent(
@@ -210,19 +206,19 @@ def test_drag_selection_stops_when_release_is_lost_outside_window(monkeypatch) -
 
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_DOWN, 1, MouseButton.LEFT))
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, bottom, MouseButton.LEFT))
-            assert app._selection_dragging is True
-            assert app._selection_scroll_handle is not None
+            assert app.transcript.selection_dragging is True
+            assert app.transcript.selection_scroll_handle is not None
             # Release happened outside the terminal: MOUSE_UP never arrives and the
             # next plain motion (1003 any-motion tracking) carries no button.
             app.transcript_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, 2, MouseButton.NONE))
-            assert app._selection_dragging is False
-            assert app._selection_scroll_handle is None
-            assert app._selection_edge == 0
+            assert app.transcript.selection_dragging is False
+            assert app.transcript.selection_scroll_handle is None
+            assert app.transcript.selection_edge == 0
             # Later plain motion must not extend the selection or re-arm autoscroll.
-            frozen_end = app._selection_end
+            frozen_end = app.transcript.selection_end
             app.editor_control.mouse_handler(mouse(MouseEventType.MOUSE_MOVE, 0, MouseButton.NONE))
-            assert app._selection_end == frozen_end
-            assert app._selection_scroll_handle is None
+            assert app.transcript.selection_end == frozen_end
+            assert app.transcript.selection_scroll_handle is None
 
     asyncio.run(driver())
 
@@ -232,7 +228,7 @@ def test_transcript_scroll_down_moves_viewport_back() -> None:
     from prompt_toolkit.mouse_events import MouseEventType
 
     def scenario(app: CliApplication) -> None:
-        maximum = app.transcript_max_scroll()
+        maximum = app.transcript.transcript_max_scroll()
         assert maximum > 9
 
         for _ in range(3):
@@ -247,7 +243,7 @@ def test_transcript_scroll_down_moves_viewport_back() -> None:
         for _ in range(3):
             app.transcript_control.mouse_handler(_wheel(MouseEventType.SCROLL_DOWN))
             _paint(app)
-        assert app._transcript_anchor is None
+        assert app.transcript.transcript_anchor is None
         assert app.transcript_window.vertical_scroll == maximum
 
     _with_painted_app("scroll-down", scenario)
@@ -255,18 +251,18 @@ def test_transcript_scroll_down_moves_viewport_back() -> None:
 
 def test_transcript_page_down_follows_page_up() -> None:
     def scenario(app: CliApplication) -> None:
-        maximum = app.transcript_max_scroll()
-        app.scroll_transcript_to(0)
+        maximum = app.transcript.transcript_max_scroll()
+        app.transcript.scroll_transcript_to(0)
         _paint(app)
         assert app.transcript_window.vertical_scroll == 0
 
-        app.scroll_transcript(10)
+        app.transcript.scroll_transcript(10)
         _paint(app)
         assert app.transcript_window.vertical_scroll == 10
 
-        app.scroll_transcript_to(maximum + 50)
+        app.transcript.scroll_transcript_to(maximum + 50)
         _paint(app)
-        assert app._transcript_anchor is None
+        assert app.transcript.transcript_anchor is None
         assert app.transcript_window.vertical_scroll == maximum
 
     _with_painted_app("page-scroll", scenario)
@@ -274,30 +270,30 @@ def test_transcript_page_down_follows_page_up() -> None:
 
 def test_streamed_transcript_follows_only_while_tail_is_visible() -> None:
     def scenario(app: CliApplication) -> None:
-        assert not app.transcript_away_from_bottom()
-        app._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 8))
+        assert not app.transcript.transcript_away_from_bottom()
+        app.run_events._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 8))
         _paint(app)
-        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
+        assert app.transcript_window.vertical_scroll == app.transcript.transcript_max_scroll()
 
-        app.scroll_transcript(-6)
+        app.transcript.scroll_transcript(-6)
         _paint(app)
         pinned = app.transcript_window.vertical_scroll
-        assert app.transcript_away_from_bottom()
-        app._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 20))
+        assert app.transcript.transcript_away_from_bottom()
+        app.run_events._apply_event(RunEvent(type="assistant_delta", content="new answer\n" * 20))
         _paint(app)
         assert app.transcript_window.vertical_scroll == pinned
 
-        app.follow_transcript()
+        app.transcript.follow_transcript()
         _paint(app)
-        assert app._transcript_anchor is None
-        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
-        assert not app.transcript_away_from_bottom()
+        assert app.transcript.transcript_anchor is None
+        assert app.transcript_window.vertical_scroll == app.transcript.transcript_max_scroll()
+        assert not app.transcript.transcript_away_from_bottom()
 
-        app.scroll_transcript(-5)
+        app.transcript.scroll_transcript(-5)
         _paint(app)
-        assert app.transcript_offset(0) == 0
-        assert app._transcript_anchor is None
-        assert not app.transcript_away_from_bottom()
+        assert app.transcript.transcript_offset(0) == 0
+        assert app.transcript.transcript_anchor is None
+        assert not app.transcript.transcript_away_from_bottom()
 
     _with_painted_app("stream-follow", scenario)
 
@@ -308,9 +304,9 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
     def scenario(app: CliApplication) -> None:
         app.state.running = True
         app.runner.control.begin_run()
-        app.scroll_transcript(-5)
+        app.transcript.scroll_transcript(-5)
         _paint(app)
-        assert app.transcript_away_from_bottom()
+        assert app.transcript.transcript_away_from_bottom()
         handlers = app.application.renderer.mouse_handlers.mouse_handlers
         hint_window = next(w for w in app.application.renderer._last_screen.visible_windows_to_write_positions if w.content is app.back_to_bottom_control)
         hint_y = app.application.renderer._last_screen.visible_windows_to_write_positions[hint_window].ypos
@@ -318,11 +314,11 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
 
         _escape(app)
         _paint(app)
-        assert app._transcript_anchor is None
+        assert app.transcript.transcript_anchor is None
         assert not app.runner.control.cancel_requested
-        assert not app.transcript_away_from_bottom()
+        assert not app.transcript.transcript_away_from_bottom()
 
-        app.scroll_transcript(-5)
+        app.transcript.scroll_transcript(-5)
         _paint(app)
         handlers = app.application.renderer.mouse_handlers.mouse_handlers
         click = MouseEvent(
@@ -335,8 +331,8 @@ def test_back_to_bottom_hint_click_and_escape_priority() -> None:
         with set_app(app.application):
             assert handlers[hint_y][1](click) is None
         _paint(app)
-        assert app._transcript_anchor is None
-        assert app.transcript_window.vertical_scroll == app.transcript_max_scroll()
+        assert app.transcript.transcript_anchor is None
+        assert app.transcript_window.vertical_scroll == app.transcript.transcript_max_scroll()
 
         _escape(app)
         assert app.runner.control.cancel_requested
@@ -348,11 +344,11 @@ def test_escape_cancels_slash_command_before_scrolling_or_cancelling_run() -> No
     def scenario(app: CliApplication) -> None:
         app.state.running = True
         app.runner.control.begin_run()
-        app.scroll_transcript(-5)
+        app.transcript.scroll_transcript(-5)
         app.buffer.text = "/model"
         _escape(app)
         assert app.buffer.text == ""
-        assert app.transcript_away_from_bottom()
+        assert app.transcript.transcript_away_from_bottom()
         assert not app.runner.control.cancel_requested
         assert app.application.ttimeoutlen <= 0.1
         assert app.application.timeoutlen <= 0.2
@@ -362,14 +358,14 @@ def test_escape_cancels_slash_command_before_scrolling_or_cancelling_run() -> No
 
 def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
     def scenario(app: CliApplication) -> None:
-        app.interaction = InteractionController.approval([{
+        app.dialogs.current = InteractionController.approval([{
             "toolCallId": "call-write", "name": "write_file", "args": {},
         }])
-        app._finish_interaction = lambda *, cancelled=False: cancelled_calls.append(cancelled)  # type: ignore[method-assign]
-        app.scroll_transcript(-5)
+        app.interaction_flow._finish_interaction = lambda *, cancelled=False: cancelled_calls.append(cancelled)  # type: ignore[method-assign]
+        app.transcript.scroll_transcript(-5)
         _paint(app)
         _escape(app)
-        assert app._transcript_anchor is None
+        assert app.transcript.transcript_anchor is None
         assert cancelled_calls == []
         _escape(app)
         assert cancelled_calls == [True]
@@ -382,7 +378,7 @@ def test_back_to_bottom_hint_sits_immediately_above_editor_below_status() -> Non
     def scenario(app: CliApplication) -> None:
         app.state.running = True
         app.state.status = "Working…  Esc to cancel"
-        app.scroll_transcript(-5)
+        app.transcript.scroll_transcript(-5)
         _paint(app)
         screen = app.application.renderer._last_screen
         columns = app.application.output.get_size().columns
@@ -403,14 +399,14 @@ def test_back_to_bottom_hint_sits_immediately_above_editor_below_status() -> Non
 def test_back_to_bottom_uses_a_row_only_when_needed(interaction_kind) -> None:
     def scenario(app: CliApplication) -> None:
         if interaction_kind == "approval":
-            app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+            app.dialogs.current = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
         elif interaction_kind == "human":
-            app.interaction = InteractionController.human({
+            app.dialogs.current = InteractionController.human({
                 "question": "输入说明", "fields": [{"id": "answer", "type": "text", "label": "回答"}],
             })
-        app.state.running = app.interaction is None
-        app.state.status = "Working…  Esc to cancel" if app.interaction is None else "Waiting for input"
-        app.follow_transcript()
+        app.state.running = app.dialogs.current is None
+        app.state.status = "Working…  Esc to cancel" if app.dialogs.current is None else "Waiting for input"
+        app.transcript.follow_transcript()
         _paint(app)
 
         def positions():
@@ -422,27 +418,27 @@ def test_back_to_bottom_uses_a_row_only_when_needed(interaction_kind) -> None:
             }
 
         before = positions()
-        transcript_height = app.transcript_viewport_rows()
-        app.scroll_transcript(-5)
+        transcript_height = app.transcript.transcript_viewport_rows()
+        app.transcript.scroll_transcript(-5)
         _paint(app)
-        if app.interaction is None:
+        if app.dialogs.current is None:
             after = positions()
             assert after[app.editor_control] == before[app.editor_control]
             assert after[app.status_control] == (before[app.status_control][0] - 1, 1)
-            assert app.transcript_viewport_rows() == transcript_height - 1
+            assert app.transcript.transcript_viewport_rows() == transcript_height - 1
         else:
             assert positions() == before
-            assert app.transcript_viewport_rows() == transcript_height - 1
+            assert app.transcript.transcript_viewport_rows() == transcript_height - 1
         screen = app.application.renderer._last_screen
         rows = [
             "".join(screen.data_buffer[y][x].char for x in range(app._width()))
             for y in range(app.application.output.get_size().rows)
         ]
         assert sum("↓ Back to bottom · esc" in row for row in rows) == 1
-        if app.interaction is not None:
+        if app.dialogs.current is not None:
             hint_row = next(y for y, row in enumerate(rows) if "↓ Back to bottom · esc" in row)
             assert hint_row + 2 == before[app.interaction_control][0]
-        app.follow_transcript()
+        app.transcript.follow_transcript()
         _paint(app)
         assert positions() == before
 
@@ -451,9 +447,9 @@ def test_back_to_bottom_uses_a_row_only_when_needed(interaction_kind) -> None:
 
 def test_waiting_for_input_has_matching_divider_below_status() -> None:
     def scenario(app: CliApplication) -> None:
-        app.interaction = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
-        app._apply_event(RunEvent(type="interaction_requested"))
-        app.scroll_transcript(-5)
+        app.dialogs.current = InteractionController.approval([{"toolCallId": "x", "name": "execute", "args": {}}])
+        app.run_events._apply_event(RunEvent(type="interaction_requested"))
+        app.transcript.scroll_transcript(-5)
         _paint(app)
         screen = app.application.renderer._last_screen
         columns = app.application.output.get_size().columns
@@ -481,7 +477,7 @@ def test_waiting_for_input_has_matching_divider_below_status() -> None:
             window for window in app.application.renderer._last_screen.visible_windows_to_write_positions
             if window.style == "class:interaction-divider"
         ]) == 2
-        app.interaction = InteractionController(
+        app.dialogs.current = InteractionController(
             kind="skill", title="Select skill", question="Choose a skill",
             fields=[{"id": "skill", "type": "single_select", "label": "Skill",
                      "options": [{"value": "alpha", "label": "alpha"}]}],
@@ -493,7 +489,7 @@ def test_waiting_for_input_has_matching_divider_below_status() -> None:
         assert app.interaction_divider_window in visible
         assert app.interaction_bottom_divider_window in visible
         assert visible[app.interaction_bottom_divider_window].ypos > visible[app.interaction_divider_window].ypos
-        app.interaction = None
+        app.dialogs.current = None
         app.state.status = "Ready"
         _paint(app)
         assert app.interaction_bottom_divider_window not in app.application.renderer._last_screen.visible_windows_to_write_positions
@@ -525,7 +521,7 @@ def test_status_line_uses_editable_config_from_config_directory(tmp_path, monkey
     with create_pipe_input() as pipe:
         app = CliApplication(runner, config_dir=config_dir, input=pipe, output=DummyOutput())
         monkeypatch.setattr(app, "_width", lambda: 200)
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         assert "需求很简单，工期很勇敢。" in "".join(value for _, value in app._status_text())
 
 
@@ -538,18 +534,18 @@ def test_compaction_status_restores_working_and_clears_on_terminal_events(monkey
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         monkeypatch.setattr(app, "_width", lambda: 200)
         text = lambda: "".join(value for _, value in app._status_text())
-        app._apply_event(RunEvent(type="run_started"))
-        app._apply_event(RunEvent(type="compaction_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="compaction_started"))
         assert "Compacting context" in text() and "Working" not in text()
         assert " · " in text()
-        app._apply_event(RunEvent(type="compaction_finished"))
+        app.run_events._apply_event(RunEvent(type="compaction_finished"))
         assert "Working" in text() and "Compacting" not in text()
-        app._apply_event(RunEvent(type="compaction_started"))
-        app._apply_event(RunEvent(type="run_cancelling"))
+        app.run_events._apply_event(RunEvent(type="compaction_started"))
+        app.run_events._apply_event(RunEvent(type="run_cancelling"))
         assert "Cancelling" in text() and "Compacting" not in text()
-        app._apply_event(RunEvent(type="run_failed", content="failed"))
+        app.run_events._apply_event(RunEvent(type="run_failed", content="failed"))
         assert not app.state.compacting
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         assert "Working" in text()
 
 
@@ -570,7 +566,7 @@ def test_status_line_is_above_editor_and_footer_does_not_repeat_it() -> None:
         attrs = app.application.style.get_attrs_for_style_str("class:status")
         assert attrs.bold
         assert attrs.color == "ansicyan"
-        app._apply_event(RunEvent(type="run_completed"))
+        app.run_events._apply_event(RunEvent(type="run_completed"))
         _paint(app)
         assert windows[app.status_control] not in app.application.renderer._last_screen.visible_windows_to_write_positions
         assert not app._status_visible()
@@ -587,14 +583,14 @@ def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         monkeypatch.setattr(app, "_width", lambda: 200)
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         for _ in range(steering):
             runner.control.steer("steer")
         for _ in range(follow_up):
             runner.control.follow_up("follow up")
         text = lambda: "".join(value for _, value in app._status_text())
         assert f"{app.state.status} · queued {steering + follow_up}" in text()
-        app._apply_event(RunEvent(type="run_completed"))
+        app.run_events._apply_event(RunEvent(type="run_completed"))
         assert app._status_visible()
         preview = " | ".join(["steer"] * steering + ["follow up"] * follow_up)
         assert text().strip() == f"queued {steering + follow_up}: {preview}"
@@ -623,21 +619,21 @@ def test_working_status_rotates_and_hides_messages_after_stop(monkeypatch) -> No
         monkeypatch.setattr(app, "_width", lambda: 200)
         now = [100.0]
         monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         text = lambda: "".join(value for _, value in app._status_text())
         assert JOKES[0].text in text()
         now[0] += 8
         assert JOKES[1].text in text()
         now[0] += 8
         assert FGO_LINES[0].display in text()
-        app._apply_event(RunEvent(type="run_cancelling"))
+        app.run_events._apply_event(RunEvent(type="run_cancelling"))
         assert "Cancelling" in text()
         assert FGO_LINES[0].text not in text()
-        app._apply_event(RunEvent(type="run_completed"))
+        app.run_events._apply_event(RunEvent(type="run_completed"))
         assert text() == ""
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         assert JOKES[0].text in text()
-        app._apply_event(RunEvent(type="interaction_requested"))
+        app.run_events._apply_event(RunEvent(type="interaction_requested"))
         assert text().strip() == "Waiting for input"
 
 
@@ -657,9 +653,9 @@ def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, w
         monkeypatch.setattr(app, "_width", lambda: width)
         now = [100.0]
         monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
-        app._apply_event(RunEvent(type="run_started"))
+        app.run_events._apply_event(RunEvent(type="run_started"))
         for index in range(count):
-            app._apply_event(RunEvent(type="tool_started", name="task", tool_call_id=f"child-{index}"))
+            app.run_events._apply_event(RunEvent(type="tool_started", name="task", tool_call_id=f"child-{index}"))
         for offset in (0, 16):
             now[0] = 100 + offset
             line = "".join(value for _, value in app._status_text())
@@ -857,7 +853,7 @@ def test_compact_command_reports_threshold_and_current_usage() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app._dispatch_command("/compact")
+            await app.run_dispatch._dispatch_command("/compact")
             notice = app.state.blocks[-1].content
             assert "42.5%" in notice
             assert "0.8%" in notice
@@ -877,7 +873,7 @@ def test_compact_command_does_not_invent_usage_without_model_report() -> None:
     async def scenario() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            await app._dispatch_command("/compact")
+            await app.run_dispatch._dispatch_command("/compact")
             notice = app.state.blocks[-1].content
             assert "42.5%" in notice
             assert "unknown" in notice
@@ -927,7 +923,7 @@ def test_compact_command_runs_upstream_tool_and_reports_success() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.state.usage = {"input_tokens": 60_000, "total_tokens": 60_010}
-            task = asyncio.create_task(app._dispatch_command("/compact"))
+            task = asyncio.create_task(app.run_dispatch._dispatch_command("/compact"))
             # A real Application has a refresh timer; keep the DummyOutput test
             # loop ticking while LangGraph finishes work in the IO executor.
             for _ in range(100):
@@ -1164,7 +1160,7 @@ def test_interaction_options_follow_selection_without_scrolling_heading(kind) ->
                                 for i in range(8)
                             ]}],
             })
-        app.interaction = controller
+        app.dialogs.current = controller
         app.state.status = "Waiting for input"
         size = [Size(rows=15, columns=40)]
         app.application.output.get_size = lambda: size[0]
@@ -1207,16 +1203,16 @@ def test_interaction_options_follow_selection_without_scrolling_heading(kind) ->
 @pytest.mark.parametrize("content", [None, "", "\n", "  \n  "])
 def test_tool_tail_has_one_blank_row_before_editor(content) -> None:
     def scenario(app: CliApplication) -> None:
-        app._apply_event(RunEvent(
+        app.run_events._apply_event(RunEvent(
             type="tool_started", tool_call_id="spacing-tool", name="execute",
             arguments={"command": "printf spacing-output"},
         ))
-        app._apply_event(RunEvent(
+        app.run_events._apply_event(RunEvent(
             type="tool_completed", tool_call_id="spacing-tool", name="execute",
             content="spacing-output",
         ))
         if content is not None:
-            app._apply_event(RunEvent(type="assistant_delta", content=content))
+            app.run_events._apply_event(RunEvent(type="assistant_delta", content=content))
         _paint(app)
         screen = app.application.renderer._last_screen
         positions = screen.visible_windows_to_write_positions

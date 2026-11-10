@@ -11,11 +11,7 @@ from typing import Any, TypeGuard
 from zoneinfo import ZoneInfo
 
 from prompt_toolkit import ANSI
-from prompt_toolkit.formatted_text import (
-    FormattedText,
-    StyleAndTextTuples,
-    to_formatted_text,
-)
+from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
 from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
@@ -40,8 +36,9 @@ from agent.cli.previews import (
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.cli.skills import skill_message_display
-from agent.config import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
+from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
 from agent.version import package_version
+
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {

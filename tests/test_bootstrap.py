@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from agent.bootstrap import initialize_user_files
-from agent.config import Settings
+from agent.bootstrap.setup import initialize_user_files
+from agent.bootstrap.config import Settings
 
 
 def test_first_launch_creates_template_and_skills_then_preserves_config(
@@ -208,7 +208,7 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
     from contextlib import contextmanager
     from types import SimpleNamespace
     from agent.cli import main as cli
-    from agent.sandbox import ExecutionMode
+    from agent.execution.types import ExecutionMode
     calls = []
     monkeypatch.setattr(cli, "initialize_user_files", lambda: None)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
@@ -240,8 +240,8 @@ def test_normal_tty_runs_and_closes_runner(monkeypatch, tmp_path):
 def test_cli_reports_missing_required_mount_without_traceback(monkeypatch, tmp_path, capsys):
     from dataclasses import replace
     from agent.cli import main as cli
-    from agent.config import BindMount
-    from agent.sandbox import select_backend
+    from agent.execution.policy import BindMount
+    from agent.execution.backend import select_backend
 
     monkeypatch.setattr(cli, "initialize_user_files", lambda: None)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)

@@ -14,8 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent.config import SandboxConfig
-from agent.sandbox import SandboxUnavailableError, select_backend
+from agent.execution.policy import SandboxConfig
+from agent.execution.backend import select_backend
+from agent.execution.types import SandboxUnavailableError
 
 
 def main(argv: list[str] | None = None) -> int:

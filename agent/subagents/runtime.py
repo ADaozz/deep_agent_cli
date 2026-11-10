@@ -3,6 +3,7 @@
 A fresh Context is deliberate: LangGraph otherwise inherits the parent's
 callbacks, checkpoint namespace, stream writer and configuration implicitly.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +17,9 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
-from agent.cancel import set_output_emitter
-from agent.llm_stream import set_stream_owner
-from agent.stream import visible_text
+from agent.runtime.cancellation import set_output_emitter
+from agent.models.stream_lifecycle import set_stream_owner
+from agent.models.messages import visible_text
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import SubAgentManager
 
@@ -203,7 +204,7 @@ class SubAgentRuntime(Runnable):
             return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {str(exc)[:1000]}")]}
         finally:
             if prepared is not None and getattr(prepared, "owns_model_clients", False):
-                from agent.llm_stream import close_model_http_clients
+                from agent.models.stream_lifecycle import close_model_http_clients
                 try:
                     close_model_http_clients(prepared.model)
                 except Exception as exc:

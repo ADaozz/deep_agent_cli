@@ -4,6 +4,7 @@ Keymap owns the mapping from keys to actions. This router owns the policy:
 which UI state wins, and when a second Ctrl+C is an exit. CliApplication
 performs the chosen action. Run cancellation stays on RunController.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
