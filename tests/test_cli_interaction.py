@@ -443,8 +443,11 @@ def test_status_notices_replace_each_other_and_keep_new_events() -> None:
                 await asyncio.sleep(0.5)
                 assert app.state.status == "Approval still pending · F2 to decide"
                 app.run_events._apply_event(RunEvent(type="run_started"))
-                app.run_events._apply_event(RunEvent(type="steering_queued", content="继续", result={"mode": "steer", "id": "message"}))
-                assert app.state.status == "Steering queued"
+                runner.steer("继续")
+                assert app.state.status == "Working…  Esc to cancel"
+                assert app._queue_expanded()
+                assert "↳ 继续" in "".join(text for _, text in app._queue_text())
+                assert not any(getattr(block, "kind", None) == "user" for block in app.state.blocks)
                 await asyncio.sleep(1.1)
                 assert app.state.status == "Working…  Esc to cancel"
                 app.set_status("Model queued: next")
