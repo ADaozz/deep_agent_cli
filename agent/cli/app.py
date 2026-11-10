@@ -94,7 +94,7 @@ from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE
 from agent.cli.lifecycle import AppLifecycle, TaskStop, restore_terminal_modes
 from agent.cli.mcp_controller import MCPController
 from agent.cli.input_actions import (
-    EXIT_WINDOW_SECONDS as CTRL_C_EXIT_WINDOW_SECONDS,
+    DOUBLE_PRESS_WINDOW_SECONDS,
     InputAction,
     InputActionRouter,
     InputView,
@@ -275,6 +275,7 @@ class CliApplication:
             invalidate=lambda: self.application.invalidate(),
         )
         self.run_events = RunEventsController(
+            run_view=self.run_view,
             request_summary=self.session_summaries.request,
             _allow_confirm_open=lambda *args, **kwargs: self.access_selection._allow_confirm_open(*args, **kwargs),
             _announce_mcp_switch=lambda *args, **kwargs: self._announce_mcp_switch(*args, **kwargs),
@@ -740,7 +741,7 @@ class CliApplication:
                 self._status_before_notice = previous
                 self._status_notice = text
                 self._status_notice_handle = loop.call_later(
-                    CTRL_C_EXIT_WINDOW_SECONDS if text == INPUT_CLEARED_HINT else STATUS_NOTICE_SECONDS,
+                    DOUBLE_PRESS_WINDOW_SECONDS if text == INPUT_CLEARED_HINT else STATUS_NOTICE_SECONDS,
                     self._hide_status_notice,
                 )
         self.application.invalidate()
@@ -995,11 +996,11 @@ class CliApplication:
             self.application.invalidate()
             return
         if action is InputAction.CANCEL_RUN:
-            restored = self._restore_queued_to_editor(buffer)
+            self.run_view.send_queue_after_cancel = bool(self.runner.control.pending_message_texts())
             self.run_view.cancel_sent = True
             self.runner.request_cancel()
-            if restored:
-                self.set_status("Cancelling… · queued messages restored", transient=False)
+            if self.run_view.send_queue_after_cancel:
+                self.set_status("Interrupting… queued messages will be sent next", transient=False)
             else:
                 self.set_status("Cancelling…", transient=False)
             self.application.invalidate()
@@ -1091,7 +1092,7 @@ class CliApplication:
         )
 
     def _queue_expanded(self) -> bool:
-        return self.state.messages_expanded and bool(self.runner.control.pending_message_texts())
+        return bool(self.runner.control.pending_message_texts())
 
     def _queue_text(self) -> FormattedText:
         key = (tuple(self.runner.control.pending_message_texts()), self._width())
@@ -1122,8 +1123,6 @@ class CliApplication:
         if not self._status_visible():
             self._working_messages.reset()
             return FormattedText([])
-        queued = self.runner.control.pending_message_texts()
-        pending = len(queued)
         active = self.state.running and self.dialogs.current is None and not self.state.status.startswith("Cancelling")
         now = monotonic()
         message = self._working_messages.current(active, now)
@@ -1139,17 +1138,8 @@ class CliApplication:
             label = ""
         if (self.run_view.compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
-        if pending:
-            preview = " | ".join(" ".join(text.split()) for text in queued)
-            queue_label = f"queued {pending} · Ctrl+B collapse" if self.state.messages_expanded else f"queued {pending}: {preview}"
-            label = f"{label} · {queue_label}" if label else queue_label
         raw_status = f" {spinner}{label}"
-        if pending and not self.state.messages_expanded and get_cwidth(raw_status) > left_width and left_width >= 20:
-            hint = " · Ctrl+B expand" if left_width >= 32 else " · Ctrl+B"
-            status = _truncate_cells(raw_status, max(1, left_width - get_cwidth(hint))) + hint
-            status = _truncate_cells(status, left_width)
-        else:
-            status = _truncate_cells(raw_status, left_width)
+        status = _truncate_cells(raw_status, left_width)
         fragments = [("class:status", status)]
         remaining = left_width - get_cwidth(status)
         if message is not None and remaining > 3:

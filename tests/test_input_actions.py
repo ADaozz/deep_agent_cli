@@ -1,5 +1,5 @@
 """InputActionRouter is the only place that orders interrupt and exit keys."""
-from agent.cli.input_actions import EXIT_WINDOW_SECONDS, InputAction, InputActionRouter, InputView
+from agent.cli.input_actions import DOUBLE_PRESS_WINDOW_SECONDS, InputAction, InputActionRouter, InputView
 
 
 def test_interrupt_checks_follow_one_priority() -> None:
@@ -34,10 +34,10 @@ def test_ctrl_c_window_is_armed_only_by_the_router() -> None:
     assert router.last_ctrl_c is None
     assert router.decide_clear_or_exit(InputView(), 0.0) is InputAction.CLEAR_INPUT
     router.arm_clear(0.0)
-    assert router.decide_clear_or_exit(InputView(), EXIT_WINDOW_SECONDS - 0.001) is InputAction.REQUEST_EXIT
+    assert router.decide_clear_or_exit(InputView(), DOUBLE_PRESS_WINDOW_SECONDS - 0.001) is InputAction.REQUEST_EXIT
     assert router.decide_clear_or_exit(InputView(has_interaction=True), 0.1) is InputAction.CANCEL_INTERACTION
     assert router.last_ctrl_c == 0.0
-    assert router.decide_clear_or_exit(InputView(), EXIT_WINDOW_SECONDS) is InputAction.CLEAR_INPUT
+    assert router.decide_clear_or_exit(InputView(), DOUBLE_PRESS_WINDOW_SECONDS) is InputAction.CLEAR_INPUT
 
 
 def test_ctrl_d_and_exit_command_share_the_exit_action() -> None:

@@ -216,6 +216,16 @@ class RunController:
             messages = sorted((*self._steering, *self._follow_ups), key=lambda item: item.order)
             return [message.text for message in messages]
 
+    def pop_next_for_dispatch(self) -> str | None:
+        """Consume the oldest queued input after the previous run has stopped."""
+        with self._lock:
+            queues = [queue for queue in (self._steering, self._follow_ups) if queue]
+            if not queues:
+                return None
+            message = min(queues, key=lambda queue: queue[0].order).popleft()
+        self._emit("steering_applied", {"content": message.text, "id": message.id})
+        return message.text
+
     def pop_follow_up(self) -> str | None:
         with self._lock:
             if not self._follow_ups:

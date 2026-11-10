@@ -30,4 +30,6 @@ class RunPresentation:
     task: asyncio.Task[None] | None = None
     epoch: int = 0
     cancel_sent: bool = False
+    send_queue_after_cancel: bool = False
+    last_queue_enter: float | None = None
     compacting: bool = False

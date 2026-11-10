@@ -54,10 +54,10 @@ def test_cli_steer_and_follow_up_use_run_controller() -> None:
         app.run_dispatch._submit_buffer("followUp")
         assert runner.control.pending_follow_up_count() == 1
         assert not app.state.blocks
-        assert "queued 2: steer now | later" in "".join(value for _, value in app._status_text())
+        assert "steer now" in "".join(value for _, value in app._queue_text())
         assert runner.control.pop_steering() == "steer now"
         assert [block.content for block in app.state.blocks] == ["steer now"]
-        assert "queued 1: later" in "".join(value for _, value in app._status_text())
+        assert "later" in "".join(value for _, value in app._queue_text())
         assert runner.control.pop_follow_up() == "later"
         assert [block.content for block in app.state.blocks] == ["steer now", "later"]
         assert runner.control.pending_message_texts() == []
@@ -185,12 +185,53 @@ def test_cli_esc_requests_cancel() -> None:
                 break
         else:
             app.runner.request_cancel()
-        assert runner.control.cancel_requested
+        assert not runner.control.cancel_requested
         assert "please stop" in app.buffer.text
         assert "after cancel" in app.buffer.text
-        assert runner.control.pending_steering_count() == 0
-        assert runner.control.pending_follow_up_count() == 0
-        assert "restored" in app.state.status.lower() or "Cancelling" in app.state.status
+        assert not runner.control.pending_message_texts()
+        assert not app.run_view.send_queue_after_cancel
+
+
+def test_queued_input_is_shown_only_after_clean_interrupt(monkeypatch) -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        runner.control.begin_run()
+        app.state.running = True
+        runner.steer("jjj")
+        assert not app.state.blocks
+        panel = "".join(text for _, text in app._queue_text())
+        assert "Messages to be submitted after next tool call" in panel
+        assert "↳ jjj" in panel
+        app.run_dispatch.submit_enter(1.0)
+        assert not runner.control.cancel_requested
+        app.run_dispatch.submit_enter(1.2)
+        assert runner.control.cancel_requested
+        runner.control.end_run()
+        started = []
+        monkeypatch.setattr(app.run_dispatch, "_start_run", lambda *args, **kwargs: started.append(kwargs))
+        app.run_events._handle_result(RunResult(status="cancelled"))
+        assert len(started) == 1
+        assert [block.content for block in app.state.blocks if block.kind == "user"] == ["jjj"]
+        assert any(block.content == "Model interrupted to submit steer instructions." and block.status_marker == "interrupted" for block in app.state.blocks)
+        assert not app._queue_expanded()
+
+
+def test_double_enter_queues_text_then_interrupts_and_timeout_does_not() -> None:
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend())
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        runner.control.begin_run()
+        app.state.running = True
+        app.buffer.text = "new request"
+        app.run_dispatch.submit_enter(1.0)
+        assert runner.control.pending_message_texts() == ["new request"]
+        assert not runner.control.cancel_requested
+        app.run_dispatch.submit_enter(3.0)
+        assert not runner.control.cancel_requested
+        app.run_dispatch.submit_enter(3.2)
+        assert runner.control.cancel_requested
+        assert app.run_view.send_queue_after_cancel
 
 
 def test_cli_resume_prefix_switches_session(tmp_path) -> None:
@@ -692,7 +733,7 @@ def test_escape_before_worker_starts_cancels_the_dispatched_run() -> None:
             assert not app.state.running
             assert app.state.status == "Cancelled"
             assert calls == []
-            assert any("Operation cancelled." in getattr(block, "content", "") for block in app.state.blocks)
+            assert not any("Operation cancelled." in getattr(block, "content", "") for block in app.state.blocks)
             app._io_executor.shutdown(wait=True)
 
     try:

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from agent.runtime.runner import AgentRunner
     from prompt_toolkit.buffer import Buffer
     from agent.cli.state import CliState
-    from agent.cli.view_state import DialogState
+    from agent.cli.view_state import DialogState, RunPresentation
     from agent.cli.working_messages import WorkingMessageRotation
 
 
@@ -31,6 +31,7 @@ class RunEventsController:
         _working_messages: Callable[[], WorkingMessageRotation],
         buffer: Buffer,
         dialogs: DialogState,
+        run_view: RunPresentation,
         runner: AgentRunner,
         set_status: Callable[..., None],
         state: CliState,
@@ -46,6 +47,7 @@ class RunEventsController:
         self._working_messages = _working_messages
         self.buffer = buffer
         self.dialogs = dialogs
+        self.run_view = run_view
         self.runner = runner
         self.set_status = set_status
         self.state = state
@@ -95,6 +97,8 @@ class RunEventsController:
         self.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:
+        send_queued = self.run_view.send_queue_after_cancel
+        self.run_view.send_queue_after_cancel = False
         if result.status == "cancelled":
             self.state.running = False
             if result.error:
@@ -120,7 +124,7 @@ class RunEventsController:
             self.dialogs.current = self.dialogs.deferred
             self.dialogs.deferred = None
             self._show_allow_confirm_status()
-        elif result.status == "completed":
+        elif result.status == "completed" or (result.status == "cancelled" and send_queued and not result.error):
             # Input can arrive after the worker's final queue check, while
             # the UI still considers that worker to be running.
             self._start_queued_run()

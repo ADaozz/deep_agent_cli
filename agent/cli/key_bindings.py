@@ -49,7 +49,7 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
             return
         if self.run_dispatch._accept_command_completion(event.current_buffer):
             return
-        self.run_dispatch._submit_buffer("steer")
+        self.run_dispatch.submit_enter(clock())
 
     completion_active = Condition(lambda: self.dialogs.current is None and self.buffer.complete_state is not None)
 
@@ -168,6 +168,14 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
     def escape(event) -> None:  # type: ignore[no-untyped-def]
         buffer = event.current_buffer
         action = self._input_actions.decide_interrupt(self._input_view(buffer))
+        self.run_view.last_queue_enter = None
+        if (action in {InputAction.CANCEL_RUN, InputAction.CANCEL_ALREADY_SENT, InputAction.NONE}
+                and self.runner.control.pending_message_texts()):
+            self._restore_queued_to_editor(buffer)
+            self.run_view.send_queue_after_cancel = False
+            self.set_status("Queued messages restored to input")
+            self.application.invalidate()
+            return
         self.apply_input_action(action, buffer)
 
     @bind("clear_or_exit")

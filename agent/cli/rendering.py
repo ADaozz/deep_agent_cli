@@ -323,7 +323,8 @@ def _create_group(
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
         return _tool(blocks[-1], expanded, width, limits=limits, after_user=after_user)
-    title = Text.assemble(("• ", "green"), (f"Created {len(mutation.paths)} files", "bold"))
+    symbol, color = _tool_status_marker("completed")
+    title = Text.assemble((f"{symbol} ", color), (f"Created {len(mutation.paths)} files", "bold"))
     rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
     for row in (title, *rows):
         row.truncate(max(1, width - 1), overflow="ellipsis")
@@ -625,7 +626,15 @@ class _UserMessagePreview:
 
 
 def render_queued_messages(messages: list[str], width: int) -> str:
-    return _capture(Padding(Group(*(Text(f"{index}. {text}") for index, text in enumerate(messages, 1))), (0, 1)), width)
+    if not messages:
+        return ""
+    heading = Text("Messages to be submitted after next tool call (press esc to restore to input, enter twice to interrupt and send immediately)", style="dim")
+    rows = [heading]
+    for message in messages:
+        lines = message.splitlines() or [""]
+        rows.append(Text("  ↳ " + lines[0]))
+        rows.extend(Text("    " + line) for line in lines[1:])
+    return _capture(Padding(Group(*rows), (0, 1)), width)
 
 
 def _message(
@@ -660,10 +669,13 @@ def _message(
     elif block.kind == "error":
         items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
-        text = Text(block.content, style="white" if block.styled_spans else "yellow")
+        text = Text(block.content, style="white" if block.styled_spans or block.status_marker else "yellow")
         for start, end, style in block.styled_spans:
             text.stylize(style, start, end)
-        items.append(Padding(text, (top, 1, 0, 1)))
+        if block.status_marker:
+            symbol, color = _tool_status_marker(block.status_marker)
+            text = Text.assemble((f"{symbol} ", color), text)
+        items.append(Padding(text, (top, 1, 0, block.left_padding)))
     return items
 
 
@@ -933,9 +945,9 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
 
 
 def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int, *, after_user: bool = False) -> Any:
-    _symbol, color = _tool_status_marker("error")
+    symbol, color = _tool_status_marker("error")
     title = Text.assemble(
-        ("• ", color),
+        (f"{symbol} ", color),
         (f"Failed (exit {_failure_code(block)}) ", "bold"),
         (preview.target, ""),
     )
@@ -993,13 +1005,14 @@ _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
     """Shared status icon and color for tool cards and grouped tools."""
+    dot = "•"
     if status == "running":
         return _spinner(), "green"
     if status == "waiting":
-        return "•", "yellow"
+        return dot, "yellow"
     if status in {"error", "interrupted", "cancelled"} or is_error:
-        return "•", "#888888"
-    return "•", "green"
+        return dot, "#888888"
+    return dot, "green"
 
 
 def _spinner_tick() -> int:

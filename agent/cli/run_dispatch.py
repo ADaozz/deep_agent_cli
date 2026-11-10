@@ -10,6 +10,7 @@ from prompt_toolkit.buffer import Buffer
 
 from agent.sessions.images import ImageAttachmentRef
 from agent.cli.lifecycle import TaskStop
+from agent.cli.input_actions import is_double_press
 from agent.runtime.contracts import RunEvent
 
 
@@ -83,6 +84,30 @@ class RunDispatch:
         self.invalidate()
         return True
 
+    def submit_enter(self, now: float) -> None:
+        previous = self.run_view.last_queue_enter
+        self.run_view.last_queue_enter = None
+        if (self.dialogs.current is None and self.state.running
+                and not self.run_view.compacting and not self.state.compacting
+                and not self.run_view.cancel_sent
+                and self.runner.control.pending_message_texts()
+                and not self.buffer.text.strip() and not self.state.attachments
+                and is_double_press(previous, now)):
+            self.run_view.send_queue_after_cancel = True
+            self.run_view.cancel_sent = True
+            self.runner.request_cancel()
+            self.state.add_system(
+                "Model interrupted to submit steer instructions.",
+                status_marker="interrupted", left_padding=0,
+            )
+            self.set_status("Interrupting… queued messages will be sent next", transient=False)
+            self.invalidate()
+            return
+        self._submit_buffer("steer")
+        if (self.dialogs.current is None and self.state.running
+                and self.runner.control.pending_message_texts() and not self.run_view.cancel_sent):
+            self.run_view.last_queue_enter = now
+
     def _submit_buffer(self, queue_mode: str) -> None:
         self.slash_completer.accepted_text = None
         if self.sessions().waiting:
@@ -141,10 +166,8 @@ class RunDispatch:
             self._reset_submitted_buffer(text)
             if queue_mode == "followUp":
                 self.runner.follow_up(text)
-                self.set_status("Follow-up queued")
             else:
                 self.runner.steer(text)
-                self.set_status("Steering queued")
             if pending_interrupt is not None:
                 self.set_status(f"{self.state.status} · F2 pending", transient=False)
             if not self.state.running and (self.run_view.task is None or self.run_view.task.done()):
@@ -235,9 +258,7 @@ class RunDispatch:
             return
         if self.dialogs.current is not None or self.runner.current_interrupt() is not None:
             return
-        text = self.runner.control.pop_steering()
-        if text is None:
-            text = self.runner.control.pop_follow_up()
+        text = self.runner.control.pop_next_for_dispatch()
         if text is not None:
             # The applied event records the user message in the transcript.
             self._start_run("", resume_call=partial(

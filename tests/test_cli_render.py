@@ -138,7 +138,7 @@ def test_ctrl_b_expands_queue_below_status_and_scrolls_without_editing_input() -
         app.state.add_user("sent content " * 80)
         app.buffer.text = "draft stays here"
         status = "".join(part[1] for part in app._status_text())
-        assert "Ctrl+B expand" in status
+        assert "queue line" not in status
         assert "queue line 079" not in status
         binding = next(item for item in app.bindings.bindings if item.keys == ("c-b",))
         binding.handler(None)
@@ -162,7 +162,7 @@ def test_ctrl_b_expands_queue_below_status_and_scrolls_without_editing_input() -
         assert app.queue_window.vertical_scroll == 0
         binding.handler(None)
         _paint(app)
-        assert app.queue_window not in app.application.renderer._last_screen.visible_windows_to_write_positions
+        assert app.queue_window in app.application.renderer._last_screen.visible_windows_to_write_positions
         assert not app.state.messages_expanded
         assert app.runner.control.pending_message_texts() == [text]
         assert app.state.blocks[-1].content == "sent content " * 80

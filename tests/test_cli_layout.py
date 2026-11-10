@@ -589,13 +589,13 @@ def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch
         for _ in range(follow_up):
             runner.control.follow_up("follow up")
         text = lambda: "".join(value for _, value in app._status_text())
-        assert f"{app.state.status} · queued {steering + follow_up}" in text()
+        assert "queued " not in text()
         app.run_events._apply_event(RunEvent(type="run_completed"))
         assert app._status_visible()
         preview = " | ".join(["steer"] * steering + ["follow up"] * follow_up)
-        assert text().strip() == f"queued {steering + follow_up}: {preview}"
+        assert preview not in text()
         monkeypatch.setattr(app, "_width", lambda: 7)
-        assert text() == " queue…"
+        assert "queued " not in text()
         for _ in range(steering):
             runner.control.pop_steering()
         for _ in range(follow_up):

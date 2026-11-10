@@ -326,7 +326,7 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             assert state['live_streams'] == 0
             assert state['cancel_requests'] == 1
             assert state['last_run'] == 'aborted'
-            assert 'Operation cancelled.' in state['transcript']
+            assert 'Operation cancelled.' not in state['transcript']
             # Esc while idle neither cancels nor disturbs the next run.
             tui.send('\x1b')
             tui.send('second task\r')
