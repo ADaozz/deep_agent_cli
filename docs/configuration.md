@@ -252,7 +252,7 @@ web_search:
 | `workspace` | `.` | 宿主项目目录。沙箱路径和当前目录都是它的真实绝对路径（如 `/mnt/d/test`）；`.` 表示启动时的当前目录 |
 | `bwrap_path` | `bwrap` | Bubblewrap 可执行文件名或路径 |
 | `mode` | `restricted` | 文件系统模式：`restricted` 或 `full-access`。其他值启动失败。`full-access` 写入当前真实环境，仍在 Bubblewrap 中执行，不取消审批。`/dev` 默认是沙箱自己的设备 tmpfs，宿主设备由 `extra_read_write_mounts` 的 `dev_bind` 传入。运行中可用 `/sandbox` 切换，不写回本文件。`restricted` 使用独立持久 HOME（`~/.deep-agent/sandbox/home`），`full-access` 使用真实用户 HOME。切换模式不迁移用户级安装，也不删除另一模式已有的数据。行为见 [HOME 隔离与持久化](sandbox.md#home-隔离与持久化) |
-| `timeout_seconds` | `null` | 单条命令的超时上限（秒）；`null` 表示不限制。模型可为单次调用请求更短的超时 |
+| `timeout_seconds` | `null` | 单条命令的默认超时（秒）；未传 `execute.timeout` 时采用此值，`null` 表示不限制。显式传入 `timeout` 时以参数值为准，可长于或短于此默认值 |
 | `max_output_bytes` | `100000` | 单条命令保留的输出上限，超出部分写入日志文件 |
 | `env_allowlist` | `[]` | 允许传入沙箱的宿主环境变量名 |
 | `env_set` | `{}` | 固定注入沙箱的环境变量 |

@@ -59,7 +59,7 @@ def build_execute_tool(
 
     def execute(
         command: Annotated[str, Field(description="要执行的 Shell 命令。")],
-        timeout: Annotated[int | None, Field(description="本次执行超时秒数；省略时使用后端默认值。")] = None,
+        timeout: Annotated[int | None, Field(description="本次执行超时秒数；显式传入时覆盖 sandbox.timeout_seconds，省略时使用该配置默认值。")] = None,
         network: Annotated[bool, Field(description="是否使用有网沙箱；allow 模式下始终有网。")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)

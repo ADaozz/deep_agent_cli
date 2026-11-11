@@ -140,26 +140,41 @@ def test_skills_mount_cannot_be_replaced(tmp_path: Path) -> None:
         select_backend(config, check=False)
 
 
-def test_timeout_is_a_hard_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "default,requested,expected_code", [(1, None, 124), (1, 3, 0), (5, 1, 124)],
+)
+def test_execute_timeout_overrides_sandbox_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, default, requested, expected_code,
+) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "work"
     workspace.mkdir()
     executable = _bwrap_executable()
-    config = replace(config_for(workspace), bwrap_path=executable, timeout_seconds=1)
+    config = replace(config_for(workspace), bwrap_path=executable, timeout_seconds=default)
     backend = select_backend(config).backend
     try:
-        result = backend.execute("sleep 3", timeout=100)
+        result = backend.execute("sleep 1.2", timeout=requested)
     finally:
-        backend.executor.pool.shutdown("timeout cap test finished")
-    assert result.exit_code == 124
+        backend.executor.pool.shutdown("timeout default test finished")
+    assert result.exit_code == expected_code
 
 
-def test_default_execute_has_no_timeout_cap() -> None:
+@pytest.mark.parametrize(
+    "requested,default,expected", [(None, None, None), (3, None, 3), (None, 120, 120),
+                                   (180, 120, 180), (60, 120, 60)],
+)
+def test_effective_timeout_uses_explicit_value_or_default(requested, default, expected) -> None:
     from agent.execution.process import _effective_timeout
 
-    assert _effective_timeout(None, None) is None
-    assert _effective_timeout(3, None) == 3
-    assert _effective_timeout(100, 1) == 1
+    assert _effective_timeout(requested, default) == expected
+
+
+@pytest.mark.parametrize("requested", [0, -1])
+def test_explicit_timeout_must_be_positive(requested) -> None:
+    from agent.execution.process import _effective_timeout
+
+    with pytest.raises(ValueError, match="positive"):
+        _effective_timeout(requested, 120)
 
 
 def test_user_skills_are_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

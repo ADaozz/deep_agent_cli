@@ -35,12 +35,11 @@ class LocalExecuteResponse(ExecuteResponse):
     max_output_bytes: int | None = None
 
 
-def _effective_timeout(requested: int | None, cap: int | None) -> int | None:
+def _effective_timeout(requested: int | None, default: int | None) -> int | None:
+    """An explicit per-command timeout overrides the sandbox default."""
     if requested is not None and requested <= 0:
         raise ValueError(f"timeout must be positive, got {requested}")
-    if cap is None:
-        return requested
-    return min(requested, cap) if requested is not None else cap
+    return requested if requested is not None else default
 
 
 def _create_exec_log(workspace: Path) -> tuple[int, int, str]:

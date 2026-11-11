@@ -138,7 +138,7 @@ sandbox:
   # 配置文件未写 mode 时，代码默认仍是 restricted。
   # 新模板也从 restricted 开始。已有 ~/.deep-agent/config.yaml 不会被这次改动覆盖。
   mode: restricted
-  # 默认不限制执行时间；设置正数可限制每条命令的执行秒数。
+  # 未传 execute.timeout 时采用此默认秒数；null 表示不限制。显式传入 timeout 时以参数值为准。
   timeout_seconds: null
   max_output_bytes: 100000
   # 允许传入沙箱的宿主环境变量。PATH 用宿主的，命令就在宿主目录里解析
