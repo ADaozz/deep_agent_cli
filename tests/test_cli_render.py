@@ -775,6 +775,26 @@ def test_non_command_failure_preserves_wrapped_indentation(width, expanded) -> N
     _assert_card_indentation(_capture(_tool(block, expanded, width), width), width, output)
 
 
+@pytest.mark.parametrize("width", [20, 40, 80])
+@pytest.mark.parametrize("name", ["task", "start_background_task", "web_search"])
+def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> None:
+    """SubAgent and other generic cards share the same title wrap/indent path."""
+    long = "x" * 180
+    if name in {"task", "start_background_task"}:
+        args = {"description": f"Do carefully: {long}", "subagent_type": "general-purpose"}
+        marker = "SubAgent"
+    else:
+        args = {"query": long}
+        marker = "web_search"
+    block = ToolBlock("wrap", name, args, status="running")
+    lines = [line.rstrip() for line in _plain(_capture(_tool(block, False, width), width)).splitlines() if line.strip()]
+    assert any(marker in line for line in lines)
+    wrapped = [line for line in lines[1:] if line.startswith("  ") and not line.startswith("   ")]
+    assert wrapped, lines
+    assert all(cell_len(line) < width for line in lines)
+    assert "xxxx" in "".join(line.strip() for line in lines)
+
+
 def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:
     blocks = [ToolBlock(str(index), "read_file", {"file_path": f"file-{index}.py"}, status="completed") for index in range(8)]
     blocks[0].status = "error"

@@ -840,25 +840,29 @@ def render_tool_preview(
     elif preview.group == "mutation" and preview.detail:
         title.append(f" {preview.detail}", style="bold")
     title.append(suffix, style="dim")
-    body: list[Any] = [title]
+    console = Console(width=max(20, width))
+    # Same wrap/indent as execute and failure cards: first visual row keeps the
+    # status marker; wrapped rows indent under the title text.
+    body: list[Any] = list(_wrap_card_line(title, console, width))
     if preview.kind == "task":
-        body.append(Text(f"  {preview.detail}", style="dim"))
+        body.extend(_wrap_card_line(Text(f"  {preview.detail}", style="dim"), console, width))
         if block.output:
-            body.append(Text("  └ result", style="dim"))
+            body.extend(_wrap_card_line(Text("  └ result", style="dim"), console, width))
     if preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
     elif preview.lines:
-        body.append(Text(
-            "\n".join(f"  {line.text}" for line in preview.lines),
-            style="dim" if not block.is_error else "red",
-        ))
+        style = "dim" if not block.is_error else "red"
+        for line in preview.lines:
+            body.extend(_wrap_card_line(Text(f"  {line.text}", style=style), console, width))
     elif preview.group == "web" and not expanded and preview.detail:
-        body.append(Text(f"  … {preview.detail} · {EXPAND_HINT}", style="dim"))
+        body.extend(_wrap_card_line(
+            Text(f"  … {preview.detail} · {EXPAND_HINT}", style="dim"), console, width,
+        ))
     else:
         output = block.output.strip()
         if output:
             body.extend(_output_tail(
-                output.splitlines(), Console(width=max(20, width)), width,
+                output.splitlines(), console, width,
                 expanded=expanded, limit=limits.tail_lines, indent=2,
                 style="dim" if not block.is_error else "red", earlier=False,
             ))
@@ -890,12 +894,12 @@ def _command_card(
     )
     console = Console(width=max(20, width))
     body: list[Any] = []
-    command_lines = _wrap_failure_line(title, console, width)
+    command_lines = _wrap_card_line(title, console, width)
     if not expanded and len(command_lines) > limits.head_lines:
         hidden = len(command_lines) - limits.head_lines
         body.extend(command_lines[:limits.head_lines])
         notice = Text(f"  … {hidden} more command lines hidden · {EXPAND_HINT}{suffix}", style="dim")
-        body.extend(_wrap_failure_line(notice, console, width))
+        body.extend(_wrap_card_line(notice, console, width))
     else:
         body.extend(command_lines)
 
@@ -924,7 +928,7 @@ def _command_card(
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:
-        body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
     body.extend(_output_tail(lines, console, width, expanded=expanded, limit=limits.tail_lines))
 
     if preview.truncated:
@@ -934,7 +938,7 @@ def _command_card(
             notice = f"Output truncated · full output: {preview.log_path}"
         else:
             notice = "Output truncated"
-        body.extend(_wrap_failure_line(Text(f"  {notice}", style="dim"), console, width))
+        body.extend(_wrap_card_line(Text(f"  {notice}", style="dim"), console, width))
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
@@ -964,15 +968,15 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     )
     console = Console(width=max(20, width))
     body: list[Any] = [] if after_user else [Text("")]
-    body.extend(_wrap_failure_line(title, console, width))
+    body.extend(_wrap_card_line(title, console, width))
     if expanded:
         lines = block.output.strip().splitlines()
     else:
         lines = [line.text for line in preview.lines]
     if lines:
-        body.extend(_wrap_failure_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
         for line in lines:
-            body.extend(_wrap_failure_line(Text(f"    {line}", style="dim"), console, width, indent=4))
+            body.extend(_wrap_card_line(Text(f"    {line}", style="dim"), console, width, indent=4))
     return Group(*body)
 
 
@@ -987,20 +991,23 @@ def _output_tail(
     """Apply the output budget after terminal wrapping, preserving the full output."""
     rows = [
         row for line in lines
-        for row in _wrap_failure_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
+        for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
     ]
     if expanded or len(rows) <= limit:
         return rows
     hidden = len(rows) - limit
     notice = f"… {hidden} {'earlier ' if earlier else ''}output lines hidden · {EXPAND_HINT}"
     return [
-        *_wrap_failure_line(Text(f"{' ' * indent}{notice}", style=style), console, width, indent=indent),
+        *_wrap_card_line(Text(f"{' ' * indent}{notice}", style=style), console, width, indent=indent),
         *rows[-limit:],
     ]
 
 
-def _wrap_failure_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:
-    """Keep the first prefix and indent continuations within the terminal margin."""
+def _wrap_card_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:
+    """Keep the first prefix and indent continuations within the terminal margin.
+
+    Shared by every tool card so titles, commands, and body lines wrap alike.
+    """
     available = max(1, width - 2)
     indent = min(indent, available - 1)
     prefix, content = line[:indent], line[indent:]
