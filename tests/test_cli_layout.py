@@ -1110,7 +1110,7 @@ def test_expanded_tool_cache_survives_collapse_and_invalidates_changed_tool(monk
     )
 
 
-def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None:
+def test_expanded_document_splits_once_per_unit_then_replays_cache(monkeypatch) -> None:
     import agent.cli.rendering as rendering
 
     original = rendering.split_lines
@@ -1130,13 +1130,38 @@ def test_expanded_document_splits_only_requested_tool_lines(monkeypatch) -> None
     )
     renderer = TranscriptRenderer()
     document = renderer.render_document(state, 80)
-    assert calls == []
+    # header + 20 tools: line_count must come from the same ANSI split as get_line.
+    assert len(calls) == 21
     assert "two" in "".join(part[1] for part in document.get_line(document.line_count - 1))
-    assert len(calls) == 1
     document.get_line(document.line_count - 2)
-    assert len(calls) == 1
+    assert len(calls) == 21
     assert renderer.render_document(state, 80) is document
-    assert len(calls) == 1
+    assert len(calls) == 21
+
+
+def test_rendered_unit_line_count_survives_ansi_newline_inside_csi() -> None:
+    from agent.cli.rendering import TranscriptDocument, rendered_unit_from_ansi
+    from agent.cli.widgets import _TranscriptControl
+    from prompt_toolkit.data_structures import Point
+
+    # prompt_toolkit's ANSI parser consumes a newline that terminates an
+    # incomplete CSI, so text.count("\n")+1 overstates the split line count.
+    text = "building...\x1b[38;5\nprogress"
+    unit = rendered_unit_from_ansi(text)
+    assert unit.line_count == len(unit._lines or ())
+    assert text.count("\n") + 1 > unit.line_count
+
+    document = TranscriptDocument((unit,), (0,), unit.line_count)
+    control = _TranscriptControl(
+        document=lambda: document,
+        cursor=lambda: Point(x=0, y=0),
+        on_scroll=lambda _delta: None,
+        on_select=lambda _event: None,
+        selected_line=lambda _row, fragments: fragments,
+    )
+    content = control.create_content(80, 10)
+    for row in range(content.line_count):
+        content.get_line(row)
 
 
 def test_transcript_renderer_matches_uncached_render() -> None:

@@ -111,10 +111,21 @@ class TranscriptUnit:
     owner: Any = None
 
 
-def _render_unit(renderable: Any, width: int) -> RenderedUnit:
-    text = _capture(renderable, width)
+def rendered_unit_from_ansi(text: str) -> RenderedUnit:
+    """Build a unit whose line_count matches prompt_toolkit's ANSI split.
+
+    ``text.count("\\n") + 1`` can disagree with ``split_lines(ANSI(text))`` when a
+    newline lands inside a CSI sequence (incomplete codes, or Rich wrapping a
+    literal escape mid-sequence). The transcript control then asks for a row the
+    unit does not have and redraw crashes with ``tuple index out of range``.
+    """
     fragments = to_formatted_text(ANSI(text))
-    return RenderedUnit(fragments, text.count("\n") + 1)
+    lines = tuple(list(line) for line in split_lines(fragments))
+    return RenderedUnit(fragments, len(lines), lines)
+
+
+def _render_unit(renderable: Any, width: int) -> RenderedUnit:
+    return rendered_unit_from_ansi(_capture(renderable, width))
 
 
 @dataclass

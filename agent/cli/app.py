@@ -78,12 +78,12 @@ from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.skills import SkillDraft
 from agent.cli.previews import is_mutation_tool, normalize_file_mutation
 from agent.cli.rendering import (
-    RenderedUnit,
     TranscriptDocument,
     TranscriptRenderer,
     render_interaction,
     render_queued_messages,
     render_review,
+    rendered_unit_from_ansi,
 )
 from agent.cli.session_controller import SessionController
 from agent.cli.session_summaries import SessionSummaries
@@ -1064,8 +1064,7 @@ class CliApplication:
 
     def _transcript_document(self) -> TranscriptDocument:
         if self.dialogs.reviewing:
-            rendered = render_review(self._review_calls(), self._width())
-            unit = RenderedUnit(to_formatted_text(ANSI(rendered)), rendered.count("\n") + 1)
+            unit = rendered_unit_from_ansi(render_review(self._review_calls(), self._width()))
             document = TranscriptDocument((unit,), (0,), unit.line_count)
         else:
             document = self._renderer.render_document(self.state, self._width())
