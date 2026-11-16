@@ -94,6 +94,13 @@ class RunEventsController:
                     self.state.add_system(f"sandbox: {event.result['sandbox_mode']}")
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
+        elif (event.type == "subagent_finished" and isinstance(event.result, dict)
+              and event.result.get("status") != "cancelled"
+              and not self.state.running
+              and (self.run_view.task is None or self.run_view.task.done())):
+            # The main agent is idle: wake it with the background result. A
+            # pending approval or dialog keeps the result queued instead.
+            self._start_queued_run()
         self.invalidate()
 
     def _handle_result(self, result: RunResult) -> None:

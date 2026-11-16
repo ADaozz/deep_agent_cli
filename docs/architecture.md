@@ -16,7 +16,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一 Runner 的模型、权限切换及新建、切换对话会话复用沙箱；文件系统模式变化或关闭 Runner 时清理沙箱。
 
-当前通过原生同步 `task` 启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
+当前通过原生同步 `task` 和本地后台委派工具启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
 
 ## 分层
 
@@ -89,6 +89,7 @@ flowchart TB
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
 | `task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
 | `read_subagent_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
+| `start_background_task`、`check_background_task`、`cancel_background_task` | 同上且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -111,7 +112,30 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
 `mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
 执行前清空父级隐式回调与配置上下文。默认最多同时运行 2 个子任务，第三个立即返回超限错误，
-完成、失败和取消均释放许可；原生 `task` 在任务结束后返回最终结果或简短错误，没有跨轮后台任务。
+完成、失败和取消均释放许可；原生 `task` 在任务结束后返回最终结果或简短错误。
+
+### 后台委派
+
+`start_background_task` 与同步 `task` 并存，由主模型按场景选择：需要等结果才能继续时用 `task`，
+子任务耗时较长且下一步不依赖其结果时用后台委派。没有使用上游 `AsyncSubAgentMiddleware`，
+它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
+
+- 启动：工具取得一个并发许可（与 `task` 共用 `max_concurrent`，超限立即返回错误）后启动线程并返回 `run_id`，
+  主 Agent 继续推理、调用其他工具或结束本轮回答。执行环境、权限、工具集和 JSONL 日志与同步子任务相同。
+- 回传：子任务完成或失败时，结果进入 `RunController` 的独立通知队列，并发出 `subagent_finished` 事件。
+  通知队列不是用户输入队列：不会被回收到输入框，不显示为待发送消息，也不阻止会话切换。
+- 注入：`SteeringMiddleware` 在 `before_model` 和 `after_agent` 先处理用户 steering，再把通知作为带
+  `additional_kwargs["deep_agent_notification"]` 标记的 `HumanMessage` 写入对话；通知不会撤销模型已提议的工具调用。
+  图返回后才到达的通知由 `AgentRunner` 的收尾循环作为新一轮继续。
+- 空闲唤醒：主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
+  存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。
+- 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_background_task` 只停止指定任务。
+  被取消的子任务只更新卡片，不产生通知，也不唤醒主 Agent。
+- 会话边界：新建会话、切换到其他会话或关闭 Runner 时取消全部后台任务并丢弃未送达的通知，结果不会进入另一个会话。
+- 沙箱模式切换会丢弃沙箱内进程：空闲时若仍有后台任务，切换保持排队；在运行边界应用时，后台子任务正在执行的命令会失败并由子任务自行处理。
+
+主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
+恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_subagent_log` 查看。
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
 已配置的 web_search 和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
@@ -128,6 +152,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 摘要只精确替换已知模型和 Tavily Key；未知凭据原样保存。
 主上下文仅接收最终 task 结果，主动调用 `read_subagent_log` 才读取本父会话的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
+后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
 实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware

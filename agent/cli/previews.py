@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
+from agent.subagents.notifications import START_TOOL
 from agent.execution.mutations import FileMutationOperation
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
 
@@ -613,15 +614,19 @@ def build_task_preview(block: ToolBlock) -> ToolPreview:
     """A bounded single-line title; the actual delegation stays untouched."""
     description = " ".join(str(block.arguments.get("description") or "Delegated task").split())
     title = description if len(description) <= 120 else description[:119] + "…"
+    detail = str(block.arguments.get("subagent_type") or "general-purpose")
+    if block.name == START_TOOL:
+        detail += " · background"
     return ToolPreview(
         kind="task", verb="SubAgent", target=title,
-        detail=str(block.arguments.get("subagent_type") or "general-purpose"),
+        detail=detail,
         summary=f"SubAgent · {title}", action="expand",
     )
 
 
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "task": build_task_preview,
+    START_TOOL: build_task_preview,
     "ls": build_ls_preview,
     "read_file": build_read_preview,
     "grep": build_grep_preview,
@@ -710,7 +715,7 @@ def build_failure_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT
 
 
 def build_tool_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
-    if block.name == "task":
+    if block.name in {"task", START_TOOL}:
         return build_task_preview(block)
     if block.name == "execute":
         return build_execute_preview(block)

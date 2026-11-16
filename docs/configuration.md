@@ -414,7 +414,7 @@ bailian:
 
 ## SubAgent 委派
 
-默认启用 Deep Agents 原生同步 `task`，注册 `general-purpose` 子 Agent。
+默认启用 Deep Agents 原生同步 `task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
 只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
 或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
@@ -431,6 +431,8 @@ subagents:
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
   permission: allow
+  # 同时提供 start/check/cancel_background_task；false 时只保留同步 task。
+  background: true
 ```
 
 `max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
@@ -450,10 +452,28 @@ subagents:
 SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills 和 AGENTS.md，
 不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
-`task` 等待任务实际完成，没有跨轮次后台任务。
+`task` 等待任务实际完成后才返回。
+
+### 后台委派
+
+`subagents.background: true`（默认）时，主 Agent 另有三个工具，与同步 `task` 并存：
+
+| 工具 | 作用 |
+|---|---|
+| `start_background_task(description)` | 启动隔离子任务并立即返回 `run_id`，主 Agent 继续工作 |
+| `check_background_task(run_id=null)` | 不传参列出当前会话的后台任务；指定 ID 返回状态，已结束时带结果 |
+| `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
+
+后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `task` 共用 `max_concurrent`；
+没有已验证的 `SANDBOXED` 后端时启动直接失败。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
+主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
+被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
+新建或切换会话、退出程序会取消后台任务并丢弃未送达的结果；未完成的任务恢复后显示为中断。
+存在后台任务时，空闲状态下的沙箱文件系统模式切换保持排队。
+主 Agent 与后台子任务同时使用共享工作区，不检测文件冲突，应避免修改子任务正在处理的文件。
 
 `1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，Working 靠左，数量靠右，数量为零时隐藏；输入框内不显示子任务数量。
-每个 `task` 在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
+每个 `task` 和后台任务在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
 
 右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限仍由 `max_concurrent` 控制。
 

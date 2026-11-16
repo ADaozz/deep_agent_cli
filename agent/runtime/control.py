@@ -49,6 +49,9 @@ class RunController:
         self._steering: deque[QueuedMessage] = deque()
         self._follow_ups: deque[QueuedMessage] = deque()
         self._queue_order = count()
+        # Host-produced results (background subagents). Kept apart from user
+        # input: never reclaimed into the editor, never shown as pending input.
+        self._notifications: deque[dict[str, Any]] = deque()
         self._pause_requested = False
         self._generations = count(1)
         self._active: _RunScope | None = None
@@ -241,6 +244,30 @@ class RunController:
             self._steering.clear()
             self._follow_ups.clear()
             return messages
+
+    def notify(self, item: dict[str, Any]) -> None:
+        with self._lock:
+            self._notifications.append(item)
+
+    def pop_notifications(self) -> list[dict[str, Any]]:
+        """Consume every queued notification at a model-safe boundary."""
+        with self._lock:
+            # Only a cancel of the run in progress holds results back. An idle
+            # parent still reports them, whatever happened to its last run.
+            active = self._active
+            if self._defer_steering or (active is not None and active.cancel_event.is_set()):
+                return []
+            items = list(self._notifications)
+            self._notifications.clear()
+            return items
+
+    def pending_notification_count(self) -> int:
+        with self._lock:
+            return len(self._notifications)
+
+    def clear_notifications(self) -> None:
+        with self._lock:
+            self._notifications.clear()
 
     def cancel(self) -> None:
         """Cancel the reserved (or else active) run; repeated calls are no-ops.

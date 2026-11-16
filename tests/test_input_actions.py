@@ -17,6 +17,9 @@ def test_interrupt_checks_follow_one_priority() -> None:
     assert router.decide_interrupt(InputView(compacting=True, running=True)) is InputAction.WAIT_FOR_COMPACTION
     assert router.decide_interrupt(InputView(running=True, cancel_sent=True, mcp_busy=True)) is InputAction.CANCEL_ALREADY_SENT
     assert router.decide_interrupt(InputView(running=True, mcp_busy=True)) is InputAction.CANCEL_RUN
+    assert router.decide_interrupt(InputView(running=True, background_running=True)) is InputAction.CANCEL_RUN
+    assert router.decide_interrupt(InputView(background_running=True, mcp_busy=True)) is InputAction.CANCEL_BACKGROUND
+    assert router.decide_interrupt(InputView(exiting=True, background_running=True)) is InputAction.CANCEL_BACKGROUND
     assert router.decide_interrupt(InputView(mcp_busy=True)) is InputAction.MCP_STILL_RUNNING
     assert router.decide_interrupt(InputView()) is InputAction.NONE
 

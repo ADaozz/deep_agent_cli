@@ -14,14 +14,14 @@ from contextvars import Context
 from typing import Any, Callable
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from agent.runtime.cancellation import set_output_emitter
 from agent.models.stream_lifecycle import set_stream_owner
 from agent.models.messages import visible_text
 from agent.subagents.log_store import SubAgentLogStore
-from agent.subagents.manager import SubAgentManager
+from agent.subagents.manager import BackgroundTask, SubAgentManager
 
 
 SUMMARY_LIMIT = 1000
@@ -153,6 +153,45 @@ class SubAgentRuntime(Runnable):
             self.manager.parent.cancel()
             await operation
             raise
+
+    def start_background(self, description: str, parent: str, tool_call_id: str) -> BackgroundTask:
+        """Run one delegation on its own thread and report the outcome to the parent.
+
+        Raises when no permit is available; nothing is started in that case.
+        """
+        run_id, controller = self.manager.admit()
+        task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
+                              description=description, controller=controller)
+
+        def work() -> None:
+            try:
+                # Same clean context as the synchronous path: no parent
+                # callbacks, stream writer or checkpoint namespace.
+                output = Context().run(
+                    self._run, {"messages": [HumanMessage(content=description)]}, parent, run_id, controller,
+                )
+                content = str(output["messages"][-1].content)
+            except BaseException as exc:  # noqa: BLE001
+                state = "cancelled" if controller.cancel_requested else "failed"
+                content = f"Subagent {state} (run_id={run_id}): {str(exc)[:1000]}"
+            status = ("cancelled" if content.startswith("Subagent cancelled")
+                      else "failed" if content.startswith("Subagent failed") else "completed")
+            try:
+                self.manager.release(run_id)
+            finally:
+                self.manager.finish(task, status, content)
+                if not task.discarded:
+                    payload = {"run_id": run_id, "tool_call_id": tool_call_id, "parent": parent,
+                               "status": status, "content": content}
+                    # A cancelled task was stopped on request: update its card only.
+                    if status != "cancelled":
+                        self.manager.parent.notify(payload)
+                    self.manager.parent._emit("subagent_finished", payload)
+
+        task.thread = threading.Thread(target=work, name=f"subagent-{run_id[:8]}", daemon=True)
+        self.manager.track(task)
+        task.thread.start()
+        return task
 
     def _run(self, input: dict, parent: str, run_id: str, controller: Any) -> dict:
         def write(event: str, **payload: Any) -> None:

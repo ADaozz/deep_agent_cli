@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from agent.runtime.control import RunController
+from agent.subagents.notifications import notification_message
 
 
 class SteeringState(AgentState):
@@ -75,6 +76,11 @@ class SteeringMiddleware(AgentMiddleware):
 
     def _consume(self, state: Any) -> dict[str, Any] | None:  # noqa: ANN401
         text = self._controller.pop_steering()
-        if text is None:
-            return None
-        return {"messages": [HumanMessage(content=text)]}
+        if text is not None:
+            return {"messages": [HumanMessage(content=text)]}
+        # Background results follow user input and never revoke proposed
+        # tools: they are only read here, between model calls.
+        notices = self._controller.pop_notifications()
+        if notices:
+            return {"messages": [notification_message(item) for item in notices]}
+        return None

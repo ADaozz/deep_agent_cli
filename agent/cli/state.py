@@ -9,6 +9,7 @@ from agent.sessions.images import ImageAttachmentRef
 from agent.runtime.contracts import RunEvent, TurnTiming
 from agent.sessions.transcript import subagent_result_status
 from agent.sessions.contracts import TranscriptBlock
+from agent.subagents.notifications import START_TOOL
 
 
 @dataclass
@@ -86,7 +87,7 @@ class CliState:
         using scheduler counts here can disagree with the visible task states.
         """
         return sum(
-            isinstance(block, ToolBlock) and block.name == "task" and block.status == "running"
+            isinstance(block, ToolBlock) and block.name in {"task", START_TOOL} and block.status == "running"
             for block in self.blocks
         )
 
@@ -229,6 +230,13 @@ class CliState:
                 tool = ToolBlock(event.tool_call_id, event.name, {})
                 self.blocks.append(tool)
             touch(tool)
+            if tool.name == START_TOOL:
+                # The launch returned; the delegation itself is still running.
+                # Only subagent_finished ends the card, and it may already have.
+                refused = subagent_result_status(event.content, is_error=event.is_error)
+                if tool.status == "running" and refused != "completed":
+                    tool.output, tool.status, tool.is_error = event.content, refused, True
+                return
             completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
             had_tail_snapshot = (
                 event.name == "execute" and isinstance(tool.artifact, dict)
@@ -253,6 +261,13 @@ class CliState:
             if event.name == "execute" and completed_artifact is not None:
                 code = completed_artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+        elif event.type == "subagent_finished" and isinstance(event.result, dict):
+            tool = self._tool_by_id(str(event.result.get("tool_call_id") or ""))
+            if tool is not None and tool.name == START_TOOL:
+                touch(tool)
+                tool.output = event.content
+                tool.status = subagent_result_status(event.content)
+                tool.is_error = tool.status in {"error", "cancelled"}
         elif event.type == "steering_queued":
             pass  # Pending input is rendered separately until it is applied.
         elif event.type == "steering_applied":
@@ -275,13 +290,15 @@ class CliState:
             self.active_block = None
             settle = _interaction_settlement(event.result)
             for block in self.blocks:
-                if isinstance(block, ToolBlock) and block.status == "running":
+                if isinstance(block, ToolBlock) and block.status == "running" and block.name != START_TOOL:
                     touch(block).status = settle(block)
         elif event.type == "run_completed":
             self.running = False
             self.status = "Ready"
             for block in self.blocks:
-                if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
+                # A background subagent outlives the run that started it.
+                if (isinstance(block, ToolBlock) and block.status in {"running", "waiting"}
+                        and block.name != START_TOOL):
                     touch(block).status = "interrupted"
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
@@ -300,7 +317,7 @@ class CliState:
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
                     touch(block)
-                    if block.name == "task":
+                    if block.name in {"task", START_TOOL}:
                         block.status = "cancelled"
                         block.is_error = True
                         continue
@@ -314,7 +331,8 @@ class CliState:
             self.running = False
             self.status = "Failed"
             for block in self.blocks:
-                if isinstance(block, ToolBlock) and block.status in {"running", "waiting"}:
+                if (isinstance(block, ToolBlock) and block.status in {"running", "waiting"}
+                        and block.name != START_TOOL):
                     touch(block).status = "error"
                     block.is_error = True
                     block.exit_code = 1

@@ -13,6 +13,8 @@ class SubAgentConfig:
     model: str | None = None
     reasoning_effort: str | None = "default"
     permission: str = "allow"
+    # Also offer background delegation next to the synchronous task tool.
+    background: bool = True
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "SubAgentConfig":
@@ -24,6 +26,8 @@ class SubAgentConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("subagents.enabled must be a boolean")
+        if not isinstance(self.background, bool):
+            raise ValueError("subagents.background must be a boolean")
         if type(self.max_concurrent) is not int or self.max_concurrent < 1:
             raise ValueError("subagents.max_concurrent must be a positive integer")
         if self.permission != "allow":

@@ -240,6 +240,8 @@ def build_agent(
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
         from agent.subagents.runtime import SubAgentRuntime
+        from agent.subagents.notifications import BACKGROUND_TOOLS
+        from agent.tools.background_tasks import build_background_task_tools
         from agent.tools.subagent_logs import build_subagent_log_tool
         # Rebuilds occur at a safe boundary; keep lifetime accounting on the
         # parent controller, which survives model changes and session switches.
@@ -275,7 +277,8 @@ def build_agent(
             child_spec = replace(
                 spec, role="subagent", tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),
-                hidden_tools=tuple(set(spec.hidden_tools) | {"task", "request_human_input", "read_subagent_log"}),
+                hidden_tools=tuple(set(spec.hidden_tools) | BACKGROUND_TOOLS
+                                   | {"task", "request_human_input", "read_subagent_log"}),
             )
             try:
                 child = build_agent(child_spec, child_model, PermissionMode.ALLOW, None,
@@ -290,6 +293,12 @@ def build_agent(
 
         runtime = SubAgentRuntime(manager, store, prepare_child,
                                   cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__))
+        if cfg.subagents.background:
+            tools.extend(build_background_task_tools(
+                runtime, manager,
+                unavailable="" if execution_mode is ExecutionMode.SANDBOXED
+                else "Subagents require a verified SANDBOXED backend for allow permission",
+            ))
         subagents.append({
             "name": "general-purpose",
             "description": (

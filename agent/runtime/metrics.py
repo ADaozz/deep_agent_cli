@@ -99,7 +99,10 @@ class GenerationTiming:
         }
 
 
-_SUBAGENT_TOOLS = frozenset({"task", "read_subagent_log"})
+_SUBAGENT_TOOLS = frozenset({
+    "task", "read_subagent_log",
+    "start_background_task", "check_background_task", "cancel_background_task",
+})
 
 
 def tool_usage_by_model(history: list[dict[str, Any]]) -> tuple[list[str], list[tuple[str, dict[str, int]]]]:

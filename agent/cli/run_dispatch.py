@@ -11,7 +11,7 @@ from prompt_toolkit.buffer import Buffer
 from agent.sessions.images import ImageAttachmentRef
 from agent.cli.lifecycle import TaskStop
 from agent.cli.input_actions import is_double_press
-from agent.runtime.contracts import RunEvent
+from agent.runtime.contracts import RunEvent, RunResult
 
 
 if TYPE_CHECKING:
@@ -264,3 +264,15 @@ class RunDispatch:
             self._start_run("", resume_call=partial(
                 self.runner.invoke, text, on_event=self._on_event_thread,
             ))
+        elif (self.runner.control.pending_notification_count()
+              and not self.run_view.compacting and not self.state.compacting):
+            # No user input is waiting: report finished background subagents.
+            self._start_run("", resume_call=self._deliver_notifications)
+
+    def _deliver_notifications(self) -> RunResult:
+        result = self.runner.deliver_notifications(on_event=self._on_event_thread)
+        if result is None:
+            # Nothing was delivered, so no run reported its end to the view.
+            self._on_event_thread(RunEvent(type="run_completed"))
+            return RunResult(status="completed")
+        return result

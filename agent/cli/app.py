@@ -944,6 +944,7 @@ class CliApplication:
             running=self.state.running,
             cancel_sent=self.run_view.cancel_sent,
             mcp_busy=self.mcp_controller.busy,
+            background_running=bool(self.state.subagent_count),
             buffer_empty=not text,
             exiting=self._exiting,
         )
@@ -1003,6 +1004,11 @@ class CliApplication:
                 self.set_status("Interrupting… queued messages will be sent next", transient=False)
             else:
                 self.set_status("Cancelling…", transient=False)
+            self.application.invalidate()
+            return
+        if action is InputAction.CANCEL_BACKGROUND:
+            self.runner.cancel_background_tasks()
+            self.set_status("Cancelling background subagents…")
             self.application.invalidate()
             return
         if action is InputAction.MCP_STILL_RUNNING:
@@ -1086,6 +1092,7 @@ class CliApplication:
         interaction_hint = self.dialogs.current is not None and " · Enter confirm · Esc " in status
         return bool(
             self.state.running or (status != "Ready" and not interaction_hint)
+            or self.state.subagent_count
             or self.runner.control.pending_steering_count()
             or self.runner.control.pending_follow_up_count()
         )
@@ -1137,6 +1144,9 @@ class CliApplication:
             label = ""
         if (self.run_view.compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"
+        elif not label and counter:
+            # The main agent is idle; only background subagents are working.
+            label = "Background  Esc to cancel"
         raw_status = f" {spinner}{label}"
         status = _truncate_cells(raw_status, left_width)
         fragments = [("class:status", status)]

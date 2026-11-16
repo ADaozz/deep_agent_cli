@@ -33,6 +33,9 @@ subagents:
   reasoning_effort: default
   # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 task 明确失败。
   permission: allow
+  # 是否同时提供后台委派工具（start/check/cancel_background_task）。
+  # 后台子任务运行期间主 Agent 继续工作，完成后自动通知；与 task 共用 max_concurrent。
+  background: true
 
 tools:
   # 启动时从模型请求中隐藏的工具名。这里隐藏上下文压缩工具；/compact 仍可使用。

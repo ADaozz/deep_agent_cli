@@ -41,7 +41,7 @@ runner.close()
 
 ## SubAgent 委派
 
-与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `task`。
+与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `task` 和后台委派工具（`subagents.background`）。
 只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
 
@@ -53,6 +53,18 @@ runner.close()
 默认模型 Profile 继承主模型，思考强度 `default/null` 使用子模型原生默认；独立客户端在任务结束后关闭。
 直接注入的自定义 `BaseChatModel` 保留原对象，强度覆盖需显式指定子模型 Profile。
 执行摘要独立持久化且按父会话隔离，只精确替换已知密钥；完整配置与查询工具见 [SubAgent 配置](configuration.md#subagent-委派)。
+
+后台任务可以比启动它的 `invoke()` 活得更久。运行期间到达的结果会在下一个模型边界自动注入；
+`invoke()` 返回后才完成的任务会发出 `subagent_finished` 事件并把结果留在通知队列中，调用方需要自行取回：
+
+```python
+result = runner.invoke("...")
+# 收到 subagent_finished 事件后，或在合适的时机：
+followup = runner.deliver_notifications()   # 没有可送达的结果或存在待处理中断时返回 None
+```
+
+`runner.background_task_count()` 返回仍在运行的后台任务数，`runner.cancel_background_tasks()` 只取消后台任务，
+`request_cancel()`、新建或切换会话以及 `close()` 也会取消它们。空闲时的事件通过构造 Runner 时传入的 `on_event` 送达。
 
 ## 处理中断
 
@@ -80,7 +92,11 @@ runner.close()
 
 原生 `task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
 
-`subagents_changed` 事件的 `result["count"]` 是实际运行数量。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
+`subagent_finished` 事件在后台任务结束时发出，可能发生在没有运行的空闲期间：`content` 是最终结果或失败/取消说明，
+`result` 包含 `run_id`、`tool_call_id`、`status`（`completed` / `failed` / `cancelled`）和父会话 ID。
+`start_background_task` 的 `tool_completed` 只表示启动成功，不代表任务完成。
+
+`subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
 

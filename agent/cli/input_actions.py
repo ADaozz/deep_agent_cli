@@ -31,6 +31,7 @@ class InputAction(Enum):
     WAIT_FOR_COMPACTION = "wait_for_compaction"
     CANCEL_RUN = "cancel_run"
     CANCEL_ALREADY_SENT = "cancel_already_sent"
+    CANCEL_BACKGROUND = "cancel_background"
     MCP_STILL_RUNNING = "mcp_still_running"
     CLEAR_INPUT = "clear_input"
     REQUEST_EXIT = "request_exit"
@@ -52,6 +53,8 @@ class InputView:
     running: bool = False
     cancel_sent: bool = False
     mcp_busy: bool = False
+    # Background subagents still running while the main agent is idle.
+    background_running: bool = False
     buffer_empty: bool = True
     # Observed: exit in progress does not by itself suppress Esc.
     # exit() does not mark the run cancel as sent, so Esc can request it again.
@@ -71,7 +74,7 @@ class InputActionRouter:
         if view.exiting and not any((
             view.has_interaction, view.completion_open, view.slash_line,
             view.transcript_away, view.session_waiting, view.reviewing,
-            view.compacting, view.running, view.mcp_busy,
+            view.compacting, view.running, view.mcp_busy, view.background_running,
         )):
             return InputAction.NONE
         if not view.has_interaction and view.completion_open:
@@ -96,6 +99,8 @@ class InputActionRouter:
             if view.cancel_sent:
                 return InputAction.CANCEL_ALREADY_SENT
             return InputAction.CANCEL_RUN
+        if view.background_running:
+            return InputAction.CANCEL_BACKGROUND
         if view.mcp_busy:
             return InputAction.MCP_STILL_RUNNING
         return InputAction.NONE

@@ -124,9 +124,14 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 
 右侧数量直接统计当前记录中标为运行中的 SubAgent 卡片，与卡片状态同步变化。调度器的任务准入和资源清理计数不单独驱动界面数量，避免启动、完成或取消时两处显示不一致。
 
+后台委派（`start_background_task`）使用同一种卡片，类型行标注 `background`。启动后主 Agent 继续工作，卡片保持运行状态，
+本轮回答结束后也不会结算为中断；此时状态行显示 `Background  Esc to cancel` 和运行数量。子任务完成后卡片原地显示结果，
+主 Agent 空闲时自动开始新一轮处理该结果，不产生用户消息；有待审批或对话框时结果排队，等该次运行恢复后再处理。
+主 Agent 空闲时按 Esc 只取消后台任务，被取消的任务不会唤醒主 Agent。新建或切换会话会取消后台任务并丢弃其结果。
+
 `deep-agent resume` 通过 `tool_call_id` 恢复原任务描述和结果；不读取 JSONL、不额外调用模型。子 Agent 内部思考、Token、文件工具、execute 和内部日志仍不转发到主界面。
 子任务使用沙箱 `allow`，没有审批和主动提问入口，也不装载 MCP 或再次委派。
-Esc 取消当前 Run 时会传播到全部关联子任务；退出沿用既有 Ctrl+C、Ctrl+D 和 `/exit` 规则。
+Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务）；退出沿用既有 Ctrl+C、Ctrl+D 和 `/exit` 规则。
 
 主模型切换只影响下一次派生使用的模型 Profile；示例配置 `subagents.reasoning_effort: default` 使用子模型原生默认强度，不向 API 发送强度参数，
 不受主 Agent 当前 high/low 影响。执行摘要仅包含操作、状态、耗时及有界最终结果，不保存模型 Token 或思考；按需查询见 [配置参考](configuration.md#subagent-委派)。
