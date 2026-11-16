@@ -1443,17 +1443,17 @@ def test_edit_preview_many_deletions_keep_one_addition() -> None:
     assert "+ replaced" in rendered
     assert "- keep-6" in rendered
     assert "- keep-7" not in rendered
-    assert "⋮" in rendered
     assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     assert texts == [
         "",
-        *[f"- keep-{index}" for index in range(7)],
-        "  ⋮",
+        "- keep-0",
         "+ replaced",
+        *[f"- keep-{index}" for index in range(1, 7)],
         "",
         "… 13 changed lines hidden · Ctrl+R to review",
     ]
+    assert "  ⋮" not in texts
     review = _plain(render_review([("edit_file", block.arguments)], 100))
     assert "-keep-15" in review
     assert "+replaced" in review
@@ -1493,10 +1493,41 @@ def test_edit_preview_under_budget_shows_all_without_hidden_hint() -> None:
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
     assert "Edited /workspace/notes.md (+2 -3)" in rendered
-    for line in ("- l1", "- l2", "- l3", "+ n1", "+ n2"):
-        assert line in rendered
+    texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
+    assert texts == ["", "- l1", "+ n1", "- l2", "+ n2", "- l3"]
     assert "changed lines hidden" not in rendered
     assert "⋮" not in rendered
+
+
+def test_edit_preview_pairs_same_number_delete_before_add() -> None:
+    block = ToolBlock(
+        tool_call_id="edit-number-order",
+        name="edit_file",
+        arguments={
+            "file_path": "/workspace/cam.ts",
+            "old_string": (
+                "keep\n"
+                "{ frame: 0, cx: 960, cy: 300, zoom: 1.1 },\n"
+                "{ frame: 75, cx: 960, cy: 760, zoom: 1.0 },\n"
+                "after"
+            ),
+            "new_string": (
+                "keep\n"
+                "{ frame: 0, cx: 960, cy: 190, zoom: 1.15 },\n"
+                "{ frame: 75, cx: 960, cy: 320, zoom: 1.0 },\n"
+                "after"
+            ),
+        },
+        status="completed",
+    )
+    lines = build_tool_preview(block).lines
+    assert [line.text for line in lines] == [
+        "",
+        "   2 - { frame: 0, cx: 960, cy: 300, zoom: 1.1 },",
+        "   2 + { frame: 0, cx: 960, cy: 190, zoom: 1.15 },",
+        "   3 - { frame: 75, cx: 960, cy: 760, zoom: 1.0 },",
+        "   3 + { frame: 75, cx: 960, cy: 320, zoom: 1.0 },",
+    ]
 
 
 def test_edit_preview_marks_hunk_jumps_with_separator() -> None:
@@ -1551,7 +1582,7 @@ def test_edit_preview_separator_does_not_consume_budget() -> None:
     assert len(changed) == 8
     assert texts.count("  ⋮") == 2
     assert texts == [
-        "", "- A", "+ A2", "  ⋮", "- B1", "- B2", "+ B", "  ⋮", "- D", "+ D1", "+ D2",
+        "", "- A", "+ A2", "  ⋮", "- B1", "+ B", "- B2", "  ⋮", "+ D1", "- D", "+ D2",
     ]
     assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
 

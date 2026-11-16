@@ -109,6 +109,11 @@ class _ChangedLine:
     number: int
 
 
+def _changed_line_sort_key(line: _ChangedLine) -> tuple[int, int]:
+    """Compact preview order: snippet line number, then delete before add."""
+    return (line.number, 0 if line.kind == "delete" else 1)
+
+
 PreviewBuilder = Callable[[ToolBlock], ToolPreview]
 
 
@@ -188,27 +193,26 @@ def _changed_lines(raw: str) -> list[_ChangedLine]:
 def _select_changed_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[_ChangedLine]:
     """Pick the compact-preview lines: first N, then a +/- floor, then re-sort.
 
-    With a budget of at least two, show both - and + when both sides exist;
-    the replacement line keeps its original diff position after sorting.
+    With a budget of at least two, show both - and + when both sides exist.
+    Display order is snippet line number ascending, delete before add.
     """
     if len(changed) <= limits.head_lines:
-        return list(changed)
-    selected = changed[:limits.head_lines]
-    if limits.head_lines < 2 or len({line.kind for line in changed}) < 2:
-        return selected
-    if "add" not in {line.kind for line in selected}:
-        replacement = next(line for line in changed if line.kind == "add")
-        for index in range(len(selected) - 1, -1, -1):
-            if selected[index].kind == "delete":
-                selected[index] = replacement
-                break
-    elif "delete" not in {line.kind for line in selected}:
-        replacement = next(line for line in changed if line.kind == "delete")
-        for index in range(len(selected) - 1, -1, -1):
-            if selected[index].kind == "add":
-                selected[index] = replacement
-                break
-    selected.sort(key=lambda line: line.order)
+        return sorted(changed, key=_changed_line_sort_key)
+    selected = list(changed[:limits.head_lines])
+    if limits.head_lines >= 2 and len({line.kind for line in changed}) >= 2:
+        if "add" not in {line.kind for line in selected}:
+            replacement = next(line for line in changed if line.kind == "add")
+            for index in range(len(selected) - 1, -1, -1):
+                if selected[index].kind == "delete":
+                    selected[index] = replacement
+                    break
+        elif "delete" not in {line.kind for line in selected}:
+            replacement = next(line for line in changed if line.kind == "delete")
+            for index in range(len(selected) - 1, -1, -1):
+                if selected[index].kind == "add":
+                    selected[index] = replacement
+                    break
+    selected.sort(key=_changed_line_sort_key)
     return selected
 
 
@@ -220,8 +224,8 @@ def _format_changed_text(line: str) -> str:
 def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> tuple[PreviewLine, ...]:
     """Compact edit body: changed lines only, ⋮ at skipped spans, hidden count.
 
-    A ⋮ marks that the preview jumped over hidden changed lines or crossed a
-    hunk boundary; it never counts against the budget or the hidden total.
+    A ⋮ marks a snippet-number jump or hunk boundary after number-then-/+
+    sorting; it never counts against the budget or the hidden total.
     """
     selected = _select_changed_lines(changed, limits=limits)
     if not selected:
@@ -229,7 +233,7 @@ def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits 
     display: list[PreviewLine] = [PreviewLine("", "plain")]
     previous: _ChangedLine | None = None
     for line in selected:
-        if previous is not None and (line.order > previous.order + 1 or line.hunk != previous.hunk):
+        if previous is not None and (line.hunk != previous.hunk or line.number > previous.number + 1):
             display.append(PreviewLine("  ⋮", "dim"))
         display.append(PreviewLine(
             f"{line.number:>4} {_format_changed_text(line.text)}",
