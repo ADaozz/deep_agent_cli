@@ -1,7 +1,7 @@
 """Native prompt_toolkit layout for the auxiliary pane."""
 from bisect import bisect_left
 from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.layout import HSplit, VSplit, Window
+from prompt_toolkit.layout import HSplit, VSplit, Window, WindowAlign
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.utils import get_cwidth
@@ -50,7 +50,7 @@ def box(body):
     def horizontal(left, right):
         return VSplit([edge(left), rule(), edge(right)], height=1)
 
-    return HSplit([horizontal("┌", "┐"), VSplit([edge("│"), body, edge("│")]), horizontal("└", "┘")])
+    return HSplit([horizontal("┌", "┐"), VSplit([edge("│"), Window(width=1), body, Window(width=1), edge("│")]), horizontal("└", "┘")])
 
 
 def aligned(left, right, width):
@@ -106,19 +106,8 @@ class LogRows(Rows):
 
 
 def build_panel(companion, git_summary):
-    def header(w, h):
-        left = [(CYAN, "Companion Agent"), (WHITE, "  [ Lain Iwakura ]")]
-        return [aligned(left, [(GRAY, "DeepAgentCLI // aux")], w)]
-
     def status(w, h):
-        state = companion.behavior.upper()
-        badges = [(GREEN if companion.connection == "CONNECTED" else GRAY, f"[ {companion.connection} ]"),
-                  (CYAN, f" [ {state} ]"), (YELLOW, " [ WATCHING ]")]
-        used = sum(get_cwidth(s) for _, s in badges)
-        label = "LAIN // COMPANION AGENT" if w >= used + 24 else "LAIN" if w >= used + 5 else ""
-        if used > w:
-            badges = [(color, value.replace(" ", "")) for color, value in badges]
-        return [aligned([(WHITE, label)], badges, w)]
+        return [[(CYAN, companion.behavior.upper())]]
 
     def resource(index, name, color):
         def draw(w, h):
@@ -128,40 +117,52 @@ def build_panel(companion, git_summary):
             bar = "[" + "█" * filled + "░" * (capacity - filled) + "]"
             percent = "N/A" if value is None else f"{value}%"
             return [aligned([(color, name)], [(WHITE, percent)], w), [(color, bar)]]
-        return box(Window(Rows(draw)))
-
+        return Window(Rows(draw))
 
     def git(w, h):
         g = git_summary()
-        status_text = g.error or (f"{g.changed} changed" if g.changed else "clean (0 changes)")
-        divider = [[(BORDER, "─" * w)]] if h >= 5 else []
-        return [[(CYAN, "git")], *divider,
-                [(WHITE, "Repo: "), (GREEN, "initialized" if g.available else g.error or "none")],
-                [(WHITE, "Branch: "), (CYAN, _truncate_cells(g.branch or "—", w - 8))],
-                [(WHITE, "Status: "), (GRAY if g.error else GREEN, status_text if g.available or g.error else "—")]]
+        status_text = f"{g.changed} changed" if g.changed else "clean"
+        status_text = g.error or (status_text if g.available else "—")
+        lines = [[(CYAN, "git")]]
+        for label, value, color in (
+            ("Repo", "yes" if g.available else "—" if g.error else "no", GREEN),
+            ("Branch", g.branch or "—", CYAN),
+            ("Status", status_text, GRAY if g.error else GREEN),
+        ):
+            prefix = f"{label}: "
+            lines.append([(WHITE, prefix), (color, _truncate_cells(value, w - len(prefix)))])
+        return lines
 
     def service_rows(w, h):
         items = companion.services
-        lines = [aligned([(CYAN, "services")], [(GREEN, "[ running ]")], w), [(BORDER, "─" * w)]]
-        for row in items[:max(0, h - 3)]:
+        title = [(CYAN, "services")]
+        count = [(GREEN, f"{len(items)} running" if items else "no")]
+        if len("services ") + len(count[0][1]) <= w:
+            lines = [aligned(title, count, w)]
+        else:
+            lines = [title, aligned([], count, w)]
+        for row in items[:max(0, h - len(lines))]:
             pid = f"{'ns:' if row.sandbox else 'PID '}{row.pid}"
             label = _truncate_cells(row.name, w - len(pid) - 1)
             lines.append(aligned([(WHITE, label)], [(WHITE, pid)], w))
-        lines.extend([[]] * max(0, h - 1 - len(lines)))
-        return [*lines, [(WHITE, "Running: "), (GREEN, str(len(items)))]]
+        return lines
 
-    def log_header(width, height):
-        title = [(CYAN, "lain.log"), (GRAY, " (rolling)")]
-        return [aligned(title, [(YELLOW, "[ thoughts ]")], width)]
+    def separator():
+        return Window(width=1, char="│", style=BORDER)
 
-    log_box = box(HSplit([Window(Rows(log_header), height=1), rule(), Window(LogRows(companion))]))
-    return HSplit([
-        Window(Rows(header), height=1), rule(),
+    title = FormattedText([(CYAN, "Companion Agent"), (WHITE, " [ Lain Iwakura ]")])
+    content = HSplit([
+        Window(FormattedTextControl(title), height=1), rule(),
         Window(FormattedTextControl(lambda: FormattedText(companion.frame)), height=lambda: companion.geometry()[1]),
-        Window(Rows(status), height=1),
-        VSplit([resource(0, "CPU", GREEN), resource(1, "GPU", GREEN),
-                resource(2, "RAM", CYAN)], height=4, padding=1),
+        Window(height=1), Window(Rows(status), height=1, align=WindowAlign.CENTER), Window(height=1),
+        VSplit([resource(0, "CPU", GREEN), separator(), resource(1, "GPU", GREEN),
+                separator(), resource(2, "RAM", CYAN)], height=2, padding=1),
+        Window(height=1),
         VSplit([box(Window(Rows(git))), box(Window(Rows(service_rows)))],
-               height=lambda: 7 if companion.geometry()[1] >= 13 else 6, padding=1),
-        log_box,
-    ], width=lambda: companion.geometry()[0], style="bg:#08090b #d0d0d0")
+               height=lambda: 7 if companion.geometry()[1] >= 13 else 6, padding=2),
+        Window(height=1),
+        Window(FormattedTextControl(FormattedText([(CYAN, "lain.log")])), height=1),
+        rule(), Window(LogRows(companion)),
+    ])
+    return VSplit([Window(width=2), content, Window(width=2)],
+                  width=lambda: companion.geometry()[0] + 4, style="bg:#08090b #d0d0d0")

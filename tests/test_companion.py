@@ -18,7 +18,7 @@ from agent.cli.app import CliApplication
 from agent.companion import STATES
 from agent.companion.animation import ASSETS, frames
 from agent.companion.controller import Companion
-from agent.companion.monitor import services
+from agent.companion.monitor import Service, services
 from agent.companion.worker import create_observer
 from agent.execution.process import _run_process
 from agent.runtime.contracts import RunEvent
@@ -35,7 +35,8 @@ def test_resizing_preserves_draft_and_clips_both_columns():
             app.buffer.text = "输入 very long " * 28
             app.state.add_system("tool output " * 500)
             app.companion.log("独立滚动")
-            for columns, rows in [(180, 48), (107, 26), (106, 26), (80, 24), (180, 48)]:
+            for columns, rows, count in [(180, 48, 0), (107, 26, 1), (106, 26, 1), (80, 24, 0), (180, 48, 2)]:
+                app.companion.services = tuple(Service(300 + i, "", 300 + i, "job", False) for i in range(count))
                 app.application.output.get_size = lambda: Size(rows=rows, columns=columns)
                 paint(app)
                 screen = app.application.renderer._last_screen
@@ -50,6 +51,19 @@ def test_resizing_preserves_draft_and_clips_both_columns():
                                   for y in range(rows))
                 for label in ("Companion Agent", "CPU", "GPU", "RAM", "git", "Status:", "services", "lain.log"):
                     assert label in right
+                panel = right.splitlines()[2:]
+                assert all(row.startswith("  ") and row.endswith("  ") for row in panel)
+                assert panel[0].strip() == "Companion Agent [ Lain Iwakura ]"
+                assert sum(row.count("┌") for row in panel) == 2
+                top = next(row for row in panel if "┌" in row)
+                bottom = next(row for row in panel if "└" in row)
+                assert "┐  ┌" in top and bottom == top.translate(str.maketrans("┌┐", "└┘"))
+                assert any(row.strip() == "IDLE" for row in panel)
+                resources = next(row for row in panel if "CPU" in row)
+                assert resources.count(" │ ") == 2
+                assert (f"{count} running" if count else "no │") in right
+                for service in app.companion.services:
+                    assert f"PID {service.pid}" in right
                 assert "tool output" not in right
         runner.close()
     asyncio.run(run())

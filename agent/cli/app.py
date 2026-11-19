@@ -203,7 +203,7 @@ class CliApplication:
 
         self.companion = Companion(
             workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
-            session=lambda: self.runner.thread_id, geometry=self._companion_geometry,
+            session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
             invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
         )
 
@@ -1105,6 +1105,10 @@ class CliApplication:
             return 0, 0
         size = self.application.output.get_size()
         return geometry(size.columns, size.rows)
+
+    def _companion_viewport(self) -> tuple[int, int]:
+        width, height = self._companion_geometry()
+        return max(0, width - 4), height
 
     def _width(self) -> int:
         try:
