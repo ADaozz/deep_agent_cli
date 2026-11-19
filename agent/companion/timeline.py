@@ -2,10 +2,13 @@
 
 from collections import Counter, deque
 from dataclasses import asdict, dataclass
+from math import sqrt
 import json
 import sqlite3
 from time import time
 from uuid import uuid4
+
+from agent.companion.diagnosis import interpret_turn
 
 
 @dataclass
@@ -49,6 +52,10 @@ def category(text, exit_code):
     return "exit_code" if exit_code is not None else "tool_error"
 
 
+# A session-wide population, including calls from tools hidden in the panel.
+SESSION_RELIABILITY = ("", "", "*")
+
+
 class Series:
     def __init__(self, size):
         self.recent = deque(maxlen=size)
@@ -56,6 +63,7 @@ class Series:
         self.window_failed = 0
         self.points = deque(maxlen=180)
         self.streak = 0
+        self.success_streak = 0
         self.last_error = ""
         self.last_failed = None
 
@@ -78,6 +86,7 @@ class Series:
             if failed
             else 0
         )
+        self.success_streak = 0 if failed else self.success_streak + 1
         self.last_error = obs.error_category
         self.last_failed = obs if failed else None
 
@@ -89,6 +98,21 @@ class Series:
             n=len(self.recent),
             cumulative_pct=100 * self.counts["failed"] / known if known else None,
         )
+
+    def baseline(self):
+        n = self.counts["success"] + self.counts["failed"] - len(self.recent)
+        return (
+            100 * (self.counts["failed"] - self.window_failed) / n if n else None
+        ), n
+
+    def distributed_shift(self):
+        baseline, old_n = self.baseline()
+        n = len(self.recent)
+        if old_n < 40 or n < 40 or self.window_failed < 4 or self.rate - baseline < 5:
+            return False
+        pooled = self.counts["failed"] / (n + old_n)
+        se = 100 * sqrt(pooled * (1 - pooled) * (1 / n + 1 / old_n))
+        return self.rate - baseline >= 2 * se
 
     def elevated(self):
         old_n = self.counts["success"] + self.counts["failed"] - len(self.recent)
@@ -107,6 +131,7 @@ class Timeline:
         self.retries = deque(maxlen=32)
         self.series = {}
         self.models = {}
+        self.overall = Series(200)
         self.incidents = {}
         self.summaries = deque(maxlen=8)
         self.failures = deque(maxlen=32)
@@ -145,6 +170,7 @@ class Timeline:
             del self.interrupted[identity]
             series.counts["unknown"] -= 1
             aggregate.counts["unknown"] -= 1
+            self.overall.counts["unknown"] -= 1
         if obs.retry_of:
             self.retries.append(
                 dict(
@@ -158,6 +184,7 @@ class Timeline:
         self.plot_version += 1
         series.add(obs)
         aggregate.add(obs)
+        self.overall.add(obs)
         if obs.outcome == "failed":
             self.failures.append(asdict(obs))
         if replay:
@@ -173,6 +200,11 @@ class Timeline:
             key=obs.run_id + "/" + obs.tool_call_id,
             stamp=obs.finished_at,
             turn=obs.turn_id,
+        )
+        if obs.outcome not in ("success", "failed"):
+            return
+        self.detect(
+            SESSION_RELIABILITY, self.overall.distributed_shift(), obs, self.overall
         )
         self.detect(key, series.streak >= 3 or series.elevated(), obs, series)
         self.detect((*group, "*"), aggregate.elevated(), obs, aggregate)
@@ -192,16 +224,33 @@ class Timeline:
                 opened=stamp,
                 turn=obs.turn_id,
                 cooldown_until=stamp + 120,
+                scope="session"
+                if key == SESSION_RELIABILITY
+                else "model"
+                if key[-1] == "*"
+                else "tool",
+                baseline_pct=series.baseline()[0],
                 category=obs.error_category,
                 **series.statistics(),
             )
             self.queue.append((key, data["id"], data["version"]))
-        elif not elevated and previous and previous["state"] == "open":
+        elif (
+            not elevated
+            and previous
+            and previous["state"] == "open"
+            and series.success_streak >= 5
+            and (
+                previous.get("baseline_pct") is None
+                or series.rate <= previous["baseline_pct"] + 5
+            )
+        ):
             data = dict(
                 previous,
                 state="resolved",
                 version=previous["version"] + 1,
                 resolved=stamp,
+                recovery_successes=series.success_streak,
+                recovery_pct=series.rate,
                 resolved_turn=obs.turn_id,
             )
         else:
@@ -219,6 +268,7 @@ class Timeline:
                     key = (obs.run_id, obs.tool_call_id)
                     if key not in self.finished and key not in self.interrupted:
                         self.interrupted[key] = obs
+                        self.overall.counts["unknown"] += 1
                         group = (obs.model_id, obs.reasoning_effort)
                         self.series.setdefault(
                             (*group, obs.tool_name), Series(self.window)
@@ -260,6 +310,7 @@ class Timeline:
                     for i in self.incidents.values()
                     if data["turn"] in (i["turn"], i.get("resolved_turn"))
                 ]
+                data["findings"] = interpret_turn(data, self.failures, self.samples)
                 self.summaries.append(data)
                 starting_rates = {
                     key: series.rate for key, series in self.series.items()

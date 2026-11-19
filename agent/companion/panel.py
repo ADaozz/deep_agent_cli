@@ -123,7 +123,10 @@ class ChatRows(Rows):
                 user = speaker == "You"
                 size = max(get_cwidth(line) for line in text_rows) + 2
                 indent = " " * max(0, width - size) if user else ""
-                label = [(MUTED, f"{speaker} · {stamp[:5]}")]
+                name = {"You": "你", "Lain": "玲音", "Status": "提示"}.get(
+                    speaker, speaker
+                )
+                label = [(MUTED, f"{name} · {stamp[:5]}")]
                 rows = [aligned([], label, width) if user else label]
                 style = f"bg:{USER_BUBBLE if user else LAIN_BUBBLE} {TEXT}"
                 for line in text_rows:
@@ -206,8 +209,8 @@ def build_panel(companion, git_summary, chart, editor):
     )
 
     def chat_header(w, h):
-        hint = "thinking…" if companion.question else "F6 · ask Lain"
-        return [aligned([(ACCENT, "Chat")], [(MUTED, hint)], w)]
+        hint = "在看…" if companion.question else "F6 · 提问"
+        return [aligned([(ACCENT, "对话")], [(MUTED, hint)], w)]
 
     title = FormattedText([(ACCENT, "Companion Agent"), (TEXT, " [ Lain Iwakura ]")])
     content = HSplit(

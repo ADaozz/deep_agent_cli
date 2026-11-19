@@ -45,7 +45,22 @@ jobs:
       - name: Run automatic regression
         env:
           REQUIRE_BWRAP_TEST: "1"
-        run: python -m pytest -q --tb=short -o faulthandler_timeout=30
+        run: python -m pytest -q --tb=short -o faulthandler_timeout=30 --junitxml="$RUNNER_TEMP/pytest.xml"
+      - name: Identify regression failures
+        if: failure()
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+          report = Path(os.environ["RUNNER_TEMP"]) / "pytest.xml"
+          if report.exists():
+              for case in ElementTree.parse(report).iter("testcase"):
+                  for issue in list(case):
+                      if issue.tag in {"failure", "error"}:
+                          detail = issue.get("message", "")[:1000].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                          print(f"::error::{case.get('classname')}.{case.get('name')} — {detail}")
+          PYTHON
       - name: Build distributions
         run: python -m build
       - name: Check distribution metadata

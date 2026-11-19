@@ -200,9 +200,9 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 
 ### Lain Companion
 
-终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / ROM、Git、Services、工具失败率曲线和聊天。ROM 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，Services 的 `ns:` 标记沙箱内 PID。
+终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / ROM、Git、Services、按失败率从左到右降序排列的工具柱状图和聊天。ROM 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，Services 的 `ns:` 标记沙箱内 PID。
 
-用 F6 进入聊天，Enter 发送，Esc 返回主输入；也可以输入 `/lain <问题>`。F7 翻看更多工具曲线。日常采集、异常检测和每轮复盘在本地完成。异常或主动提问才会调用独立的 `deepseek/deepseek-flash`。模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，其次读取配置目录中的 `companion.key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
+用 F6 进入聊天，Enter 发送，Esc 返回主输入；也可以输入 `/lain <问题>`。F7 翻看后续排名，`/lain stats` 查看上轮工具明细。低于 15% 的工具依然计入总体异常检测。玲音用简短中文解释异常与复盘发现。日常采集、异常检测和每轮复盘在本地完成。异常或主动提问才会调用独立的 `deepseek/deepseek-flash`。模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，其次读取配置目录中的 `companion.key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
 
 ### `/status details` 性能统计口径
 

@@ -52,7 +52,7 @@ def test_resizing_preserves_draft_and_clips_both_columns():
                 assert all(screen.data_buffer[y][width].char == "│" for y in range(2, rows))
                 right = "\n".join("".join(screen.data_buffer[y][x].char for x in range(width+1, columns))
                                   for y in range(rows))
-                for label in ("Lain Iwakura", "CPU", "GPU", "RAM", "ROM", "Status:", "services", "Chat", "F6", "No elevated"):
+                for label in ("Lain Iwakura", "CPU", "GPU", "RAM", "ROM", "Status:", "services", "F6", "No elevated"):
                     assert label in right
                 panel = right.splitlines()[2:]
                 assert all(row.startswith("  ") and row.endswith("  ") for row in panel)
@@ -284,7 +284,7 @@ r = json.loads(input())
 q = r['snapshot']
 assert q['question'] == 'why?' and q['recent_errors'] == [['read', 'missing widget']]
 assert 'question' in q
-print(json.dumps(dict(session=r['session'], seq=r['seq'], token=r['token'], message='answer', status='ok')), flush=True)
+print(json.dumps(dict(session=r['session'], seq=r['seq'], token=r['token'], message='连续读失败了。', status='ok')), flush=True)
 """
         async def launch(*args):
             return await asyncio.create_subprocess_exec(sys.executable, "-c", code, stdin=asyncio.subprocess.PIPE,
@@ -295,7 +295,7 @@ print(json.dumps(dict(session=r['session'], seq=r['seq'], token=r['token'], mess
         c.ask("why?")
         await asyncio.wait_for(c.worker_session(), 5)
         assert any((role, msg) == ("You", "why?") for _, role, msg in c.logs)
-        assert c.logs[-1][1:] == ("Lain", "answer")
+        assert c.logs[-1][1:] == ("Lain", "连续读失败了。")
         session[0] = "two"
         c.sync_session()
         assert not (c.logs or c.errors or c.question)

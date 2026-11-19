@@ -559,7 +559,7 @@ class CliApplication:
         @companion_keys.add("enter", filter=focused & available)
         def send_lain(event):
             result = self.companion.ask(self.lain_buffer.text)
-            if result == "Question sent to Lain.":
+            if result == "已发给玲音。":
                 self.lain_buffer.reset()
             else:
                 self.set_status(result)

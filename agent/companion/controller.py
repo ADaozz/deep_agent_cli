@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from agent.companion import STATES
 from agent.companion.timeline import (
+    SESSION_RELIABILITY,
     Timeline,
     ToolObservation,
     category,
@@ -25,6 +26,7 @@ from agent.companion.timeline import (
 )
 from agent.sessions.summary import redact_summary_input
 from agent.companion.repository import Repository
+from agent.companion.diagnosis import interpret_turn, reply_text
 from agent.companion.monitor import Resources, services
 
 
@@ -137,17 +139,17 @@ class Companion:
     def ask(self, text):
         self.sync_session()
         if self.question:
-            return "Lain is answering your previous question."
+            return "上一问还在看。"
         if self.connection == "OFFLINE" and not self.worker_ready:
-            return "Lain is offline. Check the Companion API key and connection."
+            return "玲音离线。请检查 Companion 密钥和连接。"
         text = " ".join(text.split())
         if not text or len(text) > 800:
-            return "Use /lain <question> (up to 800 characters)."
+            return "请输入问题，最多 800 字。"
         self.question = text
         self.anchor = None
         self.log(text, speaker="You")
         self.changed.set()
-        return "Question sent to Lain."
+        return "已发给玲音。"
 
     def log(self, message, speaker="Lain"):
         self.log_sequence += 1
@@ -262,6 +264,9 @@ class Companion:
                 for i in self.timeline.incidents.values()
                 if self.turn in (i["turn"], i.get("resolved_turn"))
             ],
+        )
+        summary["findings"] = interpret_turn(
+            summary, self.timeline.failures, self.timeline.samples
         )
         self.timeline.record("turn", summary, key=self.turn, stamp=wall, turn=self.turn)
         self.timeline.summaries.append(summary)
@@ -529,11 +534,9 @@ class Companion:
                 old = set(self.services)
                 for row in current:
                     if row not in old:
-                        self.log(
-                            f"Service started: {row.name} (PID {row.pid})", "Status"
-                        )
+                        self.log(f"服务已启动：{row.name}（PID {row.pid}）", "Status")
                 for row in old.difference(current):
-                    self.log(f"Service stopped: {row.name} (PID {row.pid})", "Status")
+                    self.log(f"服务已停止：{row.name}（PID {row.pid}）", "Status")
                 self.services = current
                 self.timeline.sample(
                     "services",
@@ -590,15 +593,31 @@ class Companion:
                 for (m, e, t), series in state.series.items()
                 if (m, e) == self.profile()
             ]
-            return sorted(
-                rows, key=lambda r: r["counts"].get("failed", 0), reverse=True
-            )[:48]
+            return dict(
+                overall=state.overall.statistics(),
+                current_profile=self.profile(),
+                tools=sorted(
+                    rows, key=lambda r: r["counts"].get("failed", 0), reverse=True
+                )[:48],
+            )
         if kind == "failures":
             return list(state.failures)[-8:]
         if kind == "retries":
             return list(state.retries)[-8:]
         if kind == "turns":
-            return list(state.summaries)[-3:]
+            return [
+                dict(
+                    turn=s["turn"],
+                    findings=(
+                        s.get("findings")
+                        or interpret_turn(s, state.failures, state.samples)
+                    )[:8],
+                    prior_analyses=[
+                        a["message"] for a in s.get("analyses", []) if a.get("message")
+                    ][-3:],
+                )
+                for s in list(state.summaries)[-3:]
+            ]
         return []
 
     async def host_query(self, kind, args):
@@ -631,8 +650,8 @@ class Companion:
                 if await self.worker_session() == "no key":
                     return
             except (OSError, ValueError, TimeoutError, sqlite3.Error):
-                self.log("Companion connection interrupted.", "Status")
-        self.log("Companion offline; local monitoring continues.", "Status")
+                self.log("玲音的连接中断了。", "Status")
+        self.log("玲音离线，本地监测继续。", "Status")
 
     async def worker_session(self):
         process = None
@@ -641,7 +660,7 @@ class Companion:
             process = await asyncio.shield(spawn)
             hello = json.loads(await asyncio.wait_for(process.stdout.readline(), 30))
             if hello.get("status") == "no key":
-                self.log("Chat offline · Companion API key unavailable.", "Status")
+                self.log("未配置 Companion 密钥，本地监测继续。", "Status")
                 self.question = None
                 return "no key"
             if hello.get("status") != "ready":
@@ -670,6 +689,7 @@ class Companion:
                         snapshot_version=state.version,
                         profile=self.profile(),
                         recent_errors=list(self.errors),
+                        latest_review=self.session_evidence("turns")[-1:],
                         conversation=[(r, m[:400]) for _, r, m in list(self.logs)[-5:]],
                     )
                 elif state.queue:
@@ -701,7 +721,10 @@ class Companion:
                         recent_failures=[
                             f
                             for f in state.failures
-                            if (f["model_id"], f["reasoning_effort"]) == key[:2]
+                            if (
+                                key == SESSION_RELIABILITY
+                                or (f["model_id"], f["reasoning_effort"]) == key[:2]
+                            )
                             and key[2] in ("*", f["tool_name"])
                         ][-5:],
                     )
@@ -761,9 +784,9 @@ class Companion:
                     continue
                 if question:
                     self.question = None
-                    self.log(reply.get("message") or "暂时无法回答，请稍后再试。")
+                    self.log(reply_text(reply.get("message")))
                 else:
-                    message = clean(reply.get("message", ""))
+                    message = reply_text(reply.get("message"), proactive=True)
                     analysis = dict(
                         incident=incident_id,
                         version=version,
@@ -799,7 +822,7 @@ class Companion:
                         self.log(message)
         finally:
             if self.question:
-                self.log("Chat connection unavailable.", "Status")
+                self.log("暂时无法连接玲音。", "Status")
             self.worker_ready = False
             self.question = None
             self.connection = "OFFLINE"

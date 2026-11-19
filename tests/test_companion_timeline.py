@@ -98,9 +98,9 @@ def test_chart_filter_window_and_incident_cooldown(tmp_path):
     for i in range(4):
         add(i, True, "other" + str(i))
     chart.draw(38, 5)
-    assert chart.pages == 3
+    assert chart.pages == 2
     chart.scroll(1)
-    assert "2/3" in str(chart.draw(38, 5))
+    assert "2/2" in str(chart.draw(38, 5))
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):
@@ -227,3 +227,144 @@ def test_first_live_window_on_resume_uses_persisted_baseline(tmp_path):
         assert resumed.timeline.summaries[-1]["tools"][0]["start_pct"] == 0
 
     asyncio.run(run())
+
+
+def test_distributed_decline_with_no_visible_bars_survives_resume(tmp_path):
+    from agent.companion.chart import FailureChart
+    from agent.companion.timeline import (
+        SESSION_RELIABILITY,
+        ToolObservation,
+        restore_session,
+        transact,
+    )
+    from time import time
+
+    c = companion(tmp_path, lambda: "s")
+    stamp = time() - 1000
+    call = 0
+    # Interleave tools, spacing failures across the population. Each tool's
+    # latest 20 calls contain two failures; every call contributes to overall.
+    for step in range(40):
+        for tool in range(20):
+            failed = step >= 20 and (step + tool) % 10 == 0
+            call += 1
+            obs = ToolObservation(
+                "s",
+                "turn",
+                "run",
+                "main",
+                "fixed model",
+                "default",
+                f"tool{tool}",
+                str(call),
+                stamp + call,
+                stamp + call,
+                1,
+                "failed" if failed else "success",
+                "tool_error" if failed else "",
+            )
+            c.timeline.completed(obs)
+            c.timeline.record("tool", vars(obs), key=str(call), stamp=obs.finished_at)
+    assert all(v.rate == 10 for v in c.timeline.series.values())
+    assert "No elevated failure rates" in str(FailureChart(c).draw(45, 6))
+    assert c.timeline.overall.rate == 10
+    incident = c.timeline.incidents[SESSION_RELIABILITY]
+    assert incident["state"] == "open" and incident["scope"] == "session"
+    assert sum(key == SESSION_RELIABILITY for key, _, _ in c.timeline.queue) == 1
+    transact(c.database, c.timeline.pending)
+    restored = restore_session(c.database, "s", 20)
+    assert restored.overall.statistics() == c.timeline.overall.statistics()
+    assert restored.incidents[SESSION_RELIABILITY]["id"] == incident["id"]
+
+
+def test_bars_sorted_across_pages_and_recover_only_after_clean_results(tmp_path):
+    from agent.companion.chart import FailureChart
+    from agent.companion.timeline import ToolObservation
+
+    c = companion(tmp_path, lambda: "s")
+
+    def add(tool, i, failed):
+        obs = ToolObservation(
+            "s",
+            "t",
+            "r",
+            "main",
+            "fixed model",
+            "default",
+            tool,
+            tool + str(i),
+            i,
+            i,
+            1,
+            "failed" if failed else "success",
+            "timeout" if failed else "",
+        )
+        c.timeline.completed(obs)
+
+    for tool, count in (("edit", 3), ("execute", 7), ("read", 2), ("grep", 1)):
+        for i in range(10):
+            add(tool, i, i < count)
+    chart = FailureChart(c)
+    rows = chart.draw(25, 6)
+    assert [s.strip() for _, s in rows[-2]] == ["execute", "edit"]
+    assert [s.strip() for _, s in rows[-1]] == ["70% n=10", "30% n=10"]
+    chart.scroll(1)
+    assert [s.strip() for _, s in chart.draw(25, 6)[-2]] == ["read"]
+    for i in range(3):
+        add("probe", i, True)
+    key = ("fixed model", "default", "probe")
+    add("probe", 3, False)
+    assert c.timeline.incidents[key]["state"] == "open"
+    for i in range(4, 8):
+        add("probe", i, False)
+    assert c.timeline.incidents[key]["state"] == "resolved"
+
+
+def test_turn_review_filters_evidence_and_voice():
+    from agent.companion.diagnosis import interpret_turn, reply_text
+
+    summary = dict(
+        turn="t",
+        tools=[],
+        git=[],
+        incidents=[],
+        previous_turn_ms=[1000, 1100, 1200],
+        duration_ms=6000,
+    )
+    summary["tools"] = [
+        dict(
+            tool="execute",
+            duration_ms=4200,
+            outcomes={"success": 2, "failed": 2},
+            recent_pct=40,
+            start_pct=10,
+        )
+    ]
+    failures = [
+        dict(
+            turn_id="t",
+            tool_name="execute",
+            tool_call_id="a",
+            retry_of=None,
+            error_category="timeout",
+            finished_at=100,
+        ),
+        dict(
+            turn_id="t",
+            tool_name="execute",
+            tool_call_id="b",
+            retry_of="a",
+            error_category="timeout",
+            finished_at=103,
+        ),
+    ]
+    findings = " ".join(
+        interpret_turn(
+            summary, failures, [(101, "resources", {"percent": [10, None, 96, 20]})]
+        )
+    )
+    assert all(term in findings for term in ("上升", "疑似重试", "RAM", "更慢"))
+    assert "4200" not in findings and "Git" not in findings
+    assert reply_text("Uncertain.", proactive=True) == ""
+    assert "可靠" in reply_text("No evidence.")
+    assert reply_text("先看依赖声明。") == "先看依赖声明。"
