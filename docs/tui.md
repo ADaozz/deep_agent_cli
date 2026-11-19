@@ -200,12 +200,9 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 
 ### Lain Companion
 
-终端至少 107 列、26 行时，右栏显示 Lain 的实时 GIF 字符动画、系统资源、Git、后台服务和滚动日志。Git 每 5 秒刷新，计数沿用已跟踪路径的改动。Services 显示本次 CLI 启动的监听进程及启动命令结束后留下的后台进程；`ns:` 标记沙箱内部 PID。日志上滚暂停跟随，滚回末尾恢复。
+终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / ROM、Git、Services、工具失败率曲线和聊天。ROM 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，Services 的 `ns:` 标记沙箱内 PID。
 
-Lain 以独立子进程运行，只观察环境和表达。模型固定为 `deepseek/deepseek-flash`，凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，亦可读取受保护的 CLI 配置目录中的 `companion.key`（默认 `~/.deep-agent/companion.key`，权限 0600）。没有密钥或模型不可用时，本地动画与监控仍可使用。
-
-观察证据按工作区保存在配置目录的 `companion/` 下，比较最近七天与之前七天的工具使用记录。发送给观察模型的数据包含模型和工具名称、计数、调用批次、服务名称及上一条观察；命令参数、工具输出和对话正文留在主会话中。
-
+用 F6 进入聊天，Enter 发送，Esc 返回主输入；也可以输入 `/lain <问题>`。F7 翻看更多工具曲线。日常采集、异常检测和每轮复盘在本地完成。异常或主动提问才会调用独立的 `deepseek/deepseek-flash`。模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，其次读取配置目录中的 `companion.key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
 
 ### `/status details` 性能统计口径
 

@@ -200,3 +200,30 @@ def test_focus_returns_on_resize_and_preserves_both_drafts():
         runner.close()
 
     asyncio.run(run())
+
+
+def test_first_live_window_on_resume_uses_persisted_baseline(tmp_path):
+    async def run():
+        c = companion(tmp_path, lambda: "s")
+        c.event(RunEvent("run_started"), "m")
+        for i in range(20):
+            c.event(RunEvent("tool_started", name="read", tool_call_id=str(i)), "m")
+            c.event(RunEvent("tool_completed", tool_call_id=str(i)), "m")
+        await c.finish()
+        resumed = companion(tmp_path, lambda: "s")
+        resumed.event(RunEvent("run_started"), "m")
+        resumed.event(
+            RunEvent("tool_started", name="read", tool_call_id="failure"), "m"
+        )
+        resumed.event(
+            RunEvent("tool_completed", tool_call_id="failure", is_error=True), "m"
+        )
+        await resumed.finish()
+        db = sqlite3.connect(c.database)
+        row = db.execute(
+            "select payload from timeline where kind='window' and id like '%/failure'"
+        ).fetchone()
+        assert json.loads(row[0])["recent_pct"] == 5
+        assert resumed.timeline.summaries[-1]["tools"][0]["start_pct"] == 0
+
+    asyncio.run(run())

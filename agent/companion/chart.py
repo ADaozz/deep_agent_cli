@@ -14,6 +14,8 @@ class FailureChart:
         self.companion = companion
         self.page = 0
         self.pages = 1
+        self.cache_key = None
+        self.rows = []
 
     def scroll(self, n):
         self.page = (self.page + n) % self.pages
@@ -21,6 +23,14 @@ class FailureChart:
 
     def draw(self, width, height):
         group = self.companion.profile()
+        state = self.companion.timeline
+        key = (state, state.plot_version, group, width, height, self.page)
+        if self.cache_key != key:
+            self.rows = self.render(group, width, height)
+            self.cache_key = key
+        return self.rows
+
+    def render(self, group, width, height):
         eligible = sorted(
             (key[2], s)
             for key, s in self.companion.timeline.series.items()
@@ -50,8 +60,8 @@ class FailureChart:
         lines = max(0, height - len(rows) - int(show_axis))
         if not lines or width <= 0:
             return rows[:height]
-        start = min(s.points[0][0] for _, s in eligible)
-        end = max(s.points[-1][0] for _, s in eligible)
+        stamps = [t for _, series in eligible for t, _ in series.points]
+        start, end = min(stamps), max(stamps)
         grid = [[(0, 0) for _ in range(width)] for _ in range(lines)]
         for j, (_, s) in enumerate(visible):
             previous = None

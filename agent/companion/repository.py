@@ -172,11 +172,14 @@ class Repository:
                             continue
                         if not entry.is_file(follow_symlinks=False):
                             continue
+                        size = entry.stat(follow_symlinks=False).st_size
+                        if size > min(budget, MAX_FILE):
+                            continue
+                        budget -= size
                         try:
                             lines = self.lines(path)
                         except (OSError, ValueError):
                             continue
-                        budget -= entry.stat(follow_symlinks=False).st_size
                         if paths_only:
                             if term in path.casefold():
                                 hits.append(path)

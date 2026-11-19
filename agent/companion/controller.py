@@ -20,10 +20,10 @@ from agent.companion.timeline import (
     ToolObservation,
     category,
     restore_session,
+    timeline_window,
     transact,
 )
 from agent.sessions.summary import redact_summary_input
-from agent.companion.timeline import timeline_window
 from agent.companion.repository import Repository
 from agent.companion.monitor import Resources, services
 
@@ -343,6 +343,7 @@ class Companion:
             if (
                 previous
                 and previous.run_id == self.run
+                and previous.agent_id == agent
                 and 0 <= wall - previous.finished_at <= 60
             ):
                 obs.retry_of = previous.tool_call_id
@@ -474,13 +475,7 @@ class Companion:
                 )
                 if state is not self.timeline:
                     return
-                # The session may receive events while the historical batch loads.
-                for _, kind, _, stamp, _, data in state.pending:
-                    if kind == "tool" and data["finished_at"] is None:
-                        continue
-                    combined.restore([(kind, stamp, data)])
-                combined.pending = state.pending
-                combined.queue.extend(state.queue)
+                combined.merge_live_events(state.pending)
                 self.timeline = state = combined
                 self.loaded = True
                 self.invalidate()
@@ -590,11 +585,14 @@ class Companion:
     def session_evidence(self, kind):
         state = self.timeline
         if kind == "statistics":
-            return [
+            rows = [
                 dict(model=m, effort=e, tool=t, **series.statistics())
                 for (m, e, t), series in state.series.items()
                 if (m, e) == self.profile()
-            ][:48]
+            ]
+            return sorted(
+                rows, key=lambda r: r["counts"].get("failed", 0), reverse=True
+            )[:48]
         if kind == "failures":
             return list(state.failures)[-8:]
         if kind == "retries":

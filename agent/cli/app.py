@@ -1321,14 +1321,14 @@ class CliApplication:
             self._apply_run_event(event, epoch, context)
 
     def _apply_run_event(self, event: RunEvent, epoch: int | None, context=None) -> None:
+        if event.type == "companion_tool":
+            if context and event.result["scope"][0] == self.runner.thread_id:
+                self.companion.child_event(event.result, context[-2])
+            return
         # Events without an epoch come from the UI thread (steering, control).
         # Summary metadata carries its own thread_id and survives a later UI run.
         if (epoch is not None and epoch != self.run_view.epoch
                 and event.type != "session_summary_requested"):
-            return
-        if event.type == "companion_tool":
-            if context and event.result["scope"][0] == self.runner.thread_id:
-                self.companion.child_event(event.result, context[-2])
             return
         self.run_events._apply_event(event)
         if context and context[0] == self.runner.thread_id:

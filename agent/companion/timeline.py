@@ -112,6 +112,7 @@ class Timeline:
         self.failures = deque(maxlen=32)
         self.samples = deque(maxlen=60)
         self.version = 0
+        self.plot_version = 0
         self.pending = []
         self.queue = deque()
 
@@ -154,6 +155,7 @@ class Timeline:
                     outcome=obs.outcome,
                 )
             )
+        self.plot_version += 1
         series.add(obs)
         aggregate.add(obs)
         if obs.outcome == "failed":
@@ -232,6 +234,40 @@ class Timeline:
                 self.summaries.append(data)
             elif kind in ("resources", "git", "services", "profile"):
                 self.samples.append((stamp, kind, data))
+
+    def merge_live_events(self, events):
+        """Replay the small arrival batch against restored history before its first commit."""
+        starting_rates = {key: series.rate for key, series in self.series.items()}
+        for row in events:
+            _, kind, _, stamp, _, data = row
+            if kind in ("window", "incident"):
+                # Recomputed below with the restored rolling window and cooldown.
+                continue
+            if kind == "tool" and data["finished_at"] is not None:
+                self.completed(ToolObservation(**data))
+            elif kind == "turn":
+                for tool in data["tools"]:
+                    key = (tool["model"], tool["effort"], tool["tool"])
+                    tool["start_pct"] = starting_rates.get(key)
+                    tool["recent_pct"] = self.series[key].rate
+                data["previous_turn_ms"] = [
+                    r["duration_ms"]
+                    for r in self.summaries
+                    if r["duration_ms"] is not None
+                ][-3:]
+                data["incidents"] = [
+                    i.copy()
+                    for i in self.incidents.values()
+                    if data["turn"] in (i["turn"], i.get("resolved_turn"))
+                ]
+                self.summaries.append(data)
+                starting_rates = {
+                    key: series.rate for key, series in self.series.items()
+                }
+            elif kind != "tool":
+                self.restore([(kind, stamp, data)])
+            self.pending.append(row)
+            self.version += 1
 
     def sample(self, kind, data, turn):
         stamp = time()
