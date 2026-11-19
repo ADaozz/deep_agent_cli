@@ -118,10 +118,6 @@ def _changed_line_sort_key(line: _ChangedLine) -> tuple[int, int]:
 PreviewBuilder = Callable[[ToolBlock], ToolPreview]
 
 
-def _display_name(name: str) -> str:
-    return {"read_file": "read", "write_file": "write", "edit_file": "edit"}.get(name, name)
-
-
 def _operand(args: dict[str, Any]) -> str:
     """file_path/path label (with offset range), else preferred scalar args."""
     path = args.get("file_path") or args.get("path")
@@ -148,7 +144,7 @@ def _mutation_path(name: str, args: dict[str, Any]) -> str:
     if not path:
         return "file"
     label = str(PurePosixPath(str(path)))
-    if name == "write_file" and label.startswith("/"):
+    if name == "write" and label.startswith("/"):
         label = label.lstrip("/")
     return label
 
@@ -250,7 +246,7 @@ def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits 
 
 def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
     """Parse mutation arguments into the shared DiffPreview domain model."""
-    if name == "write_file":
+    if name == "write":
         content = args.get("content")
         if not isinstance(content, str):
             return None
@@ -270,7 +266,7 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
             lines=tuple(PreviewLine(line, "add") for line in content_lines),
             full_diff=raw,
         )
-    if name == "edit_file":
+    if name == "edit":
         old = args.get("old_string")
         new = args.get("new_string")
         if not isinstance(old, str) or not isinstance(new, str):
@@ -324,14 +320,14 @@ def normalize_file_mutation(block: ToolBlock, *, limits: UiDisplayLimits = DEFAU
     """Map a successful tool result to file semantics; never infer a missing write operation."""
     if block.status != "completed" or block.is_error:
         return None
-    if block.name == "edit_file":
+    if block.name == "edit":
         diff = build_diff_preview(block.name, block.arguments)
         return FileMutationPreview(
             path=diff.path if diff else _operand(block.arguments),
             operation="modify", diff=diff,
             compact_lines=_edit_display_lines(_changed_lines(diff.full_diff), limits=limits) if diff else (),
         )
-    if block.name == "write_file":
+    if block.name == "write":
         operation = block.artifact.get("operation") if isinstance(block.artifact, dict) else None
         if operation not in {"create", "overwrite"}:
             return None
@@ -352,7 +348,7 @@ def build_review_mutation(name: str, args: dict[str, Any]) -> FileMutationPrevie
     if diff is None:
         return None
     operation: FileMutationOperation = {
-        "edit_file": "modify", "write_file": "overwrite", "delete": "delete",
+        "edit": "modify", "write": "overwrite", "delete": "delete",
     }[name]
     return FileMutationPreview(path=diff.path, operation=operation, diff=diff)
 
@@ -467,7 +463,7 @@ def build_write_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_U
     mutation = normalize_file_mutation(block, limits=limits)
     if mutation is not None:
         return file_tool_preview(mutation)
-    diff = build_diff_preview("write_file", block.arguments)
+    diff = build_diff_preview("write", block.arguments)
     if diff is None:
         return ToolPreview(
             kind="write", verb="write", target=_operand(block.arguments),
@@ -484,7 +480,7 @@ def build_edit_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI
     mutation = normalize_file_mutation(block, limits=limits)
     if mutation is not None:
         return file_tool_preview(mutation)
-    diff = build_diff_preview("edit_file", block.arguments)
+    diff = build_diff_preview("edit", block.arguments)
     verb = "edit"
     if diff is None:
         return ToolPreview(
@@ -601,7 +597,7 @@ def build_human_input_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_generic_preview(block: ToolBlock) -> ToolPreview:
-    display = _display_name(block.name)
+    display = block.name
     target = _operand(block.arguments)
     return ToolPreview(
         kind=block.name, verb=display, target=target,
@@ -625,10 +621,10 @@ def build_task_preview(block: ToolBlock) -> ToolPreview:
 
 
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
-    "task": build_task_preview,
+    "start_task": build_task_preview,
     START_TOOL: build_task_preview,
     "ls": build_ls_preview,
-    "read_file": build_read_preview,
+    "read": build_read_preview,
     "grep": build_grep_preview,
     "glob": build_glob_preview,
 
@@ -643,11 +639,11 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 _TOOL_GROUPS: dict[str, PreviewGroup] = {
     "ls": "explore",
-    "read_file": "explore",
+    "read": "explore",
     "grep": "explore",
     "glob": "explore",
-    "write_file": "mutation",
-    "edit_file": "mutation",
+    "write": "mutation",
+    "edit": "mutation",
     "delete": "mutation",
     "execute": "command",
     "web_search": "web",
@@ -689,9 +685,9 @@ def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLi
 
 
 def _build_base_preview(block: ToolBlock, *, limits: UiDisplayLimits) -> ToolPreview:
-    if block.name == "write_file":
+    if block.name == "write":
         return build_write_preview(block, limits=limits)
-    if block.name == "edit_file":
+    if block.name == "edit":
         return build_edit_preview(block, limits=limits)
     builder = _PREVIEW_BUILDERS.get(block.name, build_generic_preview)
     return builder(block)
@@ -715,7 +711,7 @@ def build_failure_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT
 
 
 def build_tool_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> ToolPreview:
-    if block.name in {"task", START_TOOL}:
+    if block.name in {"start_task", START_TOOL}:
         return build_task_preview(block)
     if block.name == "execute":
         return build_execute_preview(block)

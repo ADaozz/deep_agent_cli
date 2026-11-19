@@ -105,7 +105,7 @@ tools:
     - request_human_input
 ```
 
-未写 `hidden` 时不隐藏任何工具。示例配置 [`config.example.yaml`](../agent/config.example.yaml) 里写了 `compact_conversation`，首次生成的配置会按该列表隐藏；已有配置不会被覆盖。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。内置系统提示词使用中文，字段名、工具名及枚举值保持英文；系统提示词不包含工具用法。工具说明与参数默认由上游工具定义原样提供，不做翻译；`ls` 和 `read_file` 的说明由本地中文版本替换，用来减少多余的调用轮次（见[架构说明](architecture.md)）。本地自定义工具可直接用中文编写说明。外部 MCP 服务的原始说明和用户、项目提供的内容不自动翻译。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
+未写 `hidden` 时不隐藏任何工具。示例配置 [`config.example.yaml`](../agent/config.example.yaml) 里写了 `compact_conversation`，首次生成的配置会按该列表隐藏；已有配置不会被覆盖。列表按工具名匹配，在 Agent 初始化时生效；自定义工具、文件工具及中间件提供的工具均会从模型请求中过滤。内置系统提示词使用中文，字段名、工具名及枚举值保持英文；系统提示词不包含工具用法。工具说明与参数默认由上游工具定义原样提供，不做翻译；`ls` 和 `read` 的说明由本地中文版本替换，用来减少多余的调用轮次（见[架构说明](architecture.md)）。本地自定义工具可直接用中文编写说明。外部 MCP 服务的原始说明和用户、项目提供的内容不自动翻译。用户和项目指令保持原样，配置后应自行避免要求调用已隐藏的工具。
 
 此设置只控制模型可见工具，不改变 ASK/ALLOW 审批规则，不提供 `/tool` 命令或运行时热切换。
 
@@ -293,12 +293,12 @@ web_search:
 
 ## 界面（`ui`）
 
-修改后重启 CLI 生效。内容折叠统一使用 `head_lines` 和 `tail_lines`，均为正整数，默认各 4 行。需要开头预览的命令正文、写入、差异和普通失败摘要使用 `head_lines`；思考和工具输出、命令失败输出使用 `tail_lines`。命令正文、思考、命令输出和普通工具的原始输出按终端折行后的显示行计数，标题和隐藏提示另计；其他内容按逻辑行计数。展开工具输出后不再受折叠行数限制。带 `_items` 的字段按条目计数。
+修改后重启 CLI 生效。内容折叠统一使用 `head_lines` 和 `tail_lines`，均为正整数，默认保留开头 4 行或末尾 3 行。需要开头预览的命令正文、写入、差异和普通失败摘要使用 `head_lines`；思考和工具输出、命令失败输出使用 `tail_lines`。命令正文、思考、命令输出和普通工具的原始输出按终端折行后的显示行计数，标题和隐藏提示另计；其他内容按逻辑行计数。展开工具输出后不再受折叠行数限制。带 `_items` 的字段按条目计数。
 
 ```yaml
 ui:
   head_lines: 4
-  tail_lines: 4
+  tail_lines: 3
 ```
 
 原来的 `thinking_tail_lines`、`execute_tail_lines`、`tool_tail_lines`、`expanded_tool_lines`、`edit_preview_changed_lines`、`write_preview_lines`、`failure_preview_lines`、`command_failure_tail_lines` 已移除。已有配置中请删除这些字段，改用上面的两个字段；程序不会覆盖已有配置文件。
@@ -307,11 +307,11 @@ ui:
 |---|---|---|
 | `timezone` | `Asia/Shanghai` | 每轮结束时间和系统提示词中当前日期使用的 IANA 时区 |
 | `head_lines` | `4` | 内容折叠时保留的开头行数 |
-| `tail_lines` | `4` | 内容折叠时保留的末尾行数 |
+| `tail_lines` | `3` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
 | `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
-| `editor_max_lines` | `10` | 输入框最大行数；实际还不超过终端高度的三分之一 |
+| `editor_max_lines` | `5` | 输入框最多显示 5 行，可配置更小值；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
 
 每次模型请求都会在系统提示词中动态附加当前用户日期（`yyyy-mm-dd`）和 `ui.timezone` 时区名称，主 Agent 和 SubAgent 均生效。日期按配置的时区计算，长会话跨天后会在下一次模型请求时更新，无需重建 Agent。时区配置修改后需重启 CLI。
@@ -414,7 +414,7 @@ bailian:
 
 ## SubAgent 委派
 
-默认启用 Deep Agents 原生同步 `task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
+默认启用 Deep Agents 原生同步 `start_task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
 只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
 或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
@@ -431,7 +431,7 @@ subagents:
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
   permission: allow
-  # 同时提供 start/check/cancel_background_task；false 时只保留同步 task。
+  # 同时提供 start/check/cancel_background_task；false 时只保留同步 start_task。
   background: true
 ```
 
@@ -445,18 +445,18 @@ subagents:
 例如，主 Agent 通过 `/model` 选择 `high` 时，`subagents.reasoning_effort: default` 仍使用子模型原生默认；只有显式配置 `subagents.reasoning_effort: high` 才会为子任务发送 `high`。这里的 `default` 是子任务配置值，不应加入模型能力列表 `reasoning_efforts`。修改配置后重启 CLI 生效，程序不会自动覆盖已有配置。
 直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
 此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
-当前原生 `task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
+当前原生 `start_task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
 当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills 和 AGENTS.md，
 不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
-`task` 等待任务实际完成后才返回。
+`start_task` 等待任务实际完成后才返回。
 
 ### 后台委派
 
-`subagents.background: true`（默认）时，主 Agent 另有三个工具，与同步 `task` 并存：
+`subagents.background: true`（默认）时，主 Agent 另有三个工具，与同步 `start_task` 并存：
 
 | 工具 | 作用 |
 |---|---|
@@ -464,7 +464,7 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 | `check_background_task(run_id=null)` | 不传参列出当前会话的后台任务；指定 ID 返回状态，已结束时带结果 |
 | `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
 
-后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `task` 共用 `max_concurrent`；
+后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用 `max_concurrent`；
 没有已验证的 `SANDBOXED` 后端时启动直接失败。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
 主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
@@ -473,7 +473,7 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 主 Agent 与后台子任务同时使用共享工作区，不检测文件冲突，应避免修改子任务正在处理的文件。
 
 `1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，Working 靠左，数量靠右，数量为零时隐藏；输入框内不显示子任务数量。
-每个 `task` 和后台任务在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
+每个 `start_task` 和后台任务在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
 
 右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限仍由 `max_concurrent` 控制。
 
@@ -498,12 +498,12 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 详细 stdout/stderr 需要时查看已有命令日志。tool_start 与 tool_finish 分别追加，
 取消或进程崩溃时仍能识别最后启动的工具，不伪造未收到的工具完成事件。
 每项存储事件仍最多约 24 KB，日志顺序追加并 flush；不引入新日志格式系统。
-主 Agent 收到的正常 task 最终结果保持完整，仅落盘的回答摘要受 1,000 字符限制。
+主 Agent 收到的正常 start_task 最终结果保持完整，仅落盘的回答摘要受 1,000 字符限制。
 日志只对已掌握的模型 API Key 和已配置的 Tavily API Key 做精确字符串替换。
 不按字段名或文本格式识别凭据，不扫描其他环境变量；未知的 `password=...`、`token=...`
 和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
 日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
 
-主 Agent 可按需调用 `read_subagent_log(run_id=null, offset=0, limit=100)` 查看当前会话的
+主 Agent 可按需调用 `read_task_log(run_id=null, offset=0, limit=100)` 查看当前会话的
 最近任务 ID；指定 ID 后分页读取事件。ID 不接受路径，查询限定父会话，单页最多 100 项、约 64 KB。
-常规 task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。
+常规 start_task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。

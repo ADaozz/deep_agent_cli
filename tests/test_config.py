@@ -33,7 +33,7 @@ def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert settings.sandbox.timeout_seconds is None
     assert settings.state_path is None
     assert settings.ui_timezone == "Asia/Shanghai"
-    assert settings.ui_display_limits.tail_lines == 4
+    assert settings.ui_display_limits.tail_lines == 3
     assert settings.ui_display_limits.head_lines == 4
 
 
@@ -873,14 +873,14 @@ def test_removed_ui_line_settings_request_head_tail_migration(name) -> None:
         Settings.from_mapping({"ui": {name: 4}})
 
 
-def test_template_and_code_share_four_line_defaults() -> None:
+def test_template_and_code_share_folding_defaults() -> None:
     import yaml
 
     template = yaml.safe_load((Path(__file__).parents[1] / "agent/config.example.yaml").read_text())
     configured = UiDisplayLimits.from_mapping(template["ui"])
     defaults = UiDisplayLimits()
     assert configured.head_lines == defaults.head_lines == 4
-    assert configured.tail_lines == defaults.tail_lines == 4
+    assert configured.tail_lines == defaults.tail_lines == 3
     assert {name for name in template["ui"] if name.endswith("_lines")} == {
         "head_lines", "tail_lines", "editor_max_lines", "completion_menu_lines",
     }

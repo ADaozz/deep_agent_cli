@@ -99,15 +99,15 @@ def test_runtime_logs_operations_without_model_trace_or_raw_tool_output(tmp_path
     raw_file, raw_patch, raw_stdout = 'PRIVATE_FILE_CONTENT', 'PRIVATE_PATCH_CONTENT', 'PRIVATE_STDOUT_CONTENT'
     thought = 'PRIVATE_REASONING_CONTENT'
     answer = 'Fixed stats_rules.py. ' + 'summary ' * 1000 + 'FINAL_ANSWER_TAIL'
-    def read_file(file_path: str):
+    def read(file_path: str):
         return raw_file * 1000
-    def edit_file(file_path: str, old_string: str, new_string: str):
+    def edit(file_path: str, old_string: str, new_string: str):
         return raw_patch * 1000
     def execute(command: str):
         emit_tool_output('execute-call', raw_stdout * 1000)
         return raw_stdout * 1000, {'exit_code': 0, 'agent_log_path': '/workspace/.deep-agent/logs/exec/execution.log'}
-    tools = [StructuredTool.from_function(read_file, description='Read a file'),
-             StructuredTool.from_function(edit_file, description='Edit a file'),
+    tools = [StructuredTool.from_function(read, description='Read a file'),
+             StructuredTool.from_function(edit, description='Edit a file'),
              StructuredTool.from_function(execute, description='Execute a command', response_format='content_and_artifact')]
     class Graph:
         def stream(self, input, config, **kwargs):
@@ -162,7 +162,7 @@ def test_callback_bounds_arguments_errors_and_keeps_parallel_tool_identity():
     records = []
     callback = LogCallback(lambda event, **payload: records.append({'event': event, **payload}))
     file_run, command_run = uuid4(), uuid4()
-    callback.on_tool_start({'name': 'write_file'}, json.dumps({'file_path': 'file.py', 'content': 'PRIVATE_FILE'}), run_id=file_run)
+    callback.on_tool_start({'name': 'write'}, json.dumps({'file_path': 'file.py', 'content': 'PRIVATE_FILE'}), run_id=file_run)
     callback.on_tool_start({'name': 'execute'}, '', inputs={'command': 'x' * 10000}, run_id=command_run)
     callback.on_tool_end(ToolMessage(content='PRIVATE_STDOUT', tool_call_id='command',
                                    artifact={'exit_code': 7}), run_id=command_run)
@@ -172,7 +172,7 @@ def test_callback_bounds_arguments_errors_and_keeps_parallel_tool_identity():
     assert len(records[1]['command']) <= 300
     assert records[2]['tool_name'] == 'execute' and records[2]['exit_code'] == 7
     assert records[2]['status'] == 'failed' and 'PRIVATE_STDOUT' not in json.dumps(records[2])
-    assert records[3]['tool_name'] == 'write_file' and records[3]['event'] == 'tool_error'
+    assert records[3]['tool_name'] == 'write' and records[3]['event'] == 'tool_error'
     assert len(records[3]['reason']) <= 240 and len(records[4]['reason']) <= 240
     assert records[4]['event'] == 'model_error' and callback.tool_count == 2
     assert 'PRIVATE_FILE' not in json.dumps(records)
@@ -189,7 +189,7 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
         def __init__(self, controller):
             self.controller = controller
         def stream(self, input, config, **kwargs):
-            config['callbacks'][0].on_tool_start({'name': 'read_file'}, '', inputs={'file_path': 'stats_rules.py'}, run_id='tool')
+            config['callbacks'][0].on_tool_start({'name': 'read'}, '', inputs={'file_path': 'stats_rules.py'}, run_id='tool')
             if cancelled:
                 self.controller.cancel()
             raise RuntimeError('operation failed ' * 1000)
@@ -199,10 +199,10 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
     store = SubAgentLogStore(tmp_path)
     manager = SubAgentManager(parent)
     runtime = SubAgentRuntime(manager, store, lambda controller: SimpleNamespace(graph=Graph(controller)), 'test-model')
-    runtime.invoke({'messages': [HumanMessage(content='task')]}, {'configurable': {'thread_id': 'parent'}})
+    runtime.invoke({'messages': [HumanMessage(content='start_task')]}, {'configurable': {'thread_id': 'parent'}})
     records = store.read('parent', store.read('parent')['runs'][0])['records']
     assert [r['event'] for r in records] == ['start', 'tool_start', 'error', 'finish']
-    assert records[1]['tool_name'] == 'read_file'
+    assert records[1]['tool_name'] == 'read'
     assert records[-1]['status'] == ('cancelled' if cancelled else 'failed')
     assert records[-1]['tool_count'] == 1 and len(records[-2]['reason']) <= 240
     assert manager.active_count == 0

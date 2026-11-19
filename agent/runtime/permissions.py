@@ -18,8 +18,8 @@ class PermissionMode(StrEnum):
 ASK_INTERRUPT_ON: dict[str, Any] = {
     "execute": {"allowed_decisions": ["approve", "reject"]},
     "web_search": {"allowed_decisions": ["approve", "reject"]},
-    "write_file": True,
-    "edit_file": True,
+    "write": True,
+    "edit": True,
     "delete": True,
 }
 

@@ -14,11 +14,11 @@ class UiDisplayLimits:
     """Content folding limits, loaded from the main configuration's ui section."""
 
     head_lines: int = 4
-    tail_lines: int = 4
+    tail_lines: int = 3
     explore_preview_items: int = 5
     explore_failure_items: int = 3
     create_preview_items: int = 5
-    editor_max_lines: int = 10
+    editor_max_lines: int = 5
     completion_menu_lines: int = 8
 
     def __post_init__(self) -> None:

@@ -378,7 +378,7 @@ def test_cancel_after_stop_persisted_before_cleanup_keeps_completed(api: str, ma
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("api", APIS)
 def test_cancel_after_approved_tool_keeps_single_tool_result(api: str, make_runner) -> None:
-    call = {"id": "write-once", "name": "write_file",
+    call = {"id": "write-once", "name": "write",
             "args": {"file_path": "/once.txt", "content": "written once"}}
     turns = [Turn(tool_calls=[call]), Turn(mode="hang"), Turn(text="all good")]
     with ScriptedSSEServer(api, turns) as server:

@@ -59,7 +59,7 @@ class AttachmentsController:
                 self.state.add_system("No images attached. Use /image <path>.")
                 return
             lines = [f"Image #{index}: {ref.filename} ({ref.size} bytes)" for index, ref in enumerate(self.state.attachments, 1)]
-            self.state.add_system("Pending images\n" + "\n".join(lines))
+            self.state.add_command_panel("/image", "Pending images\n" + "\n".join(lines))
             return
         if value.lower() == "clear":
             count = len(self.state.attachments)

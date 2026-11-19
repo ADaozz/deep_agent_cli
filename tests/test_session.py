@@ -84,7 +84,7 @@ def test_draft_restarts_and_new_sessions_do_not_persist(tmp_path: Path) -> None:
                 assert not runner.thread_has_content()
             finally:
                 runner.close()
-        assert len(identifiers) == 6
+        assert identifiers == {""}
         assert store.list_sessions() == []
         assert not list(tmp_path.glob("*.locks/*.lock"))
         assert store.checkpointer.get_tuple({"configurable": {"thread_id": runner.thread_id}}) is None
@@ -108,6 +108,8 @@ def test_draft_first_message_persists_config_once_and_can_resume(tmp_path: Path)
             runner._apply_pending_runtime_config()
         assert store.get(identifier) is None
         assert runner.invoke("first message").status == "completed"
+        identifier = runner.thread_id
+        assert identifier
         info = store.get(identifier)
         assert info.title == "first message"
         assert info.model_id == "local/test" and info.reasoning_effort == "low"
@@ -215,7 +217,7 @@ from tests.conftest import scripted_model
 import sys
 store = SessionStore(Path(sys.argv[1]))
 prepared = create_agent(model=scripted_model([AIMessage(content='', tool_calls=[
-    {'id': 'write-1', 'name': 'write_file', 'args': {'file_path': '/workspace/note.txt', 'content': 'x'}}
+    {'id': 'write-1', 'name': 'write', 'args': {'file_path': '/workspace/note.txt', 'content': 'x'}}
 ])]), backend=StateBackend())
 runner = AgentRunner(prepared=prepared, session_store=store)
 assert runner.invoke('write a note').status == 'waiting_confirmation'
@@ -314,10 +316,10 @@ def test_messages_to_transcript_updates_existing_tool_block_artifact() -> None:
 def test_restored_unfinished_tools_stop_running_without_inventing_an_outcome() -> None:
     blocks = messages_to_transcript([
         AIMessage(content="", tool_calls=[
-            {"id": "write-1", "name": "write_file", "args": {"file_path": "/workspace/report.md", "content": "draft"}},
-            {"id": "read-1", "name": "read_file", "args": {"file_path": "/workspace/a.txt"}},
+            {"id": "write-1", "name": "write", "args": {"file_path": "/workspace/report.md", "content": "draft"}},
+            {"id": "read-1", "name": "read", "args": {"file_path": "/workspace/a.txt"}},
         ]),
-        ToolMessage(content="read", tool_call_id="read-1", name="read_file"),
+        ToolMessage(content="read", tool_call_id="read-1", name="read"),
     ])
     settle_restored_tools(blocks)
     assert blocks[0].status == "interrupted"
@@ -325,7 +327,7 @@ def test_restored_unfinished_tools_stop_running_without_inventing_an_outcome() -
     assert blocks[1].status == "completed"
 
     pending = messages_to_transcript([AIMessage(content="", tool_calls=[
-        {"id": "write-2", "name": "write_file", "args": {"file_path": "/workspace/next.md", "content": "draft"}},
+        {"id": "write-2", "name": "write", "args": {"file_path": "/workspace/next.md", "content": "draft"}},
     ])])
     settle_restored_tools(pending, waiting_ids={"write-2"})
     assert pending[0].status == "waiting"

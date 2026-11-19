@@ -294,6 +294,8 @@ class AgentRunner:
     def _require_active_session(self) -> None:
         """Invariant guard: writes to a persisted thread need its lease held."""
         assert self._runtime is not None
+        if self._runtime.is_blank_draft and self._runtime.pending_switch is None:
+            return
         if self._runtime.lease is None:
             raise RuntimeError("This runner owns no session; start or switch to one first")
         if self._runtime.lease.thread_id != self.thread_id:
@@ -758,6 +760,8 @@ class AgentRunner:
 
     def thread_has_content(self, thread_id: str | None = None) -> bool:
         tid = thread_id or self.thread_id
+        if not tid:
+            return False
         if self.session_store is not None:
             assert self._runtime is not None
             return self._runtime.thread_has_checkpoint(tid)
@@ -1109,21 +1113,17 @@ class AgentRunner:
         if self._resume_context is not None:
             self._resume_context.armed = True
         if self.session_store is not None:
-            if (self.settings is not None and isinstance(self._chat_model, ChatOpenAI)
-                    and self._summary_eligibility.accepts_request(self.thread_id)):
-                request_text = redact_summary_input(text, self.summary_secrets())[:2000]
-                if self._summary_eligibility.needs_inspection(self.thread_id):
-                    info = self.session_store.get(self.thread_id)
-                    self._summary_eligibility.begin(
-                        self.thread_id, request_text, has_content=self.thread_has_content(),
-                        has_summary=bool(info and info.summary),
-                    )
-                else:
-                    self._summary_eligibility.update_request(self.thread_id, request_text)
             self._runtime.persist_for_message(
                 model_id=self.configuration.current_model_id, permission_mode=self.configuration.permission_mode.value,
                 reasoning_effort=self.configuration.reasoning_effort,
             )
+            if (self.settings is not None and isinstance(self._chat_model, ChatOpenAI)
+                    and self._summary_eligibility.needs_inspection(self.thread_id)):
+                info = self.session_store.get(self.thread_id)
+                self._summary_eligibility.begin(
+                    self.thread_id, redact_summary_input(text, self.summary_secrets())[:2000],
+                    has_content=self.thread_has_content(), has_summary=bool(info and info.summary),
+                )
             title = text.strip().splitlines()[0][:80] if text.strip() else None
             self.session_store.touch(self.thread_id, title=title,
                                      last_run_status=StopReason.PENDING)
@@ -1302,6 +1302,8 @@ class AgentRunner:
         return self._resume(True, on_delta=on_delta, on_event=on_event)
 
     def current_interrupt(self) -> InterruptState | None:
+        if not self.thread_id:
+            return None
         return interrupt_kind_from_state(self.prepared.graph, self._thread_config())
 
     def _thread_config(self) -> dict[str, Any]:
@@ -1402,14 +1404,9 @@ class AgentRunner:
                 result=timing,
             ))
             summary = self._summary_eligibility.complete(
-                self.thread_id, output, self.configuration.current_model_id,
+                self.thread_id, self.configuration.current_model_id,
             )
             if summary is not None:
-                secrets = self.summary_secrets()
-                summary = replace(
-                    summary, user_request=redact_summary_input(summary.user_request, secrets)[:2000],
-                    agent_result=redact_summary_input(summary.agent_result, secrets)[:4000],
-                )
                 _emit(event_handler, RunEvent(type="session_summary_requested", result=summary))
 
         try:
@@ -1497,7 +1494,7 @@ class AgentRunner:
         self._subagent_tool_ids = {
             str(call.get("id") or "") for message in state_values.get("messages", [])
             if isinstance(message, AIMessage) for call in message.tool_calls or []
-            if call.get("name") == "task"
+            if call.get("name") == "start_task"
         }
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
@@ -1563,12 +1560,12 @@ class AgentRunner:
         if saw_input_usage:
             self._context_usage_invalidated = False
         for event in events:
-            if event.type == "tool_started" and event.name == "task":
+            if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:
                 # Native task returns an unnamed ToolMessage. Preserve the
                 # presentation identity even when resuming a saved tool step.
-                event = replace(event, name="task", is_error=(
+                event = replace(event, name="start_task", is_error=(
                     subagent_result_status(event.content, is_error=event.is_error) != "completed"
                 ))
             _emit(handler, event)

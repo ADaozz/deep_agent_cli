@@ -47,7 +47,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == [
-        "read_subagent_log", "start_background_task", "check_background_task", "cancel_background_task",
+        "read_task_log", "start_background_task", "check_background_task", "cancel_background_task",
     ]
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
     assert prepared.system_prompt
@@ -59,8 +59,10 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert {"task", "read_subagent_log", "start_background_task",
+    assert {"start_task", "read_task_log", "start_background_task",
             "check_background_task", "cancel_background_task"} <= names
+    assert {"read", "write", "edit"} <= names
+    assert not {"task", "read_subagent_log", "read_file", "write_file", "edit_file"} & names
     assert len(names) == 12
 
 
@@ -146,7 +148,7 @@ def test_confirm_tool_interrupts_then_resumes() -> None:
     prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[{
                 "id": "call-write",
-                "name": "write_file",
+                "name": "write",
                 "args": {"file_path": "/workspace/note.txt", "content": "hello"},
             }]),
             AIMessage(content="写入完成。"),
@@ -157,11 +159,38 @@ def test_confirm_tool_interrupts_then_resumes() -> None:
     )
     waiting = runner.invoke("写入 note.txt")
     assert waiting.status == "waiting_confirmation"
-    assert waiting.pending_tool_calls[0]["name"] == "write_file"
+    assert waiting.pending_tool_calls[0]["name"] == "write"
     assert waiting.pending_tool_calls[0]["toolCallId"] == "call-write"
     resumed = runner.approve_tool("call-write")
     assert resumed.status == "completed"
     assert resumed.output == "写入完成。"
+
+
+def test_parallel_renamed_file_mutations_to_same_path_are_rejected() -> None:
+    path = "/workspace/note.txt"
+    runner = AgentRunner(model=scripted_model([
+        AIMessage(content="", tool_calls=[
+            {"id": "first", "name": "write", "args": {"file_path": path, "content": "one"}},
+            {"id": "second", "name": "write", "args": {"file_path": path, "content": "two"}},
+        ]),
+        AIMessage(content="done"),
+    ]), backend=StateBackend())
+    try:
+        waiting = runner.invoke("Write two versions")
+        assert waiting.status == "waiting_confirmation"
+        result = runner.decide_tools([
+            {"tool_call_id": "first", "decision": "approve"},
+            {"tool_call_id": "second", "decision": "approve"},
+        ])
+        assert result.status == "completed"
+        messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+        results = {m.tool_call_id: m for m in messages if isinstance(m, ToolMessage)}
+        assert results["first"].name == results["second"].name == "write"
+        assert results["first"].status == "success"
+        assert results["second"].status == "error"
+        assert "parallel file mutations to the same path" in results["second"].content
+    finally:
+        runner.close()
 
 
 def test_request_human_input_interrupts_then_resumes() -> None:
@@ -511,7 +540,7 @@ def test_runner_rejects_concurrent_run_before_changing_state() -> None:
     assert results[0].status == "completed"
 
 
-def _hitl_payload(name: str = "write_file", args: dict | None = None) -> dict:
+def _hitl_payload(name: str = "write", args: dict | None = None) -> dict:
     return {
         "action_requests": [{"name": name, "args": args or {"file_path": "/workspace/note.txt"}}],
         "review_configs": [{"action_name": name, "allowed_decisions": ["approve", "reject"]}],
@@ -528,7 +557,7 @@ def _graph_with_tool_calls(calls: list | None = None):
 
 def test_classify_interrupt_accepts_known_protocols() -> None:
     graph = _graph_with_tool_calls([{
-        "id": "c1", "name": "write_file", "args": {"file_path": "/workspace/note.txt"},
+        "id": "c1", "name": "write", "args": {"file_path": "/workspace/note.txt"},
     }])
     human = classify_interrupt(
         [{"type": "human_input", "fields": [], "question": "选哪个？"}], graph, {},
@@ -550,15 +579,15 @@ def test_classify_interrupt_rejects_unknown_and_malformed() -> None:
     with pytest.raises(UnknownInterruptError, match="Unsupported interrupt type"):
         classify_interrupt([{"type": "something_new"}], graph, {})
     with pytest.raises(UnknownInterruptError):
-        classify_interrupt([{"action_requests": [{"name": "write_file", "args": {}}]}], graph, {})
+        classify_interrupt([{"action_requests": [{"name": "write", "args": {}}]}], graph, {})
     with pytest.raises(UnknownInterruptError):
         classify_interrupt([{
-            "action_requests": [{"name": "write_file"}],
-            "review_configs": [{"action_name": "write_file", "allowed_decisions": ["approve"]}],
+            "action_requests": [{"name": "write"}],
+            "review_configs": [{"action_name": "write", "allowed_decisions": ["approve"]}],
         }], graph, {})
     with pytest.raises(UnknownInterruptError, match="no recognizable payload"):
         classify_interrupt(["not-a-dict"], graph, {})
-    assert not is_valid_hitl_interrupt({"action_requests": [{"name": "write_file", "args": {}}]})
+    assert not is_valid_hitl_interrupt({"action_requests": [{"name": "write", "args": {}}]})
 
 
 def test_current_interrupt_is_none_without_pending_interrupt() -> None:
@@ -639,8 +668,8 @@ def test_decide_tools_mixed_batch_validates_and_preserves_order() -> None:
     runner = AgentRunner(
         model=scripted_model([
             AIMessage(content="", tool_calls=[
-                {"id": "a", "name": "write_file", "args": {"file_path": "/workspace/a.txt", "content": "yes"}},
-                {"id": "b", "name": "write_file", "args": {"file_path": "/workspace/b.txt", "content": "no"}},
+                {"id": "a", "name": "write", "args": {"file_path": "/workspace/a.txt", "content": "yes"}},
+                {"id": "b", "name": "write", "args": {"file_path": "/workspace/b.txt", "content": "no"}},
             ]),
             AIMessage(content="finished"),
         ]), backend=StateBackend(), thread_id="mixed-batch",

@@ -121,8 +121,8 @@ def test_413_recovery_runs_in_assembled_agent():
     images = [{"type": "image", "base64": "a" * 10000, "mime_type": "image/png"}]
     result = graph.invoke({"messages": [
         HumanMessage(content="inspect"),
-        AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": "/x.png"}, "id": "call-1"}]),
-        ToolMessage(content=images, name="read_file", tool_call_id="call-1"),
+        AIMessage(content="", tool_calls=[{"name": "read", "args": {"file_path": "/x.png"}, "id": "call-1"}]),
+        ToolMessage(content=images, name="read", tool_call_id="call-1"),
         HumanMessage(content="continue"),
     ]}, {"configurable": {"thread_id": "test-413"}})
     assert result["messages"][-1].content == "recovered"

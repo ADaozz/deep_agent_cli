@@ -53,13 +53,27 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
 
     completion_active = Condition(lambda: self.dialogs.current is None and self.buffer.complete_state is not None)
 
-    @kb.add("up", filter=completion_active)
-    def completion_up(event) -> None:  # type: ignore[no-untyped-def]
-        event.current_buffer.complete_previous()
+    turn_navigation = Condition(lambda: not self.buffer.text and not self.state.attachments and not self.dialogs.reviewing)
 
-    @kb.add("down", filter=completion_active)
-    def completion_down(event) -> None:  # type: ignore[no-untyped-def]
-        event.current_buffer.complete_next()
+    @kb.add("left", filter=turn_navigation & ~interaction_active & ~completion_active)
+    def previous_turn(event) -> None:  # type: ignore[no-untyped-def]
+        self.transcript.jump_turn(-1)
+
+    @kb.add("right", filter=turn_navigation & ~interaction_active & ~completion_active)
+    def next_turn(event) -> None:  # type: ignore[no-untyped-def]
+        self.transcript.jump_turn(1)
+
+    editing = Condition(lambda: bool(self.buffer.text) and (
+        self.dialogs.current is None or self.dialogs.current.accepts_text
+    ))
+
+    @kb.add("up", filter=editing)
+    def editor_up(event) -> None:  # type: ignore[no-untyped-def]
+        self.editor_control.move_vertical(-1, self._editor_width())
+
+    @kb.add("down", filter=editing)
+    def editor_down(event) -> None:  # type: ignore[no-untyped-def]
+        self.editor_control.move_vertical(1, self._editor_width())
 
     @kb.add("tab", filter=completion_active)
     def completion_tab(event) -> None:  # type: ignore[no-untyped-def]
@@ -102,13 +116,13 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
         removed = self.state.attachments.pop()
         self.set_status(f"Removed image: {removed.filename}")
 
-    @kb.add("up", filter=interaction_active)
+    @kb.add("up", filter=interaction_active & ~editing)
     def interaction_up(event) -> None:  # type: ignore[no-untyped-def]
         assert self.dialogs.current
         self.dialogs.current.move(-1)
         self.application.invalidate()
 
-    @kb.add("down", filter=interaction_active)
+    @kb.add("down", filter=interaction_active & ~editing)
     def interaction_down(event) -> None:  # type: ignore[no-untyped-def]
         assert self.dialogs.current
         self.dialogs.current.move(1)

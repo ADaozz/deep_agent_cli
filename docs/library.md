@@ -41,7 +41,7 @@ runner.close()
 
 ## SubAgent 委派
 
-与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `task` 和后台委派工具（`subagents.background`）。
+与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
 只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
 
@@ -90,7 +90,7 @@ followup = runner.deliver_notifications()   # 没有可送达的结果或存在�
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
 
-原生 `task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
+原生 `start_task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
 
 `subagent_finished` 事件在后台任务结束时发出，可能发生在没有运行的空闲期间：`content` 是最终结果或失败/取消说明，
 `result` 包含 `run_id`、`tool_call_id`、`status`（`completed` / `failed` / `cancelled`）和父会话 ID。
@@ -121,7 +121,7 @@ prepared = create_agent(
 
 - `runner.list_sessions()`、`runner.new_session()`、`runner.switch_session(id)`。
 - `SessionInfo.summary` 为可选中文摘要，与真实 `id` 分开保存。没有摘要时，展示层应回退为 ID。
-- CLI 在新会话首次成功完成一轮后后台生成摘要。使用配置模型客户端且启用持久化存储的 Runner，其 `session_summary_requested` 事件的 `result` 是 `agent.sessions.summary.SessionSummaryRequest`，包含绑定的 thread_id、脱敏限长的请求与结果、该轮模型 ID。库调用方可自行订阅；Runner 本身不会额外调用模型。摘要生成不属于对话 checkpoint。
+- CLI 在新会话首次成功完成一轮后后台生成摘要。使用配置模型客户端且启用持久化存储的 Runner，其 `session_summary_requested` 事件的 `result` 是 `agent.sessions.summary.SessionSummaryRequest`，包含绑定的 thread_id、脱敏限长的第一轮用户提问、该轮模型 ID。库调用方可自行订阅；Runner 本身不会额外调用模型。摘要生成不属于对话 checkpoint。
 - 目标会话被其他进程持有时，`switch_session` 抛出 `SessionLockBusyError`。
 - 切换会话前需要先用 `runner.take_unapplied_messages()` 取回未生效的 steering / follow-up，否则抛出 `RuntimeError`。
 - 主 Agent 的人工输入仅使用 `request_human_input`；会话目录初始化时补齐可选摘要列，不支持的数据库结构会明确报错。

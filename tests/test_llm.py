@@ -323,7 +323,7 @@ def test_baseline_chat_tool_chunks_and_usage() -> None:
     model = build_chat_model(ModelProfile("test", "test", api="chat_completions"))
     first = model._convert_chunk_to_generation_chunk({"choices": [{"delta": {
         "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
-                        "function": {"name": "read_file", "arguments": '{"path":'}}],
+                        "function": {"name": "read", "arguments": '{"path":'}}],
     }}]}, AIMessageChunk, None)
     second = model._convert_chunk_to_generation_chunk({"choices": [{"delta": {
         "tool_calls": [{"index": 0, "function": {"arguments": '"a"}'}}],
@@ -348,7 +348,7 @@ def test_bridged_stream_matches_sync_stream_over_real_http(api) -> None:
     from agent.models.messages import reasoning_text, visible_text
     from tests.model_stream_server import ScriptedSSEServer, Turn
 
-    call = {"id": "call_1", "name": "read_file", "args": {"path": "a"}}
+    call = {"id": "call_1", "name": "read", "args": {"path": "a"}}
     turn = Turn(reasoning="think first", text="the answer is here", tool_calls=[call])
 
     class Tokens(BaseCallbackHandler):
@@ -381,7 +381,7 @@ def test_bridged_stream_matches_sync_stream_over_real_http(api) -> None:
     for combined in (bridged, plain):
         assert reasoning_text(combined) == "think first"
         assert visible_text(combined) == "the answer is here"
-        assert combined.tool_calls == [{"name": "read_file", "args": {"path": "a"}, "id": "call_1", "type": "tool_call"}]
+        assert combined.tool_calls == [{"name": "read", "args": {"path": "a"}, "id": "call_1", "type": "tool_call"}]
         assert combined.usage_metadata["input_tokens"] == 21
         assert combined.usage_metadata["output_tokens"] == 7
     assert live_stream_count() == 0

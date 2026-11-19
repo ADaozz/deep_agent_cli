@@ -10,7 +10,8 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-from deepagents.middleware.subagents import CompiledSubAgent
+from deepagents.middleware.subagents import CompiledSubAgent, SubAgentMiddleware
+from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT, SkillsMiddleware
 from deepagents.middleware.summarization import (
     SummarizationMiddleware,
     SummarizationToolMiddleware,
@@ -19,6 +20,7 @@ from deepagents.middleware.summarization import (
 from deepagents._models import get_model_identifier, get_model_provider
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AnyMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -57,7 +59,7 @@ from agent.tools.web_search import build_web_search_tool
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
 
 
-DEFAULT_FS_TOOLS = ["ls", "read_file", "write_file", "edit_file", "delete"]
+DEFAULT_FS_TOOLS = ["ls", "read", "write", "edit", "delete"]
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
@@ -90,6 +92,47 @@ DEFAULT_SYSTEM_PROMPT = (
     "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
     "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
 )
+
+
+class StartTaskMiddleware(SubAgentMiddleware):
+    @property
+    def name(self) -> str:
+        return "SubAgentMiddleware"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.tools[0].name = "start_task"
+
+    @SubAgentMiddleware.private_state_keys.setter
+    def private_state_keys(self, value: frozenset[str]) -> None:
+        # create_deep_agent rebuilds the native tool after collecting state keys.
+        SubAgentMiddleware.private_state_keys.fset(self, value)
+        self.tools[0].name = "start_task"
+
+
+class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
+    def _truncate_args(
+        self, messages: list[AnyMessage], total_tokens: int,
+    ) -> tuple[list[AnyMessage], bool]:
+        """Keep upstream argument truncation for the renamed write and edit tools."""
+        if not self._should_truncate_args(messages, total_tokens):
+            return messages, False
+        cutoff = self._determine_truncate_cutoff_index(messages)
+        if cutoff >= len(messages):
+            return messages, False
+        updated = list(messages)
+        modified = False
+        for index, message in enumerate(messages[:cutoff]):
+            if not isinstance(message, AIMessage):
+                continue
+            calls = [
+                self._truncate_tool_call(call) if call["name"] in {"write", "edit"} else call
+                for call in message.tool_calls
+            ]
+            if calls != message.tool_calls:
+                updated[index] = message.model_copy(update={"tool_calls": calls})
+                modified = True
+        return (updated, True) if modified else (messages, False)
 
 
 class HiddenToolsMiddleware(AgentMiddleware):
@@ -215,7 +258,7 @@ def build_agent(
         trigger = ("fraction", min(trigger[1], cfg.compaction_threshold))
         if keep[0] == "fraction" and keep[1] >= trigger[1]:
             keep = ("fraction", trigger[1] / 2)
-    summarization = SummarizationMiddleware(
+    summarization = WorkspaceSummarizationMiddleware(
         model=model, backend=fs_backend, trigger=trigger,
         keep=keep, trim_tokens_to_summarize=None,
         truncate_args_settings=summary_defaults["truncate_args_settings"],
@@ -278,7 +321,7 @@ def build_agent(
                 spec, role="subagent", tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),
                 hidden_tools=tuple(set(spec.hidden_tools) | BACKGROUND_TOOLS
-                                   | {"task", "request_human_input", "read_subagent_log"}),
+                                   | {"start_task", "request_human_input", "read_task_log"}),
             )
             try:
                 child = build_agent(child_spec, child_model, PermissionMode.ALLOW, None,
@@ -333,6 +376,11 @@ def build_agent(
                 AttachmentMaterializationMiddleware(),
                 PayloadRecoveryMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
+                *([StartTaskMiddleware(backend=fs_backend, subagents=subagents)] if subagents else []),
+                *([SkillsMiddleware(
+                    backend=fs_backend, sources=skill_sources,
+                    system_prompt=SKILLS_SYSTEM_PROMPT.replace("read_file", "read"),
+                )] if skill_sources else []),
                 summarization,
                 compact_middleware,
                 *([MCPMiddleware(mcp, mcp_tools)] if include_mcp else []),

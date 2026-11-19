@@ -16,7 +16,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一 Runner 的模型、权限切换及新建、切换对话会话复用沙箱；文件系统模式变化或关闭 Runner 时清理沙箱。
 
-当前通过原生同步 `task` 和本地后台委派工具启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
+当前通过原生同步 `start_task` 和本地后台委派工具启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
 
 ## 分层
 
@@ -82,13 +82,13 @@ flowchart TB
 
 | 工具 | 来源与条件 | 默认 `ask` 下的交互 |
 |---|---|---|
-| `ls`、`read_file` | Deep Agents 文件系统中间件 | 免审批 |
-| `write_file`、`edit_file`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
+| `ls`、`read` | Deep Agents 文件系统中间件 | 免审批 |
+| `write`、`edit`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
 | `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
-| `task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
-| `read_subagent_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
+| `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
+| `read_task_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
 | `start_background_task`、`check_background_task`、`cancel_background_task` | 同上且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
@@ -97,11 +97,11 @@ flowchart TB
 
 `web_search` 是可用的内置工具，有密钥时正常提供，未配置时不注册。其 Tavily 请求在宿主进程中发送，不受 Shell 的网络命名空间约束。
 
-文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read_file`、`write_file`、`edit_file` 和 `delete`，不包含 `grep` 或 `glob`。
+文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read`、`write`、`edit` 和 `delete`，不包含 `grep` 或 `glob`。
 
-`ls` 和 `read_file` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本，其余文件工具沿用上游说明。上游 `ls` 要求读写文件前几乎总是先列目录，`read_file` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`。调用方传入的 `custom_tool_descriptions` 优先于这两条默认值。
+`ls` 和 `read` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本，其余文件工具沿用上游说明。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`。调用方传入的 `custom_tool_descriptions` 优先于这两条默认值。
 
-Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `task`。关闭 `subagents.enabled` 后不提供 `task` 或 `read_subagent_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `start_task`。关闭 `subagents.enabled` 后不提供 `start_task` 或 `read_task_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
 ### SubAgent 委派边界
 
@@ -112,15 +112,15 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
 `mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
 执行前清空父级隐式回调与配置上下文。默认最多同时运行 2 个子任务，第三个立即返回超限错误，
-完成、失败和取消均释放许可；原生 `task` 在任务结束后返回最终结果或简短错误。
+完成、失败和取消均释放许可；原生 `start_task` 在任务结束后返回最终结果或简短错误。
 
 ### 后台委派
 
-`start_background_task` 与同步 `task` 并存，由主模型按场景选择：需要等结果才能继续时用 `task`，
+`start_background_task` 与同步 `start_task` 并存，由主模型按场景选择：需要等结果才能继续时用 `start_task`，
 子任务耗时较长且下一步不依赖其结果时用后台委派。没有使用上游 `AsyncSubAgentMiddleware`，
 它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
 
-- 启动：工具取得一个并发许可（与 `task` 共用 `max_concurrent`，超限立即返回错误）后启动线程并返回 `run_id`，
+- 启动：工具取得一个并发许可（与 `start_task` 共用 `max_concurrent`，超限立即返回错误）后启动线程并返回 `run_id`，
   主 Agent 继续推理、调用其他工具或结束本轮回答。执行环境、权限、工具集和 JSONL 日志与同步子任务相同。
 - 回传：子任务完成或失败时，结果进入 `RunController` 的独立通知队列，并发出 `subagent_finished` 事件。
   通知队列不是用户输入队列：不会被回收到输入框，不显示为待发送消息，也不阻止会话切换。
@@ -135,7 +135,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 - 沙箱模式切换会丢弃沙箱内进程：空闲时若仍有后台任务，切换保持排队；在运行边界应用时，后台子任务正在执行的命令会失败并由子任务自行处理。
 
 主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
-恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_subagent_log` 查看。
+恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
 已配置的 web_search 和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
@@ -150,7 +150,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
 摘要只精确替换已知模型和 Tavily Key；未知凭据原样保存。
-主上下文仅接收最终 task 结果，主动调用 `read_subagent_log` 才读取本父会话的日志页。
+主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
 实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
@@ -170,7 +170,7 @@ TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示�
 | `SteeringMiddleware` | 注入运行中指令，必要时撤销尚未执行的工具提议并重新推理 |
 | `ToolCancelMiddleware` | 为工具传递可取消上下文 |
 | `ToolArgHintMiddleware` | 为工具参数校验错误提供提示 |
-| `WriteOperationMiddleware` | 标记 `write_file` 是新建还是覆盖 |
+| `WriteOperationMiddleware` | 标记 `write` 是新建还是覆盖 |
 | `AttachmentMaterializationMiddleware` | 仅请求模型时将图片引用展开为内容 |
 | `WorkspaceFilesystemMiddleware` | 文件工具及组合 Backend 能力适配 |
 | `SummarizationToolMiddleware` | 提供手动压缩工具 |
@@ -233,7 +233,7 @@ sequenceDiagram
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
 
-`ask` 默认审批文件修改、每次 `execute`、每次 `web_search`，以及宿主 MCP 工具和 `mcp_add` / `mcp_remove`。`ls`、`read_file`、`mcp_list` 等只读查询免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
+`ask` 默认审批文件修改、每次 `execute`、每次 `web_search`，以及宿主 MCP 工具和 `mcp_add` / `mcp_remove`。`ls`、`read`、`mcp_list` 等只读查询免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
 
 找不到 `bwrap` 时启动失败，没有宿主机执行回退。`CUSTOM` 由调用方注入的 Backend 决定资源边界。`restricted` 与 `full-access` 只改变文件系统挂载，不改变审批，也不提权。`/sandbox` 在下一次模型调用前更换挂载并关闭当前会话的两个沙箱；模式不写入会话库，恢复会话时回到配置文件中的 `sandbox.mode`。
 
@@ -289,7 +289,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 线程环境快照
 
-固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read_file` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
+固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
 
 采集使用与 `execute` 相同的离线挂载做一次只读探测，不经过工具审批，也不扫描软件包、进程、CPU 负载或内存。探测失败的字段为 `unknown`，不中断线程。这里没有新的配置项。
 

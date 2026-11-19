@@ -37,6 +37,21 @@ def format_context_usage(usage: dict[str, int], window: int, *, empty_session: b
     return f"{label} · {percent:.1f}% used"
 
 
+def format_context_meter(usage: dict[str, int], window: int, *, empty_session: bool) -> str:
+    def tokens(count: int) -> str:
+        return str(count) if count < 1000 else f"{count / 1000:,.1f}".rstrip("0").rstrip(".") + "K"
+
+    if window <= 0:
+        return "Unknown"
+    used = 0 if empty_session and not usage else usage.get("input_tokens")
+    if type(used) is not int or used < 0:
+        return f"Unknown ({tokens(window)} capacity)"
+    remaining = max(0, window - used) / window
+    filled = round(remaining * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    return f"[{bar}] {remaining:.0%} left ({tokens(used)} used / {tokens(window)})"
+
+
 def _fit_footer_line(left: str, right: str, width: int) -> str:
     available = max(1, width)
     if not right:

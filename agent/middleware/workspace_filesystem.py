@@ -7,13 +7,15 @@ from typing import Any
 
 from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import BaseTool
 
 from agent.execution.filesystem import WorkspaceCompositeBackend
 
 
 LS_DESCRIPTION = (
     "列出目录中的文件和子目录。path 必须是绝对路径。\n"
-    "已知文件路径时直接用 read_file，不必先 ls；按名称查找文件用 execute 运行 rg --files。"
+    "已知文件路径时直接用 read，不必先 ls；按名称查找文件用 execute 运行 rg --files。"
 )
 
 READ_FILE_DESCRIPTION = (
@@ -27,7 +29,10 @@ READ_FILE_DESCRIPTION = (
     "- 编辑文件前必须先读取。"
 )
 
-TOOL_DESCRIPTIONS = {"ls": LS_DESCRIPTION, "read_file": READ_FILE_DESCRIPTION}
+TOOL_DESCRIPTIONS = {"ls": LS_DESCRIPTION, "read": READ_FILE_DESCRIPTION}
+
+_NATIVE_FILE_NAMES = {"read": "read_file", "write": "write_file", "edit": "edit_file"}
+_FILE_TOOL_NAMES = {native: name for name, native in _NATIVE_FILE_NAMES.items()}
 
 
 class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
@@ -39,7 +44,57 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
     """
 
     def __init__(self, *, custom_tool_descriptions: Mapping[str, str] | None = None, **kwargs: Any) -> None:
-        super().__init__(custom_tool_descriptions={**TOOL_DESCRIPTIONS, **(custom_tool_descriptions or {})}, **kwargs)
+        if (tools := kwargs.get("tools")) is not None:
+            kwargs["tools"] = [_NATIVE_FILE_NAMES.get(name, name) for name in tools]
+        descriptions = {**TOOL_DESCRIPTIONS, **(custom_tool_descriptions or {})}
+        super().__init__(
+            custom_tool_descriptions={_NATIVE_FILE_NAMES.get(name, name): text for name, text in descriptions.items()},
+            **kwargs,
+        )
+
+    def _create_tools(self) -> list[BaseTool]:
+        tools = super()._create_tools()
+        for tool in tools:
+            tool.name = _FILE_TOOL_NAMES.get(tool.name, tool.name)
+            for native, name in _FILE_TOOL_NAMES.items():
+                tool.description = tool.description.replace(native, name)
+        return tools
+
+    @staticmethod
+    def _filesystem_request(request: Any) -> Any:
+        """Adapt only the upstream filesystem hook's view of the current call."""
+        name = request.tool_call["name"]
+        if name not in _NATIVE_FILE_NAMES and name != "delete":
+            return request
+        call = {**request.tool_call, "name": _NATIVE_FILE_NAMES.get(name, name)}
+        state = request.state
+        if name in {"write", "edit", "delete"} and isinstance(state, Mapping):
+            messages = list(state.get("messages", ()))
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                if isinstance(message, AIMessage):
+                    calls = [
+                        {**item, "name": _NATIVE_FILE_NAMES.get(item["name"], item["name"])}
+                        for item in message.tool_calls
+                    ]
+                    messages[index] = message.model_copy(update={"tool_calls": calls})
+                    state = {**state, "messages": messages}
+                    break
+        return request.override(tool_call=call, state=state)
+
+    @staticmethod
+    def _name_result(result: Any, name: str) -> Any:
+        if isinstance(result, ToolMessage) and result.name in _FILE_TOOL_NAMES:
+            return result.model_copy(update={"name": name})
+        return result
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        result = super().wrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        return self._name_result(result, request.tool_call["name"])
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        result = await super().awrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        return self._name_result(result, request.tool_call["name"])
 
     @property
     def name(self) -> str:

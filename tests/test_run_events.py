@@ -32,19 +32,19 @@ def test_tool_updates_start_once_and_forward_artifacts() -> None:
     seen: set[str] = set()
     calls = AIMessage(content="", id="m", tool_calls=[
         {"id": "a", "name": "execute", "args": {"command": "true"}},
-        {"id": "b", "name": "write_file", "args": {"file_path": "x"}},
+        {"id": "b", "name": "write", "args": {"file_path": "x"}},
     ])
     events, saw_usage = update_tool_events({"agent": {"messages": [calls]}}, seen)
     assert saw_usage is False
     assert [(event.type, event.tool_call_id, event.name) for event in events] == [
         ("tool_started", "a", "execute"),
-        ("tool_started", "b", "write_file"),
+        ("tool_started", "b", "write"),
     ]
     assert events[0].arguments == {"command": "true"}
     replay, _ = update_tool_events({"agent": {"messages": [calls]}}, seen)
     assert replay == []
     done = ToolMessage(content="ok", tool_call_id="a", name="execute", artifact={"exit_code": 0})
-    failed = ToolMessage(content="no", tool_call_id="b", name="write_file", status="error")
+    failed = ToolMessage(content="no", tool_call_id="b", name="write", status="error")
     events, saw_usage = update_tool_events({"tools": {"messages": [done, failed]}}, seen)
     assert saw_usage is False
     assert events[0].type == "tool_completed" and events[0].artifact == {"exit_code": 0}

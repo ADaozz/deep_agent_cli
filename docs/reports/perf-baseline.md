@@ -4,7 +4,7 @@
 
 ## Agent 外围（`benchmark.py agent --repeat 20`）
 
-脚本模型、FilesystemBackend，四轮模型调用、四次工具调用（ls、两个并行 read_file、glob）。模型延迟为 0，剩下的就是图、中间件与工具的开销。
+脚本模型、FilesystemBackend，四轮模型调用、四次工具调用（ls、两个并行 read、glob）。模型延迟为 0，剩下的就是图、中间件与工具的开销。
 
 | 指标 | P50 | P95 |
 |---|---|---|
@@ -22,7 +22,7 @@
 | 冷启动后第一次 `execute` | 38–50 | — |
 | 热沙箱 `execute true` | 1.8 | 2.8 |
 | 热沙箱输出 64 KiB | 3.8 | 5.8 |
-| `read_file`（宿主路径） | 0.12 | 0.23 |
+| `read`（宿主路径） | 0.12 | 0.23 |
 
 ## TUI（`benchmark.py cli`，改动前）
 

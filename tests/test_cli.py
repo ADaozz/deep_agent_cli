@@ -85,7 +85,7 @@ def test_cli_enter_during_stream_replans_before_tools(monkeypatch, propose_tools
             assert submitted.wait(5), "UI did not submit while the model was streaming"
             if propose_tools:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_call_chunks=[{
-                    "name": "write_file", "args": '{"file_path":"/stale.txt","content":"stale"}',
+                    "name": "write", "args": '{"file_path":"/stale.txt","content":"stale"}',
                     "id": "stale-call", "index": 0,
                 }]))
         else:
@@ -253,6 +253,7 @@ def test_cli_resume_prefix_switches_session(tmp_path) -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             await _await_cli_io(app.resume_session(first[:8]))
             assert app.runner.thread_id == first
+            assert not any(getattr(block, "content", "").startswith("Resumed session ") for block in app.state.blocks)
             assert any(
                 getattr(block, "content", "") == "saved"
                 for block in app.state.blocks
@@ -593,7 +594,7 @@ def test_cli_startup_resume_waits_for_a_busy_session(tmp_path) -> None:
 
 
 
-def test_status_omits_permission_session_and_sandbox_details(tmp_path) -> None:
+def test_status_shows_aligned_session_overview(tmp_path) -> None:
     from dataclasses import replace as dc_replace
     from agent.execution.policy import SandboxConfig
     from agent.execution.backend import select_backend
@@ -607,10 +608,28 @@ def test_status_omits_permission_session_and_sandbox_details(tmp_path) -> None:
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         app.show_status()
+        assert app.state.blocks[-1].command_title == "/status"
         status = app.state.blocks[-1].content
-        for label in ("Permission:", "Thread:", "Sandbox:", "Filesystem:", "Offline sandbox:", "Networked sandbox:"):
-            assert label not in status
-        assert "Model:" in status and "Tools:" in status and "Average TPS:" in status
+        assert "tool_list" not in status
+        app.show_help()
+        help_panel = app.state.blocks[-1]
+        assert help_panel.command_title == "/help"
+        assert "Keyboard shortcuts" in help_panel.content and "\nCommands\n" in help_panel.content
+        assert "/session" not in help_panel.content
+        assert "session" not in app.run_dispatch.command_by_name
+        assert "Visit https://github.com/ADaozz/deep_agent_cli to view project." in status
+        assert "ChatGPT workspace" not in status
+        assert ">_ DeepAgent CLI (v" in status
+        assert "Server:              local AgentRuntime" in status
+        assert "Session:             sandbox-status" in status
+        assert "Permissions:         restricted/ask" in status
+        assert "Context window:" in status
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        assert not list(app.slash_completer.get_completions(Document("/sess"), CompleteEvent()))
+        asyncio.run(app.run_dispatch._dispatch_command("/session"))
+        assert app.state.blocks[-1].content == "Unknown command: /session"
     runner.close()
 
 
@@ -794,7 +813,7 @@ def test_unconfirmed_cancel_cleanup_is_reported() -> None:
 def test_removed_tool_argument_aliases_do_not_create_diff_previews() -> None:
     from agent.cli.previews import build_diff_preview
 
-    assert build_diff_preview("edit_file", {
+    assert build_diff_preview("edit", {
         "file_path": "/workspace/a.py", "old_text": "old", "new_text": "new",
     }) is None
 
@@ -814,7 +833,7 @@ def test_arriving_approval_keeps_typing_and_restores_draft_after_f2(decision) ->
     async def scenario() -> None:
         runner = AgentRunner(model=scripted_model([
             AIMessage(content="", tool_calls=[{
-                "id": "draft-write", "name": "write_file",
+                "id": "draft-write", "name": "write",
                 "args": {"file_path": "/draft.txt", "content": "hello"},
             }]),
             AIMessage(content="done"),
@@ -870,7 +889,7 @@ def test_approval_preserves_pasted_content_and_queues_new_input() -> None:
     async def scenario() -> None:
         runner = AgentRunner(model=scripted_model([
             AIMessage(content="", tool_calls=[{
-                "id": "paste-write", "name": "write_file",
+                "id": "paste-write", "name": "write",
                 "args": {"file_path": "/paste.txt", "content": "hello"},
             }]), AIMessage(content="done"),
         ]), backend=StateBackend())
@@ -925,7 +944,7 @@ def test_status_metrics_are_compact_indented_and_grouped_by_model_effort():
             assert label not in text
         app.state.apply(RunEvent(type="run_completed"))
         assert not app._status_visible()
-        app.show_status()
+        app.show_status_details()
         assert text in app.state.blocks[-1].content
 
 
@@ -936,20 +955,20 @@ def test_status_tool_usage_table_has_a_column_per_model() -> None:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             assert app._tool_usage_lines() == "Tool usage: none yet"
             app.state.load_model_metrics([
-                {"model": "deepseek-flash", "reasoning_effort": "low", "tool_calls": ["execute", "read_file"]},
+                {"model": "deepseek-flash", "reasoning_effort": "low", "tool_calls": ["execute", "read"]},
                 {"model": "deepseek-flash", "reasoning_effort": "high", "tool_calls": ["execute", "mcp__docs__search"]},
                 {"model": "qwen3.8-max", "reasoning_effort": "default",
-                 "tool_calls": ["read_file", "grep", "task", "read_subagent_log"]},
+                 "tool_calls": ["read", "grep", "start_task", "read_task_log"]},
                 {"model": "glm-5.3", "tps": 10.0},
             ])
             assert app._tool_usage_lines().splitlines() == [
                 "Tool usage",
-                "  Tool       deepseek-flash  qwen3.8-max",
-                "  execute                 2            0",
-                "  read_file               1            1",
-                "  grep                    0            1",
+                "  Tool     deepseek-flash  qwen3.8-max",
+                "  execute               2            0",
+                "  read                  1            1",
+                "  grep                  0            1",
             ]
-            app.show_status()
+            app.show_status_details()
             assert app._tool_usage_lines() in app.state.blocks[-1].content
     finally:
         runner.close()

@@ -38,7 +38,7 @@ def test_steering_before_tools_skips_proposed_tools_before_replanning() -> None:
     controller.steer("change direction")
     response = middleware.wrap_model_call(None, lambda _: ModelResponse(result=[AIMessage(
         content="", tool_calls=[
-            {"id": "a", "name": "write_file", "args": {}},
+            {"id": "a", "name": "write", "args": {}},
             {"id": "b", "name": "execute", "args": {}},
         ],
     )]))
@@ -54,7 +54,7 @@ def test_steer_during_model_skips_tool_and_reaches_next_model() -> None:
     events: list[str] = []
     model = scripted_model([
             AIMessage(content="", tool_calls=[{
-                "id": "call-1", "name": "write_file",
+                "id": "call-1", "name": "write",
                 "args": {"file_path": "/workspace/should-not-exist.txt", "content": "stale"},
             }]),
             AIMessage(content="after correction"),

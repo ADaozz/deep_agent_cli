@@ -158,7 +158,7 @@ class AccessSelection:
             self.state.add_system("Sandbox mount policy is not available for this backend.", error=True)
             return
         skills = getattr(backend, "skills_dir", None)
-        self.state.add_system(render_launch_manifest(
+        self.state.add_command_panel("/sandbox mounts", render_launch_manifest(
             config, skills_dir=skills, pending_mode=self.runner.pending_sandbox_mode(),
         ))
         self.invalidate()

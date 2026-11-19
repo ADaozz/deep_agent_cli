@@ -185,7 +185,7 @@ def test_skill_command_completion():
 def test_native_middleware_and_read_file_work_together(tmp_path):
     write_skill(tmp_path, "alpha", "执行技能时输出特定内容")
     runner = make_runner(tmp_path, [
-        AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": "/skills/alpha/SKILL.md"}, "id": "skill-read"}]),
+        AIMessage(content="", tool_calls=[{"name": "read", "args": {"file_path": "/skills/alpha/SKILL.md"}, "id": "skill-read"}]),
         AIMessage(content="done"),
     ])
     config = {"configurable": {"thread_id": "skills-integration"}}

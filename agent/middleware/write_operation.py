@@ -1,4 +1,4 @@
-"""Attach the pre-write file state to successful write_file results."""
+"""Attach the pre-write file state to successful write results."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _operation(result: LsResult) -> WriteOperation | None:
 
 def _write_path(request: Any) -> str | None:
     call = getattr(request, "tool_call", None) or {}
-    if call.get("name") != "write_file":
+    if call.get("name") != "write":
         return None
     args = call.get("args")
     if not isinstance(args, dict) or not isinstance(args.get("file_path"), str):

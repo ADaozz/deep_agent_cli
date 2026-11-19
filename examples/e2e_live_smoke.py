@@ -235,7 +235,7 @@ def run_permission_suite(runner: AgentRunner, workspace: Path, report: Report, *
     )
     if waiting and waiting.status == "waiting_confirmation":
         names = [c.get("name") for c in waiting.pending_tool_calls]
-        report.add("ask write pending name", "write_file" in names, detail=str(names))
+        report.add("ask write pending name", "write" in names, detail=str(names))
         resumed = runner.approve_tool(waiting.pending_tool_calls[0].get("toolCallId"))
         # May still need more tool rounds; drain approvals up to 5 times.
         for _ in range(5):

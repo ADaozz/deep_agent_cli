@@ -57,7 +57,7 @@ def test_stream_thinking_tool_arguments_and_actual_usage(api, asynchronous, inpu
             assert body["stream_options"] == {"include_usage": True}
             deltas = [
                 {"reasoning": "think"}, {"content": "answer"},
-                {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":'}}]},
+                {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "read", "arguments": '{"path":'}}]},
                 {"tool_calls": [{"index": 0, "function": {"arguments": '"a"}'}}]},
             ]
             events = [{"id": "chat_1", "object": "chat.completion.chunk", "created": 0, "model": "arbitrary-model",
@@ -75,7 +75,7 @@ def test_stream_thinking_tool_arguments_and_actual_usage(api, asynchronous, inpu
             {"type": "response.reasoning_text.delta", "sequence_number": 0, "output_index": 0, "item_id": "rs_1", "delta": "think"},
             {"type": "response.output_text.delta", "sequence_number": 1, "output_index": 1, "content_index": 0, "item_id": "msg_1", "delta": "answer"},
             {"type": "response.output_item.added", "sequence_number": 2, "output_index": 2,
-             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": "", "status": "in_progress"}},
+             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read", "arguments": "", "status": "in_progress"}},
             {"type": "response.function_call_arguments.delta", "sequence_number": 3, "output_index": 2, "item_id": "fc_1", "delta": '{"path":'},
             {"type": "response.function_call_arguments.delta", "sequence_number": 4, "output_index": 2, "item_id": "fc_1", "delta": '"a"}'},
             {"type": "response.completed", "sequence_number": 5, "response": response_body(usage)},

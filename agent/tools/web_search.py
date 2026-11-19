@@ -29,7 +29,7 @@ def build_web_search_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
 
         用户明确要求搜索、查找或核实时，或文档、版本、API、产品、价格、新闻等信息
         可能变化时使用。事实不确定或需要权威来源时也应搜索。
-        本地文件阅读使用 read_file，本地代码搜索通过 execute 运行 rg。
+        本地文件阅读使用 read，本地代码搜索通过 execute 运行 rg。
         搜索词应具体；需要官方或指定来源时使用 include_domains。
         查询近期事件时使用 topic="news"，并指定 time_range。
         结果是排序后的摘要片段，并非完整网页或穷尽结果；未返回某项不代表它不存在。

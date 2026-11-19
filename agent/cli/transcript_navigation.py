@@ -57,6 +57,7 @@ class TranscriptNavigation:
         self.transcript_window = transcript_window
         self.invalidate = invalidate
         self.output = output
+        self.jump_message_id: str | None = None
         self.transcript_line_count = 1
         self.transcript_anchor: int | None = None
         self.selection_start: tuple[int, int] | None = None
@@ -100,16 +101,37 @@ class TranscriptNavigation:
     def transcript_offset(self, maximum: int) -> int:
         """Resolve a painted viewport's offset and restore following at its tail."""
         anchor = self.transcript_anchor
-        if anchor is None or anchor >= maximum:
+        if anchor is None or (anchor >= maximum and self.jump_message_id is None):
             self.transcript_anchor = None
             return maximum
-        return max(0, anchor)
+        return min(maximum, max(0, anchor))
 
     def transcript_away_from_bottom(self) -> bool:
         """Only offer the return action while the transcript tail is off screen."""
         return self.transcript_anchor is not None and self.transcript_top() < self.transcript_max_scroll()
 
+    def jump_turn(self, delta: int) -> None:
+        document = self._transcript_document()
+        turns = document.turns
+        current = document.turn_at(self.transcript_top())
+        if not turns:
+            return
+        if self.transcript_anchor is None:
+            if current < 0 or self.transcript_top() < turns[current].end:
+                current = len(turns) - 1
+            if self.jump_message_id != turns[-1].message_id:
+                self.jump_message_id = None
+        if self.jump_message_id is not None:
+            current = next((i for i, turn in enumerate(turns) if turn.message_id == self.jump_message_id), current)
+        target = current + delta
+        if 0 <= target < len(turns):
+            self.scroll_transcript_to(turns[target].start)
+            self.jump_message_id = turns[target].message_id
+            if target < len(turns) - 1:
+                self.transcript_anchor = self.transcript_top()
+
     def follow_transcript(self) -> None:
+        self.jump_message_id = None
         self.transcript_anchor = None
         self.invalidate()
 
@@ -118,6 +140,7 @@ class TranscriptNavigation:
 
     def scroll_transcript_to(self, row: int) -> None:
         maximum = self.transcript_max_scroll()
+        self.jump_message_id = None
         nxt = min(maximum, max(0, row))
         self.transcript_anchor = None if nxt >= maximum else nxt
         self.invalidate()

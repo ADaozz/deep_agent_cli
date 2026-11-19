@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage
 from deepagents.backends import StateBackend
 from prompt_toolkit.application.current import set_app
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent
 from prompt_toolkit.output import DummyOutput
@@ -359,7 +360,7 @@ def test_escape_cancels_slash_command_before_scrolling_or_cancelling_run() -> No
 def test_escape_returns_to_bottom_before_cancelling_interaction() -> None:
     def scenario(app: CliApplication) -> None:
         app.dialogs.current = InteractionController.approval([{
-            "toolCallId": "call-write", "name": "write_file", "args": {},
+            "toolCallId": "call-write", "name": "write", "args": {},
         }])
         app.interaction_flow._finish_interaction = lambda *, cancelled=False: cancelled_calls.append(cancelled)  # type: ignore[method-assign]
         app.transcript.scroll_transcript(-5)
@@ -655,7 +656,7 @@ def test_status_line_truncates_chinese_messages_by_terminal_cells(monkeypatch, w
         monkeypatch.setattr("agent.cli.app.monotonic", lambda: now[0])
         app.run_events._apply_event(RunEvent(type="run_started"))
         for index in range(count):
-            app.run_events._apply_event(RunEvent(type="tool_started", name="task", tool_call_id=f"child-{index}"))
+            app.run_events._apply_event(RunEvent(type="tool_started", name="start_task", tool_call_id=f"child-{index}"))
         for offset in (0, 16):
             now[0] = 100 + offset
             line = "".join(value for _, value in app._status_text())
@@ -703,7 +704,7 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
         assert "Ready" not in footer
-        assert "perm:" in lines[1]
+        assert "p:" in lines[1]
         assert not app._status_visible()
         assert "".join(value for _, value in app._status_text()) == ""
 
@@ -1038,7 +1039,7 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
             arguments={"file_path": f"f{index}.py"}, output="x", status="completed",
         )
 
-    state = CliState(blocks=[explore(0, "read_file"), explore(1, "grep"), explore(2, "glob")])
+    state = CliState(blocks=[explore(0, "read"), explore(1, "grep"), explore(2, "glob")])
     renderer = TranscriptRenderer()
 
     fragments, _ = renderer.render(state, 80)
@@ -1049,11 +1050,11 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
         renderer.render(state, 80)
     assert len(rendered) == 2
 
-    state.blocks.append(explore(3, "read_file"))
+    state.blocks.append(explore(3, "read"))
     renderer.render(state, 80)
     assert len(rendered) == 3  # the group gained a member
 
-    state.blocks.extend(explore(index, "read_file") for index in range(4, 7))
+    state.blocks.extend(explore(index, "read") for index in range(4, 7))
     fragments, _ = renderer.render(state, 80)
     text = _plain("".join(part[1] for part in fragments))
     assert "Explored 7 items" in text
@@ -1082,7 +1083,7 @@ def test_expanded_tool_cache_survives_collapse_and_invalidates_changed_tool(monk
 
     monkeypatch.setattr(rendering, "_render_unit", counting)
     state = CliState(blocks=[
-        ToolBlock(str(index), "read_file", {"file_path": f"f{index}.py"}, output="old", status="completed")
+        ToolBlock(str(index), "read", {"file_path": f"f{index}.py"}, output="old", status="completed")
         for index in range(6)
     ])
     renderer = TranscriptRenderer()
@@ -1123,7 +1124,7 @@ def test_expanded_document_splits_once_per_unit_then_replays_cache(monkeypatch) 
     monkeypatch.setattr(rendering, "split_lines", counting)
     state = CliState(
         blocks=[
-            ToolBlock(str(index), "read_file", {"file_path": f"f{index}.py"}, output="one\ntwo", status="completed")
+            ToolBlock(str(index), "read", {"file_path": f"f{index}.py"}, output="one\ntwo", status="completed")
             for index in range(20)
         ],
         tools_expanded=True,
@@ -1172,7 +1173,7 @@ def test_transcript_renderer_matches_uncached_render() -> None:
         output="ok\nfailed", status="completed",
     ))
     state.blocks.append(ToolBlock(
-        tool_call_id="t2", name="read_file", arguments={"file_path": "a.py"},
+        tool_call_id="t2", name="read", arguments={"file_path": "a.py"},
         output="print(1)", status="completed",
     ))
     renderer = TranscriptRenderer()
@@ -1283,7 +1284,7 @@ def test_subagent_counter_is_right_aligned_in_working_status_row(count, label):
         app.state.apply(RunEvent(type='run_started'))
         before = rows()
         for index in range(count):
-            app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id=f'child-{index}'))
+            app.state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id=f'child-{index}'))
         after = rows()
         editor_y = next(y for y, row in enumerate(after) if row.startswith('› '))
         assert editor_y == next(y for y, row in enumerate(before) if row.startswith('› '))
@@ -1298,8 +1299,96 @@ def test_subagent_counter_is_right_aligned_in_working_status_row(count, label):
             assert 'class:editor' not in screen.data_buffer[counter_y][counter_x].style
         else:
             assert 'subagent' not in next(row for row in after if 'Working' in row)
-        app.state.apply(RunEvent(type='tool_started', name='task', tool_call_id='delegate'))
+        app.state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id='delegate'))
         app.state.apply(RunEvent(type='tool_completed', tool_call_id='delegate', content='private result'))
         cards = [block for block in app.state.blocks if isinstance(block, ToolBlock)]
         assert len(cards) == count + 1 and cards[-1].output == 'private result'
     _with_painted_app('subagent-counter', scenario)
+
+
+def test_turn_preview_tracks_bubble_edges_after_resume_and_resize(monkeypatch) -> None:
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.utils import get_cwidth
+
+    def scenario(app: CliApplication) -> None:
+        app.state.load_transcript([
+            TranscriptBlock(kind="user", content="第一段\n第二段" + "提问" * 50),
+            TranscriptBlock(kind="assistant", content="执行中\n\n" * 80),
+        ])
+        for width in (60, 35):
+            monkeypatch.setattr(app.application.output, "get_size", lambda: Size(rows=24, columns=width))
+            _paint(app)
+            turn, = app._transcript_document().turns
+            for offset, visible in ((-1, False), (0, True), (-1, False)):
+                app.transcript.scroll_transcript_to(turn.end + offset)
+                _paint(app)
+                preview = fragment_list_to_text(app.transcript_window.preview)
+                assert bool(preview) == visible
+                if visible:
+                    assert preview.startswith("current › 第一段 第二段")
+                    assert preview.endswith("…") and get_cwidth(preview) <= width
+
+    _with_painted_app("pinned-turn", scenario, lines=0)
+
+
+def test_turn_arrows_cycle_short_turns_and_yield_to_editor() -> None:
+    def scenario(app: CliApplication) -> None:
+        for text in ("first", "second", "third"):
+            app.state.add_user(text)
+        app.state.add_user("queued", pending=True)
+        _paint(app)
+        first, second, third = app._transcript_document().turns
+        bindings = {b.keys[0]: b for b in app.bindings.bindings if b.keys in (("left",), ("right",))}
+        for key, expected in [
+            ("left", second), ("left", first), ("left", first),
+            ("right", second), ("right", third), ("right", third),
+        ]:
+            binding = bindings[key]
+            assert binding.filter()
+            binding.handler(None)
+            _paint(app)
+            assert app.transcript.jump_message_id == expected.message_id
+        app.buffer.text = "草稿"
+        assert not any(b.filter() for b in bindings.values())
+
+    _with_painted_app("turn-arrows", scenario, lines=0)
+
+
+def test_turn_jump_keeps_history_anchored_during_live_output() -> None:
+    def scenario(app: CliApplication) -> None:
+        for text in ("first", "second", "third"):
+            app.state.add_user(text)
+            for i in range(30):
+                app.state.add_system(f"output {i}")
+        _paint(app)
+        assert app.transcript_window.preview == [("ansigreen", "current"), ("", " › third")]
+        first, second, _ = app._transcript_document().turns
+        app.transcript.jump_turn(-1)
+        _paint(app)
+        assert app.transcript_window.vertical_scroll == second.start
+        assert not app.transcript_window.preview
+        app.transcript.scroll_transcript_to(second.end)
+        app.state.add_system("more output")
+        _paint(app)
+        assert app.transcript_window.vertical_scroll == second.end
+        assert app.transcript_window.preview == [("ansigreen", "1 before"), ("", " › second")]
+        app.transcript.jump_turn(-1)
+        _paint(app)
+        assert app.transcript_window.vertical_scroll == first.start
+        app.transcript.scroll_transcript_to(first.end)
+        _paint(app)
+        assert app.transcript_window.preview == [("ansigreen", "2 before"), ("", " › first")]
+
+    _with_painted_app("live-turn-history", scenario, lines=0)
+
+
+
+def test_status_context_meter_reports_remaining_capacity():
+    from agent.cli.formatting import format_context_meter
+
+    assert format_context_meter({"input_tokens": 104_000}, 258_000, empty_session=False) == (
+        "[████████████░░░░░░░░] 60% left (104K used / 258K)"
+    )
+    assert "100% left" in format_context_meter({}, 258_000, empty_session=True)
+    assert "0% left" in format_context_meter({"input_tokens": 300}, 250, empty_session=False)
+    assert format_context_meter({}, 258_000, empty_session=False) == "Unknown (258K capacity)"

@@ -25,7 +25,6 @@ def command_table() -> tuple[Command, ...]:
         Command("status", "Show runtime and sandbox status", _status),
         Command("pause", "Pause at the next model safe point", _pause),
         Command("new", "Start a new persistent session thread", _new),
-        Command("session", "Show current session information", _session),
         Command("resume", "List sessions with content (/resume or /resume <id-prefix>)", _resume),
         Command("model", "Select source, model, and reasoning effort (/model or /model <id-prefix>)", _model),
         Command("skill", "Select a skill for the next message", _skill),
@@ -61,8 +60,11 @@ async def _clear(app: "CliApplication", _arg: str) -> None:
     app.set_status("Transcript cleared; agent context was preserved")
 
 
-async def _status(app: "CliApplication", _arg: str) -> None:
-    app.show_status()
+async def _status(app: "CliApplication", arg: str) -> None:
+    if arg.strip() == "details":
+        app.show_status_details()
+    else:
+        app.show_status()
 
 
 async def _pause(app: "CliApplication", _arg: str) -> None:
@@ -72,10 +74,6 @@ async def _pause(app: "CliApplication", _arg: str) -> None:
 
 async def _new(app: "CliApplication", _arg: str) -> None:
     app.new_session()
-
-
-async def _session(app: "CliApplication", _arg: str) -> None:
-    app.show_session()
 
 
 async def _resume(app: "CliApplication", arg: str) -> None:

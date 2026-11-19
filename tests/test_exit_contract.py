@@ -23,7 +23,7 @@ from agent.sessions.store import SessionStore
 from tests.conftest import scripted_model
 
 
-_APPROVAL = [{"id": "call-1", "name": "write_file", "args": {"file_path": "/workspace/note.txt"}}]
+_APPROVAL = [{"id": "call-1", "name": "write", "args": {"file_path": "/workspace/note.txt"}}]
 
 
 class Harness:

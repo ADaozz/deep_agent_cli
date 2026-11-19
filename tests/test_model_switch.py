@@ -73,7 +73,7 @@ def test_switch_model_defers_rebuild_until_next_invoke() -> None:
 def test_switch_model_deferred_keeps_pending_approval_recoverable() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "old-write", "name": "write_file",
+            "id": "old-write", "name": "write",
             "args": {"file_path": "/workspace/old.txt", "content": "old"},
         }]), AIMessage(content="done")]),
         backend=StateBackend(), settings=_settings_two_models(),
@@ -94,7 +94,7 @@ def test_switch_model_deferred_keeps_pending_approval_recoverable() -> None:
 def test_deferred_model_switch_waits_for_old_tool_then_uses_new_model() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "write-old", "name": "write_file",
+            "id": "write-old", "name": "write",
             "args": {"file_path": "/workspace/old.txt", "content": "old"},
         }])]),
         backend=StateBackend(), settings=_settings_two_models(),
@@ -176,7 +176,7 @@ def test_pending_model_failure_keeps_current_and_reports_error() -> None:
 def test_internal_config_boundary_can_resume_after_interrupted_apply() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "write-old", "name": "write_file",
+            "id": "write-old", "name": "write",
             "args": {"file_path": "/workspace/old.txt", "content": "old"},
         }])]), backend=StateBackend(), settings=_settings_two_models(),
     )
@@ -285,7 +285,7 @@ def test_cli_model_prefix_switch() -> None:
 def test_cli_idle_switch_preserves_pending_approval() -> None:
     runner = AgentRunner(
         model=scripted_model([AIMessage(content="", tool_calls=[{
-            "id": "cli-write", "name": "write_file",
+            "id": "cli-write", "name": "write",
             "args": {"file_path": "/note.txt", "content": "once"},
         }])]), backend=StateBackend(), settings=_settings_two_models(),
     )
@@ -619,7 +619,6 @@ def test_new_session_inherits_effective_model_and_effort(tmp_path, persist_on_fi
             with patch('agent.runtime.runner.build_chat_model') as build:
                 info = runner.new_session()
                 build.assert_not_called()
-            assert info.id != previous
             assert info.model_id == runner.current_model().id == 'local/beta'
             assert info.reasoning_effort == runner.reasoning_effort() == effort
             assert runner._chat_model is model
@@ -628,9 +627,12 @@ def test_new_session_inherits_effective_model_and_effort(tmp_path, persist_on_fi
             assert runner.pending_reasoning_effort() is None
             assert not runner.thread_has_content()
             if persist_on_first_message:
+                assert info.id == previous == ""
                 assert store.get(info.id) is None
+            else:
+                assert info.id != previous
             assert runner.invoke('new conversation').status == 'completed'
-            saved = store.get(info.id)
+            saved = store.get(runner.thread_id)
             assert saved.model_id == 'local/beta' and saved.reasoning_effort == effort
         finally:
             runner.close()
@@ -828,7 +830,7 @@ def test_subagent_effort_stays_independent_after_main_model_switch(api, child_ef
     from agent.execution.types import ExecutionMode
     from tests.model_stream_server import ScriptedSSEServer, Turn
     def task_call(identity):
-        return {'id': identity, 'name': 'task', 'args': {
+        return {'id': identity, 'name': 'start_task', 'args': {
             'description': identity, 'subagent_type': 'general-purpose'}}
     turns = [Turn(tool_calls=[task_call('first')]), Turn(text='first child'), Turn(text='first parent'),
              Turn(tool_calls=[task_call('second')]), Turn(text='second child'), Turn(text='second parent')]

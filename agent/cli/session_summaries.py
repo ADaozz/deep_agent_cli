@@ -28,7 +28,7 @@ class SessionSummaries:
         self.generate = generate or self._generate
         self._labels: dict[str, str | None] = {}
         self._attempted: set[str] = set()
-        if runner.session_store is not None:
+        if runner.thread_id and runner.session_store is not None:
             info = runner.session_store.get(runner.thread_id)
             if info is not None:
                 self.remember(info)

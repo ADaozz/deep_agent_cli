@@ -218,7 +218,7 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
         AIMessage(content='', tool_calls=[start_call('first')]),
         AIMessage(content='', tool_calls=[
             start_call('second'),
-            {'id': 'sync', 'name': 'task', 'args': {'description': 'x', 'subagent_type': 'general-purpose'}},
+            {'id': 'sync', 'name': 'start_task', 'args': {'description': 'x', 'subagent_type': 'general-purpose'}},
         ]),
         AIMessage(content='limit reported'),
     ], max_concurrent=1)
@@ -331,7 +331,7 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         prepared = create_agent(model=model, backend=StateBackend(), skills=[],
                                 settings=replace(cfg, subagents=subagents))
         assert not BACKGROUND & graph_tool_names(prepared.graph)
-    assert 'task' in graph_tool_names(create_agent(
+    assert 'start_task' in graph_tool_names(create_agent(
         model=model, backend=StateBackend(), skills=[],
         settings=replace(cfg, subagents=SubAgentConfig(background=False))).graph)
 
@@ -352,7 +352,7 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         harness.runner.invoke('go')
         harness.gate.set()
         wait_until(lambda: harness.finished())
-        assert not (BACKGROUND | {'task', 'read_subagent_log'}) & graph_tool_names(children[0].graph)
+        assert not (BACKGROUND | {'start_task', 'read_task_log'}) & graph_tool_names(children[0].graph)
     finally:
         harness.close()
 

@@ -52,7 +52,9 @@ async def main():
     app = CliApplication(runner)
     target = Path(sys.argv[2])
     def snapshot():
+        editor = app.application.layout.current_window.render_info
         data = {'input':app.buffer.text, 'cursor':app.buffer.cursor_position,
+                'editor_rows':editor.window_height if editor else 0,
                 'completion':app.buffer.complete_state is not None,
                 'permission':runner.permission_mode().value,
                 'pending':runner.pending_permission_mode().value if runner.pending_permission_mode() else None,
@@ -156,6 +158,28 @@ def tui(tmp_path):
         app.close()
 
 
+def test_editor_grows_to_five_rows_and_arrows_stay_in_draft(tui):
+    tui.send('/mod')
+    tui.wait(lambda s: s['completion'] and s['input'] == '/mod')
+    tui.send('\x1b[B\x1b[A!')
+    tui.wait(lambda s: s['input'] == '/mod!')
+    tui.send('\x15')
+    tui.wait(lambda s: not s['input'])
+    # The 120-column terminal reserves two cells for the editor prompt.
+    tui.send('中' * 62)
+    tui.wait(lambda s: s['editor_rows'] == 2 and s['cursor'] == 62)
+    tui.send('\x1b[A')
+    tui.wait(lambda s: s['cursor'] == 3)
+    tui.send('\x1b[B')
+    tui.wait(lambda s: s['cursor'] == 62)
+    tui.send('x' * 600)
+    tui.wait(lambda s: s['editor_rows'] == 5 and s['cursor'] == 662)
+    tui.send('\x1b[A')
+    tui.wait(lambda s: s['cursor'] == 544)
+    tui.send('\x03')
+    tui.wait(lambda s: not s['input'] and s['editor_rows'] == 1)
+
+
 def test_real_pty_completion_permission_and_pending_approval(tui):
     tui.send('/mod')
     before = tui.wait(lambda s: s['input'] == '/mod' and s['completion'])
@@ -167,15 +191,15 @@ def test_real_pty_completion_permission_and_pending_approval(tui):
     tui.send('\t')
     tui.wait(lambda s: s['input'].startswith('/model') and not s['completion'])
     tui.send('\x03/status\r')
-    tui.wait(lambda s: 'Status: idle' in s['transcript'])
+    tui.wait(lambda s: 'Context window:' in s['transcript'])
     tui.send('/permission allow\r')
     tui.wait(lambda s: s['interaction'] == 'permission_confirm')
     tui.send('ALLOW\r')
     state = tui.wait(lambda s: s['permission'] == 'allow' and s['interaction'] is None)
-    assert state['pending'] is None and 'perm:allow' in state['footer']
+    assert state['pending'] is None and 'p:allow' in state['footer']
     tui.send('/permission ask\r')
     state = tui.wait(lambda s: s['permission'] == 'ask')
-    assert state['pending'] is None and 'perm:ask' in state['footer']
+    assert state['pending'] is None and 'p:ask' in state['footer']
     tui.send('run a command\r')
     state = tui.wait(lambda s: s['interaction'] == 'approval')
     assert 'Network: OFF (default)' in state['question']
@@ -336,7 +360,8 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             assert state['summary'] == '修复会话恢复流程中的异常中断问题'
             assert len(server.summary_connections) == 1
             summary_body = json.dumps(server.summary_connections[0].body, ensure_ascii=False)
-            assert 'second task' in summary_body and 'first task' not in summary_body
+            assert 'first task' in summary_body and 'second task' not in summary_body
+            assert 'second answer' not in summary_body
             assert len(server.connections) == 2
             assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
@@ -652,7 +677,7 @@ def _subagent_stream_probe():
 def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
     from tests.model_stream_server import ScriptedSSEServer, Turn
     probe = _subagent_stream_probe()
-    call = {'name': 'task', 'id': 'delegate', 'args': {
+    call = {'name': 'start_task', 'id': 'delegate', 'args': {
         'description': 'private child task', 'subagent_type': 'general-purpose'}}
     with ScriptedSSEServer('chat_completions', [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
         tui = Tui(tmp_path, probe=probe, extra_args=(server.base_url, 'chat_completions'))
@@ -681,7 +706,7 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
 
 def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
     from tests.model_stream_server import ScriptedSSEServer, Turn
-    calls = [{'name': 'task', 'id': identifier, 'args': {
+    calls = [{'name': 'start_task', 'id': identifier, 'args': {
         'description': description, 'subagent_type': 'general-purpose'}}
         for identifier, description in [('median', 'Fix median3'), ('date', 'Fix is_leap_year')]]
     with ScriptedSSEServer('chat_completions', [

@@ -206,7 +206,7 @@ def test_workspace_middleware_reports_executor_and_skips_shell_denial_prompt(
     composite = WorkspaceCompositeBackend(executor, skills_dir=None)
 
     unsupported, execution_active, backend = FilesystemMiddleware(
-        backend=composite, tools=list(DEFAULT_FS_TOOLS),
+        backend=composite, tools=["ls", "read_file"],
     )._unsupported_tools_and_execution_state({"execute", "ls"})
     assert unsupported == {"execute"}
     assert execution_active is False
@@ -243,30 +243,34 @@ def test_workspace_middleware_local_descriptions_yield_to_caller_overrides(tmp_p
         middleware = WorkspaceFilesystemMiddleware(backend=composite, tools=list(DEFAULT_FS_TOOLS), **kwargs)
         return {tool.name: tool.description for tool in middleware.tools}
 
-    upstream = {tool.name: tool.description for tool in FilesystemMiddleware(
-        backend=composite, tools=list(DEFAULT_FS_TOOLS),
-    ).tools}
+    renamed = {"read_file": "read", "write_file": "write", "edit_file": "edit"}
+    upstream = {}
+    for tool in FilesystemMiddleware(backend=composite).tools:
+        description = tool.description
+        for native, name in renamed.items():
+            description = description.replace(native, name)
+        upstream[renamed.get(tool.name, tool.name)] = description
     defaults = descriptions()
     for name, description in defaults.items():
         assert description == TOOL_DESCRIPTIONS.get(name, upstream[name]), name
 
-    custom = descriptions(custom_tool_descriptions={"ls": "custom", "write_file": "custom write"})
+    custom = descriptions(custom_tool_descriptions={"ls": "custom", "write": "custom write"})
     assert custom["ls"] == "custom"
-    assert custom["write_file"] == "custom write"
-    assert custom["read_file"] == TOOL_DESCRIPTIONS["read_file"]
+    assert custom["write"] == "custom write"
+    assert custom["read"] == TOOL_DESCRIPTIONS["read"]
 
 
 def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
     backend = select_backend(replace(config_for(tmp_path), bwrap_path="/bin/true"), check=False).backend
     middleware = WriteOperationMiddleware(backend)
     request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": f"{_root(tmp_path)}/report.md", "content": "text"},
+        "name": "write", "args": {"file_path": f"{_root(tmp_path)}/report.md", "content": "text"},
     })
 
     def write(_request: object) -> ToolMessage:
         result = backend.write(f"{_root(tmp_path)}/report.md", "text")
         assert result.error is None
-        return ToolMessage(content=f"Updated file {_root(tmp_path)}/report.md", tool_call_id="write-1", name="write_file")
+        return ToolMessage(content=f"Updated file {_root(tmp_path)}/report.md", tool_call_id="write-1", name="write")
 
     created = middleware.wrap_tool_call(request, write)
     overwritten = middleware.wrap_tool_call(request, write)
@@ -274,28 +278,28 @@ def test_write_operation_uses_pre_write_file_state(tmp_path: Path) -> None:
     assert overwritten.artifact == {"operation": "overwrite"}
 
     empty_request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": f"{_root(tmp_path)}/empty.md", "content": ""},
+        "name": "write", "args": {"file_path": f"{_root(tmp_path)}/empty.md", "content": ""},
     })
 
     def write_empty(_request: object) -> ToolMessage:
         result = backend.write(f"{_root(tmp_path)}/empty.md", "")
         assert result.error is None
-        return ToolMessage(content=f"Updated file {_root(tmp_path)}/empty.md", tool_call_id="write-empty", name="write_file")
+        return ToolMessage(content=f"Updated file {_root(tmp_path)}/empty.md", tool_call_id="write-empty", name="write")
 
     assert middleware.wrap_tool_call(empty_request, write_empty).artifact == {"operation": "create"}
 
     def fail(_request: object) -> ToolMessage:
-        return ToolMessage(content="failed", tool_call_id="write-2", name="write_file", status="error")
+        return ToolMessage(content="failed", tool_call_id="write-2", name="write", status="error")
 
     assert middleware.wrap_tool_call(request, fail).artifact is None
 
     async def async_write(_request: object) -> ToolMessage:
         result = backend.write(f"{_root(tmp_path)}/async.md", "text")
         assert result.error is None
-        return ToolMessage(content=f"Updated file {_root(tmp_path)}/async.md", tool_call_id="write-3", name="write_file")
+        return ToolMessage(content=f"Updated file {_root(tmp_path)}/async.md", tool_call_id="write-3", name="write")
 
     async_request = SimpleNamespace(tool_call={
-        "name": "write_file", "args": {"file_path": f"{_root(tmp_path)}/async.md", "content": "text"},
+        "name": "write", "args": {"file_path": f"{_root(tmp_path)}/async.md", "content": "text"},
     })
     async def check_async() -> None:
         first = await middleware.awrap_tool_call(async_request, async_write)
@@ -311,7 +315,7 @@ def test_write_operation_reaches_tool_completion_artifact(tmp_path: Path) -> Non
     path = f"{_root(tmp_path)}/report.md"
     model = scripted_model([
         AIMessage(content="", tool_calls=[{
-            "id": "write-new", "name": "write_file",
+            "id": "write-new", "name": "write",
             "args": {"file_path": path, "content": "first"},
         }]),
         AIMessage(content="done"),
@@ -357,14 +361,14 @@ def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.Monkey
     assert names == {
         "request_human_input",
         "ls",
-        "read_file",
-        "write_file",
-        "edit_file",
+        "read",
+        "write",
+        "edit",
         "delete",
         "execute",
         "compact_conversation",
-        "task",
-        "read_subagent_log",
+        "start_task",
+        "read_task_log",
         "start_background_task",
         "check_background_task",
         "cancel_background_task",

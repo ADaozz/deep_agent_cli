@@ -267,7 +267,7 @@ def race(profile: ModelProfile, root: Path, rounds: int, step: float) -> dict[st
 def self_test_server(api: str, selected: set[str]):
     from tests.model_stream_server import ScriptedSSEServer, Turn
 
-    write = {"id": "w1", "name": "write_file",
+    write = {"id": "w1", "name": "write",
              "args": {"file_path": "/coding-workspace/fib.py", "content": "a, b = 0, 1\nout = []\nfor _ in range(10):\n"
                       "    out.append(str(a))\n    a, b = b, a + b\nprint(' '.join(out))\n"}}
     run = {"id": "e1", "name": "execute", "args": {"command": "python3 fib.py"}}

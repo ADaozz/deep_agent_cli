@@ -113,7 +113,7 @@ def requested_tool_names(message: BaseMessage | None) -> list[str]:
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         path = str(args.get("file_path") or args.get("path") or "")
-        if name == "read_file" and (path == SKILLS_ROOT or path.startswith(f"{SKILLS_ROOT}/")):
+        if name == "read" and (path == SKILLS_ROOT or path.startswith(f"{SKILLS_ROOT}/")):
             continue
         names.append(name)
     return names

@@ -88,7 +88,7 @@ def test_local_model_stream_and_effort_mapping():
 
 
 def test_http_tool_approval_survives_process_restart(tmp_path: Path):
-    answers = [{"tool": "write_file", "id": "write-local", "args": {"file_path": "/note.txt", "content": "approved"}},
+    answers = [{"tool": "write", "id": "write-local", "args": {"file_path": "/note.txt", "content": "approved"}},
                {"text": "saved after approval"}]
     with compatible_endpoint(answers) as (endpoint, requests):
         settings = settings_for(endpoint)
@@ -97,7 +97,7 @@ def test_http_tool_approval_survives_process_restart(tmp_path: Path):
         runner = AgentRunner(settings=settings, backend=StateBackend(), session_store=store)
         waiting = runner.invoke("write a note")
         assert waiting.status == "waiting_confirmation"
-        assert waiting.pending_tool_calls[0]["name"] == "write_file"
+        assert waiting.pending_tool_calls[0]["name"] == "write"
         assert len(requests) == 1
         thread_id = runner.thread_id
         runner.close(); store.close()
@@ -115,7 +115,7 @@ def test_http_tool_approval_survives_process_restart(tmp_path: Path):
 
 
 def test_http_pause_then_resume_without_repeating_tool():
-    answers = [{"tool": "write_file", "id": "pause-write", "args": {"file_path": "/paused.txt", "content": "once"}},
+    answers = [{"tool": "write", "id": "pause-write", "args": {"file_path": "/paused.txt", "content": "once"}},
                {"text": "continued"}]
     with compatible_endpoint(answers) as (endpoint, requests):
         runner = AgentRunner(settings=settings_for(endpoint), backend=StateBackend())

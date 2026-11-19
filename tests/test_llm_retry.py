@@ -184,7 +184,7 @@ def test_nonretryable_request_errors_are_not_retried(api, status, runner_factory
 
 @pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize("hidden", [(), ("request_human_input",), ("compact_conversation",),
-                                     ("request_human_input", "ls", "read_file", "compact_conversation")])
+                                     ("request_human_input", "ls", "read", "compact_conversation")])
 @pytest.mark.parametrize("use_prepared", [False, True])
 def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, runner_factory):
     with ScriptedSSEServer(api, [Turn(text="done")]) as server:
@@ -198,15 +198,15 @@ def test_hidden_tools_are_absent_from_real_requests(api, hidden, use_prepared, r
             if "request_human_input" in hidden:
                 assert "request_human_input" not in str(body.get("instructions", body.get("messages", body.get("input"))))
         else:
-            assert {"request_human_input", "ls", "read_file", "compact_conversation"} <= names
-        assert "write_file" in names
+            assert {"request_human_input", "ls", "read", "compact_conversation"} <= names
+        assert "write" in names
         assert set(runner.prepared.model_tool_names) == names
         from agent.cli.app import CliApplication
         from prompt_toolkit.input.defaults import create_pipe_input
         from prompt_toolkit.output import DummyOutput
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
-            app.show_status()
+            app.show_status_details()
             listed = ", ".join(runner.prepared.model_tool_names)
             assert f"Tools: {len(names)} · {listed}" in app.state.blocks[-1].content
         # Hiding is a schema choice; the ASK rules are unchanged.

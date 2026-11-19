@@ -44,7 +44,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
 
     monkeypatch.setattr(factory, 'build_agent', capture)
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
             'description': 'Only delegated instructions', 'subagent_type': 'general-purpose'}, 'id': 'delegate'}]),
         AIMessage(content='private child final'),
         AIMessage(content='public parent answer'),
@@ -61,7 +61,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         child = child_prepared[0]
         assert child.backend is runner.prepared.backend
         assert child.execution_mode is ExecutionMode.SANDBOXED
-        assert not {'task', 'request_human_input', 'read_subagent_log'} & graph_tool_names(child.graph)
+        assert not {'start_task', 'request_human_input', 'read_task_log'} & graph_tool_names(child.graph)
         assert not any(name.startswith("mcp") for name in graph_tool_names(child.graph))
         assert "mcp__server__tool" in graph_tool_names(runner.prepared.graph)
         assert mcp.snapshots == 1
@@ -73,7 +73,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         assert 'private child final' in tool_result.content
         assert 'run_id=' in tool_result.content
         cards = [block for block in messages_to_transcript(state['messages']) if block.kind == 'tool']
-        assert len(cards) == 1 and cards[0].name == 'task'
+        assert len(cards) == 1 and cards[0].name == 'start_task'
         assert cards[0].arguments['description'] == 'Only delegated instructions'
         assert cards[0].content == tool_result.content
         assert [e.result['count'] for e in events if e.type == 'subagents_changed'] == [1, 0]
@@ -95,7 +95,7 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path / 'private')
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
             'description': 'List files', 'subagent_type': 'general-purpose'}, 'id': 'delegate'}]),
         AIMessage(content='', tool_calls=[{'name': 'ls', 'args': {'path': '/'}, 'id': 'child-ls'}]),
         AIMessage(content='child final'),
@@ -108,7 +108,7 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
         result = runner.invoke('delegate a listing')
         assert result.status == 'completed', result.error
         recorded = [e.result['tool_calls'] for e in events if e.type == 'model_metrics']
-        assert recorded == [['task'], []]
+        assert recorded == [['start_task'], []]
     finally:
         runner.close()
 
@@ -117,9 +117,9 @@ def test_disabled_task_and_custom_backend_refusal(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     prepared = create_agent(model=scripted_model([AIMessage(content='done')]), backend=StateBackend(),
                             skills=[], settings=replace(cfg, subagents=SubAgentConfig(enabled=False)))
-    assert not {'task', 'read_subagent_log'} & graph_tool_names(prepared.graph)
+    assert not {'start_task', 'read_task_log'} & graph_tool_names(prepared.graph)
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
             'description': 'do work', 'subagent_type': 'general-purpose'}, 'id': 'd'}]),
         AIMessage(content='reported refusal'),
     ])
@@ -162,7 +162,7 @@ def test_real_sandbox_native_concurrency_and_command_cancel(tmp_path):
             else:
                 names = ['child-cancel'] if human == 'cancel' else ['child-1', 'child-2', 'child-3']
                 answer = AIMessage(content='', tool_calls=[{
-                    'name': 'task', 'id': name, 'args': {
+                    'name': 'start_task', 'id': name, 'args': {
                         'description': name, 'subagent_type': 'general-purpose'}} for name in names])
             return ChatResult(generations=[ChatGeneration(message=answer)])
 
@@ -205,7 +205,7 @@ def test_log_tool_reads_only_its_parent_after_restart(tmp_path):
     SubAgentLogStore(tmp_path / 'subagents').append('parent', run_id, 'finish', status='completed', output='saved event')
     cfg = Settings(config_dir=tmp_path)
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'read_subagent_log', 'id': 'log', 'args': {'run_id': run_id}}]),
+        AIMessage(content='', tool_calls=[{'name': 'read_task_log', 'id': 'log', 'args': {'run_id': run_id}}]),
         AIMessage(content='read completed'),
     ])
     runner = AgentRunner(model=model, backend=StateBackend(), settings=cfg, thread_id='parent')
@@ -223,7 +223,7 @@ def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeyp
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     def responses(label):
         return scripted_model([
-            AIMessage(content='', tool_calls=[{'name': 'task', 'id': label, 'args': {
+            AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': label, 'args': {
                 'description': label, 'subagent_type': 'general-purpose'}}]),
             AIMessage(content=f'child-{label}'), AIMessage(content=f'parent-{label}')])
     first, second = responses('first'), responses('second')
@@ -254,7 +254,7 @@ def test_subagent_model_and_effort_override(tmp_path, monkeypatch):
     from agent.models.profile import ModelProfile
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     parent = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
             'description': 'child', 'subagent_type': 'general-purpose'}}]), AIMessage(content='parent')])
     child = scripted_model([AIMessage(content='child')])
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'parent'),
@@ -278,7 +278,7 @@ def test_prepared_runner_honors_subagent_disable_setting(tmp_path):
     runner = AgentRunner(prepared=create_agent(model=scripted_model([AIMessage(content='done')]),
                          backend=StateBackend(), skills=[]), settings=cfg)
     try:
-        assert 'task' not in graph_tool_names(runner.prepared.graph)
+        assert 'start_task' not in graph_tool_names(runner.prepared.graph)
     finally:
         runner.close()
 
@@ -293,7 +293,7 @@ def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch
     runner = AgentRunner(model=scripted_model([AIMessage(content='private result'), AIMessage(content='public answer')]), settings=cfg)
     try:
         messages = [HumanMessage(content='old parent input'), AIMessage(content='', tool_calls=[{
-            'name': 'task', 'id': 'restored-task', 'args': {
+            'name': 'start_task', 'id': 'restored-task', 'args': {
                 'description': 'pending delegated task', 'subagent_type': 'general-purpose'}}])]
         runner.prepared.graph.update_state(runner._thread_config(), {'messages': messages}, as_node='model')
         ui = CliState()
@@ -302,7 +302,7 @@ def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch
         assert result.status == 'completed', result.error
         assert result.output == 'public answer'
         cards = [block for block in ui.blocks if isinstance(block, ToolBlock)]
-        assert len(cards) == 1 and cards[0].name == 'task'
+        assert len(cards) == 1 and cards[0].name == 'start_task'
         assert cards[0].arguments['description'] == 'pending delegated task'
         assert cards[0].status == 'completed' and 'private result' in cards[0].output
         checkpoint = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
@@ -325,7 +325,7 @@ def test_child_request_effort_is_independent_of_parent(
     from agent.models.client import build_chat_model
     from agent.models.stream_lifecycle import close_model_http_clients
     from tests.model_stream_server import ScriptedSSEServer, Turn
-    call = {'name': 'task', 'id': 'delegate', 'args': {
+    call = {'name': 'start_task', 'id': 'delegate', 'args': {
         'description': 'child-only task', 'subagent_type': 'general-purpose'}}
     with ScriptedSSEServer(api, [Turn(tool_calls=[call]), Turn(text='child answer'), Turn(text='parent answer')]) as server:
         main = ModelProfile('main', 'main-model', api=api, base_url=server.base_url,
@@ -379,7 +379,7 @@ def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monk
         pytest.fail('custom injected model silently replaced by configured default')
     monkeypatch.setattr(factory, 'build_chat_model', unexpected_build)
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
             'description': 'custom task', 'subagent_type': 'general-purpose'}}]),
         AIMessage(content='custom child'), AIMessage(content='custom parent')])
     runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path))
@@ -396,7 +396,7 @@ def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, mo
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'configured', reasoning_efforts=('low',)),),
                    subagents=SubAgentConfig(reasoning_effort='low'))
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
             'description': 'custom task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported')])
     monkeypatch.setattr(factory, 'build_chat_model', lambda *args, **kwargs: pytest.fail('unexpected profile fallback'))
     runner = AgentRunner(model=model, settings=cfg)
@@ -419,7 +419,7 @@ def test_log_redacts_only_configured_model_and_tavily_keys(tmp_path, monkeypatch
         ModelProfile('unused', 'unused', api_key='known-unused-key')))
     description = 'known-main-key known-unused-key known-tavily-key password=unknown-output-key'
     parent = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'd', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
             'description': description, 'subagent_type': 'general-purpose'}}]),
         AIMessage(content='child result'), AIMessage(content='parent result')])
     runner = AgentRunner(model=parent, settings=cfg)

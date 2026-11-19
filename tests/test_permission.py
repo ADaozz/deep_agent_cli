@@ -155,9 +155,9 @@ def test_custom_approval_survives_permission_round_trip() -> None:
 
 def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() -> None:
     messages = [
-        AIMessage(content="", tool_calls=[{"id": "old-write", "name": "write_file",
+        AIMessage(content="", tool_calls=[{"id": "old-write", "name": "write",
                                           "args": {"file_path": "/workspace/old.txt", "content": "old"}}]),
-        AIMessage(content="", tool_calls=[{"id": "new-write", "name": "write_file",
+        AIMessage(content="", tool_calls=[{"id": "new-write", "name": "write",
                                           "args": {"file_path": "/workspace/new.txt", "content": "new"}}]),
         AIMessage(content="done"),
     ]
@@ -477,9 +477,9 @@ def test_custom_backend_rejects_allow_before_graph_is_exposed() -> None:
 
 
 def test_custom_approval_cannot_disable_builtin_approval() -> None:
-    with pytest.raises(ValueError, match="write_file"):
+    with pytest.raises(ValueError, match="write"):
         create_agent(model=scripted_model([AIMessage(content="ok")]),
-                     backend=StateBackend(), interrupt_on={"write_file": False})
+                     backend=StateBackend(), interrupt_on={"write": False})
 
 
 def test_approval_ui_mentions_declared_network() -> None:
@@ -565,13 +565,13 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
             assert app.runner.permission_mode() is PermissionMode.ALLOW
             assert app.runner.pending_permission_mode() is None
             assert app.dialogs.current is None
-            assert "perm:allow" in "".join(text for _, text in app._footer_text())
+            assert "p:allow" in "".join(text for _, text in app._footer_text())
             app.show_status()
             assert "pending" not in getattr(app.state.blocks[-1], "content", "").lower()
             await app.access_selection.select_permission("ask")
             assert runner.permission_mode() is PermissionMode.ASK
             assert runner.pending_permission_mode() is None
-            assert "perm:ask" in "".join(text for _, text in app._footer_text())
+            assert "p:ask" in "".join(text for _, text in app._footer_text())
             await app.access_selection.select_permission("allow")
             assert app.dialogs.current.accept("ALLOW")
             app.interaction_flow._finish_interaction()
@@ -618,13 +618,13 @@ def test_approval_multiple_tools_truncation_and_redaction() -> None:
     ui = InteractionController.approval([
         {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
         {"toolCallId": "b", "name": "execute", "args": {"command": "curl -H 'Authorization: Bearer private-value' site"}},
-        {"toolCallId": "c", "name": "write_file", "args": {"content": "private-file-content"}},
+        {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
     ])
     assert ui.tool_call_ids == ["a", "b", "c"]
     assert "truncated" in ui.question and "Ctrl+O" in ui.question
     assert "private-value" not in ui.question
     assert "private-file-content" not in ui.question
-    assert "Tool: write_file" in ui.question
+    assert "Tool: write" in ui.question
     assert ui.option_index == 0
 
 
@@ -698,7 +698,7 @@ def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
         store.close()
 
 
-@pytest.mark.parametrize("tool", ["write_file", "edit_file", "delete"])
+@pytest.mark.parametrize("tool", ["write", "edit", "delete"])
 @pytest.mark.parametrize("key", ["file_path", "path"])
 def test_approval_file_tool_shows_only_target(tool, key) -> None:
     args = {key: "/workspace/report.md", "content": "private contents",
@@ -718,8 +718,8 @@ def test_approval_file_tool_shows_only_target(tool, key) -> None:
 
 def test_approval_file_targets_bound_and_redact_summary() -> None:
     ui = InteractionController.approval([
-        {"name": "write_file", "args": {"file_path": "/workspace/" + "x" * 400}},
-        {"name": "edit_file", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
+        {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
+        {"name": "edit", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
         {"name": "delete", "args": {"file_path": "/workspace/api_key=private-value"}},
         {"name": "delete", "args": {}},
     ])

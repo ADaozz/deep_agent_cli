@@ -362,7 +362,7 @@ def test_restart_restores_checkpoint_interrupt(tmp_path: Path, kind: str) -> Non
     db = tmp_path / f"{kind}.sqlite3"
     store = SessionStore(db)
     response = AIMessage(content="", tool_calls=[{
-        "id": "write-1", "name": "write_file", "args": {"file_path": "/workspace/note.txt", "content": "b"},
+        "id": "write-1", "name": "write", "args": {"file_path": "/workspace/note.txt", "content": "b"},
     }]) if kind == "waiting_confirmation" else AIMessage(content="done")
     prepared = create_agent(model=scripted_model([response]), backend=StateBackend())
     runner = AgentRunner(prepared=prepared, session_store=store)

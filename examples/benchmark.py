@@ -60,8 +60,8 @@ def _agent_script() -> list[Any]:
     return [
         AIMessage(content="", tool_calls=[{"id": "ls-1", "name": "ls", "args": {"path": "/"}}]),
         AIMessage(content="", tool_calls=[
-            {"id": "read-1", "name": "read_file", "args": {"file_path": "/pkg/mod_0.py"}},
-            {"id": "read-2", "name": "read_file", "args": {"file_path": "/pkg/mod_1.py"}},
+            {"id": "read-1", "name": "read", "args": {"file_path": "/pkg/mod_0.py"}},
+            {"id": "read-2", "name": "read", "args": {"file_path": "/pkg/mod_1.py"}},
         ]),
         AIMessage(content="", tool_calls=[{"id": "glob-1", "name": "glob", "args": {"pattern": "**/*.py"}}]),
         AIMessage(content="The package has 50 modules."),
@@ -132,7 +132,7 @@ def bench_sandbox(repeat: int) -> dict[str, Any]:
             probe = backend.read(str(root / "pkg" / "mod_0.py"))
             if getattr(probe, "error", None):
                 raise SystemExit(f"sandbox read failed: {probe.error}")
-            report["read_file"] = _time(repeat, lambda index: backend.read(str(root / "pkg" / f"mod_{index % 50}.py")))
+            report["read"] = _time(repeat, lambda index: backend.read(str(root / "pkg" / f"mod_{index % 50}.py")))
         finally:
             pool = sandbox_pool_of(backend)
             if pool is not None:
@@ -195,7 +195,7 @@ def _long_state(blocks: int) -> Any:
     for index in range(blocks // 4):
         state.blocks.append(MessageBlock(kind="user", content=f"question {index}"))
         state.blocks.append(ToolBlock(
-            tool_call_id=f"call-{index}", name="read_file",
+            tool_call_id=f"call-{index}", name="read",
             arguments={"file_path": f"/pkg/mod_{index}.py"}, output="x = 1\n" * 20, status="completed",
         ))
         state.blocks.append(MessageBlock(kind="assistant", content=f"answer {index} " * 30))
@@ -236,7 +236,7 @@ def bench_cli(blocks: int, repeat: int) -> dict[str, Any]:
 
     report["assistant_delta"] = _time(repeat, delta)
     report["tool_completed_lookup"] = _time(repeat, lambda index: state.apply(RunEvent(
-        type="tool_completed", tool_call_id=f"call-{index % 10}", name="read_file", content="x = 1\n" * 20,
+        type="tool_completed", tool_call_id=f"call-{index % 10}", name="read", content="x = 1\n" * 20,
     )))
     renderer = TranscriptRenderer()
     renderer.render_document(state, 120)

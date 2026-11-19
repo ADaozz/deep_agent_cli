@@ -99,7 +99,7 @@ def test_native_tools_still_run_when_mcp_is_connected(tmp_path: Path, http_mcp: 
             model=scripted_model([
                 AIMessage(content="", tool_calls=[{
                     "id": "call-write",
-                    "name": "write_file",
+                    "name": "write",
                     "args": {"file_path": "/workspace/note.txt", "content": "hello"},
                 }]),
                 AIMessage(content="写入完成。"),
@@ -109,7 +109,7 @@ def test_native_tools_still_run_when_mcp_is_connected(tmp_path: Path, http_mcp: 
         )
         try:
             names = graph_tool_names(runner.prepared.graph)
-            assert "write_file" in names
+            assert "write" in names
             assert "mcp__local__echo" in names
             waiting = runner.invoke("写入")
             assert waiting.status == "waiting_confirmation"

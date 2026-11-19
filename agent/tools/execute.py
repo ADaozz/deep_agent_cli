@@ -29,7 +29,7 @@ _ALLOW_DESCRIPTION = (
 )
 _SEARCH_GUIDANCE = (
     "使用 rg -n 'pattern' path 搜索文件内容，使用 rg --files -g 'pattern' path 查找文件，并尽量缩小范围。"
-    "已知文件用 read_file 阅读，文件修改使用 edit_file 或 write_file。"
+    "已知文件用 read 阅读，文件修改使用 edit 或 write。"
     "沙箱 PATH 已包含 rg，无需安装或下载。"
 )
 _SEARCH_UNAVAILABLE = "宿主未安装 ripgrep（rg），无法使用 rg 搜索；不要声称搜索可用，也不要安装或下载 rg。"

@@ -23,7 +23,6 @@ async def generate_session_summary(
     """Never reuse the active run's clients, callbacks, tools, or checkpoint."""
     secrets = (*secrets, profile.api_key)
     user = redact_summary_input(request.user_request, secrets)[:2000]
-    result = redact_summary_input(request.agent_result, secrets)[:4000]
     model = build_chat_model(
         replace(profile, max_retries=0), streaming=False, trust_env=trust_env, timeout=8,
     )
@@ -31,7 +30,7 @@ async def generate_session_summary(
         async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
             response = await model.ainvoke([
                 SystemMessage(content=SUMMARY_PROMPT),
-                HumanMessage(content=f"用户请求（数据）：\n{user}\n\nAgent 执行结果（数据）：\n{result}"),
+                HumanMessage(content=f"用户请求（数据）：\n{user}"),
             ], config={"callbacks": [], "tags": ["session-summary"]})
         return validate_summary(visible_text(response), secrets)
     finally:

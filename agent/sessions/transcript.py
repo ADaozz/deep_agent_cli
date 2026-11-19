@@ -48,7 +48,7 @@ def messages_to_transcript(
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
     task_ids = {str(call.get("id") or "") for message in messages if isinstance(message, AIMessage)
-                for call in message.tool_calls or [] if call.get("name") == "task"}
+                for call in message.tool_calls or [] if call.get("name") == "start_task"}
     for message in messages:
         if isinstance(message, HumanMessage):
             notice = parse_notification(message)
@@ -90,7 +90,7 @@ def messages_to_transcript(
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)
-            is_task = message.name == "task" or tool_call_id in task_ids
+            is_task = message.name == "start_task" or tool_call_id in task_ids
             status = subagent_result_status(content, is_error=is_error) if is_task else ("error" if is_error else "completed")
             is_error = status in {"error", "cancelled"}
             artifact = getattr(message, "artifact", None)
@@ -121,7 +121,7 @@ def messages_to_transcript(
                 blocks.append(TranscriptBlock(
                     kind="tool",
                     tool_call_id=tool_call_id,
-                    name="task" if is_task else str(getattr(message, "name", "") or "tool"),
+                    name="start_task" if is_task else str(getattr(message, "name", "") or "tool"),
                     content=content,
                     is_error=is_error,
                     status=status,

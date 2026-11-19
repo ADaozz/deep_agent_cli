@@ -185,12 +185,12 @@ def test_parallel_search_and_write_both_require_approval(monkeypatch):
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="", tool_calls=[
             {"id": "parallel-search", "name": "web_search", "args": {"query": "x"}},
-            {"id": "parallel-write", "name": "write_file", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
+            {"id": "parallel-write", "name": "write", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
         ]),
     ]), backend=StateBackend())
     waiting = runner.invoke("搜索并写入")
     assert waiting.status == "waiting_confirmation"
-    assert {item["name"] for item in waiting.pending_tool_calls} == {"web_search", "write_file"}
+    assert {item["name"] for item in waiting.pending_tool_calls} == {"web_search", "write"}
     assert not requests
 
 
@@ -232,14 +232,14 @@ def test_old_search_policy_waits_for_other_tools_in_the_same_batch(monkeypatch):
         prepared = create_agent(model=scripted_model([
             AIMessage(content="", tool_calls=[
                 {"id": "old-search", "name": "web_search", "args": {"query": "x"}},
-                {"id": "old-write", "name": "write_file", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
+                {"id": "old-write", "name": "write", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
             ]),
             AIMessage(content="done"),
         ]), backend=StateBackend())
     runner = AgentRunner(prepared=prepared)
     waiting = runner.invoke("搜索并写入")
     assert waiting.status == "waiting_confirmation"
-    assert [item["name"] for item in waiting.pending_tool_calls] == ["write_file"]
+    assert [item["name"] for item in waiting.pending_tool_calls] == ["write"]
     assert not requests
     assert runner.approve_tool("old-write").status == "completed"
     assert len(requests) == 1

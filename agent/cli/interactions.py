@@ -187,7 +187,7 @@ class InteractionController:
                 else:
                     details.append("Network: OFF" + (" (default)" if "network" not in args else ""))
                 details.append(f"Command: {_approval_summary(args.get('command'))}")
-            elif name in {"write_file", "edit_file", "delete"}:
+            elif name in {"write", "edit", "delete"}:
                 target = args.get("file_path")
                 details.append(f"Target: {_approval_summary(target, kind='target')}")
             elif name == "web_search":

@@ -100,7 +100,7 @@ class GenerationTiming:
 
 
 _SUBAGENT_TOOLS = frozenset({
-    "task", "read_subagent_log",
+    "start_task", "read_task_log",
     "start_background_task", "check_background_task", "cancel_background_task",
 })
 

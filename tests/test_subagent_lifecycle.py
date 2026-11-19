@@ -116,7 +116,7 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
     from agent.models.stream_lifecycle import close_model_http_clients, live_stream_count
     from tests.model_stream_server import ScriptedSSEServer, Turn
     from tests.test_model_stream_cancel import Harness, settings_for
-    call = {'id': 'delegate', 'name': 'task', 'args': {
+    call = {'id': 'delegate', 'name': 'start_task', 'args': {
         'description': 'child-only instructions', 'subagent_type': 'general-purpose'}}
     with ScriptedSSEServer(api, [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
         cfg = replace(settings_for(server), config_dir=tmp_path)
@@ -136,7 +136,7 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             assert child_connection.hanging.wait(5)
             tools = {tool['function']['name'] if 'function' in tool else tool.get('name')
                      for tool in child_connection.body['tools']}
-            assert not {'task', 'request_human_input', 'read_subagent_log'} & tools
+            assert not {'start_task', 'request_human_input', 'read_task_log'} & tools
             import json
             assert 'parent private history' not in json.dumps(child_connection.body)
             assert runner.prepared.subagent_manager.active_count == 1
@@ -186,8 +186,8 @@ def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, 
     monkeypatch.setattr(factory, 'build_chat_model', build)
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     parent = scripted_model([
-        AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'task', 'args': {
-            'description': 'task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported failure')])
+        AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
+            'description': 'start_task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported failure')])
     runner = AgentRunner(model=parent, settings=cfg)
     try:
         assert runner.invoke('go').output == 'reported failure'

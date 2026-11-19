@@ -62,10 +62,10 @@ def test_run_metrics_splits_wall_time_without_double_counting_parallel_tools():
         RunEvent(type="assistant_started"),
         RunEvent(type="model_metrics", result={"ttft": 0.5, "input_tokens": 100, "output_tokens": 10}),
         RunEvent(type="assistant_completed"),
-        RunEvent(type="tool_started", tool_call_id="a", name="read_file"),
-        RunEvent(type="tool_started", tool_call_id="b", name="read_file"),
-        RunEvent(type="tool_completed", tool_call_id="a", name="read_file"),
-        RunEvent(type="tool_completed", tool_call_id="b", name="read_file"),
+        RunEvent(type="tool_started", tool_call_id="a", name="read"),
+        RunEvent(type="tool_started", tool_call_id="b", name="read"),
+        RunEvent(type="tool_completed", tool_call_id="a", name="read"),
+        RunEvent(type="tool_completed", tool_call_id="b", name="read"),
         RunEvent(type="assistant_started"),
         RunEvent(type="assistant_completed"),
         RunEvent(type="run_completed"),
@@ -75,7 +75,7 @@ def test_run_metrics_splits_wall_time_without_double_counting_parallel_tools():
     assert len(forwarded) == 11
     assert summary["model_calls"] == 2 and summary["model_seconds"] == 3.0
     assert summary["tool_calls"] == 2 and summary["tool_seconds"] == 2.0
-    assert summary["tool_seconds_by_name"] == {"read_file": 3.0}
+    assert summary["tool_seconds_by_name"] == {"read": 3.0}
     assert summary["wall_seconds"] == 8.0 and summary["scheduling_seconds"] == 3.0
     assert summary["ttft_seconds"] == [0.5]
     assert (summary["input_tokens"], summary["output_tokens"]) == (100, 10)

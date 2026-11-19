@@ -104,7 +104,7 @@ class SessionController:
         self.state.clear()
         self.state.context_pristine = True
         self.state.attachments.clear()
-        self.state.add_system(f"Started session {info.id}")
+        self.state.add_system(f"Started session {info.id}" if info.id else "New session")
         self.set_status("Ready", transient=False)
 
     async def resume(self, arg: str = "") -> None:
@@ -174,9 +174,6 @@ class SessionController:
         self.reset_session_view()
         self.state.load_transcript(snapshot.transcript)
         self.state.load_model_metrics(snapshot.model_metrics_history)
-        self.state.add_system(
-            f"Resumed session {snapshot.info.id} (last run: {snapshot.info.last_run_status.value})"
-        )
         for notice in snapshot.notices:
             self.state.add_system(notice)
         if not self.interaction_flow()._reopen_pending_interaction(notify_missing=False):

@@ -126,7 +126,7 @@ grep(pattern="config.yaml", fixed_string=true)
 **行为变更**：旧版默认按字面量搜索；现在 `.`, `*`, `+`, `[` 等字符默认解释为正则语法。
 通过自定义非本地 Backend 注入的工具仍使用该 Backend 的原有搜索接口。
 
-`path` 默认是工作区的真实绝对路径。还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read_file(offset, limit)` 查看上下文。
+`path` 默认是工作区的真实绝对路径。还可以搜索 `/skills` 和启动时声明的额外挂载；未授权路径返回权限错误。模型定位代码时使用 `execute` 里的 `rg`，再用 `read(offset, limit)` 查看上下文。
 
 #### Glob 过滤
 

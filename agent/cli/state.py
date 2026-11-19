@@ -27,6 +27,7 @@ class MessageBlock:
     styled_spans: tuple[tuple[int, int, str], ...] = ()
     left_padding: int = 1
     status_marker: str | None = None
+    command_title: str | None = None
 
 
 @dataclass
@@ -87,7 +88,7 @@ class CliState:
         using scheduler counts here can disagree with the visible task states.
         """
         return sum(
-            isinstance(block, ToolBlock) and block.name in {"task", START_TOOL} and block.status == "running"
+            isinstance(block, ToolBlock) and block.name in {"start_task", START_TOOL} and block.status == "running"
             for block in self.blocks
         )
 
@@ -118,6 +119,14 @@ class CliState:
             kind="error" if error else "system", content=text,
             is_error=error, styled_spans=styled_spans, left_padding=left_padding,
             status_marker=status_marker,
+        ))
+
+    def add_command_panel(
+        self, title: str, body: str, *,
+        styled_spans: tuple[tuple[int, int, str], ...] = (),
+    ) -> None:
+        self.blocks.append(MessageBlock(
+            kind="system", content=body, styled_spans=styled_spans, command_title=title,
         ))
 
     def clear(self, *, preserve_model_metrics: bool = False) -> None:
@@ -254,7 +263,7 @@ class CliState:
                 tool.output = event.content
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
-            if tool.name == "task":
+            if tool.name == "start_task":
                 tool.output = event.content
                 tool.status = subagent_result_status(event.content, is_error=event.is_error)
                 tool.is_error = tool.status in {"error", "cancelled"}
@@ -317,7 +326,7 @@ class CliState:
             for block in self.blocks:
                 if isinstance(block, ToolBlock) and block.status == "running":
                     touch(block)
-                    if block.name in {"task", START_TOOL}:
+                    if block.name in {"start_task", START_TOOL}:
                         block.status = "cancelled"
                         block.is_error = True
                         continue

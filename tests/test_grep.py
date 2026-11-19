@@ -467,8 +467,8 @@ def test_grep_and_glob_are_not_registered(workspace, monkeypatch, permission):
     assert "grep" not in names
     assert "glob" not in names
     assert "write_todos" not in names
-    assert set(names) == {"ls", "read_file", "write_file", "edit_file", "delete",
-                          "execute", "request_human_input", "compact_conversation", "task", "read_subagent_log",
+    assert set(names) == {"ls", "read", "write", "edit", "delete",
+                          "execute", "request_human_input", "compact_conversation", "start_task", "read_task_log",
                               "start_background_task", "check_background_task", "cancel_background_task"}
     from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE
 

@@ -38,12 +38,12 @@ def build_background_task_tools(
 
         Use it for an independent subtask that takes a while and whose result you
         do not need for your next step, so you can keep working or answer the user
-        meanwhile. Use `task` instead when you must wait for the result anyway.
+        meanwhile. Use `start_task` instead when you must wait for the result anyway.
         The subagent only sees `description`: make it self-contained. It shares
         the workspace with you, so do not edit the files it is working on.
         The result is delivered to you automatically as a host notification when
         the subagent finishes, even after your turn ended. Do not poll for it.
-        Background tasks share the concurrency limit with `task`.
+        Background tasks share the concurrency limit with `start_task`.
         """
         parent = _parent(runtime)
         if not parent:

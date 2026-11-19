@@ -66,18 +66,17 @@ def test_summary_migration_preserves_catalog_and_checkpoint(tmp_path):
 def test_only_empty_new_sessions_become_eligible_and_attempt_once():
     policy = SummaryEligibility()
     policy.begin("historical", "existing", has_content=True, has_summary=False)
-    assert policy.complete("historical", "answer", "a") is None
+    assert policy.complete("historical", "a") is None
     assert not policy.needs_inspection("historical")
-    assert not policy.accepts_request("historical")
     policy.begin("saved", "request", has_content=False, has_summary=True)
-    assert policy.complete("saved", "answer", "a") is None
+    assert policy.complete("saved", "a") is None
     policy.begin("new", "request", has_content=False, has_summary=False)
     # A tool pause does not consume eligibility; the caller completes only after an answer.
-    request = policy.complete("new", "result", "a")
-    assert request == SessionSummaryRequest("new", "request", "result", "a")
+    policy.begin("new", "later request", has_content=True, has_summary=False)
+    request = policy.complete("new", "a")
+    assert request == SessionSummaryRequest("new", "request", "a")
     policy.begin("new", "later task", has_content=True, has_summary=False)
-    assert policy.complete("new", "later answer", "b") is None
-    assert not policy.accepts_request("new")
+    assert policy.complete("new", "b") is None
 
 
 @pytest.mark.parametrize("unsafe", [
@@ -133,7 +132,7 @@ def test_title_generator_uses_isolated_nonstreaming_protocol_request(api, monkey
 
     monkeypatch.setattr("agent.models.session_summary.build_chat_model", builder)
     profile = ModelProfile("s/arbitrary", "arbitrary-model", api=api, api_key="configured-secret")
-    request = SessionSummaryRequest("session", "修复 React 登录 /private/config.py configured-secret", "已完成修复", profile.id)
+    request = SessionSummaryRequest("session", "修复 React 登录 /private/config.py configured-secret", profile.id)
     assert asyncio.run(generate_session_summary(request, profile)) == TITLE
     assert len(requests) == 1
     payload = json.dumps(requests[0], ensure_ascii=False)
@@ -166,7 +165,7 @@ def test_first_completed_turn_emits_one_bound_summary_request(api, tmp_path):
         assert summaries[0].thread_id == runner.thread_id
         assert summaries[0].model_id == profile.id
         assert "/private" not in summaries[0].user_request and "configured-secret" not in summaries[0].user_request
-        assert summaries[0].agent_result == "已修复登录异常"
+        assert "已修复登录异常" not in repr(summaries[0])
         runner.invoke("继续优化", on_event=events.append)
         assert len([e for e in events if e.type == "session_summary_requested"]) == 1
         assert store.get(runner.thread_id).summary is None  # No CLI subscriber, no extra model request.
@@ -207,7 +206,7 @@ def test_background_summary_stays_bound_across_session_switch_and_persists(tmp_p
             await release.wait()
             return TITLE
         app.session_summaries.generate = generate
-        req = SessionSummaryRequest(first, "request", "result", "default")
+        req = SessionSummaryRequest(first, "request", "default")
         try:
             app.session_summaries.request(req)
             app.session_summaries.request(req)
@@ -239,7 +238,7 @@ def test_bad_background_result_falls_back_without_affecting_run(tmp_path, result
             return result
         app.session_summaries.generate = generate
         try:
-            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "answer", "default"))
+            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "default"))
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
             assert store.get(runner.thread_id).summary is None
             assert app.session_summaries.label(runner.thread_id) == runner.thread_id
@@ -263,7 +262,7 @@ def test_exit_cancels_title_request_and_does_not_save(tmp_path):
                 cancelled.set()
         app.session_summaries.generate = generate
         try:
-            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "answer", "default"))
+            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "default"))
             await started.wait()
             await app.lifecycle.shutdown(task_timeout=1)
             assert cancelled.is_set()
@@ -315,7 +314,7 @@ def test_summary_failure_does_not_retry_or_change_coding_state(tmp_path, monkeyp
             await asyncio.Event().wait()
         monkeypatch.setattr("agent.cli.session_summaries.SUMMARY_TIMEOUT_SECONDS", 0.01)
         app.session_summaries.generate = generate
-        request = SessionSummaryRequest(runner.thread_id, "request", "answer", "default")
+        request = SessionSummaryRequest(runner.thread_id, "request", "default")
         try:
             app.session_summaries.request(request)
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
@@ -351,7 +350,7 @@ def test_model_title_timeout_and_cancellation_close_owned_clients(monkeypatch, c
         monkeypatch.setattr("agent.models.session_summary.build_chat_model", lambda *a, **kw: model)
         monkeypatch.setattr("agent.models.session_summary.SUMMARY_TIMEOUT_SECONDS", 0.01 if not cancel else 10)
         task = asyncio.create_task(generate_session_summary(
-            SessionSummaryRequest("id", "request", "answer", "default"), ModelProfile("default", "test"),
+            SessionSummaryRequest("id", "request", "default"), ModelProfile("default", "test"),
         ))
         await started.wait()
         if cancel:
@@ -384,7 +383,7 @@ def test_queued_turn_does_not_replace_first_request_or_first_result(tmp_path):
         summaries = [event.result for event in events if event.type == "session_summary_requested"]
         assert len(summaries) == 1
         assert summaries[0].user_request == "initial goal"
-        assert summaries[0].agent_result == "first answer"
+        assert "first answer" not in repr(summaries[0])
     finally:
         runner.close()
         store.close()
@@ -404,7 +403,7 @@ def test_delayed_summary_event_is_not_dropped_by_a_new_ui_epoch(tmp_path):
             app.run_view.epoch = 2
             app._apply_run_event(RunEvent(
                 type="session_summary_requested",
-                result=SessionSummaryRequest(first, "initial goal", "first result", "default"),
+                result=SessionSummaryRequest(first, "initial goal", "default"),
             ), 1)
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
             assert store.get(first).summary == TITLE
@@ -420,7 +419,7 @@ def test_delayed_summary_event_is_not_dropped_by_a_new_ui_epoch(tmp_path):
 def test_summary_without_a_running_ui_loop_is_optional(tmp_path):
     store, runner, app = make_app(tmp_path)
     try:
-        app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "answer", "default"))
+        app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "default"))
         assert not app.lifecycle._tracked
         assert app.session_summaries.label(runner.thread_id) == runner.thread_id
     finally:

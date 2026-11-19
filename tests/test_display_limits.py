@@ -31,15 +31,15 @@ def test_thinking_title_hint_indent_and_expand() -> None:
     block = MessageBlock(kind="assistant", thinking="\n".join(f"思考 {i}" for i in range(41)))
     rows = plain(_capture(_message(block, True)[0], 100)).splitlines()
     title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
-    assert rows[title + 1].strip() == "… 37 earlier thinking lines hidden · Ctrl+T to expand"
-    assert [row.strip() for row in rows[title + 2:]] == [f"思考 {i}" for i in range(37, 41)]
+    assert rows[title + 1].strip() == "… 38 earlier thinking lines hidden · Ctrl+T to expand"
+    assert [row.strip() for row in rows[title + 2:]] == [f"思考 {i}" for i in range(38, 41)]
     title_indent = len(rows[title]) - len(rows[title].lstrip())
     assert all(len(row) - len(row.lstrip()) == title_indent + 2 for row in rows[title + 1:])
     expanded = plain(_capture(_message(block, False)[0], 100))
     assert expanded.count("Thinking") == 1
     assert "hidden" not in expanded
     assert "思考 0" in expanded
-    assert "… 37 earlier" in plain(_capture(_message(block, True)[0], 100))
+    assert "… 38 earlier" in plain(_capture(_message(block, True)[0], 100))
     assert "Thinking" not in plain(render_transcript(CliState(blocks=[MessageBlock(kind="assistant", content="回答")]), 80))
 
 
@@ -66,7 +66,7 @@ def test_thinking_limit_counts_wrapped_rows_and_short_blocks_have_no_hint() -> N
     "旧段落\n\n" + "A paragraph that wraps across the terminal. " * 20 + "\n\n最后一行",
     "a" * 500 + "\n\t" + "有制表符的内容" * 20,
 ])
-def test_collapsed_thinking_keeps_exact_last_four_screen_rows(width, content):
+def test_collapsed_thinking_keeps_exact_last_three_screen_rows(width, content):
     """正文预算按显示行计算，缩进、空行和宽字符也占据实际宽度。"""
     block = MessageBlock(kind="assistant", thinking=content)
     expanded = plain(_capture(_message(block, False)[0], width)).splitlines()
@@ -75,9 +75,9 @@ def test_collapsed_thinking_keeps_exact_last_four_screen_rows(width, content):
     collapsed_title = next(i for i, row in enumerate(collapsed) if row.strip() == "Thinking")
     original_rows = expanded[expanded_title + 1:]
     kept_rows = collapsed[collapsed_title + 2:]
-    assert len(kept_rows) == 4
-    assert [row.rstrip() for row in kept_rows] == [row.rstrip() for row in original_rows[-4:]]
-    assert f"… {len(original_rows) - 4} earlier" in collapsed[collapsed_title + 1]
+    assert len(kept_rows) == 3
+    assert [row.rstrip() for row in kept_rows] == [row.rstrip() for row in original_rows[-3:]]
+    assert f"… {len(original_rows) - 3} earlier" in collapsed[collapsed_title + 1]
 
 
 def test_thinking_preview_reflows_after_resize_and_streaming():
@@ -89,12 +89,12 @@ def test_thinking_preview_reflows_after_resize_and_streaming():
         fragments, _ = renderer.render(state, width)
         rows = "".join(value for _, value in fragments).splitlines()
         title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
-        assert len(rows[title + 2:]) == 4
+        assert len(rows[title + 2:]) == 3
     state.apply(RunEvent(type="thinking_delta", content=state.blocks[0].thinking + "\n这是后来追加的长段落。" * 30))
     fragments, _ = renderer.render(state, 25)
     rows = "".join(value for _, value in fragments).splitlines()
     title = next(i for i, row in enumerate(rows) if row.strip() == "Thinking")
-    assert len(rows[title + 2:]) == 4
+    assert len(rows[title + 2:]) == 3
     state.thinking_collapsed = False
     fragments, _ = renderer.render(state, 25)
     assert "English" in "".join(value for _, value in fragments)
@@ -131,11 +131,11 @@ def test_command_and_generic_output_limits() -> None:
 
 def test_file_preview_and_create_list_limits() -> None:
     configured = limits(head_lines=2, create_preview_items=2)
-    write = ToolBlock("write", "write_file", {"file_path": "notes", "content": "一\n二\n三\n四"})
+    write = ToolBlock("write", "write", {"file_path": "notes", "content": "一\n二\n三\n四"})
     preview = build_tool_preview(write, limits=configured)
     assert len([line for line in preview.lines if line.style == "add"]) == 2
     assert any("2 lines hidden" in line.text for line in preview.lines)
-    edit = ToolBlock("edit", "edit_file", {
+    edit = ToolBlock("edit", "edit", {
         "file_path": "notes", "old_string": "旧一\n旧二\n旧三", "new_string": "新一\n新二\n新三",
     }, status="completed")
     preview = build_tool_preview(edit, limits=configured)
@@ -145,7 +145,7 @@ def test_file_preview_and_create_list_limits() -> None:
     edit_two = replace(edit, tool_call_id="edit-two")
     grouped = plain(render_transcript(CliState(blocks=[edit, edit_two]), 100, limits=configured))
     assert "10 changed lines hidden" in grouped
-    creates = [ToolBlock(str(i), "write_file", {"file_path": f"file{i}"}, artifact={"operation": "create"}, status="completed") for i in range(5)]
+    creates = [ToolBlock(str(i), "write", {"file_path": f"file{i}"}, artifact={"operation": "create"}, status="completed") for i in range(5)]
     state = CliState(blocks=creates)
     text = plain(render_transcript(state, 100, limits=configured))
     assert "3 more" in text and "file2" not in text and "file3" in text and "file4" in text
@@ -155,7 +155,7 @@ def test_file_preview_and_create_list_limits() -> None:
 
 def test_exploration_and_failure_summary_limits() -> None:
     configured = limits(explore_preview_items=2, explore_failure_items=1, head_lines=2, tail_lines=2)
-    blocks = [ToolBlock(str(i), "read_file", {"file_path": f"file{i}"}, output="错误一\n错误二\n错误三", status="error", is_error=True) for i in range(4)]
+    blocks = [ToolBlock(str(i), "read", {"file_path": f"file{i}"}, output="错误一\n错误二\n错误三", status="error", is_error=True) for i in range(4)]
     text = plain(render_transcript(CliState(blocks=blocks), 120, limits=configured))
     assert "3 more failed" in text and "file1" not in text and "file2" in text and "file3" in text
     preview = build_tool_preview(blocks[0], limits=configured)
@@ -179,7 +179,7 @@ def test_app_uses_configured_renderer_editor_and_menu() -> None:
         assert menu.content.height.max == 4
 
 
-@pytest.mark.parametrize("rows,configured_max,expected", [(6, 10, 2), (2, 10, 1), (30, 10, 10), (60, 10, 10), (30, 2, 2)])
+@pytest.mark.parametrize("rows,configured_max,expected", [(6, 10, 2), (2, 10, 1), (30, 10, 5), (60, 10, 5), (30, 2, 2)])
 def test_editor_height_respects_terminal_and_config_limits(monkeypatch, rows, configured_max, expected) -> None:
     settings = Settings.from_mapping({"ui": {"editor_max_lines": configured_max}})
     runner = AgentRunner(model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(), settings=settings)
@@ -194,8 +194,8 @@ def test_editor_height_respects_terminal_and_config_limits(monkeypatch, rows, co
 
 
 @pytest.mark.parametrize("name,arguments,target", [
-    ("write_file", {"file_path": "notes", "content": "one\ntwo\nthree"}, "write notes"),
-    ("edit_file", {"file_path": "notes", "old_string": "old", "new_string": "new"}, "edit notes"),
+    ("write", {"file_path": "notes", "content": "one\ntwo\nthree"}, "write notes"),
+    ("edit", {"file_path": "notes", "old_string": "old", "new_string": "new"}, "edit notes"),
     ("custom_tool", {}, "custom_tool"),
 ])
 def test_failure_dispatch_preserves_tool_summary_and_configured_limit(name, arguments, target) -> None:
@@ -232,7 +232,7 @@ def test_head_and_tail_limits_are_independent_across_tool_types() -> None:
 
 @pytest.mark.parametrize("budget", [1, 2, 4])
 def test_edit_preview_respects_unified_head_budget(budget) -> None:
-    block = ToolBlock("edit", "edit_file", {
+    block = ToolBlock("edit", "edit", {
         "file_path": "notes", "old_string": "a\nb\nc\nd", "new_string": "e\nf\ng\nh",
     }, status="completed")
     preview = build_tool_preview(block, limits=limits(head_lines=budget))

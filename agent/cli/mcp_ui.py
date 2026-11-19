@@ -26,7 +26,7 @@ async def handle_mcp_command(app: Any, arg: str) -> None:
         return
     text = arg.strip()
     if not text:
-        _show_mcp_status(app, manager)
+        _show_mcp_status(app, manager, panel=True)
         return
     command, _, rest = text.partition(" ")
     rest = rest.strip()
@@ -512,7 +512,28 @@ async def _report_switch(app: Any, enabled: bool, epoch: int) -> None:
     _announce_published_switch(app)
 
 
-def _show_mcp_status(app: Any, manager: Any) -> None:
+def _show_mcp_switch_notice(app: Any, text: str) -> None:
+    # A completed switch supersedes progress messages from the same operation.
+    if _shown_status(app) in {
+        _MCP_OPERATION_RUNNING,
+        "MCP enable queued",
+        "MCP disable queued",
+        "MCP change queued until the current run reaches a safe point",
+        "MCP update failed",
+        "MCP tool update failed; retry at the next safe point",
+        "MCP config error",
+    }:
+        if app.state.running:
+            previous = "Working…  Esc to cancel"
+        elif app.dialogs.current is not None:
+            previous = "Waiting for input"
+        else:
+            previous = "Ready"
+        app.set_status(previous, transient=False)
+    app.set_status(text)
+
+
+def _show_mcp_status(app: Any, manager: Any, *, panel: bool = False) -> None:
     if manager.config_error:
         app.state.add_system(manager.describe(), error=True)
         app.set_status("MCP config error", transient=False)
@@ -523,12 +544,19 @@ def _show_mcp_status(app: Any, manager: Any) -> None:
         app.set_status("MCP disable queued", transient=False)
         return
     if not manager.enabled:
-        app.state.add_system(disabled_status_text(manager))
-        app.set_status("MCP: Disabled", transient=False)
+        text = disabled_status_text(manager)
+        if panel:
+            app.state.add_command_panel("/mcp", text)
+        else:
+            app.state.add_system(text)
+        _show_mcp_switch_notice(app, "MCP: Disabled")
         return
     text, spans = _enabled_listing(manager)
-    app.state.add_system(text, styled_spans=spans)
-    app.set_status("MCP: Enabled", transient=False)
+    if panel:
+        app.state.add_command_panel("/mcp", text, styled_spans=spans)
+    else:
+        app.state.add_system(text, styled_spans=spans)
+    _show_mcp_switch_notice(app, "MCP: Enabled")
 
 
 def _enabled_listing(manager: Any) -> tuple[str, tuple[tuple[int, int, str], ...]]:
@@ -571,7 +599,7 @@ def _show_tools(app: Any, manager: Any, name: str) -> None:
         app.state.add_system(f"No MCP server named {name}.", error=True)
         return
     if not state.tools:
-        app.state.add_system("\n".join([
+        app.state.add_command_panel(f"/mcp tools {name}", "\n".join([
             f"{name} is {state.status.value}. {state.error}".strip(),
             *[f"Warning: {note}" for note in state.warnings],
         ]))
@@ -581,7 +609,7 @@ def _show_tools(app: Any, manager: Any, name: str) -> None:
         summary = " ".join((tool.description or "").split())
         lines.append(f"- {tool.name}: {summary[:180]}")
     lines.extend(f"Warning: {note}" for note in state.warnings)
-    app.state.add_system("\n".join(lines))
+    app.state.add_command_panel(f"/mcp tools {name}", "\n".join(lines))
 
 
 async def _apply_when_idle(app: Any, *, announce_status: bool = True) -> bool:

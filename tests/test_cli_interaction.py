@@ -83,7 +83,7 @@ def test_human_interaction_other_multi_select_can_be_removed() -> None:
 
 def test_approval_defaults_to_reject_and_escape_is_safe() -> None:
     controller = InteractionController.approval([{
-        "toolCallId": "call-write", "name": "write_file",
+        "toolCallId": "call-write", "name": "write",
         "args": {"file_path": "/workspace/note.txt"},
     }])
     assert controller.tool_call_ids == ["call-write"]
@@ -95,7 +95,7 @@ def test_escape_closes_interrupt_ui_without_resuming() -> None:
     runner = AgentRunner(
         model=scripted_model([
             AIMessage(content="", tool_calls=[{
-                "id": "call-write", "name": "write_file",
+                "id": "call-write", "name": "write",
                 "args": {"file_path": "/workspace/note.txt", "content": "x"},
             }]),
             AIMessage(content="done"),
@@ -173,7 +173,7 @@ def test_ctrl_c_dismisses_approval_to_status_and_f2_can_finish_decision(approve)
     """实际按键验证关闭、F2 恢复及批准或拒绝后的正常执行。"""
     async def scenario() -> None:
         runner = AgentRunner(model=scripted_model([
-            AIMessage(content="", tool_calls=[{"id": "status-write", "name": "write_file",
+            AIMessage(content="", tool_calls=[{"id": "status-write", "name": "write",
                                               "args": {"file_path": "/workspace/status.txt", "content": "x"}}]),
             AIMessage(content="done"),
         ]), backend=StateBackend())
@@ -456,6 +456,38 @@ def test_status_notices_replace_each_other_and_keep_new_events() -> None:
                 assert app.state.status == "Waiting for input"
             finally:
                 app._io_executor.shutdown(wait=True)
+                runner.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("command", "notice"), [("disable", "MCP: Disabled"), ("enable", "MCP: Enabled")])
+def test_mcp_switch_notice_expires_to_idle(tmp_path, monkeypatch, command, notice) -> None:
+    from agent.cli.mcp_ui import handle_mcp_command
+    from agent.mcp.manager import MCPManager
+
+    monkeypatch.setattr("agent.cli.app.STATUS_NOTICE_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        manager = MCPManager(tmp_path / "mcp.json")
+        manager.load()
+        if command == "enable":
+            assert manager.set_enabled(False).ok
+        runner = AgentRunner(
+            model=scripted_model([AIMessage(content="unused")]), backend=StateBackend(), mcp_manager=manager,
+        )
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            try:
+                app.set_status(f"MCP {command} queued", transient=False)
+                await handle_mcp_command(app, command)
+                assert app.state.status == notice
+                await asyncio.sleep(0.03)
+                assert app.state.status == "Ready"
+                assert not app._status_visible()
+                assert app.state.blocks[-1].content.startswith(notice)
+            finally:
+                await app.lifecycle.shutdown()
                 runner.close()
 
     asyncio.run(scenario())

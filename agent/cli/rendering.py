@@ -81,6 +81,7 @@ class RenderedUnit:
     fragments: StyleAndTextTuples
     line_count: int
     _lines: tuple[StyleAndTextTuples, ...] | None = None
+    user_preview: str = ""
 
     def get_line(self, index: int) -> StyleAndTextTuples:
         if self._lines is None:
@@ -89,10 +90,22 @@ class RenderedUnit:
 
 
 @dataclass(frozen=True)
+class TranscriptTurn:
+    message_id: str
+    preview: str
+    start: int
+    end: int  # Exclusive end of the bubble, before its trailing spacer.
+
+
+@dataclass(frozen=True)
 class TranscriptDocument:
     units: tuple[RenderedUnit, ...]
     starts: tuple[int, ...]
     line_count: int
+    turns: tuple[TranscriptTurn, ...] = ()
+
+    def turn_at(self, row: int) -> int:
+        return bisect_right(self.turns, row, key=lambda turn: turn.start) - 1
 
     def get_line(self, index: int) -> StyleAndTextTuples:
         if index < 0 or index >= self.line_count:
@@ -412,8 +425,11 @@ class TranscriptRenderer:
             return document_entry[1]
         rendered_units: list[RenderedUnit] = []
         starts: list[int] = []
+        turns: list[TranscriptTurn] = []
+        previous = None
         line_count = 0
         for unit in units:
+            block = unit.owner
             entry = self._cache.get(unit.key)
             if (
                 entry is None
@@ -421,13 +437,23 @@ class TranscriptRenderer:
                 or entry[1] != unit.fingerprint
             ):
                 rendered = _render_unit(unit.build(), width)
+                if isinstance(block, MessageBlock) and block.kind == "user":
+                    displayed, _ = skill_message_display(block.content)
+                    rendered.user_preview = " ".join(displayed.split()) or ", ".join(
+                        ref.filename for ref in block.attachments
+                    )
                 self._cache[unit.key] = (unit.owner, unit.fingerprint, rendered)
             else:
                 rendered = entry[2]
+            if isinstance(block, MessageBlock) and block.kind == "user" and not block.pending:
+                after_user = isinstance(previous, MessageBlock) and previous.kind == "user"
+                start = line_count + int(not after_user)
+                turns.append(TranscriptTurn(block.id, rendered.user_preview, start, line_count + rendered.line_count - 1))
+            previous = block
             starts.append(line_count)
             line_count += rendered.line_count
             rendered_units.append(rendered)
-        document = TranscriptDocument(tuple(rendered_units), tuple(starts), line_count)
+        document = TranscriptDocument(tuple(rendered_units), tuple(starts), line_count, tuple(turns))
         # Units hold their owners, so cached block ids cannot be recycled.
         self._documents[mode] = (signature, document)
         return document
@@ -517,7 +543,13 @@ def _diff_row(content: str, kind: str, width: int) -> list[Text]:
     style = _PREVIEW_LINE_STYLES[kind]
     available = max(1, width - 1)  # Spare terminal column avoids auto-wrap.
     console = Console(width=max(20, width))
-    rows = list(Text(content, style=style).wrap(console, available, overflow="fold"))
+    text = Text(content, style=style)
+    if kind in {"add", "delete"}:
+        marker = re.match(r"^ *[0-9]+ ([-+])", content)
+        if marker:
+            color = "#459745" if kind == "add" else "#c45555"
+            text.stylize(color, marker.start(1), marker.end(1))
+    rows = list(text.wrap(console, available, overflow="fold"))
     if kind in {"add", "delete"}:
         for row in rows:
             row.pad_right(max(0, available - row.cell_len))
@@ -680,13 +712,18 @@ def _message(
     elif block.kind == "error":
         items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
-        text = Text(block.content, style="white" if block.styled_spans or block.status_marker else "yellow")
+        style = "white" if block.command_title or block.styled_spans or block.status_marker else "yellow"
+        text = Text(block.content, style=style)
         for start, end, style in block.styled_spans:
             text.stylize(style, start, end)
         if block.status_marker:
             symbol, color = _tool_status_marker(block.status_marker)
             text = Text.assemble((f"{symbol} ", color), text)
-        items.append(Padding(text, (top, 1, 0, block.left_padding)))
+        if block.command_title:
+            panel = Group(Text(block.command_title, style="magenta"), Text(""), Padding(text, (0, 0, 0, 2)))
+            items.append(Padding(panel, (top, 1, 0, 0)))
+        else:
+            items.append(Padding(text, (top, 1, 0, block.left_padding)))
     return items
 
 
@@ -825,7 +862,7 @@ def render_tool_preview(
     )
     verb = preview.verb
     if block.status == "running":
-        verb = {"edit_file": "Editing", "write_file": "Writing", "delete": "Deleting"}.get(block.name, verb)
+        verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
     summary = f"{verb} {preview.target}".strip()
     if preview.kind == "task":
         summary = f"{'Running SubAgent' if block.status == 'running' else 'SubAgent'} · {preview.target}"

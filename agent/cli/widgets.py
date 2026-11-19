@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from itertools import islice
 from typing import Any
 
 from prompt_toolkit import ANSI
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.layout import BufferControl, Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.layout.screen import Char, WritePosition
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 
 from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.skills import SkillDraft
+from agent.cli.formatting import _truncate_cells
 from agent.cli.rendering import render_interaction_viewport
+
+
+EDITOR_PROMPT = "› "
 
 
 class _ScrollableTextControl(FormattedTextControl):
@@ -113,6 +121,56 @@ class _EditorScrollControl(BufferControl):
         self._on_select_outside = on_select_outside
         super().__init__(*args, **kwargs)
 
+    def _visual_rows(self, width: int) -> Iterator[tuple[int, int]]:
+        """Yield ranges of cursor positions, including the trailing cursor cell."""
+        start = column = 0
+        text = self.buffer.text
+        for index, char in enumerate(text):
+            cells = 1 if char == "\n" else get_cwidth(Char.display_mappings.get(char, char))
+            if column and column + cells > width:
+                yield start, index
+                start, column = index, 0
+            if char == "\n":
+                yield start, index + 1
+                start, column = index + 1, 0
+            else:
+                column += cells
+        if column >= width:
+            yield start, len(text)
+            start = len(text)
+        yield start, len(text) + 1
+
+    def visible_rows(self, width: int, maximum: int) -> int:
+        return sum(1 for _ in islice(self._visual_rows(width), maximum))
+
+    def move_vertical(self, direction: int, width: int) -> None:
+        buffer = self.buffer
+        rows = self._visual_rows(width)
+        previous = None
+        for start, end in rows:
+            if buffer.cursor_position >= end:
+                previous = (start, end)
+                continue
+            target = previous if direction < 0 else next(rows, None)
+            if target is None:
+                return
+            preferred = buffer.preferred_column
+            if preferred is None:
+                preferred = sum(get_cwidth(Char.display_mappings.get(c, c))
+                                for c in buffer.text[start:buffer.cursor_position])
+            index, stop = target
+            column = 0
+            while index + 1 < stop:
+                char = buffer.text[index]
+                cells = get_cwidth(Char.display_mappings.get(char, char))
+                if column + cells > preferred:
+                    break
+                column += cells
+                index += 1
+            buffer.cursor_position = index
+            buffer.preferred_column = preferred
+            return
+
     def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
         if self._on_select_outside is not None and self._on_select_outside(mouse_event):
             return None
@@ -178,3 +236,37 @@ class _TranscriptWindow(Window):
             self.vertical_scroll = self._scroll_offset(maximum)
         else:
             self.vertical_scroll = self._viewport.transcript_offset(maximum) if self._viewport is not None else maximum
+
+
+class _TurnTranscriptWindow(_TranscriptWindow):
+    """Allocate a pinned prompt using the actual viewport size on each paint."""
+
+    def __init__(self, *args: Any, document: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._document = document
+        self.preview: list[tuple[str, str]] = []
+        self._preview_window = Window(
+            _ScrollableTextControl(lambda: self.preview, on_scroll=self._viewport.scroll_transcript),
+            style="bg:#303030 fg:#ffffff", wrap_lines=False,
+        )
+
+    def write_to_screen(self, screen, mouse_handlers, write_position, parent_style, erase_bg, z_index):
+        pos = write_position
+        document = self._document()
+        maximum = max(0, document.line_count - pos.height)
+        anchor = self._viewport.transcript_anchor
+        top = maximum if anchor is None else min(anchor, maximum)
+        index = document.turn_at(top)
+        self.preview = []
+        if pos.height > 1 and index >= 0 and top >= document.turns[index].end:
+            summary = document.turns[index].preview
+            turns_before = len(document.turns) - 1 - index
+            label = f"{turns_before} before" if turns_before else "current"
+            line = _truncate_cells(f"{label} {EDITOR_PROMPT}{summary}", pos.width)
+            self.preview = [("ansigreen", line[:len(label)]), ("", line[len(label):])]
+            self._preview_window.write_to_screen(
+                screen, mouse_handlers, WritePosition(pos.xpos, pos.ypos, pos.width, 1),
+                parent_style, erase_bg, z_index,
+            )
+            pos = WritePosition(pos.xpos, pos.ypos + 1, pos.width, pos.height - 1)
+        super().write_to_screen(screen, mouse_handlers, pos, parent_style, erase_bg, z_index)

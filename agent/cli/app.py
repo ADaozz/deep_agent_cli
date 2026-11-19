@@ -11,7 +11,7 @@ import signal
 import time
 import warnings
 from time import monotonic
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -42,6 +42,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
 from agent.cli.widgets import (
+    EDITOR_PROMPT,
     _ScrollableTextControl,
     _InteractionControl,
     _BackToBottomControl,
@@ -49,14 +50,17 @@ from agent.cli.widgets import (
     _EditorScrollControl,
     _PastedContentProcessor,
     _TranscriptWindow,
+    _TurnTranscriptWindow,
 )
 from agent.cli.formatting import (
     format_workspace_path,
     format_context_usage,
+    format_context_meter,
     _fit_footer_line,
     _truncate_cells,
 )
 from agent.cli.clipboard import ClipboardAdapter, ClipboardError, copy_to_clipboard
+from agent.version import package_version
 from agent.cli.commands import command_table
 from agent.cli.completion import SlashCompleter, model_display_name
 from agent.cli.key_bindings import create_bindings
@@ -392,15 +396,15 @@ class CliApplication:
         back_to_bottom_visible = Condition(self.transcript.transcript_away_from_bottom)
 
         def editor_height() -> Any:
-            lines = max(1, self.buffer.document.line_count)
             try:
                 rows = self.application.output.get_size().rows
             except Exception:  # noqa: BLE001
                 rows = 30
             # Keep at least one input row even in an extremely short terminal.
             terminal_limit = max(1, rows // 3)
-            maximum = min(display_limits.editor_max_lines, terminal_limit)
-            return Dimension(min=1, preferred=min(lines, maximum), max=maximum)
+            maximum = min(5, display_limits.editor_max_lines, terminal_limit)
+            lines = self.editor_control.visible_rows(self._editor_width(), maximum)
+            return Dimension(min=1, preferred=lines, max=maximum)
 
         def interaction_height() -> Any:
             if self.dialogs.current is None:
@@ -414,7 +418,7 @@ class CliApplication:
             maximum = max(8, rows - 8)
             return Dimension(min=3, preferred=min(max(lines, 3), maximum), max=maximum)
 
-        self.transcript_window = _TranscriptWindow(
+        self.transcript_window = _TurnTranscriptWindow(
             self.transcript_control,
             # Rich already wraps each captured transcript line to the viewport.
             # Re-wrapping those padded lines here makes physical rows diverge
@@ -423,6 +427,7 @@ class CliApplication:
             height=Dimension(min=3, weight=1),
             always_hide_cursor=True,
             viewport=self.transcript,
+            document=self._transcript_document,
         )
         self.interaction_divider_window = Window(height=1, char="─", style="class:interaction-divider")
         self.interaction_bottom_divider_window = Window(height=1, char="─", style="class:interaction-divider")
@@ -495,7 +500,7 @@ class CliApplication:
                 HSplit([
                     Window(height=1, char=" ", style="class:editor"),
                     VSplit([
-                        Window(FormattedTextControl("› "), width=2, style="class:editor"),
+                        Window(FormattedTextControl(EDITOR_PROMPT), width=2, style="class:editor"),
                         Window(
                             self.editor_control,
                             wrap_lines=True,
@@ -773,23 +778,69 @@ class CliApplication:
 
 
     def show_help(self) -> None:
-        commands = "\n".join(
-            f"/{item.name:<9} {item.description}"
-            for item in self.commands
+        shortcuts = (
+            ("Enter", "Submit"),
+            ("Ctrl+J", "Insert a newline"),
+            ("Alt+Enter", "Queue a follow-up"),
+            ("Esc", "Cancel or restore queued input"),
+            ("PgUp / PgDn", "Scroll the transcript"),
+            ("← / →", "Jump between turns with empty input"),
+            ("↑ / ↓", "Move the cursor by display row while editing"),
+            ("Ctrl+P / Alt+P", "Select the next or previous model"),
+            ("Alt+Up", "Restore queued input"),
+            ("Ctrl+O", "Expand tool output"),
+            ("Ctrl+R", "Review file changes"),
+            ("F2", "Reopen a pending interaction"),
+            ("Ctrl+T", "Toggle thinking"),
+            ("Ctrl+B", "Toggle long messages"),
+            ("Mouse drag", "Select and copy transcript text"),
+            ("Ctrl+V / Alt+V", "Paste image or text"),
+            ("Ctrl+C", "Clear input or exit"),
+            ("Ctrl+D", "Exit"),
         )
-        self.state.add_system(
-            "/help\n"
-            "Keyboard\n"
-            "Enter submit · Ctrl+J newline · Alt+Enter follow-up · Esc cancel+restore · "
-            "PgUp/PgDn scroll · Ctrl+P next model · Alt+P prev model · Alt+Up restore queue · "
-            "Ctrl+O tools · Ctrl+R review · F2 pending · Ctrl+T thinking · Ctrl+B messages · "
-            "Mouse drag selects and copies across history · "
-            "Ctrl+V/Alt+V paste image/text · "
-            "Ctrl+C clear/exit · Ctrl+D exit\n\n"
-            f"Commands\n{commands}"
+        commands = [(f"/{item.name}", item.description) for item in self.commands]
+        width = max(get_cwidth(label) for label, _ in [*shortcuts, *commands])
+
+        def rows(entries: Iterable[tuple[str, str]]) -> str:
+            return "\n".join(label + " " * (width - get_cwidth(label) + 2) + value for label, value in entries)
+
+        self.state.add_command_panel(
+            "/help", f"Keyboard shortcuts\n{rows(shortcuts)}\n\nCommands\n{rows(commands)}",
         )
 
     def show_status(self) -> None:
+        model = self.runner.current_model()
+        model_name = model.model if model else "fixed model"
+        workspace = self._workspace()
+        instructions = workspace / "AGENTS.md"
+        session_id = self.runner.thread_id
+        title = self.session_summaries.label(session_id)
+        permissions = f"{self.runner.sandbox_mode()}/{self.runner.permission_mode().value}"
+        rows = [
+            ("Model", f"{model_name} (reasoning {self.runner.reasoning_effort()})"),
+            ("Model provider", model.source if model and model.source else "<unknown>"),
+            ("Directory", format_workspace_path(workspace)),
+            ("Permissions", f"{permissions} (sandbox/permission)"),
+            ("AGENTS.md", format_workspace_path(instructions) if instructions.is_file() else "<none>"),
+            ("Thread name", title if title and title != session_id else "<none>"),
+            ("Session", session_id or "<none>"),
+        ]
+        heading = f">_ DeepAgent CLI (v{package_version()})"
+        lines = [heading, "", "Visit https://github.com/ADaozz/deep_agent_cli to view project.", ""]
+
+        def row(label: str, value: str) -> str:
+            return f"{label + ':':<21}{value}"
+
+        lines.extend([row("Server", "local AgentRuntime"), ""])
+        lines.extend(row(label, value) for label, value in rows)
+        context = format_context_meter(
+            self.state.usage, self.runner.context_window(),
+            empty_session=self.state.context_pristine and not self.state.running,
+        )
+        lines.extend(["", row("Context window", context)])
+        self.state.add_command_panel("/status", "\n".join(lines), styled_spans=((0, len(heading), "bold"),))
+
+    def show_status_details(self) -> None:
         prepared = self.runner.prepared
         tool_names = ", ".join(prepared.model_tool_names)
         tool_count = len(prepared.model_tool_names)
@@ -805,8 +856,8 @@ class CliApplication:
         pending_effort = self.runner.pending_reasoning_effort()
         if pending_effort is not None:
             model_line += f"Reasoning: {self.runner.reasoning_effort()} → {pending_effort} (pending)\n"
-        self.state.add_system(
-            "/status\n"
+        self.state.add_command_panel(
+            "/status details",
             f"Status: {'running' if self.state.running else 'idle'}\n"
             f"{model_line}"
             f"{tool_line}\n"
@@ -852,39 +903,6 @@ class CliApplication:
             sections.append("\n".join(lines))
         return "\n\n".join(sections)
 
-    def show_session(self) -> None:
-        store = self.runner.session_store
-        model = self.runner.current_model()
-        model_line = (
-            f"Model: {model_display_name(model)} · reasoning: {self.runner.reasoning_effort()}\n" if model is not None else ""
-        )
-        if store is None:
-            self.state.add_system(
-                "/session\n"
-                f"Session: {self.runner.thread_id}\n"
-                f"{model_line}"
-                "Checkpointer: in-memory\nPersistent /resume is not configured."
-            )
-            return
-        info = store.get(self.runner.thread_id)
-        status = info.status if info else "unknown"
-        stop_reason = info.last_run_status.value if info else "unknown"
-        title = info.summary if info and info.summary else ""
-        created_at = info.created_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
-        updated_at = info.updated_at.astimezone().isoformat(sep=" ", timespec="seconds") if info else "unknown"
-        self.state.add_system(
-            "/session\n"
-            f"Session: {self.runner.thread_id}\n"
-            f"Title: {title}\n"
-            f"Created: {created_at}\n"
-            f"Updated: {updated_at}\n"
-            f"Status: {status}\n"
-            f"Last run: {stop_reason}\n"
-            f"{model_line}"
-            f"Checkpointer: sqlite\n"
-            f"Persistent store: {self.runner.state_path}"
-        )
-
     def new_session(self) -> None:
         self.sessions.new_session()
 
@@ -898,6 +916,7 @@ class CliApplication:
         self.dialogs.current = None
         self.dialogs.deferred = None
         self.dialogs.reviewing = False
+        self.transcript.jump_message_id = None
         self.transcript.transcript_anchor = None
         self._renderer.clear()
 
@@ -1052,6 +1071,9 @@ class CliApplication:
         )
         return Path(sandbox.workspace) if sandbox is not None else Path.cwd()
 
+    def _editor_width(self) -> int:
+        return max(1, self.application.output.get_size().columns - get_cwidth(EDITOR_PROMPT))
+
     def _width(self) -> int:
         try:
             columns = self.application.output.get_size().columns
@@ -1161,7 +1183,7 @@ class CliApplication:
     def _footer_text(self):  # type: ignore[no-untyped-def]
         mode = self.runner.prepared.execution_mode.value.lower()
         if mode == "sandboxed":
-            mode = "sandbox"
+            mode = "sbx"
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
@@ -1176,7 +1198,7 @@ class CliApplication:
             model_label += f" → {pending_model.model} · {pending_effort or 'default'} (pending)"
         elif pending_effort is not None:
             model_label += f" → {pending_effort} (pending)"
-        resume_id = self.session_summaries.label(self.runner.thread_id)
+        resume_id = self.session_summaries.label(self.runner.thread_id) or "New session"
         context = format_context_usage(
             self.state.usage, self.runner.context_window(),
             empty_session=self.state.context_pristine and not self.state.running,
@@ -1185,11 +1207,13 @@ class CliApplication:
         # Row 2: sandbox/permission on the left, context on the right.
         # The left side always truncates before the right side.
         git = self._git_summary.label() or "⎇ no git"
-        filesystem = self.runner.sandbox_mode()
+        fs_labels = {"full-access": "full", "restricted": "rest"}
+        current_filesystem = self.runner.sandbox_mode()
+        filesystem = fs_labels.get(current_filesystem, current_filesystem)
         pending_filesystem = self.runner.pending_sandbox_mode()
         if pending_filesystem is not None:
-            filesystem += f"→{pending_filesystem}(pending)"
-        status = f" {mode}:{filesystem} · perm:{perm}"
+            filesystem += f"→{fs_labels.get(pending_filesystem, pending_filesystem)}(pending)"
+        status = f" {mode}:{filesystem} · p:{perm}"
         git_fit = _truncate_cells(git, width)
         available = max(1, width - get_cwidth(git_fit) - 1)
         fragments: list[tuple[str, str]] = []
@@ -1292,6 +1316,7 @@ class CliApplication:
 
     def _close_review(self) -> None:
         self.dialogs.reviewing = False
+        self.transcript.jump_message_id = None
         self.transcript.transcript_anchor = None
         self.set_status("Waiting for input" if self.dialogs.current is not None else "Ready", transient=False)
 

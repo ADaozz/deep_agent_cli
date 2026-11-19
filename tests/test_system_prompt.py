@@ -16,7 +16,7 @@ from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
 
 # 内置文件工具：描述与参数说明由工具定义提供，不应在模型请求阶段被改写。
-UPSTREAM_TOOLS = ("ls", "read_file", "write_file", "edit_file", "delete", "compact_conversation")
+UPSTREAM_TOOLS = ("ls", "read", "write", "edit", "delete", "compact_conversation")
 
 
 @pytest.mark.parametrize('role', ['main', 'subagent'])
@@ -103,4 +103,4 @@ def test_system_prompt_composition_and_native_tool_schemas(tmp_path, with_skills
         # 上游 SkillsMiddleware 渲染技能目录，技能可被发现并呈现。
         assert content.count("## Skills System") == 1
         assert "demo" in content and "示例技能" in content and "/skills/demo/SKILL.md" in content
-    assert {"read_file", "request_human_input", "compact_conversation"} <= graph_tool_names(prepared.graph)
+    assert {"read", "request_human_input", "compact_conversation"} <= graph_tool_names(prepared.graph)

@@ -18,7 +18,7 @@ from tests.conftest import scripted_model
 
 
 def start(state, identifier, description):
-    state.apply(RunEvent(type='tool_started', name='task', tool_call_id=identifier,
+    state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id=identifier,
                          arguments={'description': description, 'subagent_type': 'general-purpose'}))
 
 
@@ -40,7 +40,7 @@ def test_counter_tracks_cards_when_scheduler_and_tool_events_arrive_separately(s
     for identifier, remaining in [('a', 1), ('b', 0)]:
         events = [
             RunEvent(type='subagents_changed', result={'count': remaining}),
-            RunEvent(type='tool_completed', name='task', tool_call_id=identifier, content='Result'),
+            RunEvent(type='tool_completed', name='start_task', tool_call_id=identifier, content='Result'),
         ]
         if not scheduler_first:
             events.reverse()
@@ -70,7 +70,7 @@ def test_counter_ignores_other_tools_duplicate_starts_and_failed_delegations():
     state = CliState()
     start(state, 'a', 'Task')
     start(state, 'a', 'Task')
-    state.apply(RunEvent(type='tool_started', name='read_file', tool_call_id='file'))
+    state.apply(RunEvent(type='tool_started', name='read', tool_call_id='file'))
     assert state.subagent_count == 1
     state.apply(RunEvent(type='tool_completed', tool_call_id='a',
                          content='Subagent failed: Subagent concurrency limit reached'))
@@ -92,7 +92,7 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     assert 'Fix median3' in text and 'Fix is_leap_year' in text
     assert 'Explored' not in text
     first, second = state.blocks
-    state.apply(RunEvent(type='tool_completed', name='task', tool_call_id='a', content='All median tests passed'))
+    state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='a', content='All median tests passed'))
     state.apply(RunEvent(type='subagents_changed', result={'count': 1}))
     assert state.blocks[0] is first and state.blocks[1] is second
     assert first.status == 'completed' and second.status == 'running'
@@ -114,7 +114,7 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     ('Subagent cancelled (run_id=abc): Cancelled by parent', 'cancelled'),
 ])
 def test_runner_and_unnamed_history_results_share_status(result, status):
-    calls = [AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'task', 'args': {
+    calls = [AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
         'description': 'Fix median3', 'subagent_type': 'general-purpose'}}])]
     message = ToolMessage(content=result, tool_call_id='d')
     runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
@@ -128,7 +128,7 @@ def test_runner_and_unnamed_history_results_share_status(result, status):
         runner._emit_update_events({'tools': {'messages': [message]}}, emit)
         card = state.blocks[0]
         assert isinstance(card, ToolBlock) and card.status == status
-        assert events[-1].name == 'task'
+        assert events[-1].name == 'start_task'
         assert events[-1].is_error == (status != 'completed')
         restored = CliState()
         restored.load_transcript(messages_to_transcript([*calls, message]))
@@ -145,7 +145,7 @@ def test_long_result_folds_tail_and_control_o_expands_full_text():
     def scenario(app):
         app.state.clear()
         start(app.state, 'd', 'Fix median3')
-        app.state.apply(RunEvent(type='tool_completed', name='task', tool_call_id='d', content=output))
+        app.state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='d', content=output))
         limits = UiDisplayLimits(tail_lines=3)
         collapsed = plain(render_transcript(app.state, 100, limits=limits))
         assert 'Ctrl+O to expand' in collapsed and 'line 0' not in collapsed
@@ -175,7 +175,7 @@ def test_unfinished_tasks_keep_description_without_fabricating_results(event, st
 
 def test_title_is_bounded_and_does_not_modify_delegated_description():
     description = 'Fix\n  median3\t' + 'details ' * 100
-    block = ToolBlock('d', 'task', {'description': description})
+    block = ToolBlock('d', 'start_task', {'description': description})
     preview = build_task_preview(block)
     assert preview.target.startswith('Fix median3 ') and len(preview.target) == 120
     assert '\n' not in preview.target and preview.target.endswith('…')
@@ -184,7 +184,7 @@ def test_title_is_bounded_and_does_not_modify_delegated_description():
 
 def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
     path = tmp_path / 'sessions.sqlite3'
-    calls = AIMessage(content='', tool_calls=[{'id': name, 'name': 'task', 'args': {
+    calls = AIMessage(content='', tool_calls=[{'id': name, 'name': 'start_task', 'args': {
         'description': f'Fix {name}', 'subagent_type': 'general-purpose'}} for name in ['a', 'b']])
     with closing(SessionStore(path)) as store:
         runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store)
@@ -215,10 +215,10 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
     backend = StateBackend()
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'task', 'id': 'delegate', 'args': {
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'delegate', 'args': {
             'description': 'Inspect isolated file', 'subagent_type': 'general-purpose'}}]),
         AIMessage(content='', additional_kwargs={'reasoning_content': 'private child thinking'},
-                  tool_calls=[{'name': 'read_file', 'id': 'private-read', 'args': {'file_path': '/private-child.txt'}}]),
+                  tool_calls=[{'name': 'read', 'id': 'private-read', 'args': {'file_path': '/private-child.txt'}}]),
         AIMessage(content='Final child result'), AIMessage(content='Parent final answer'),
     ])
     events = []
@@ -231,13 +231,13 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
         result = runner.invoke('Inspect independent tasks')
         assert result.status == 'completed'
         cards = [b for b in state.blocks if isinstance(b, ToolBlock)]
-        assert len(cards) == 1 and cards[0].name == 'task'
+        assert len(cards) == 1 and cards[0].name == 'start_task'
         assert 'Final child result' in cards[0].output
         assert not any(e.tool_call_id == 'private-read' for e in events)
         text = plain(render_transcript(state, 100))
         assert 'private child thinking' not in text and '/private-child.txt' not in text
         saved = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
         restored = [b for b in messages_to_transcript(saved) if b.kind == 'tool']
-        assert len(restored) == 1 and restored[0].name == 'task'
+        assert len(restored) == 1 and restored[0].name == 'start_task'
     finally:
         runner.close()

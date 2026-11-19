@@ -67,6 +67,10 @@ class SessionRuntime:
     def pending_switch(self) -> str | None:
         return self._pending_switch
 
+    @property
+    def is_blank_draft(self) -> bool:
+        return self._draft is not None and not self._draft.id
+
     def owns(self, thread_id: str) -> bool:
         return self._lease is not None and self._lease.thread_id == thread_id
 
@@ -172,10 +176,15 @@ class SessionRuntime:
             self.adopt_new(info.id)
             return info
         now = datetime.now(timezone.utc)
-        identifier = str(uuid4()) if self._store is not None else f"cli-{uuid4()}"
+        identifier = "" if self._store is not None else f"cli-{uuid4()}"
         info = SessionInfo(id=identifier, title=title or "New session", created_at=now,
                            updated_at=now, status="running", model_id=model_id,
                            permission_mode=permission_mode, reasoning_effort=reasoning_effort)
+        if not identifier:
+            self.release()
+            self.bind("")
+            self._draft = info
+            return info
         lease = self._in_process_locks.try_acquire(info.id)
         if lease is None:
             raise SessionLockBusyError(f"Session {info.id} is already open in another window")
@@ -188,16 +197,17 @@ class SessionRuntime:
         if self._store is None or self._draft is None:
             return
         draft = self._draft
-        lease = self._store.try_acquire_session(draft.id)
+        identifier = str(uuid4())
+        lease = self._store.try_acquire_session(identifier)
         if lease is None:
-            raise SessionLockBusyError(f"Session {draft.id} is already open in another window")
+            raise SessionLockBusyError(f"Session {identifier} is already open in another window")
         try:
-            self._store.create_session(session_id=draft.id, title=draft.title, model_id=model_id,
+            self._store.create_session(session_id=identifier, title=draft.title, model_id=model_id,
                                        permission_mode=permission_mode, reasoning_effort=reasoning_effort)
         except Exception:
             lease.release()
             raise
-        self.adopt(draft.id, lease)
+        self.adopt(identifier, lease)
         self._draft = None
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:

@@ -610,7 +610,7 @@ def build_regex_grep_tool(backend: WorkspaceCompositeBackend, *, network: bool =
         output_mode：files_with_matches 返回文件路径；content 返回匹配行和行号；
         count 按文件返回匹配行数。max_count 默认 1000；content 模式限制匹配行数，
         其他模式限制文件数，单文件计数保持完整。结果受大小和时间限制，截断时会明确提示。
-        用于定位源码；查看上下文时通过 read_file 的 offset 和 limit 分页读取。
+        用于定位源码；查看上下文时通过 read 的 offset 和 limit 分页读取。
         """
         return search(backend, pattern, path, glob, output_mode, max_count, fixed_string, network=network)
 
