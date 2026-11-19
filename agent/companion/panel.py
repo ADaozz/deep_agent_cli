@@ -1,4 +1,5 @@
 """Native prompt_toolkit layout for the auxiliary pane."""
+
 from bisect import bisect_left
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.layout import HSplit, VSplit, Window, WindowAlign
@@ -8,16 +9,23 @@ from prompt_toolkit.utils import get_cwidth
 
 from agent.cli.formatting import _truncate_cells
 
-CYAN, GRAY, WHITE = "#00d7e6", "#777777", "#d0d0d0"
-GREEN, YELLOW, BORDER = "#36e05c", "#f0c000", "#505050"
+from agent.companion.theme import (
+    ACCENT,
+    BACKGROUND,
+    BORDER,
+    LAIN_BUBBLE,
+    MUTED,
+    TEXT,
+    USER_BUBBLE,
+)
 
 
 def geometry(columns: int, rows: int) -> tuple[int, int]:
     """Return the auxiliary width and animation height in terminal cells."""
-    if columns < 107 or rows < 26:
+    if columns < 120 or rows < 32:
         return 0, 0
-    width = min(columns - 65, max(42, round((columns - 1) * 0.36)))
-    height = min(rows - 20, round((rows - 2) * 0.38))
+    width = round(columns * 0.28)
+    height = min(rows - 25, round((rows - 2) * 0.36))
     return width, height
 
 
@@ -30,11 +38,16 @@ class Rows(UIControl):
         try:
             lines = self.draw(width, height)
         except Exception:
-            lines = [[(GRAY, "Unavailable")]]
-        return UIContent(get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False)
+            lines = [[(MUTED, "Unavailable")]]
+        return UIContent(
+            get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False
+        )
 
     def mouse_handler(self, event):
-        if self.scroll and event.event_type in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+        if self.scroll and event.event_type in (
+            MouseEventType.SCROLL_UP,
+            MouseEventType.SCROLL_DOWN,
+        ):
             self.scroll(-1 if event.event_type == MouseEventType.SCROLL_UP else 1)
         return None
 
@@ -50,7 +63,13 @@ def box(body):
     def horizontal(left, right):
         return VSplit([edge(left), rule(), edge(right)], height=1)
 
-    return HSplit([horizontal("┌", "┐"), VSplit([edge("│"), Window(width=1), body, Window(width=1), edge("│")]), horizontal("└", "┘")])
+    return HSplit(
+        [
+            horizontal("┌", "┐"),
+            VSplit([edge("│"), Window(width=1), body, Window(width=1), edge("│")]),
+            horizontal("└", "┘"),
+        ]
+    )
 
 
 def aligned(left, right, width):
@@ -60,7 +79,7 @@ def aligned(left, right, width):
     return [*left, ("", " " * (width - size)), *right]
 
 
-class LogRows(Rows):
+class ChatRows(Rows):
     """Keep the first visible wrapped line anchored across appends and eviction."""
 
     def __init__(self, companion):
@@ -79,25 +98,46 @@ class LogRows(Rows):
             self.addresses.clear()
             self.lines.clear()
             first = c.log_sequence - len(c.logs) + 1
-            for sequence, (stamp, text) in enumerate(c.logs, first):
-                rows = [[]]
-                used = 0
-                for color, part in [(GRAY, f"[{stamp}] "), (CYAN, "Lain: "), (WHITE, text)]:
-                    chunk = ""
-                    for char in part:
-                        cells = get_cwidth(char)
-                        if used and used + cells > width:
-                            rows[-1].append((color, chunk))
-                            rows.append([])
-                            chunk, used = "", 0
-                        chunk += char
+            for sequence, (stamp, speaker, message) in enumerate(c.logs, first):
+                limit = max(2, width - 6)
+                text_rows = []
+                line, used = "", 0
+                for char in message:
+                    cells = get_cwidth(char)
+                    if char == "\n":
+                        text_rows.append(line.rstrip())
+                        line, used = "", 0
+                        continue
+                    if used + cells > limit:
+                        head, space, tail = line.rpartition(" ")
+                        if space and head:
+                            text_rows.append(head)
+                            line, used = tail, get_cwidth(tail)
+                        else:
+                            text_rows.append(line)
+                            line, used = "", 0
+                    if line or char != " ":
+                        line += char
                         used += cells
-                    rows[-1].append((color, chunk))
+                text_rows.append(line)
+                user = speaker == "You"
+                size = max(get_cwidth(line) for line in text_rows) + 2
+                indent = " " * max(0, width - size) if user else ""
+                label = [(MUTED, f"{speaker} · {stamp[:5]}")]
+                rows = [aligned([], label, width) if user else label]
+                style = f"bg:{USER_BUBBLE if user else LAIN_BUBBLE} {TEXT}"
+                for line in text_rows:
+                    padding = " " * (size - get_cwidth(line) - 1)
+                    rows.append([("", indent), (style, f" {line}{padding}")])
                 self.lines.extend(rows)
                 self.addresses.extend((sequence, row) for row in range(len(rows)))
         self.maximum = max(0, len(self.lines) - height)
-        self.top = self.maximum if c.anchor is None else min(self.maximum, bisect_left(self.addresses, c.anchor))
-        return self.lines[self.top:self.top + height]
+        self.top = (
+            self.maximum
+            if c.anchor is None
+            else min(self.maximum, bisect_left(self.addresses, c.anchor))
+        )
+        return self.lines[self.top : self.top + height]
 
     def scroll_lines(self, direction):
         top = min(self.maximum, max(0, self.top + direction * 3))
@@ -105,64 +145,118 @@ class LogRows(Rows):
         self.companion.invalidate()
 
 
-def build_panel(companion, git_summary):
+def build_panel(companion, git_summary, chart, editor):
     def status(w, h):
-        return [[(CYAN, companion.behavior.upper())]]
+        return [[(ACCENT, companion.behavior.upper())]]
 
     def resource(index, name, color):
         def draw(w, h):
             value = companion.metrics[index]
             capacity = max(0, w - 2)
-            filled = 0 if value is None else min(capacity, max(0, round(capacity * value / 100)))
+            filled = (
+                0
+                if value is None
+                else min(capacity, max(0, round(capacity * value / 100)))
+            )
             bar = "[" + "█" * filled + "░" * (capacity - filled) + "]"
             percent = "N/A" if value is None else f"{value}%"
-            return [aligned([(color, name)], [(WHITE, percent)], w), [(color, bar)]]
+            if w < 8:
+                return [[(color, name)], [(TEXT, percent)]]
+            return [aligned([(color, name)], [(TEXT, percent)], w), [(color, bar)]]
+
         return Window(Rows(draw))
 
     def git(w, h):
         g = git_summary()
         status_text = f"{g.changed} changed" if g.changed else "clean"
         status_text = g.error or (status_text if g.available else "—")
-        lines = [[(CYAN, "git")]]
+        lines = [[(ACCENT, "git")]]
         for label, value, color in (
-            ("Repo", "yes" if g.available else "—" if g.error else "no", GREEN),
-            ("Branch", g.branch or "—", CYAN),
-            ("Status", status_text, GRAY if g.error else GREEN),
+            ("Repo", "yes" if g.available else "—" if g.error else "no", ACCENT),
+            ("Branch", g.branch or "—", ACCENT),
+            ("Status", status_text, MUTED if g.error else ACCENT),
         ):
             prefix = f"{label}: "
-            lines.append([(WHITE, prefix), (color, _truncate_cells(value, w - len(prefix)))])
+            lines.append(
+                [(TEXT, prefix), (color, _truncate_cells(value, w - len(prefix)))]
+            )
         return lines
 
     def service_rows(w, h):
         items = companion.services
-        title = [(CYAN, "services")]
-        count = [(GREEN, f"{len(items)} running" if items else "no")]
+        title = [(ACCENT, "services")]
+        count = [(ACCENT, f"{len(items)} running" if items else "no")]
         if len("services ") + len(count[0][1]) <= w:
             lines = [aligned(title, count, w)]
         else:
             lines = [title, aligned([], count, w)]
-        for row in items[:max(0, h - len(lines))]:
+        for row in items[: max(0, h - len(lines))]:
             pid = f"{'ns:' if row.sandbox else 'PID '}{row.pid}"
             label = _truncate_cells(row.name, w - len(pid) - 1)
-            lines.append(aligned([(WHITE, label)], [(WHITE, pid)], w))
+            lines.append(aligned([(TEXT, label)], [(TEXT, pid)], w))
         return lines
 
     def separator():
         return Window(width=1, char="│", style=BORDER)
 
-    title = FormattedText([(CYAN, "Companion Agent"), (WHITE, " [ Lain Iwakura ]")])
-    content = HSplit([
-        Window(FormattedTextControl(title), height=1), rule(),
-        Window(FormattedTextControl(lambda: FormattedText(companion.frame)), height=lambda: companion.geometry()[1]),
-        Window(height=1), Window(Rows(status), height=1, align=WindowAlign.CENTER), Window(height=1),
-        VSplit([resource(0, "CPU", GREEN), separator(), resource(1, "GPU", GREEN),
-                separator(), resource(2, "RAM", CYAN)], height=2, padding=1),
-        Window(height=1),
-        VSplit([box(Window(Rows(git))), box(Window(Rows(service_rows)))],
-               height=lambda: 7 if companion.geometry()[1] >= 13 else 6, padding=2),
-        Window(height=1),
-        Window(FormattedTextControl(FormattedText([(CYAN, "lain.log")])), height=1),
-        rule(), Window(LogRows(companion)),
-    ])
-    return VSplit([Window(width=2), content, Window(width=2)],
-                  width=lambda: companion.geometry()[0] + 4, style="bg:#08090b #d0d0d0")
+    cards = VSplit(
+        [box(Window(Rows(git))), box(Window(Rows(service_rows)))],
+        height=lambda: 7 if companion.geometry()[1] >= 13 else 6,
+        padding=2,
+    )
+
+    def chat_header(w, h):
+        hint = "thinking…" if companion.question else "F6 · ask Lain"
+        return [aligned([(ACCENT, "Chat")], [(MUTED, hint)], w)]
+
+    title = FormattedText([(ACCENT, "Companion Agent"), (TEXT, " [ Lain Iwakura ]")])
+    content = HSplit(
+        [
+            Window(
+                FormattedTextControl(
+                    lambda: (
+                        title
+                        if companion.geometry()[0] >= 31
+                        else FormattedText([(ACCENT, "Lain Iwakura")])
+                    )
+                ),
+                height=1,
+            ),
+            rule(),
+            Window(
+                FormattedTextControl(lambda: FormattedText(companion.frame)),
+                height=lambda: companion.geometry()[1],
+            ),
+            Window(height=1),
+            Window(Rows(status), height=1, align=WindowAlign.CENTER),
+            Window(height=1),
+            VSplit(
+                [
+                    resource(0, "CPU", ACCENT),
+                    separator(),
+                    resource(1, "GPU", ACCENT),
+                    separator(),
+                    resource(2, "RAM", ACCENT),
+                    separator(),
+                    resource(3, "ROM", ACCENT),
+                ],
+                height=2,
+                padding=1,
+            ),
+            Window(height=1),
+            cards,
+            Window(
+                Rows(chart.draw, chart.scroll),
+                height=lambda: 6 if companion.geometry()[1] >= 12 else 4,
+            ),
+            Window(height=1),
+            Window(Rows(chat_header), height=1),
+            Window(ChatRows(companion)),
+            Window(editor, height=1, style=f"bg:{USER_BUBBLE} {TEXT}"),
+        ]
+    )
+    return VSplit(
+        [Window(width=2), content, Window(width=2)],
+        width=lambda: companion.geometry()[0] + 4,
+        style=f"bg:{BACKGROUND} {TEXT}",
+    )

@@ -21,6 +21,7 @@ class Command:
 def command_table() -> tuple[Command, ...]:
     return (
         Command("help", "Show commands and keyboard shortcuts", _help),
+        Command("lain", "Ask your Companion (/lain <question>)", _lain),
         Command("clear", "Clear the visible transcript", _clear),
         Command("status", "Show runtime and sandbox status", _status),
         Command("pause", "Pause at the next model safe point", _pause),
@@ -52,6 +53,13 @@ def command_table() -> tuple[Command, ...]:
 
 async def _help(app: "CliApplication", _arg: str) -> None:
     app.show_help()
+
+
+async def _lain(app: "CliApplication", arg: str) -> None:
+    if not app._companion_geometry()[0]:
+        app.set_status("Lain chat needs a terminal at least 120 columns by 32 rows.")
+        return
+    app.set_status(app.companion.ask(arg))
 
 
 async def _clear(app: "CliApplication", _arg: str) -> None:

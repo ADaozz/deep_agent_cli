@@ -19,11 +19,11 @@ from zoneinfo import ZoneInfo
 from prompt_toolkit import ANSI, Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
@@ -35,13 +35,15 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.containers import WindowAlign
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
+from agent.companion.chart import FailureChart
 from agent.companion.controller import Companion
+from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
 from agent.cli.widgets import (
     EDITOR_PROMPT,
@@ -201,8 +203,13 @@ class CliApplication:
         self._git_summary = self._git.summary
         self._git_task: asyncio.Task[None] | None = None
 
+        sandbox = runner.settings.sandbox if runner.settings else runner._sandbox_config
+        protected = list(sandbox.protected_files) if sandbox else []
+        if sandbox and sandbox.protected_config_dir:
+            protected.append(sandbox.protected_config_dir)
         self.companion = Companion(
             workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
+            protected=protected, secrets=runner.summary_secrets(), profile=self._companion_profile,
             session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
             invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
         )
@@ -533,7 +540,37 @@ class CliApplication:
                 max_height=display_limits.completion_menu_lines, scroll_offset=1)),
         ])
         visible = Condition(lambda: bool(self._companion_geometry()[0]))
-        sidebar = build_panel(self.companion, lambda: self._git_summary)
+        self.lain_buffer = Buffer(multiline=False)
+        self.lain_editor = BufferControl(buffer=self.lain_buffer, focus_on_click=True)
+        chart = FailureChart(self.companion)
+        sidebar = build_panel(self.companion, lambda: self._git_summary, chart, self.lain_editor)
+        focused = has_focus(self.lain_editor)
+        available = visible & Condition(lambda: self.dialogs.current is None)
+        companion_keys = KeyBindings()
+
+        @companion_keys.add("f6", filter=available)
+        def toggle_lain(event):
+            event.app.layout.focus(self.editor_control if focused() else self.lain_editor)
+
+        @companion_keys.add("escape", filter=focused)
+        def leave_lain(event):
+            event.app.layout.focus(self.editor_control)
+
+        @companion_keys.add("enter", filter=focused & available)
+        def send_lain(event):
+            result = self.companion.ask(self.lain_buffer.text)
+            if result == "Question sent to Lain.":
+                self.lain_buffer.reset()
+            else:
+                self.set_status(result)
+
+        @companion_keys.add("f7", filter=available)
+        def next_tools(event):
+            chart.scroll(1)
+
+        def restore_focus(app):
+            if app.layout.current_control is self.lain_editor and not available():
+                app.layout.focus(self.editor_control)
         title = FormattedText([("#00d7e6 bold", "DeepAgentCLI"),
                                ("#777777", f" v{package_version()}  terminal coding agent")])
         title_bar = HSplit([Window(FormattedTextControl(title), height=1),
@@ -542,12 +579,13 @@ class CliApplication:
         show_title = Condition(lambda: self.dialogs.current is None or self.application.output.get_size().rows >= 20)
         root = HSplit([
             ConditionalContainer(title_bar, show_title),
-            VSplit([left, ConditionalContainer(Window(width=1, char="│", style="#505050"), visible),
+            VSplit([left, ConditionalContainer(Window(width=1, char="│", style=COMPANION_BORDER), visible),
                     ConditionalContainer(sidebar, visible)]),
         ], style="bg:#08090b #d0d0d0")
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.editor_control),
-            key_bindings=self.bindings,
+            key_bindings=merge_key_bindings([ConditionalKeyBindings(self.bindings, ~focused), companion_keys]),
+            before_render=restore_focus,
             full_screen=True,
             mouse_support=Condition(lambda: not self._exiting),
             style=Style.from_dict({
@@ -717,6 +755,7 @@ class CliApplication:
         """Keep the Companion Git card fresh without ever blocking a render pass."""
         while True:
             summary = await self._git.refresh()
+            self.companion.git_changed(summary)
             if summary != self._git_summary:
                 self._git_summary = summary
                 self.application.invalidate()
@@ -937,6 +976,7 @@ class CliApplication:
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
         self.companion.sync_session()
+        self.lain_buffer.reset()
         self.skills._clear_skill_draft()
         self.transcript.clear_transcript_selection()
         self.dialogs.current = None
@@ -1265,26 +1305,35 @@ class CliApplication:
         return create_bindings(self, lambda: time.monotonic())
 
 
+    def _companion_profile(self):
+        model = self.runner.current_model()
+        return (model.id if model else "fixed model", self.runner.reasoning_effort())
+
     def _on_event_thread(self, event: RunEvent) -> None:
         epoch = _RUN_EPOCH.get()
-        # Capture attribution before a queued UI callback can observe a model switch.
-        model = self.runner.current_model() if event.type == "tool_started" else None
-        model_id = model.id if model else "fixed model"
+        context = None
+        if event.type in {"run_started", "turn_started", "turn_completed", "companion_tool", "tool_started", "tool_completed", "interaction_requested",
+                          "run_failed", "run_completed", "run_cancelled"}:
+            context = (self.runner.thread_id, *self._companion_profile(), time.time(), time.monotonic())
         if self.run_view.loop is not None:
-            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch, model_id)
+            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch, context)
         else:
-            self._apply_run_event(event, epoch, model_id)
+            self._apply_run_event(event, epoch, context)
 
-    def _apply_run_event(self, event: RunEvent, epoch: int | None, model_id: str = "fixed model") -> None:
+    def _apply_run_event(self, event: RunEvent, epoch: int | None, context=None) -> None:
         # Events without an epoch come from the UI thread (steering, control).
         # Summary metadata carries its own thread_id and survives a later UI run.
         if (epoch is not None and epoch != self.run_view.epoch
                 and event.type != "session_summary_requested"):
             return
+        if event.type == "companion_tool":
+            if context and event.result["scope"][0] == self.runner.thread_id:
+                self.companion.child_event(event.result, context[-2])
+            return
         self.run_events._apply_event(event)
-        if event.type in {"run_started", "tool_started", "tool_completed", "interaction_requested",
-                          "run_failed", "run_completed", "run_cancelled"}:
-            self.companion.event(event, model_id)
+        if context and context[0] == self.runner.thread_id:
+            _, model, effort, wall, tick = context
+            self.companion.event(event, model, effort, "main", wall, tick)
 
 
     def _announce_mcp_switch(self) -> None:

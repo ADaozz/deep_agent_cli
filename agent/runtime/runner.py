@@ -64,6 +64,7 @@ from agent.runtime.events import (
     is_valid_hitl_interrupt as is_valid_hitl_interrupt,
 )
 from agent.runtime.contracts import (
+    observation_scope,
     CompactResult,
     InterruptKind,
     InterruptState,
@@ -1380,7 +1381,9 @@ class AgentRunner:
         stream_owner_token = set_stream_owner(self.control)
         self._busy = True
         self._context_usage_invalidated = True
-        _emit(event_handler, RunEvent(type="run_started"))
+        run_id, turn_id = uuid4().hex, uuid4().hex
+        scope_token = observation_scope.set((self.thread_id, run_id, turn_id))
+        _emit(event_handler, RunEvent(type="run_started", run_id=run_id, turn_id=turn_id))
 
         result: RunResult | None = None
         turn_started = time.monotonic()
@@ -1426,7 +1429,10 @@ class AgentRunner:
                 run_control = self.control.begin_run()
                 self._seen_tool_calls.clear()
                 turn_started = time.monotonic()
+                turn_id = uuid4().hex
+                observation_scope.set((self.thread_id, run_id, turn_id))
                 self._apply_pending_runtime_config(event_handler)
+                _emit(event_handler, RunEvent(type="turn_started", run_id=run_id, turn_id=turn_id))
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)] if text is not None
                      else [notification_message(item) for item in notices]},
@@ -1441,6 +1447,7 @@ class AgentRunner:
                 self._touch_status(StopReason.STOP)
             return result
         finally:
+            observation_scope.reset(scope_token)
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)

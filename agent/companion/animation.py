@@ -4,6 +4,7 @@ from pathlib import Path
 from PIL import Image
 
 from agent.companion import STATES
+from agent.companion.theme import ACCENT
 from agent.companion.ascii_art import PRESETS, convert, frame_iter
 
 ASSETS = Path(__file__).with_name("assets")
@@ -42,4 +43,4 @@ def frames(state: str, width: int, height: int):
                                if LEVELS[portrait[4*y + dy][2*x + dx]] >= threshold)
                     line.append(chr(0x2800 + mask) if mask else " ")
                 canvas[top + y] = (" " * left + "".join(line)).ljust(width)
-            yield [("#ffffff", "\n".join(canvas))], delay / 1000
+            yield [(ACCENT, "\n".join(canvas))], delay / 1000

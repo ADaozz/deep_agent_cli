@@ -81,7 +81,9 @@ def services(proc: Path = Path("/proc")) -> tuple[Service, ...]:
 
 
 class Resources:
-    def __init__(self):
+    def __init__(self, workspace):
+        self.workspace = workspace
+        self.disk_bytes = None
         self.previous = None
 
     def sample(self):
@@ -106,4 +108,11 @@ class Resources:
                 gpu = int(result.stdout.splitlines()[0])
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             pass
-        return cpu, gpu, ram
+        try:
+            usage = shutil.disk_usage(self.workspace)
+            self.disk_bytes = {"capacity": usage.total, "used": usage.used}
+            disk = round(100 * usage.used / usage.total)
+        except (OSError, ZeroDivisionError):
+            disk = None
+            self.disk_bytes = None
+        return cpu, gpu, ram, disk

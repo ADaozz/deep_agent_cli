@@ -1,0 +1,8 @@
+"""Terminal colors shared by the Companion panel and portrait."""
+BACKGROUND = "#0B090D"
+BORDER = "#503A49"
+ACCENT = "#F18AB6"
+MUTED = "#927F8B"
+TEXT = "#E8DBE3"
+LAIN_BUBBLE = "#151017"
+USER_BUBBLE = "#442738"
