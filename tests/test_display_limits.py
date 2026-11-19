@@ -175,7 +175,7 @@ def test_app_uses_configured_renderer_editor_and_menu() -> None:
         app.buffer.text = "一\n二\n三\n四"
         editor = next(w for w in app.application.layout.find_all_windows() if w.content is app.editor_control)
         assert editor.height().max == 2
-        menu = app.application.layout.container.floats[0].content
+        menu = app.application.layout.container.children[-1].children[0].floats[0].content
         assert menu.content.height.max == 4
 
 

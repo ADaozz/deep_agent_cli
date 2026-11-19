@@ -193,10 +193,18 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 - `/status details` 按“模型 + 推理强度”分组，例如 `deepseek-flash-low`；每组下方仅缩进显示 5% low / 5% top / Average TPS 三项。状态栏不显示性能指标，任务完成后照常隐藏。
 - 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、运行中的 SubAgent 数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。排队内容在独立区域显示。
 - 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
-- 底栏第一行：工作区路径、当前模型、会话中文摘要（无摘要时显示 thread_id）；右侧为 Git 分支和改动文件数。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
+- 底栏第一行：工作区路径、当前模型、会话中文摘要（无摘要时显示 thread_id）。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。
 - 上下文占用 = 模型最近一次返回的 token usage / `context_window`。端点不返回 usage 时只显示窗口大小；`context_window` 为 0 时不显示。
-- Git 状态每 5 秒在后台刷新，单次探测最长 10 秒。可能的显示：`⎇ checking git`、`⎇ no git`、`git unavailable`、`git error`、`git timeout`。
+
+
+### Lain Companion
+
+终端至少 107 列、26 行时，右栏显示 Lain 的实时 GIF 字符动画、系统资源、Git、后台服务和滚动日志。Git 每 5 秒刷新，计数沿用已跟踪路径的改动。Services 显示本次 CLI 启动的监听进程及启动命令结束后留下的后台进程；`ns:` 标记沙箱内部 PID。日志上滚暂停跟随，滚回末尾恢复。
+
+Lain 以独立子进程运行，只观察环境和表达。模型固定为 `deepseek/deepseek-flash`，凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，亦可读取受保护的 CLI 配置目录中的 `companion.key`（默认 `~/.deep-agent/companion.key`，权限 0600）。没有密钥或模型不可用时，本地动画与监控仍可使用。
+
+观察证据按工作区保存在配置目录的 `companion/` 下，比较最近七天与之前七天的工具使用记录。发送给观察模型的数据包含模型和工具名称、计数、调用批次、服务名称及上一条观察；命令参数、工具输出和对话正文留在主会话中。
 
 
 ### `/status details` 性能统计口径

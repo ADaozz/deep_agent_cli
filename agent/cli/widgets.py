@@ -8,6 +8,7 @@ from typing import Any
 
 from prompt_toolkit import ANSI
 from prompt_toolkit.formatted_text import to_formatted_text
+from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.layout import BufferControl, Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.screen import Char, WritePosition
@@ -63,8 +64,8 @@ class _InteractionControl(_ScrollableTextControl):
         rendered, self._option_offset = render_interaction_viewport(
             controller, width, height or 1, self._option_offset,
         )
-        self.text = to_formatted_text(ANSI(rendered))
-        return super().create_content(width, height)
+        lines = list(split_lines(to_formatted_text(ANSI(rendered))))
+        return UIContent(get_line=lines.__getitem__, line_count=len(lines), show_cursor=False)
 
 
 class _BackToBottomControl(_ScrollableTextControl):

@@ -1,6 +1,6 @@
-"""Workspace git summary for the status footer.
+"""Workspace git summary for the Companion Git card.
 
-The footer repaints several times a second, so git is probed on a timer in the
+The TUI repaints several times a second, so git is probed on a timer in the
 background and the UI only ever reads the last known summary.
 """
 

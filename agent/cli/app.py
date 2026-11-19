@@ -41,6 +41,8 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
+from agent.companion.controller import Companion
+from agent.companion.panel import build_panel, geometry
 from agent.cli.widgets import (
     EDITOR_PROMPT,
     _ScrollableTextControl,
@@ -194,10 +196,16 @@ class CliApplication:
         self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         display_limits = runner.settings.ui_display_limits if runner.settings is not None else DEFAULT_UI_DISPLAY_LIMITS
-        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name), limits=display_limits)
+        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name), limits=display_limits, show_header=False)
         self._git = GitProbe(self._workspace())
         self._git_summary = self._git.summary
         self._git_task: asyncio.Task[None] | None = None
+
+        self.companion = Companion(
+            workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
+            session=lambda: self.runner.thread_id, geometry=self._companion_geometry,
+            invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
+        )
 
         self.slash_completer = SlashCompleter(
             self.commands,
@@ -520,11 +528,25 @@ class CliApplication:
                 dont_extend_height=True,
             ),
         ])
+        left = FloatContainer(body, [
+            Float(xcursor=True, ycursor=True, content=CompletionsMenu(
+                max_height=display_limits.completion_menu_lines, scroll_offset=1)),
+        ])
+        visible = Condition(lambda: bool(self._companion_geometry()[0]))
+        sidebar = build_panel(self.companion, lambda: self._git_summary)
+        title = FormattedText([("#00d7e6 bold", "DeepAgentCLI"),
+                               ("#777777", f" v{package_version()}  terminal coding agent")])
+        title_bar = HSplit([Window(FormattedTextControl(title), height=1),
+                            Window(height=1, char="─", style="#505050")])
+        # A short approval needs room for its heading, selection and keyboard hints.
+        show_title = Condition(lambda: self.dialogs.current is None or self.application.output.get_size().rows >= 20)
+        root = HSplit([
+            ConditionalContainer(title_bar, show_title),
+            VSplit([left, ConditionalContainer(Window(width=1, char="│", style="#505050"), visible),
+                    ConditionalContainer(sidebar, visible)]),
+        ], style="bg:#08090b #d0d0d0")
         self.application: Application[None] = Application(
-            layout=Layout(FloatContainer(
-                content=body,
-                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=display_limits.completion_menu_lines, scroll_offset=1))],
-            ), focused_element=self.editor_control),
+            layout=Layout(root, focused_element=self.editor_control),
             key_bindings=self.bindings,
             full_screen=True,
             mouse_support=Condition(lambda: not self._exiting),
@@ -571,9 +593,12 @@ class CliApplication:
             with self._capture_runtime_logs():
                 try:
                     await self.sessions.start()
+                    for job in (self.companion.monitor, self.companion.animate, self.companion.observe):
+                        self.lifecycle.spawn(job(), stop=TaskStop.CANCEL, name=f"companion-{job.__name__}")
                     await self.application.run_async(pre_run=self._before_ui)
                 finally:
                     await self.lifecycle.shutdown()
+                    await self.companion.finish()
         finally:
             # Removing a handler restores SIG_DFL, so a signal during
             # runner.close() terminates the process directly.
@@ -689,7 +714,7 @@ class CliApplication:
         self._git_task = self.lifecycle.spawn(self._watch_git(), stop=TaskStop.CANCEL, name="git-watch")
 
     async def _watch_git(self) -> None:
-        """Keep the footer's git summary fresh without ever blocking a render pass."""
+        """Keep the Companion Git card fresh without ever blocking a render pass."""
         while True:
             summary = await self._git.refresh()
             if summary != self._git_summary:
@@ -911,6 +936,7 @@ class CliApplication:
 
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
+        self.companion.sync_session()
         self.skills._clear_skill_draft()
         self.transcript.clear_transcript_selection()
         self.dialogs.current = None
@@ -1072,14 +1098,21 @@ class CliApplication:
         return Path(sandbox.workspace) if sandbox is not None else Path.cwd()
 
     def _editor_width(self) -> int:
-        return max(1, self.application.output.get_size().columns - get_cwidth(EDITOR_PROMPT))
+        return max(1, self._width() - get_cwidth(EDITOR_PROMPT))
+
+    def _companion_geometry(self) -> tuple[int, int]:
+        if not hasattr(self, "application"):
+            return 0, 0
+        size = self.application.output.get_size()
+        return geometry(size.columns, size.rows)
 
     def _width(self) -> int:
         try:
             columns = self.application.output.get_size().columns
         except Exception:  # noqa: BLE001
             columns = 100
-        return max(20, columns)
+        right, _ = self._companion_geometry()
+        return max(1, columns - right - bool(right))
 
 
     async def _copy_selection(self, content: str) -> None:
@@ -1203,10 +1236,6 @@ class CliApplication:
             self.state.usage, self.runner.context_window(),
             empty_session=self.state.context_pristine and not self.state.running,
         )
-        # Row 1: workspace · model · resume on the left, git on the right.
-        # Row 2: sandbox/permission on the left, context on the right.
-        # The left side always truncates before the right side.
-        git = self._git_summary.label() or "⎇ no git"
         fs_labels = {"full-access": "full", "restricted": "rest"}
         current_filesystem = self.runner.sandbox_mode()
         filesystem = fs_labels.get(current_filesystem, current_filesystem)
@@ -1214,32 +1243,17 @@ class CliApplication:
         if pending_filesystem is not None:
             filesystem += f"→{fs_labels.get(pending_filesystem, pending_filesystem)}(pending)"
         status = f" {mode}:{filesystem} · p:{perm}"
-        git_fit = _truncate_cells(git, width)
-        available = max(1, width - get_cwidth(git_fit) - 1)
-        fragments: list[tuple[str, str]] = []
-        if available < 6 + get_cwidth(resume_id) + 2:
-            # Extremely narrow: keep the session handle and the git label only.
-            resume_fit = _truncate_cells(resume_id, available)
-            gap = " " * max(1, width - get_cwidth(resume_fit) - get_cwidth(git_fit))
-            fragments.append(("class:footer-resume-id", resume_fit))
-            fragments.append(("class:footer", gap + git_fit + "\n"))
+        fragments = []
+        if width < get_cwidth(resume_id) + 8:
+            fragments.append(("class:footer-resume-id", _truncate_cells(resume_id, width)))
         else:
-            model_width = max(1, available - get_cwidth(resume_id) - 6)
-            model_fit = _truncate_cells(model_label, model_width)
-            workspace_width = max(1, available - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
-            workspace_fit = _truncate_cells(f" {format_workspace_path(self._workspace())}", workspace_width)
-            left_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
-            first_padding = " " * max(1, width - left_width - get_cwidth(git_fit))
-            if workspace_fit.startswith(" "):
-                fragments.append(("class:footer", " "))
-                fragments.append(("class:footer-workspace", workspace_fit[1:]))
-            else:
-                fragments.append(("class:footer-workspace", workspace_fit))
-            fragments.append(("class:footer", " · "))
-            fragments.append(("class:footer-model", model_fit))
-            fragments.append(("class:footer", " · "))
-            fragments.append(("class:footer-resume-id", resume_id))
-            fragments.append(("class:footer", first_padding + git_fit + "\n"))
+            model_fit = _truncate_cells(model_label, width - get_cwidth(resume_id) - 7)
+            workspace_fit = _truncate_cells(format_workspace_path(self._workspace()),
+                                            width - get_cwidth(model_fit) - get_cwidth(resume_id) - 7)
+            fragments.extend([("class:footer", " "), ("class:footer-workspace", workspace_fit),
+                              ("class:footer", " · "), ("class:footer-model", model_fit),
+                              ("class:footer", " · "), ("class:footer-resume-id", resume_id)])
+        fragments.append(("class:footer", "\n"))
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
@@ -1249,18 +1263,24 @@ class CliApplication:
 
     def _on_event_thread(self, event: RunEvent) -> None:
         epoch = _RUN_EPOCH.get()
+        # Capture attribution before a queued UI callback can observe a model switch.
+        model = self.runner.current_model() if event.type == "tool_started" else None
+        model_id = model.id if model else "fixed model"
         if self.run_view.loop is not None:
-            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch)
+            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch, model_id)
         else:
-            self._apply_run_event(event, epoch)
+            self._apply_run_event(event, epoch, model_id)
 
-    def _apply_run_event(self, event: RunEvent, epoch: int | None) -> None:
+    def _apply_run_event(self, event: RunEvent, epoch: int | None, model_id: str = "fixed model") -> None:
         # Events without an epoch come from the UI thread (steering, control).
         # Summary metadata carries its own thread_id and survives a later UI run.
         if (epoch is not None and epoch != self.run_view.epoch
                 and event.type != "session_summary_requested"):
             return
         self.run_events._apply_event(event)
+        if event.type in {"run_started", "tool_started", "tool_completed", "interaction_requested",
+                          "run_failed", "run_completed", "run_cancelled"}:
+            self.companion.event(event, model_id)
 
 
     def _announce_mcp_switch(self) -> None:

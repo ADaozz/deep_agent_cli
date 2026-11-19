@@ -19,6 +19,7 @@ from deepagents.backends.protocol import ExecuteResponse
 from agent.runtime.cancellation import emit_tool_output, get_cancel_context
 from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxPool
 from agent.execution.policy import sandbox_workspace_root
+from agent.execution.service_observation import OWNER_VARIABLE, begin_command, end_command
 
 
 LOG = logging.getLogger(__name__)
@@ -249,13 +250,14 @@ def _run_process(
 ) -> ExecuteResponse:
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
+    owner = begin_command()
     try:
         process = subprocess.Popen(  # noqa: S603
             command,
             shell=shell,
             executable="/bin/sh" if shell else None,
             cwd=str(cwd) if cwd else None,
-            env=env,
+            env={**(os.environ if env is None else env), OWNER_VARIABLE: owner},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -263,6 +265,7 @@ def _run_process(
             start_new_session=True,
         )
     except Exception as exc:  # noqa: BLE001
+        end_command(owner)
         return LocalExecuteResponse(
             f"Error executing command ({type(exc).__name__}): {exc}", 1, False,
             termination_reason="spawn_error",
@@ -340,6 +343,7 @@ def _run_process(
             _kill_process_group_pid(process.pid)
             process.wait(timeout=1)
     finally:
+        end_command(owner)
         selector.close()
         process.stdout.close()
         process.stderr.close()

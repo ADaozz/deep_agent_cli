@@ -439,10 +439,10 @@ def test_tui_enter_accepts_candidate_before_running_command() -> None:
             pipe.send_text("\r")
             await asyncio.sleep(0.08)
             assert app.buffer.text == "/help"
-            assert not any("Keyboard\n" in getattr(block, "content", "") for block in app.state.blocks)
+            assert not any("Keyboard shortcuts\n" in getattr(block, "content", "") for block in app.state.blocks)
             pipe.send_text("\r")
             await asyncio.sleep(0.08)
-            assert any("Keyboard\n" in getattr(block, "content", "") for block in app.state.blocks)
+            assert any("Keyboard shortcuts\n" in getattr(block, "content", "") for block in app.state.blocks)
             app.exit()
             await task
 

@@ -55,6 +55,7 @@ async def main():
         editor = app.application.layout.current_window.render_info
         data = {'input':app.buffer.text, 'cursor':app.buffer.cursor_position,
                 'editor_rows':editor.window_height if editor else 0,
+                'editor_cols':editor.window_width if editor else 0,
                 'completion':app.buffer.complete_state is not None,
                 'permission':runner.permission_mode().value,
                 'pending':runner.pending_permission_mode().value if runner.pending_permission_mode() else None,
@@ -165,17 +166,19 @@ def test_editor_grows_to_five_rows_and_arrows_stay_in_draft(tui):
     tui.wait(lambda s: s['input'] == '/mod!')
     tui.send('\x15')
     tui.wait(lambda s: not s['input'])
-    # The 120-column terminal reserves two cells for the editor prompt.
+    # Vertical movement uses physical cells inside the left pane.
     tui.send('中' * 62)
-    tui.wait(lambda s: s['editor_rows'] == 2 and s['cursor'] == 62)
+    state = tui.wait(lambda s: s['editor_rows'] == 2 and s['cursor'] == 62)
+    width = state['editor_cols']
+    assert 64 <= width < 100
     tui.send('\x1b[A')
-    tui.wait(lambda s: s['cursor'] == 3)
+    tui.wait(lambda s: s['cursor'] == 62 - width // 2)
     tui.send('\x1b[B')
     tui.wait(lambda s: s['cursor'] == 62)
     tui.send('x' * 600)
     tui.wait(lambda s: s['editor_rows'] == 5 and s['cursor'] == 662)
     tui.send('\x1b[A')
-    tui.wait(lambda s: s['cursor'] == 544)
+    tui.wait(lambda s: s['cursor'] == 662 - width)
     tui.send('\x03')
     tui.wait(lambda s: not s['input'] and s['editor_rows'] == 1)
 

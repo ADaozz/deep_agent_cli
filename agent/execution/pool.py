@@ -25,6 +25,8 @@ from typing import Any, Callable, TypeVar
 import uuid
 import weakref
 
+from agent.execution.service_observation import begin_command, end_command
+
 
 LOG = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -88,6 +90,7 @@ class RemoteCommand:
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=_EVENT_QUEUE_SIZE)
         self.released = False
         self.kill_requested = False
+        self.owner_token = ""
 
     def kill(self) -> None:
         """杀掉这条命令的进程组，沙箱本身继续运行。"""
@@ -111,6 +114,8 @@ class RemoteCommand:
     def release(self) -> None:
         self.released = True
         self.sandbox._forget(self.request_id)
+        if self.owner_token:
+            end_command(self.owner_token)
 
     def _deliver(self, event: tuple[str, Any]) -> None:
         while not self.released:
@@ -197,6 +202,9 @@ class PersistentSandbox:
             handle = RemoteCommand(self, next(self._ids))
             self._commands[handle.request_id] = handle
         try:
+            if request["op"] == "run":
+                handle.owner_token = begin_command()
+                request["owner"] = handle.owner_token
             self._send({**request, "id": handle.request_id})
         except SandboxLostError:
             handle.release()
