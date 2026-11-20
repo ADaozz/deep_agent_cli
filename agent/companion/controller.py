@@ -417,13 +417,20 @@ class Companion:
             )
             self.batches.clear()
             self.queue_behavior("focused")
-        elif (
-            kind == "tool_started"
-            and event.tool_call_id
-            and identity not in self.timeline.active
-        ):
-            if identity in self.timeline.finished:
+        elif kind in ("tool_started", "tool_resumed") and event.tool_call_id:
+            if identity in self.timeline.active or identity in self.timeline.finished:
                 return
+            if kind == "tool_resumed":
+                resumed = self.resumable_call(event)
+                if resumed is not None:
+                    identity = resumed.run_id, resumed.tool_call_id
+                    resumed.outcome = "running"
+                    self.timeline.started(resumed)
+                    self.calls[identity] = resumed
+                    self.starts[identity] = tick
+                    self.cache_call(identity, call_arguments(event.arguments, self.secrets))
+                    self.invalidate()
+                    return
             name = clean(event.name)
             obs = ToolObservation(
                 self.thread,
@@ -469,13 +476,7 @@ class Companion:
                 return
             obs = self.timeline.active.get(identity)
             if obs is None:
-                # Resuming a checkpoint can deliver the end of a pre-crash call.
-                resumable = [*self.timeline.interrupted.values(), *(
-                    item for item in self.timeline.active.values() if item.outcome == "waiting"
-                )]
-                matches = [item for item in resumable if item.tool_call_id == event.tool_call_id
-                           and (not event.message_id or not item.message_id or event.message_id == item.message_id)]
-                obs = matches[0] if len(matches) == 1 else None
+                obs = self.resumable_call(event)
             if obs is None:
                 obs = ToolObservation(self.thread, self.turn, run, agent, model, effort,
                                       clean(event.name) or "tool", event.tool_call_id, wall,
@@ -522,6 +523,17 @@ class Companion:
             self.queue_behavior(behavior, temporary=behavior != "idle")
             self.close_turn(kind.removeprefix("run_"), wall, tick)
         self.invalidate()
+
+    def resumable_call(self, event):
+        pending = self.timeline.interrupted | {
+            key: obs for key, obs in self.timeline.active.items()
+            if obs.outcome == "waiting" or event.message_id and obs.message_id == event.message_id
+        }
+        matches = [obs for obs in pending.values() if obs.tool_call_id == event.tool_call_id]
+        if event.message_id:
+            exact = [obs for obs in matches if obs.message_id == event.message_id]
+            matches = exact or [obs for obs in matches if not obs.message_id]
+        return matches[0] if len(matches) == 1 else None
 
     def cache_call(self, identity, details):
         self.call_cache[identity] = details

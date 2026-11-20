@@ -1495,12 +1495,24 @@ class AgentRunner:
         resume_calls = {}
         self._subagent_tool_ids.clear()
         if isinstance(graph_input, Command):
-            last_ai = next((message for message in reversed(state_values.get("messages", []))
-                            if isinstance(message, AIMessage)), None)
-            if last_ai is not None:
-                resume_calls = {str(call.get("id") or ""): last_ai.id or "" for call in last_ai.tool_calls}
-                self._subagent_tool_ids.update(str(call.get("id") or "") for call in last_ai.tool_calls
-                                               if call.get("name") == "start_task")
+            completed = set()
+            for message in reversed(state_values.get("messages", [])):
+                if isinstance(message, ToolMessage):
+                    completed.add(message.tool_call_id)
+                if isinstance(message, AIMessage):
+                    for call in message.tool_calls:
+                        call_id = str(call.get("id") or "")
+                        if not call_id or call_id in completed:
+                            continue
+                        resume_calls[call_id] = message.id or ""
+                        name = str(call.get("name") or "tool")
+                        if name == "start_task":
+                            self._subagent_tool_ids.add(call_id)
+                        _emit(event_handler, RunEvent(
+                            "tool_resumed", tool_call_id=call_id, message_id=message.id or "", name=name,
+                            arguments=call["args"],
+                        ))
+                    break
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
             graph=self.prepared.graph, control=self.control, record_status=self._touch_status,

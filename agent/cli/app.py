@@ -1347,7 +1347,7 @@ class CliApplication:
     def _on_event_thread(self, event: RunEvent) -> None:
         epoch = _RUN_EPOCH.get()
         context = None
-        if event.type in {"run_started", "turn_started", "turn_completed", "companion_tool", "tool_started", "tool_completed", "interaction_requested",
+        if event.type in {"run_started", "turn_started", "turn_completed", "companion_tool", "tool_started", "tool_resumed", "tool_completed", "interaction_requested",
                           "run_failed", "run_completed", "run_cancelled"}:
             scope = observation_scope.get()
             thread_id = scope[0] if scope else self.runner.thread_id
