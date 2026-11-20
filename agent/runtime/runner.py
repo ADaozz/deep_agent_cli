@@ -1492,18 +1492,22 @@ class AgentRunner:
         if self._ensure_environment_snapshot(activate=True) is None:
             self._environment.snapshot = None
         state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
-        self._subagent_tool_ids = {
-            str(call.get("id") or "") for message in state_values.get("messages", [])
-            if isinstance(message, AIMessage) for call in message.tool_calls or []
-            if call.get("name") == "start_task"
-        }
+        resume_calls = {}
+        self._subagent_tool_ids.clear()
+        if isinstance(graph_input, Command):
+            last_ai = next((message for message in reversed(state_values.get("messages", []))
+                            if isinstance(message, AIMessage)), None)
+            if last_ai is not None:
+                resume_calls = {str(call.get("id") or ""): last_ai.id or "" for call in last_ai.tool_calls}
+                self._subagent_tool_ids.update(str(call.get("id") or "") for call in last_ai.tool_calls
+                                               if call.get("name") == "start_task")
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
             graph=self.prepared.graph, control=self.control, record_status=self._touch_status,
         )
         return execution.run(
             graph_input, config, thread_config=self._thread_config(), run_control=run_control,
-            on_update=lambda chunk: self._emit_update_events(chunk, event_handler),
+            on_update=lambda chunk: self._emit_update_events(chunk, event_handler, resume_calls),
             handler=event_handler, on_cancelled=lambda: self._cancelled_result(event_handler),
             answer_committed=lambda: self._final_answer_committed(last_message_id),
         )
@@ -1554,12 +1558,14 @@ class AgentRunner:
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
-    def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
+    def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None, resume_calls=None) -> None:
         events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
         # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
         if saw_input_usage:
             self._context_usage_invalidated = False
         for event in events:
+            if event.type == "tool_completed" and resume_calls and event.tool_call_id not in self._seen_tool_calls:
+                event = replace(event, message_id=resume_calls.get(event.tool_call_id, ""))
             if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:

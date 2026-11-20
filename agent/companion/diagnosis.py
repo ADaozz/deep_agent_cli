@@ -23,12 +23,20 @@ def interpret_turn(summary, failures, samples):
         if start is not None and known >= 3 and abs(tool["recent_pct"] - start) >= 10:
             direction = "上升" if tool["recent_pct"] > start else "下降"
             findings.append(f"{tool['tool']} 的近期失败率在本轮{direction}。")
-    by_id = {f["tool_call_id"]: f for f in failures}
+    failures.sort(key=lambda f: f.get("started_at", f["finished_at"]))
+    by_id = {(f.get("run_id"), f["tool_call_id"]): f for f in failures}
     repeated = Counter()
+    categories = {}
     for f in failures:
-        prior = by_id.get(f["retry_of"])
+        prior = by_id.get((f.get("run_id"), f["retry_of"])) if f.get("retry_basis") else None
         if prior and prior["error_category"] == f["error_category"]:
             repeated[f["tool_name"], f["error_category"]] += 1
+        path = categories.setdefault(f["tool_name"], [])
+        if not path or f["error_category"] != path[-1]:
+            path.append(f["error_category"])
+    for tool, path in categories.items():
+        if len(path) > 1:
+            findings.append(f"{tool} 的失败分类从 {path[-2]} 变为 {path[-1]}，可核对两次调用的参数和输出。")
     for tool, category in repeated:
         findings.append(
             f"{tool} 疑似重试后仍出现同类错误（{category}），原因尚待核对。"

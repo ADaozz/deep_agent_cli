@@ -20,19 +20,21 @@ _SENSITIVE = re.compile(
     r"(?:\b(?:[A-Za-z0-9_]+_)?(?:api[_-]?key|access[_-]?token|token|password|secret|authorization|key)|密钥|令牌|密码)"
     r"\s*[:=：]\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)|"
     r"(?<![\w])(?:[A-Za-z]:[\\/]|\\\\|~/|/)[^\s<>\"'，。；]+|"
-    r"\b[\w.-]+(?:[\\/][\w.-]+)+\b",
+    r"(?P<relative_path>\b[\w.-]+(?:[\\/][\w.-]+)+\b)",
     re.IGNORECASE,
 )
 _TECH_NAMES = frozenset({"ci/cd", "tcp/ip", "http/2", "http/3"})
 FALLBACK_SUMMARY_CHARS = 10
 
 
-def redact_summary_input(text: str, secrets: tuple[str, ...] = ()) -> str:
+def redact_summary_input(text: str, secrets: tuple[str, ...] = (), *, preserve_relative_paths: bool = False) -> str:
     for secret in sorted(set(secrets), key=len, reverse=True):
         if secret:
             text = text.replace(secret, "[已隐藏]")
     return _SENSITIVE.sub(
-        lambda match: match[0] if match[0].lower() in _TECH_NAMES else "[已隐藏]", text,
+        lambda match: match[0] if (
+            match[0].lower() in _TECH_NAMES or preserve_relative_paths and match["relative_path"]
+        ) else "[已隐藏]", text,
     )
 
 

@@ -16,7 +16,7 @@ from time import monotonic, perf_counter, time
 from uuid import uuid4
 
 from agent.companion import STATES
-from agent.companion.config import CompanionConfig
+from agent.companion.config import CompanionConfig, companion_key
 from agent.companion.diagnostic_io import QueryBudget
 from agent.companion.timeline import (
     SESSION_RELIABILITY,
@@ -27,11 +27,10 @@ from agent.companion.timeline import (
     timeline_window,
     transact,
 )
-from agent.sessions.summary import redact_summary_input
 from agent.companion.repository import Repository
 from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
-    result_status,
+    observation_views, redact_diagnostic_text, result_status,
 )
 from agent.companion.diagnosis import interpret_turn, reply_text
 from agent.companion.monitor import Resources, services
@@ -112,8 +111,8 @@ class Companion:
     ):
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
-        self.repository = Repository(self.workspace, self.protected, secrets)
-        self.secrets = secrets
+        self.secrets = tuple(filter(None, (*secrets, companion_key(config_dir))))
+        self.repository = Repository(self.workspace, self.protected, self.secrets)
         self.inspect_session = inspect_session
         self.worker_ready = False
         self.question = None
@@ -218,6 +217,7 @@ class Companion:
         return self.reply_stamp, "Lain", self.reply_preview or None
 
     def _update_chat_preview(self, text):
+        text = redact_diagnostic_text(text, self.secrets)
         text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"), partial=True)
         if self.reply_stamp is None:
             if not text:
@@ -439,16 +439,20 @@ class Companion:
             )
             series = self.timeline.series.get((model, effort, name))
             previous = series.last_failed if series else None
+            details = call_arguments(event.arguments, self.secrets)
             if (
                 previous
-                and previous.run_id == self.run
+                and previous.run_id == run
+                and previous.turn_id == obs.turn_id
                 and previous.agent_id == agent
                 and 0 <= wall - previous.finished_at <= 60
+                and details.matches_arguments(self.call_cache.get((run, previous.tool_call_id), CallDetails()))
             ):
                 obs.retry_of = previous.tool_call_id
+                obs.retry_basis = "matching_visible_arguments"
             self.calls[identity] = obs
             self.starts[identity] = tick
-            self.cache_call(identity, call_arguments(event.arguments, self.secrets))
+            self.cache_call(identity, details)
             self.timeline.started(obs)
             self.timeline.record(
                 "tool",
@@ -469,31 +473,34 @@ class Companion:
                 resumable = [*self.timeline.interrupted.values(), *(
                     item for item in self.timeline.active.values() if item.outcome == "waiting"
                 )]
-                matches = [item for item in resumable if item.tool_call_id == event.tool_call_id]
+                matches = [item for item in resumable if item.tool_call_id == event.tool_call_id
+                           and (not event.message_id or not item.message_id or event.message_id == item.message_id)]
                 obs = matches[0] if len(matches) == 1 else None
             if obs is None:
                 obs = ToolObservation(self.thread, self.turn, run, agent, model, effort,
-                                      clean(event.name) or "tool", event.tool_call_id, wall)
+                                      clean(event.name) or "tool", event.tool_call_id, wall,
+                                      message_id=event.message_id)
             if obs.finished_at is not None:
                 return
             artifact = event.artifact if isinstance(event.artifact, dict) else {}
             code = artifact.get("exit_code")
             code = code if type(code) is int else None
+            content = event.content or (event.result if isinstance(event.result, str) else "")
             outcome = result_status(
-                "completed", name=obs.tool_name, content=event.content, artifact=artifact,
+                "completed", name=obs.tool_name, content=content, artifact=artifact,
                 is_error=event.is_error or code not in (None, 0),
             )
-            error = category(event.content, code) if outcome == "failed" else ""
+            error = category(content, code) if outcome == "failed" else ""
             identity = obs.run_id, obs.tool_call_id
             self.calls[identity] = obs
-            self.cache_call(identity, call_result(self.call_cache.get(identity, CallDetails()),
-                                                 event.content, artifact, self.secrets))
+            details = call_result(self.call_cache.get(identity, CallDetails()), content, artifact, self.secrets)
+            self.cache_call(identity, details)
             self.close_call(obs, outcome, wall, tick, error, code)
             if outcome == "failed":
                 self.errors.append(
                     (
                         obs.tool_name,
-                        redact_summary_input(clean(event.content), self.secrets),
+                        clean(details.output_excerpt),
                     )
                 )
         elif kind == "turn_completed":
@@ -502,7 +509,7 @@ class Companion:
             pending = {call.get("toolCallId") for call in getattr(event.result, "pending_tool_calls", ())}
             for obs in self.timeline.active.values():
                 if obs.run_id == run and (obs.tool_call_id in pending or (
-                    obs.tool_name == "request_human_input" and getattr(event.result, "human_input", None)
+                    obs.tool_name == "request_human_input" and getattr(event.result, "status", None) == "waiting_human"
                 )):
                     obs.outcome = "waiting"
             self.queue_behavior("curious")
@@ -733,62 +740,81 @@ class Companion:
                     delay = 1
             await asyncio.sleep(max(0.04, delay))
 
-    def session_evidence(self, kind):
+    def session_evidence(self, kind, *, tool_name=None, turn_id=None):
         state = self.timeline
-        if kind == "statistics":
+
+        def selected(name, turn):
+            return (not tool_name or name == tool_name) and (not turn_id or turn == turn_id)
+
+        if kind == "statistics" and not turn_id:
             rows = [
                 dict(model=m, effort=e, tool=t, **series.statistics())
                 for (m, e, t), series in state.series.items()
-                if (m, e) == self.profile()
+                if (m, e) == self.profile() and selected(t, None)
             ]
             return dict(
-                overall=state.overall.statistics(),
+                overall=state.overall.statistics() if not tool_name else None,
                 current_profile=self.profile(),
-                tools=sorted(
-                    rows, key=lambda r: r["counts"].get("failed", 0), reverse=True
-                )[:48],
+                records=sorted(rows, key=lambda r: r["counts"].get("failed", 0), reverse=True),
             )
-        if kind == "failures":
-            return list(state.failures)[-8:]
-        if kind == "retries":
-            return list(state.retries)[-8:]
         if kind == "turns":
             return [
                 dict(
-                    turn=s["turn"],
-                    findings=(
-                        s.get("findings")
-                        or interpret_turn(s, state.failures, state.samples)
-                    )[:8],
-                    prior_analyses=[
-                        a["message"] for a in s.get("analyses", []) if a.get("message")
-                    ][-3:],
+                    turn_id=summary["turn"],
+                    outcome=summary["outcome"],
+                    duration_ms=summary["duration_ms"],
+                    previous_turn_ms=summary["previous_turn_ms"][-3:],
+                    findings=(summary.get("findings") or interpret_turn(summary, state.failures, state.samples))[:8],
                 )
-                for s in list(state.summaries)[-3:]
+                for summary in state.summaries
+                if (not turn_id or turn_id == summary["turn"])
+                and (not tool_name or any(row["tool"] == tool_name for row in summary["tools"]))
             ]
-        return []
+
+        observations = observation_views(state, cache=self.call_cache)
+        if kind == "retries":
+            records = []
+            for row in state.retries:
+                if selected(row["tool"], row["turn_id"]):
+                    prior = observations.get((row["run_id"], row["previous"]))
+                    records.append(dict(
+                        **row, previous_status=prior.status if prior else None,
+                        previous_category=prior.error_category if prior else None,
+                    ))
+            return records
+
+        ordered = sorted(observations.values(), key=lambda row: row.started_at or 0)
+        calls = [row for row in ordered if selected(row.name, row.turn_id)]
+        if kind == "statistics":
+            counts = {}
+            for row in calls:
+                counts.setdefault(row.name, Counter())[row.status] += 1
+            return dict(records=[dict(tool=name, counts=dict(values)) for name, values in counts.items()],
+                        evidence_window="retained_calls")
+
+        prior_categories = {}
+        records = []
+        for call in calls:
+            if kind == "failures" and call.status != "failed":
+                continue
+            row = call.row()
+            if call.status == "failed":
+                key = call.turn_id, call.name
+                previous = prior_categories.get(key)
+                if previous is not None and previous != call.error_category:
+                    row["previous_error_category"] = previous
+                prior_categories[key] = call.error_category
+            records.append(row)
+        return records
 
     def chat_tool_evidence(self, question):
         mentioned = set(re.findall(r"[a-z0-9_]+(?:[.-][a-z0-9_]+)*", question.casefold()))
-        profile = self.profile()
-        state = self.timeline
-        evidence = []
-        for name, rate, count in state.chart_tools(profile):
-            if name.casefold() not in mentioned:
-                continue
-            series = state.series.get((*profile, name))
-            failures = [
-                {"category": item["error_category"], "exit_code": item["exit_code"]}
-                for item in state.failures
-                if item["tool_name"] == name and (item["model_id"], item["reasoning_effort"]) == profile
-            ]
-            evidence.append(dict(
-                tool=name, calls=count, recent_failure_pct=rate,
-                recent_completed=len(series.recent) if series else 0,
-                recent_failed=series.window_failed if series else 0,
-                retained_failure_examples=failures[-4:],
-            ))
-        return evidence[:4]
+        failures = self.session_evidence("failures")
+        relevant = [row for row in failures if row["name"].casefold() in mentioned]
+        return [
+            {key: row[key] for key in ("name", "run_id", "turn_id", "tool_call_id", "error_category")}
+            for row in relevant[-4:]
+        ]
 
     async def host_query(self, kind, args):
         self.sync_session()
@@ -822,7 +848,11 @@ class Companion:
         if kind in ("timeline", "git"):
             end = min(float(args.get("end") or time()), time())
             start = max(float(args.get("start") or end - 14 * 86400), end - 14 * 86400)
-            return await asyncio.to_thread(timeline_window, self.database, thread, kind, start, end, budget)
+            return await asyncio.to_thread(
+                timeline_window, self.database, thread, kind, start, end, budget,
+                tool_name=args.get("tool_name"), turn_id=args.get("turn_id"),
+                limit=max(1, min(20, int(args.get("limit") or 16))),
+            )
         if kind in ("search", "files"):
             return await asyncio.to_thread(
                 self.repository.search, str(args.get("term", ""))[:160],
@@ -831,14 +861,21 @@ class Companion:
         if kind == "read":
             return await asyncio.to_thread(
                 self.repository.read, str(args.get("path", ""))[:512],
-                int(args.get("start", 1)), budget=budget,
+                int(args.get("start", 1)), min(self.config.source_read_lines,
+                                               int(args.get("limit") or self.config.source_read_lines)),
+                budget=budget,
             )
-        if kind not in {"statistics", "failures", "retries", "turns"}:
+        if kind not in {"statistics", "failures", "retries", "sequence", "turns"}:
             return diagnostic_error("unknown_tool", "Unknown host query.")
-        evidence = self.session_evidence(kind)
+        limit = max(1, min(20, int(args.get("limit") or 10)))
+        evidence = self.session_evidence(kind, tool_name=args.get("tool_name"), turn_id=args.get("turn_id"))
         if isinstance(evidence, list):
-            return {"records": evidence, "order": "asc", "truncated": False}
-        return {**evidence, "truncated": False}
+            response = {"records": evidence[-limit:], "order": "asc", "truncated": len(evidence) > limit}
+            if kind in {"failures", "retries", "sequence"}:
+                response["detail_view"] = "inspect_current_session(view=tool_detail, tool_call_id, run_id)"
+            return response
+        rows = evidence["records"]
+        return {**evidence, "records": rows[:limit], "truncated": len(rows) > limit}
 
     async def observe(self):
         failures = 0
@@ -929,13 +966,14 @@ class Companion:
                 incident = None
                 if question:
                     snapshot = dict(
-                        question=question,
+                        question=redact_diagnostic_text(question, self.secrets),
                         snapshot_version=state.version,
                         profile=self.profile(),
                         tool_evidence=self.chat_tool_evidence(question),
                         recent_errors=list(self.errors),
                         latest_review=self.session_evidence("turns")[-1:],
-                        conversation=[(r, m[:400]) for _, r, m in list(self.logs)[-5:]],
+                        conversation=[(r, redact_diagnostic_text(m, self.secrets)[:400])
+                                      for _, r, m in list(self.logs)[-5:]],
                     )
                 elif state.queue:
                     key, incident_id, version = state.queue.popleft()
@@ -983,7 +1021,7 @@ class Companion:
                     return (
                         self.session() == identity["session"]
                         and generation == self.session_generation
-                        and (not incident or state.incidents.get(key) is incident)
+                        and (not incident or self.timeline is state and state.incidents.get(key) is incident)
                     )
 
                 timeout = self.config.question_timeout_seconds
@@ -1013,11 +1051,11 @@ class Companion:
                 if question:
                     stamp = self._clear_chat_reply()
                     if reply.get("status") == "ok":
-                        self.log(reply_text(reply.get("message")), stamp=stamp)
+                        self.log(reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets)), stamp=stamp)
                     else:
                         self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
                 else:
-                    message = reply_text(reply.get("message"), proactive=True)
+                    message = reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets), proactive=True)
                     analysis = dict(
                         incident=incident_id,
                         version=version,

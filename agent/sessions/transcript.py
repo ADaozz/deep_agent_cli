@@ -75,8 +75,7 @@ def messages_to_transcript(
 ) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
-    task_ids = {str(call.get("id") or "") for message in messages if isinstance(message, AIMessage)
-                for call in message.tool_calls or [] if call.get("name") == "start_task"}
+    tools: dict[str, TranscriptBlock] = {}
     for message in messages:
         if isinstance(message, HumanMessage):
             notice = parse_notification(message)
@@ -84,12 +83,11 @@ def messages_to_transcript(
                 # A host notification is the outcome of a background card,
                 # not something the user typed.
                 marker, result = notice
-                for block in reversed(blocks):
-                    if block.kind == "tool" and block.tool_call_id == str(marker.get("tool_call_id") or ""):
-                        block.content = result
-                        block.status = subagent_result_status(result)
-                        block.is_error = block.status in {"error", "cancelled"}
-                        break
+                block = tools.get(str(marker.get("tool_call_id") or ""))
+                if block is not None and block.name == START_TOOL:
+                    block.content = result
+                    block.status = subagent_result_status(result)
+                    block.is_error = block.status in {"error", "cancelled"}
                 continue
             blocks.append(TranscriptBlock(
                 kind="user",
@@ -102,14 +100,16 @@ def messages_to_transcript(
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
-                blocks.append(TranscriptBlock(
+                block = TranscriptBlock(
                     kind="tool",
                     tool_call_id=str(call.get("id") or ""),
                     name=str(call.get("name") or "tool"),
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     status="running",
                     message_id=message.id or "",
-                ))
+                )
+                blocks.append(block)
+                tools[block.tool_call_id] = block
             timing = (turn_timings or {}).get(message.id or "")
             if timing is not None:
                 blocks.append(TranscriptBlock(
@@ -119,7 +119,8 @@ def messages_to_transcript(
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)
-            is_task = message.name == "start_task" or tool_call_id in task_ids
+            block = tools.get(tool_call_id)
+            is_task = message.name == "start_task" or (block is not None and block.name == "start_task")
             status = subagent_result_status(content, is_error=is_error) if is_task else ("error" if is_error else "completed")
             is_error = status in {"error", "cancelled"}
             artifact = getattr(message, "artifact", None)
@@ -136,18 +137,14 @@ def messages_to_transcript(
                 if refused == "completed":
                     continue
                 status, is_error = refused, True
-            updated = False
-            for block in reversed(blocks):
-                if block.kind == "tool" and block.tool_call_id == tool_call_id:
-                    block.content = content
-                    block.is_error = is_error
-                    block.status = status
-                    block.exit_code = exit_code
-                    block.artifact = artifact
-                    updated = True
-                    break
-            if not updated:
-                blocks.append(TranscriptBlock(
+            if block is not None:
+                block.content = content
+                block.is_error = is_error
+                block.status = status
+                block.exit_code = exit_code
+                block.artifact = artifact
+            else:
+                block = TranscriptBlock(
                     kind="tool",
                     tool_call_id=tool_call_id,
                     name="start_task" if is_task else str(getattr(message, "name", "") or "tool"),
@@ -156,7 +153,9 @@ def messages_to_transcript(
                     status=status,
                     exit_code=exit_code,
                     artifact=artifact,
-                ))
+                )
+                blocks.append(block)
+                tools[tool_call_id] = block
     return blocks
 
 
@@ -166,10 +165,13 @@ def settle_restored_tools(
 ) -> None:
     """Freeze tool calls without results when showing a saved checkpoint."""
     pending = waiting_ids or set()
-    for block in blocks:
+    seen = set()
+    for block in reversed(blocks):
         if block.kind != "tool" or block.status != "running":
             continue
-        if block.tool_call_id in pending or (waiting_human and block.name == "request_human_input"):
+        key = block.tool_call_id
+        if key not in seen and (key in pending or (waiting_human and block.name == "request_human_input")):
             block.status = "waiting"
         else:
             block.status = "interrupted"
+        seen.add(key)

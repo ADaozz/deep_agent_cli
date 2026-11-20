@@ -145,3 +145,36 @@ def test_json_budget_retains_recent_rows_and_marks_truncation():
     assert payload["truncated"]
     assert payload["messages"][-1]["content"].startswith("24 ")
     assert payload["messages"][-1]["truncated"]
+
+
+def test_same_parent_message_coalesces_resume_completion_with_restored_start():
+    from dataclasses import asdict
+    from agent.companion.session_inspector import call_result, CallDetails, observation_views
+    from agent.companion.timeline import Timeline
+
+    timeline = Timeline("session", 20)
+    old = ToolObservation("session", "one", "first", "main", "model", "default", "execute", "id", 1,
+                          message_id="parent")
+    resume = ToolObservation("session", "two", "second", "main", "model", "default", "execute", "id", 5,
+                             finished_at=5, outcome="success", message_id="parent")
+    timeline.restore([("tool", 1, asdict(old)), ("tool", 5, asdict(resume))])
+    cache = {("second", "id"): call_result(CallDetails(), "resolved", {}, ())}
+    payload = inspect_session_payload([], observations=observation_views(timeline, cache=cache),
+                                      view="tool_detail", run_id="first", tool_call_id="id")
+    assert (payload["status"], payload["started_at"], payload["source"]) == ("success", 1, "live")
+    assert payload["result"]["output_excerpt"] == "resolved"
+
+
+def test_redaction_preserves_diagnostic_paths_but_hides_credentials():
+    from agent.companion.session_inspector import call_arguments, call_result
+
+    details = call_arguments({
+        "command": "pytest tests/test_example.py --api-key opaque-cli-secret",
+        "params": {"authorization": "opaque-object-secret"},
+    }, ())
+    details = call_result(details, "Authorization: Bearer opaque-output-secret\n"
+                          "tests/test_example.py:4: failed\n"
+                          "-----BEGIN PRIVATE KEY-----\nopaque-private-key", {}, ())
+    assert "tests/test_example.py" in details.arguments["command"]
+    assert "tests/test_example.py:4" in details.output_excerpt
+    assert "opaque-" not in json.dumps(details.arguments) + details.output_excerpt

@@ -1,7 +1,6 @@
 """Bounded, read-only source inspection for the Companion worker (Linux)."""
 
 from contextlib import contextmanager
-from itertools import islice
 import os
 from pathlib import Path
 import stat
@@ -49,6 +48,15 @@ CREDENTIAL = re.compile(
     re.I,
 )
 MAX_FILE = 256 * 1024
+SEARCH_ENTRIES = 3000
+SEARCH_BYTES = 8 * 1024 * 1024
+SEARCH_SECONDS = 1.5
+OUTPUT_CHARS = 5000
+
+
+def _source_name(path):
+    name = Path(path)
+    return name.suffix.lower() in SOURCE or name.name in {"Dockerfile", "Makefile", "Gemfile"}
 
 
 def _mount(fd):
@@ -74,18 +82,13 @@ class Repository:
             or p.startswith(".")
             or p in SKIP
             or PRIVATE.search(p)
+            or any(secret in p for secret in self.secrets)
             or not p.isprintable()
             for p in parts
         ):
             raise ValueError("outside searchable source")
-        if not directory:
-            name = Path(path)
-            if name.suffix.lower() not in SOURCE and name.name not in {
-                "Dockerfile",
-                "Makefile",
-                "Gemfile",
-            }:
-                raise ValueError("unsupported file type")
+        if not directory and not _source_name(path):
+            raise ValueError("unsupported file type")
         flags = os.O_PATH | os.O_NOFOLLOW
         fd = os.open(self.root, flags | os.O_DIRECTORY)
         try:
@@ -139,7 +142,7 @@ class Repository:
                 raise ValueError("sensitive source")
             return text.splitlines()
 
-    def read(self, path, start=1, *, budget=None):
+    def read(self, path, start=1, limit=50, *, budget=None):
         try:
             lines = self.lines(path, budget)
         except TimeoutError:
@@ -147,29 +150,50 @@ class Repository:
         except (OSError, ValueError):
             return "File unavailable."
         start = max(1, start)
-        return (
-            "\n".join(
-                f"{path}:{i} {line[:240]}"
-                for i, line in enumerate(lines[start - 1 : start + 15], start)
-            )[:5000]
-            or "No lines."
-        )
+        limit = min(60, max(1, limit))
+        output, used = [], 0
+        for number, line in enumerate(lines[start - 1:start - 1 + limit], start):
+            text = f"{path}:{number} {line[:239]}…" if len(line) > 240 else f"{path}:{number} {line}"
+            if used + len(text) + 1 > OUTPUT_CHARS - 100:
+                output.append(f"[Character limit reached. Continue with start={number}.]")
+                break
+            output.append(text)
+            used += len(text) + 1
+        else:
+            if start - 1 + limit < len(lines):
+                output.append(f"[More lines available. Continue with start={start + limit}.]")
+        return "\n".join(output) or "No lines."
 
     def search(self, term, *, paths_only=False, budget=None):
         term = term.strip().casefold()
         if (not term and not paths_only) or len(term) > 160:
             return "Supply a short literal or filename."
         directories, hits = [""], []
-        remaining = 3000
-        remaining_bytes = 8 * 1024 * 1024
-        deadline = monotonic() + 1.5
-        while directories and remaining and remaining_bytes > 0 and monotonic() < deadline:
+        remaining = SEARCH_ENTRIES
+        remaining_bytes = SEARCH_BYTES
+        deadline = monotonic() + SEARCH_SECONDS
+        incomplete = set()
+
+        def result():
+            while hits and sum(len(hit) + 1 for hit in hits) > OUTPUT_CHARS - 160:
+                incomplete.add("character limit")
+                hits.pop()
+            text = "\n".join(hits) or "No match in the inspected source."
+            if incomplete:
+                return text + "\n[Scan incomplete: " + ", ".join(sorted(incomplete)) + ".]"
+            return text
+
+        while directories:
             base = directories.pop()
             try:
                 with self.opened(base, directory=True, budget=budget) as fd, os.scandir(fd) as entries:
-                    for entry in islice(entries, remaining):
+                    for entry in entries:
                         if monotonic() >= deadline:
-                            break
+                            incomplete.add("time budget")
+                            return result()
+                        if not remaining:
+                            incomplete.add("entry budget")
+                            return result()
                         if budget:
                             budget.check()
                         remaining -= 1
@@ -180,10 +204,13 @@ class Repository:
                         if entry.is_dir(follow_symlinks=False):
                             directories.append(path)
                             continue
-                        if not entry.is_file(follow_symlinks=False):
+                        if not _source_name(name) or not entry.is_file(follow_symlinks=False):
                             continue
                         size = entry.stat(follow_symlinks=False).st_size
-                        if size > min(remaining_bytes, MAX_FILE):
+                        if size > MAX_FILE:
+                            continue
+                        if size > remaining_bytes:
+                            incomplete.add("byte budget")
                             continue
                         remaining_bytes -= size
                         try:
@@ -196,19 +223,25 @@ class Repository:
                             if term in path.casefold():
                                 hits.append(path)
                             if len(hits) == 12:
-                                return "\n".join(hits)
+                                incomplete.add("result limit")
+                                return result()
                             continue
                         for i, line in enumerate(lines, 1):
+                            if i % 64 == 1:
+                                if budget:
+                                    budget.check()
+                                if monotonic() >= deadline:
+                                    incomplete.add("time budget")
+                                    return result()
                             if term in line.casefold() or (
                                 i == 1 and term in path.casefold()
                             ):
                                 hits.append(f"{path}:{i} {line[:180]}")
                             if len(hits) == 12:
-                                return "\n".join(hits)
-                        if remaining_bytes <= 0:
-                            break
+                                incomplete.add("result limit")
+                                return result()
             except TimeoutError:
                 raise
             except (OSError, ValueError):
                 continue
-        return "\n".join(hits) or "No match in the inspected source."
+        return result()

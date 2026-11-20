@@ -665,11 +665,10 @@ q = r['snapshot']
 assert q['question'] == '为什么execute工具出错多'
 assert q['execute_environment'].splitlines() == ['环境信息', 'os=Ubuntu 24.04 runtime=WSL2']
 assert q['recent_errors'] == [['execute', 'command not found']]
-assert q['tool_evidence'] == [{
-    'tool':'execute', 'calls':1, 'recent_failure_pct':100,
-    'recent_completed':1, 'recent_failed':1,
-    'retained_failure_examples':[{'category':'dependency','exit_code':127}],
-}]
+assert len(q['tool_evidence']) == 1
+assert q['tool_evidence'][0]['name'] == 'execute'
+assert q['tool_evidence'][0]['error_category'] == 'dependency'
+assert q['tool_evidence'][0]['tool_call_id'] == 'a'
 identity = {k: r[k] for k in ('session', 'seq', 'token')}
 print(json.dumps(dict(**identity, partial='这次是')), flush=True)
 while not Path(sys.argv[1]).exists(): time.sleep(.01)
@@ -961,5 +960,60 @@ def test_inspector_reads_real_restored_checkpoint(tmp_path):
         finally:
             runner.close()
             store.close()
+
+    asyncio.run(run())
+
+
+def test_source_reader_paginates_and_search_reports_partial_scan(tmp_path, monkeypatch):
+    from agent.companion import repository
+
+    path = tmp_path / "example.py"
+    path.write_text("".join(f"line_{number}\n" for number in range(1, 63)))
+    (tmp_path / "other.py").write_text("other content")
+    repo = repository.Repository(tmp_path)
+    result = repo.read(path.name, start=2, limit=50)
+    assert f"{path.name}:51 line_51" in result
+    assert "Continue with start=52" in result
+    monkeypatch.setattr(repository, "SEARCH_BYTES", 2)
+    assert "Scan incomplete: byte budget" in repo.search("absent")
+    monkeypatch.setattr(repository, "SEARCH_ENTRIES", 1)
+    assert "entry budget" in repo.search("absent")
+    monkeypatch.setattr(repository, "SEARCH_SECONDS", 0)
+    assert "Scan incomplete: time budget" in repo.search("absent")
+
+
+def test_evidence_filters_failure_changes_and_checks_retry_arguments(tmp_path):
+    async def run():
+        c = companion(tmp_path, lambda: "session")
+        c.event(RunEvent("run_started", run_id="r", turn_id="t"), "model")
+        attempts = (
+            ("a", "python -m pytest", "No module named pytest", 1),
+            ("b", "python -m pytest", "No module named pytest", 1),
+            ("c", "pytest -q", "AssertionError: assertion failed", 1),
+            ("d", "pytest -q", "2 passed", 0),
+        )
+        for call_id, command, output, code in attempts:
+            c.event(RunEvent("tool_started", tool_call_id=call_id, name="execute",
+                             arguments={"command": command}), "model")
+            c.event(RunEvent("tool_completed", tool_call_id=call_id, content=output,
+                             artifact={"exit_code": code}), "model")
+        c.event(RunEvent("tool_started", tool_call_id="read", name="read_file"), "model")
+        c.event(RunEvent("tool_completed", tool_call_id="read", content="other tool"), "model")
+        options = dict(tool_name="execute", turn_id="t")
+        failures = json.loads(await c.host_query("failures", {**options, "limit": 2}))
+        assert failures["truncated"]
+        assert [row["tool_call_id"] for row in failures["records"]] == ["b", "c"]
+        assert failures["records"][-1]["previous_error_category"] == "dependency"
+        assert failures["records"][-1]["error_category"] == "assertion"
+        sequence = json.loads(await c.host_query("sequence", options))
+        assert [row["status"] for row in sequence["records"]] == ["failed"] * 3 + ["success"]
+        retries = json.loads(await c.host_query("retries", options))["records"]
+        assert [(row["previous"], row["call"], row["outcome"]) for row in retries] == [
+            ("a", "b", "failed"), ("c", "d", "success"),
+        ]
+        await c.save_statistics()
+        timeline = json.loads(await c.host_query("timeline", {**options, "limit": 2}))
+        assert timeline["truncated"]
+        assert [data["tool_call_id"] for _, _, data in timeline["records"]] == ["d", "c"]
 
     asyncio.run(run())

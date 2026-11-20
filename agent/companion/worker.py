@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from pathlib import Path
 import sys
 from typing import Annotated, Literal
@@ -16,7 +15,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 from pydantic import Field
 
-from agent.companion.config import CompanionConfig
+from agent.companion.config import CompanionConfig, companion_key
 from agent.companion.session_inspector import diagnostic_error, format_inspect_response
 from agent.models.client import build_chat_model
 from agent.models.messages import StreamDeltaCallback, visible_text
@@ -87,9 +86,10 @@ def create_chat(model, query, *, persona=None, instructions=None):
     async def read_workspace_file(
         path: Annotated[str, Field(description="相对于工作区的源码路径，通常取自搜索或文件列表。")],
         start: Annotated[int, Field(description="起始行号，从 1 算起，默认读第一行。")] = 1,
+        limit: Annotated[int | None, Field(description="要读的行数。默认 50 行，实际由宿主配置及字符预算限制。")] = None,
     ) -> str:
-        """读取可访问源码的片段，每次最多 16 行，带路径和行号。要接着读，可把起始行号设为上一段最后一行的下一行。"""
-        return await query("read", path=path, start=start)
+        """读取可访问源码的片段，带路径和行号。要接着读，用返回的下一行号作为 start。"""
+        return await query("read", path=path, start=start, limit=limit)
 
     @tool
     async def list_workspace_files(
@@ -101,10 +101,10 @@ def create_chat(model, query, *, persona=None, instructions=None):
     @tool
     async def session_evidence(
         kind: Annotated[
-            Literal["statistics", "failures", "retries", "timeline", "git", "turns"],
+            Literal["statistics", "failures", "retries", "sequence", "timeline", "git", "turns"],
             Field(description=(
                 "statistics 查会话总体和当前模型档位的分工具统计；"
-                "failures 查最近失败，retries 查推测的重试；"
+                "failures 查最近失败与分类变化，retries 查参数匹配的可能重试，sequence 查调用顺序；"
                 "timeline 查历史事件，git 查历史 Git 采样，turns 查最近轮次复盘。"
             )),
         ],
@@ -114,9 +114,12 @@ def create_chat(model, query, *, persona=None, instructions=None):
         end: Annotated[
             float | None, Field(description="结束 Unix 时间戳，单位为秒，仅适用于 timeline 和 git，默认当前时间。")
         ] = None,
+        tool_name: Annotated[str | None, Field(description="按工具名称筛选。git 不包含工具调用。")] = None,
+        turn_id: Annotated[str | None, Field(description="按返回结果中的轮次 ID 筛选。")] = None,
+        limit: Annotated[int | None, Field(description="返回条数，1～20。")] = None,
     ) -> str:
-        """查询当前会话的有限记录。timeline 和 git 最多查最近 14 天，按时间倒序返回最多 16 条。其余类型忽略时间参数。"""
-        return await query(kind, start=start, end=end)
+        """查询当前会话的有限记录。timeline 和 git 最多查最近 14 天，按时间倒序。其他视图忽略起止时间。"""
+        return await query(kind, start=start, end=end, tool_name=tool_name, turn_id=turn_id, limit=limit)
 
     @tool
     async def inspect_current_session(
@@ -282,15 +285,8 @@ async def serve(reader, send, *, build_chat, observe, config):
 
 
 async def main():
-    key = os.environ.get("COMPANION_DEEPSEEK_API_KEY")
-    if not key:
-        try:
-            directory = (
-                Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / ".deep-agent"
-            )
-            key = (directory / "companion.key").read_text().strip()
-        except OSError:
-            pass
+    directory = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / ".deep-agent"
+    key = companion_key(directory)
     if not key:
         print('{"status":"no key"}', flush=True)
         return

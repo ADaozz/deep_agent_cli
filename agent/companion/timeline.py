@@ -5,6 +5,7 @@ from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from math import sqrt
 import json
+import re
 import sqlite3
 from time import time
 from uuid import uuid4
@@ -31,10 +32,11 @@ class ToolObservation:
     exit_code: int | None = None
     retry_of: str | None = None
     message_id: str = ""
+    retry_basis: str = ""
 
 
 def category(text, exit_code):
-    text = text[:4096].lower()
+    text = (text[:4096] + ("\n" + text[-2048:] if len(text) > 4096 else "")).lower()
     for label, terms in (
         (
             "dependency",
@@ -53,6 +55,8 @@ def category(text, exit_code):
     ):
         if any(term in text for term in terms):
             return label
+    if re.search(r"^e\s+assert\b", text, re.M):
+        return "assertion"
     return "exit_code" if exit_code is not None else "tool_error"
 
 
@@ -203,7 +207,7 @@ class Timeline:
             series.counts["unknown"] -= 1
             aggregate.counts["unknown"] -= 1
             self.overall.counts["unknown"] -= 1
-        if obs.retry_of:
+        if obs.retry_of and obs.retry_basis:
             self.retries.append(
                 dict(
                     tool=obs.tool_name,
@@ -211,6 +215,9 @@ class Timeline:
                     previous=obs.retry_of,
                     category=obs.error_category,
                     outcome=obs.outcome,
+                    run_id=obs.run_id,
+                    turn_id=obs.turn_id,
+                    basis=obs.retry_basis,
                 )
             )
         if obs.finished_at is not None and obs.outcome in ("success", "failed"):
@@ -433,7 +440,7 @@ def restore_session(path, session, window):
     return state
 
 
-def timeline_window(path, session, kind, start, end, budget=None):
+def timeline_window(path, session, kind, start, end, budget=None, *, tool_name=None, turn_id=None, limit=16):
     """The host supplies session; the model supplies only a bounded time range."""
     with readonly_database(path, budget) as db:
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 256 * 1024)
@@ -441,6 +448,24 @@ def timeline_window(path, session, kind, start, end, budget=None):
         args = [session, start, end]
         if kind == "git":
             query += " AND kind='git'"
-        rows = list(db.execute(query + " ORDER BY stamp DESC LIMIT 17", args))
-        return {"records": [(stamp, k, json.loads(data)) for stamp, k, data in rows[:16]],
-                "truncated": len(rows) > 16}
+        else:
+            query += " AND kind IN ('tool','turn','incident','run','analysis','git')"
+        if tool_name:
+            query += " AND kind='tool' AND json_extract(payload,'$.tool_name')=?"
+            args.append(tool_name)
+        if turn_id:
+            query += " AND turn=?"
+            args.append(turn_id)
+        rows = list(db.execute(query + " ORDER BY stamp DESC LIMIT ?", [*args, limit + 1]))
+        records = []
+        for stamp, kind, data in rows[:limit]:
+            data = json.loads(data)
+            if kind == "turn":
+                data = {key: data[key] for key in ("turn", "run", "outcome", "duration_ms", "findings") if key in data}
+            elif kind == "tool":
+                data.pop("session_id", None)
+                data.pop("message_id", None)
+                if not data.pop("retry_basis", ""):
+                    data.pop("retry_of", None)
+            records.append((stamp, kind, data))
+        return {"records": records, "truncated": len(rows) > limit}

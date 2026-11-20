@@ -422,6 +422,7 @@ def test_turn_review_filters_evidence_and_voice():
             tool_name="execute",
             tool_call_id="b",
             retry_of="a",
+            retry_basis="matching_visible_arguments",
             error_category="timeout",
             finished_at=103,
         ),

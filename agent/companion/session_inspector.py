@@ -19,10 +19,25 @@ OUTPUT_EXCERPT = 800
 CALL_CACHE_LIMIT = 128
 _TERMINAL = {"success", "failed", "cancelled"}
 _SECRET_FIELD = re.compile(r"api.?key|token|secret|password|authorization|credential", re.I)
+_SECRET_OPTION = re.compile(
+    r"(--[\w-]*(?:api[-_]?key|token|secret|password|authorization|credential)[\w-]*)(?:\s+|=)"
+    r"(?:\"[^\"\r\n]*(?:\"|$)|'[^'\r\n]*(?:'|$)|[^\s;]+)", re.I,
+)
+_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_AUTH_HEADER = re.compile(r"\b(?:proxy-)?authorization\s*[:=]\s*(?:Bearer|Basic)\s+[^\s,;]+", re.I)
 
 
 def diagnostic_error(code, message):
     return {"error": {"code": code, "message": message}, "truncated": False}
+
+
+def redact_diagnostic_text(text, secrets=()):
+    text = _ANSI_ESCAPE.sub("", text)
+    text = _PRIVATE_KEY.sub("[已隐藏]", text)
+    text = _AUTH_HEADER.sub("[已隐藏]", text)
+    text = _SECRET_OPTION.sub(r"\1 [已隐藏]", text)
+    return redact_summary_input(text, secrets, preserve_relative_paths=True)
 
 
 def _excerpt(text, secrets, limit):
@@ -36,7 +51,7 @@ def _excerpt(text, secrets, limit):
         clipped = True
     else:
         head, clipped = text, False
-    safe = redact_summary_input(head, secrets)
+    safe = redact_diagnostic_text(head, secrets)
     safe = "".join(c for c in safe if c.isprintable() or c in "\n\t")
     if len(safe) > limit or clipped:
         return safe[:limit - 1].rstrip() + "…", True
@@ -100,22 +115,32 @@ def result_status(status, *, name, content, artifact, is_error=False):
 class CallDetails:
     arguments: dict = field(default_factory=dict)
     output_excerpt: str = ""
-    truncated: bool = False
-    completed: bool = False
+    arguments_truncated: bool = False
+    output_truncated: bool = False
+
+    @property
+    def truncated(self):
+        return self.arguments_truncated or self.output_truncated
+
+    def matches_arguments(self, other):
+        return (
+            bool(self.arguments) and not (self.arguments_truncated or other.arguments_truncated)
+            and self.arguments == other.arguments
+            and "[已隐藏]" not in json.dumps(self.arguments, ensure_ascii=False)
+        )
 
 
 def call_arguments(arguments, secrets):
     data, truncated = _arguments(arguments, secrets)
-    return CallDetails(arguments=data, truncated=truncated)
+    return CallDetails(arguments=data, arguments_truncated=truncated)
 
 
 def call_result(details, content, artifact, secrets):
     excerpt, truncated = _excerpt(content, secrets, OUTPUT_EXCERPT)
-    return replace(details, output_excerpt=excerpt, completed=True,
-                   truncated=details.truncated or truncated or bool(artifact.get("truncated")))
+    return replace(details, output_excerpt=excerpt, output_truncated=truncated or bool(artifact.get("truncated")))
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolCallView:
     tool_call_id: str
     name: str
@@ -146,9 +171,10 @@ class ToolCallView:
     def detail(self):
         return {
             **self.row(), "tool": self.name, "arguments": self.details.arguments,
+            "arguments_truncated": self.details.arguments_truncated,
             "result": dict(exit_code=self.exit_code, status=self.status,
                            error_category=self.error_category, output_excerpt=self.details.output_excerpt,
-                           truncated=self.details.truncated),
+                           truncated=self.details.output_truncated),
             "truncated": self.details.truncated,
         }
 
@@ -192,17 +218,40 @@ def observation_views(timeline, live_calls=None, cache=None):
     for obs in (live_calls or {}).values():
         status = obs.outcome if obs.finished_at is not None or obs.outcome == "waiting" else "running"
         add(obs, "live", status)
+
+    # A resume can finish before the persisted Timeline has been loaded.
+    # The checkpoint's parent AI message identifies that same call across runs.
+    origins = {}
+    for key, row in sorted(views.items(), key=lambda item: item[1].started_at or 0):
+        if row.agent_id != "main" or not row.message_id:
+            continue
+        origin = row.message_id, row.tool_call_id
+        first_key = origins.setdefault(origin, key)
+        if first_key == key:
+            continue
+        first = views[first_key]
+        if first.status in _TERMINAL and row.status not in _TERMINAL:
+            views.pop(key)
+            continue
+        views[first_key] = replace(
+            row, run_id=first.run_id, turn_id=first.turn_id, started_at=first.started_at,
+            details=replace(row.details, arguments=row.details.arguments or first.details.arguments,
+                            arguments_truncated=row.details.arguments_truncated or first.details.arguments_truncated),
+        )
+        views.pop(key)
     return views
 
 
-def _checkpoint(block, secrets):
+def _checkpoint(block, secrets, include_details):
     artifact = block.artifact if isinstance(block.artifact, dict) else {}
     name = block.name or "tool"
     status = result_status(block.status, name=name, content=block.content,
                            artifact=artifact, is_error=block.is_error)
-    details = call_arguments(block.arguments, secrets)
-    if status in _TERMINAL:
-        details = call_result(details, block.content, artifact, secrets)
+    details = CallDetails()
+    if include_details:
+        details = call_arguments(block.arguments, secrets)
+        if status in _TERMINAL:
+            details = call_result(details, block.content, artifact, secrets)
     return ToolCallView(
         block.tool_call_id, name, status, "checkpoint", message_id=block.message_id,
         exit_code=block.exit_code,
@@ -211,7 +260,7 @@ def _checkpoint(block, secrets):
     )
 
 
-def merge_calls(blocks, observations, secrets):
+def merge_calls(blocks, observations, secrets, *, detail_id=None):
     remaining = dict(observations)
     checkpoints = [block for block in blocks if block.kind == "tool" and block.tool_call_id]
     counts = Counter(block.tool_call_id for block in checkpoints)
@@ -223,7 +272,7 @@ def merge_calls(blocks, observations, secrets):
                 by_message[row.tool_call_id, row.message_id].append(key)
     calls = []
     for block in checkpoints:
-        checkpoint = _checkpoint(block, secrets)
+        checkpoint = _checkpoint(block, secrets, block.tool_call_id == detail_id)
         matches = by_message[block.tool_call_id, block.message_id]
         if not matches and counts[block.tool_call_id] == 1:
             legacy = by_id[block.tool_call_id]
@@ -240,17 +289,26 @@ def merge_calls(blocks, observations, secrets):
         if ((status == "unknown" and checkpoint.status != "unknown")
                 or (checkpoint.status in _TERMINAL and (source != "live" or status not in _TERMINAL))):
             status, source = checkpoint.status, "checkpoint"
+        conflict = event.status in _TERMINAL and checkpoint.status in _TERMINAL and event.status != checkpoint.status
+        preferred = event if conflict and source == "live" else checkpoint
+        output = preferred.details.output_excerpt
+        if not conflict:
+            output = output or event.details.output_excerpt
+        error = preferred.error_category
+        if not conflict and event.error_category and error in {"", "exit_code", "tool_error"}:
+            error = event.error_category
+        code = preferred.exit_code
+        if not conflict and code is None:
+            code = event.exit_code
         details = CallDetails(
             arguments=checkpoint.details.arguments or event.details.arguments,
-            output_excerpt=checkpoint.details.output_excerpt or event.details.output_excerpt,
-            truncated=checkpoint.details.truncated or event.details.truncated,
-            completed=checkpoint.details.completed or event.details.completed,
+            output_excerpt=output,
+            arguments_truncated=checkpoint.details.arguments_truncated or event.details.arguments_truncated,
+            output_truncated=checkpoint.details.output_truncated or event.details.output_truncated,
         )
         calls.append(replace(
             event, status=status, source=source, details=details,
-            exit_code=checkpoint.exit_code if source == "checkpoint" and checkpoint.exit_code is not None
-            else event.exit_code if event.exit_code is not None else checkpoint.exit_code,
-            error_category=(event.error_category or checkpoint.error_category) if status == "failed" else "",
+            exit_code=code, error_category=error if status == "failed" else "",
         ))
     calls.extend(remaining.values())
     return sorted(calls, key=lambda row: row.started_at if row.started_at is not None else float("-inf"))
@@ -275,7 +333,7 @@ def inspect_session_payload(
         return diagnostic_error("invalid_view", "Unknown inspection view.")
     if observations is None:
         observations = observation_views(timeline, live_calls)
-    calls = merge_calls(blocks, observations, secrets)
+    calls = merge_calls(blocks, observations, secrets, detail_id=tool_call_id if view == "tool_detail" else None)
     if view == "recent_tools":
         matched = [row for row in calls if status is None or row.status == status]
         rows = matched[-limit:]
@@ -315,6 +373,7 @@ def format_inspect_response(payload: Mapping[str, Any]) -> str:
                 return result
     if "result" in data and "arguments" in data:
         data["arguments"] = {}
+        data["arguments_truncated"] = True
         data["result"] = {**data["result"], "output_excerpt": "", "truncated": True}
         result = encode(data)
         if len(result.encode()) <= RESPONSE_LIMIT:
@@ -361,7 +420,7 @@ def build_session_inspector(*, load_blocks, companion_provider, secrets=()):
             if not current():
                 return diagnostic_error("request_expired", "The active session changed.")
             if blocks is None:
-                payload["checkpoint_unavailable"] = True
+                payload.update(checkpoint_unavailable=True, truncated=True)
             if truncated:
                 payload.update(checkpoint_truncated=True, truncated=True)
             return payload
