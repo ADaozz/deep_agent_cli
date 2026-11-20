@@ -3,6 +3,21 @@
 from collections import Counter
 from statistics import median
 
+from agent.companion import STATES
+
+
+class InvalidObservation(ValueError):
+    """The observation did not contain a usable decision."""
+
+
+def validate_observation(value):
+    if not isinstance(value, dict) or value.keys() != {"behavior", "message"}:
+        raise InvalidObservation("Expected behavior and message")
+    if value["behavior"] not in STATES or not isinstance(value["message"], str) or len(value["message"]) > 240:
+        raise InvalidObservation("Invalid behavior or message")
+    return value
+
+
 def reply_text(value, *, proactive=False, partial=False):
     """Pass model speech through; only strip controls and cap length for the chat log."""
     del partial  # preview and final use the same visible text

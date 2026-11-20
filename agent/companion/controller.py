@@ -32,7 +32,7 @@ from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
     observation_views, redact_diagnostic_text, result_status,
 )
-from agent.companion.diagnosis import interpret_turn, reply_text
+from agent.companion.diagnosis import InvalidObservation, interpret_turn, reply_text, validate_observation
 from agent.companion.monitor import Resources, services
 
 
@@ -1055,12 +1055,20 @@ class Companion:
                     else:
                         self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
                 else:
-                    message = reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets), proactive=True)
+                    status = reply.get("status")
+                    decision = None
+                    if status == "ok":
+                        try:
+                            decision = validate_observation({field: reply.get(field) for field in ("behavior", "message")})
+                        except InvalidObservation:
+                            status = "invalid_observation"
+                    message = reply_text(redact_diagnostic_text(decision["message"], self.secrets),
+                                         proactive=True) if decision else ""
                     analysis = dict(
                         incident=incident_id,
                         version=version,
                         turn=incident["turn"],
-                        status=reply.get("status"),
+                        status=status,
                         message=message,
                     )
                     state.record(
@@ -1085,8 +1093,8 @@ class Companion:
                         key=incident_id,
                         turn=incident["turn"],
                     )
-                    if reply.get("behavior") in STATES:
-                        self.queue_behavior(reply["behavior"], temporary=True)
+                    if decision:
+                        self.queue_behavior(decision["behavior"], temporary=True)
                     if message:
                         self.log(message)
         finally:

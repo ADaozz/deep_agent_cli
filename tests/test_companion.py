@@ -362,13 +362,19 @@ def test_statistics_idempotent_attributed_at_start_and_persisted(tmp_path):
     asyncio.run(run())
 
 
-def test_real_react_graph_can_express_or_remain_silent():
+def test_observer_makes_one_structured_decision_and_can_remain_silent():
+    from agent.companion.diagnosis import InvalidObservation
+
     async def run():
-        observe = AIMessage(content="", tool_calls=[dict(name="observe", args={}, id="look")])
-        speak = AIMessage(content="", tool_calls=[dict(name="express", args=dict(behavior="curious", message="看到变化了。"), id="show")])
-        respond = create_observer(scripted_model([observe, speak, AIMessage(content="")]))
+        respond = create_observer(scripted_model([
+            AIMessage(content='{"behavior":"curious","message":"看到变化了。"}'),
+            AIMessage(content='{"behavior":"idle","message":""}'),
+            AIMessage(content='{"behavior":"busy","message":"Invalid"}'),
+        ]))
         assert await respond({"windows": []}) == {"behavior":"curious","message":"看到变化了。"}
-        assert await respond({"windows": []}) == {}
+        assert await respond({"windows": []}) == {"behavior": "idle", "message": ""}
+        with pytest.raises(InvalidObservation):
+            await respond({"windows": []})
     asyncio.run(run())
 
 
@@ -387,24 +393,36 @@ def test_persona_is_shared_and_each_graph_gets_its_own_instructions(monkeypatch)
             system, user = data["messages"]
             prompts.append(system.content)
             requests.append(user[1])
-            if "callbacks" not in config:
-                return {}
             callback = config["callbacks"][0]
             callback.on_llm_start()
             for text in ("<thi", "nk>内部内容</think>我看到", "了一次超时。"):
                 callback.on_llm_new_token(text, chunk=AIMessageChunk(content=text))
             return {"messages": [AIMessage(content="我看到了一次超时。")]}
 
+    class ObserverModel:
+        def bind(self, **options):
+            assert options == {"response_format": {"type": "json_object"}}
+            return self
+
+        async def ainvoke(self, messages):
+            system, user = messages
+            prompts.append(system.content)
+            requests.append(user[1])
+            return AIMessage(content='{"behavior":"idle","message":""}')
+
     monkeypatch.setattr("agent.companion.worker.create_react_agent", lambda model, tools: Graph())
-    observer = create_observer(None, persona="Shared persona", instructions="Observe only")
+    observer = create_observer(ObserverModel(), persona="Shared persona", instructions="Observe only")
     chat = create_chat(None, None, persona="Shared persona", instructions="Chat only")
-    assert asyncio.run(observer({"execute_environment": environment})) == {}
+    assert asyncio.run(observer({"execute_environment": environment, "findings": ["timeout"]})) == {
+        "behavior": "idle", "message": "",
+    }
     snapshot = {"question": "为什么execute工具出错多", "tool_evidence": [], "execute_environment": environment}
     assert asyncio.run(chat(snapshot, on_chunk=chunks.append)) == {
         "message": "我看到了一次超时。",
     }
     for prompt, instruction in zip(prompts, ("Observe only", "Chat only"), strict=True):
-        assert prompt.startswith("Shared persona") and prompt.endswith(f"{instruction}\n\n{environment}")
+        assert prompt.startswith("Shared persona") and instruction in prompt and prompt.endswith(environment)
+    assert json.loads(requests[0]) == {"findings": ["timeout"]}
     assert chunks == ["我看到", "我看到了一次超时。"]
     assert requests[1].endswith("\n为什么execute工具出错多")
     assert '"tool_evidence": []' in requests[1]
