@@ -4,8 +4,10 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
-import re
 from time import monotonic
+
+from agent.companion.config import SOURCE_READ_MAX_LINES
+from agent.companion.redaction import PRIVATE_KEY_MARKER, redact_source_text
 
 SOURCE = {
     ".py",
@@ -38,20 +40,22 @@ SOURCE = {
     ".css",
 }
 SKIP = {"node_modules", "__pycache__", "venv", "vendor", "target", "dist", "build"}
-PRIVATE = re.compile(
-    r"(?:secret|credentials?|passwd|password|auth(?:entication)?|token|api[-_]?key|kubeconfig|id_rsa|id_ed25519|^config(?:uration)?[.])",
-    re.I,
-)
-CREDENTIAL = re.compile(
-    r"-----BEGIN [^-]*PRIVATE KEY|(?:Bearer |sk-|gh[pousr]_|AKIA)[A-Za-z0-9_.+/=-]{8,}|"
-    r"""(?:api[_-]?key|secret|token|password|authorization)\s*["']?\s*[:=]\s*["']?[^\s,;]{4,}""",
-    re.I,
-)
+PRIVATE_NAMES = frozenset({
+    "credentials", "credential", "secrets", "secret", "passwords", "api_keys", "api-key",
+    "kubeconfig", "id_rsa", "id_ed25519", "companion.key",
+})
+PRIVATE_CONFIG_NAMES = PRIVATE_NAMES | {"auth", "token", "tokens", "password", "api_key"}
+PRIVATE_CONFIG_SUFFIXES = {".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".txt", ".xml"}
 MAX_FILE = 256 * 1024
-SEARCH_ENTRIES = 3000
-SEARCH_BYTES = 8 * 1024 * 1024
 SEARCH_SECONDS = 1.5
 OUTPUT_CHARS = 5000
+
+
+def _private_name(part):
+    name = Path(part.casefold())
+    return name.name in PRIVATE_NAMES or (
+        name.stem in PRIVATE_CONFIG_NAMES and name.suffix in PRIVATE_CONFIG_SUFFIXES
+    ) or name.suffix in {".pem", ".key", ".p12", ".pfx"}
 
 
 def _source_name(path):
@@ -76,12 +80,14 @@ class Repository:
     def opened(self, path="", *, directory=False, budget=None):
         if budget:
             budget.check()
+        if len(path) > 512:
+            raise ValueError("outside searchable source")
         parts = path.split("/") if path else []
         if any(
             not p
             or p.startswith(".")
             or p in SKIP
-            or PRIVATE.search(p)
+            or _private_name(p)
             or any(secret in p for secret in self.secrets)
             or not p.isprintable()
             for p in parts
@@ -136,11 +142,14 @@ class Repository:
             if len(data) > MAX_FILE or b"\0" in data:
                 raise ValueError("unsupported content")
             text = data.decode("utf-8")
-            if CREDENTIAL.search(text) or any(
-                secret in text for secret in self.secrets
+            if PRIVATE_KEY_MARKER in text and "-----BEGIN " in text or any(
+                "\n" in secret and secret in text for secret in self.secrets
             ):
-                raise ValueError("sensitive source")
-            return text.splitlines()
+                raise ValueError("private key material")
+            lines = redact_source_text(text, self.secrets).splitlines()
+            if budget:
+                budget.check()
+            return lines
 
     def read(self, path, start=1, limit=50, *, budget=None):
         try:
@@ -150,7 +159,7 @@ class Repository:
         except (OSError, ValueError):
             return "File unavailable."
         start = max(1, start)
-        limit = min(60, max(1, limit))
+        limit = min(SOURCE_READ_MAX_LINES, max(1, limit))
         output, used = [], 0
         for number, line in enumerate(lines[start - 1:start - 1 + limit], start):
             text = f"{path}:{number} {line[:239]}…" if len(line) > 240 else f"{path}:{number} {line}"
@@ -164,13 +173,11 @@ class Repository:
                 output.append(f"[More lines available. Continue with start={start + limit}.]")
         return "\n".join(output) or "No lines."
 
-    def search(self, term, *, paths_only=False, budget=None):
+    def search(self, term, *, directory="", paths_only=False, budget=None):
         term = term.strip().casefold()
         if (not term and not paths_only) or len(term) > 160:
             return "Supply a short literal or filename."
-        directories, hits = [""], []
-        remaining = SEARCH_ENTRIES
-        remaining_bytes = SEARCH_BYTES
+        directories, hits = [directory], []
         deadline = monotonic() + SEARCH_SECONDS
         incomplete = set()
 
@@ -191,14 +198,10 @@ class Repository:
                         if monotonic() >= deadline:
                             incomplete.add("time budget")
                             return result()
-                        if not remaining:
-                            incomplete.add("entry budget")
-                            return result()
                         if budget:
                             budget.check()
-                        remaining -= 1
                         name = entry.name
-                        if name.startswith(".") or name in SKIP:
+                        if name.startswith(".") or name in SKIP or _private_name(name):
                             continue
                         path = f"{base}/{name}" if base else name
                         if entry.is_dir(follow_symlinks=False):
@@ -206,13 +209,8 @@ class Repository:
                             continue
                         if not _source_name(name) or not entry.is_file(follow_symlinks=False):
                             continue
-                        size = entry.stat(follow_symlinks=False).st_size
-                        if size > MAX_FILE:
+                        if paths_only and term not in path.casefold():
                             continue
-                        if size > remaining_bytes:
-                            incomplete.add("byte budget")
-                            continue
-                        remaining_bytes -= size
                         try:
                             lines = self.lines(path, budget)
                         except TimeoutError:
@@ -243,5 +241,6 @@ class Repository:
             except TimeoutError:
                 raise
             except (OSError, ValueError):
-                continue
+                if base == directory and directory:
+                    return "Search directory unavailable."
         return result()

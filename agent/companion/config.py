@@ -7,6 +7,9 @@ import stat
 from typing import Mapping
 
 
+SOURCE_READ_MAX_LINES = 200
+
+
 def companion_key(directory):
     if key := os.environ.get("COMPANION_DEEPSEEK_API_KEY"):
         return key
@@ -37,7 +40,7 @@ class CompanionConfig:
         for name, minimum, maximum in (
             ("rpc_timeout_seconds", 0.05, 10),
             ("question_timeout_seconds", 0.05, 180),
-            ("source_read_lines", 40, 60),
+            ("source_read_lines", 1, SOURCE_READ_MAX_LINES),
         ):
             value = getattr(self, name)
             expected = (int,) if name == "source_read_lines" else (int, float)

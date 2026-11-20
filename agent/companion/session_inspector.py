@@ -5,64 +5,59 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 import json
+from itertools import chain
 from math import isfinite
 import re
 import sqlite3
 from typing import Any, Mapping
 
 from agent.companion.timeline import category
-from agent.sessions.summary import redact_summary_input
+from agent.companion.redaction import PRIVATE_KEY_MARKER, redact_diagnostic_text
 from agent.sessions.transcript import classify_tool_result
 
 RESPONSE_LIMIT = 6000
-OUTPUT_EXCERPT = 800
+OUTPUT_EXCERPT = 1400
+EXCERPT_SCAN = 16384
 CALL_CACHE_LIMIT = 128
 _TERMINAL = {"success", "failed", "cancelled"}
 _SECRET_FIELD = re.compile(r"api.?key|token|secret|password|authorization|credential", re.I)
-_SECRET_OPTION = re.compile(
-    r"(--[\w-]*(?:api[-_]?key|token|secret|password|authorization|credential)[\w-]*)(?:\s+|=)"
-    r"(?:\"[^\"\r\n]*(?:\"|$)|'[^'\r\n]*(?:'|$)|[^\s;]+)", re.I,
+_ERROR_LINE = re.compile(
+    r"(?im)^.*(?:traceback|assertionerror|permission denied|no module named|command not found|"
+    r"(?:^|\s)(?:error|fatal|failed):|(?:^|\s)FAILED |^E\s+assert|exit code: [1-9]).*$"
 )
-_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_AUTH_HEADER = re.compile(r"\b(?:proxy-)?authorization\s*[:=]\s*(?:Bearer|Basic)\s+[^\s,;]+", re.I)
 
 
 def diagnostic_error(code, message):
     return {"error": {"code": code, "message": message}, "truncated": False}
 
 
-def redact_diagnostic_text(text, secrets=()):
-    text = _ANSI_ESCAPE.sub("", text)
-    text = _PRIVATE_KEY.sub("[已隐藏]", text)
-    text = _AUTH_HEADER.sub("[已隐藏]", text)
-    text = _SECRET_OPTION.sub(r"\1 [已隐藏]", text)
-    return redact_summary_input(text, secrets, preserve_relative_paths=True)
+def _clean_excerpt(text, secrets):
+    safe = redact_diagnostic_text(text, secrets)
+    return "".join(c for c in safe if c.isprintable() or c in "\n\t")
 
 
 def _excerpt(text, secrets, limit):
     # Avoid processing a whole tool response. Drop the last partial line so a
     # truncated credential or multi-line key cannot be mistaken for plain text.
-    if len(text) > 16384:
-        head = text[:16384].rpartition("\n")[0]
+    if len(text) > EXCERPT_SCAN:
+        head = text[:EXCERPT_SCAN].rpartition("\n")[0]
         if "-----BEGIN" in head:
             head = head.split("-----BEGIN", 1)[0]
         head = head or "[超长内容已省略]"
         clipped = True
     else:
         head, clipped = text, False
-    safe = redact_diagnostic_text(head, secrets)
-    safe = "".join(c for c in safe if c.isprintable() or c in "\n\t")
+    safe = _clean_excerpt(head, secrets)
     if len(safe) > limit or clipped:
         return safe[:limit - 1].rstrip() + "…", True
     return safe, False
 
 
 def _arguments(value, secrets):
-    budget = 1000
+    budget = 1750
     truncated = False
 
-    def visit(item, depth=0):
+    def visit(item, depth=0, field=""):
         nonlocal budget, truncated
         if budget <= 0 or depth > 3:
             truncated = True
@@ -70,15 +65,17 @@ def _arguments(value, secrets):
         budget -= 12
         if isinstance(item, Mapping):
             result = {}
-            for index, (key, child) in enumerate(item.items()):
+            keys = chain(("command",), (key for key in item if key != "command")) if depth == 0 and "command" in item else item
+            for index, key in enumerate(keys):
                 if index >= 12 or budget <= 0:
                     truncated = True
                     break
+                child = item[key]
                 key = str(key)
                 name, clipped = _excerpt(key, secrets, 64)
                 truncated |= clipped
                 budget -= len(name)
-                result[name] = "[已隐藏]" if _SECRET_FIELD.search(key[:128]) else visit(child, depth + 1)
+                result[name] = "[已隐藏]" if _SECRET_FIELD.search(key[:128]) else visit(child, depth + 1, key)
             return result
         if isinstance(item, (list, tuple)):
             result = []
@@ -92,7 +89,8 @@ def _arguments(value, secrets):
             return item
         if isinstance(item, int) and item.bit_length() < 64 or isinstance(item, float) and isfinite(item):
             return item
-        text, clipped = _excerpt(item if isinstance(item, str) else "[未展示]", secrets, max(1, min(budget, 240)))
+        field_limit = 1200 if depth == 1 and field == "command" else 400
+        text, clipped = _excerpt(item if isinstance(item, str) else "[未展示]", secrets, max(1, min(budget, field_limit)))
         budget -= len(text)
         truncated |= clipped
         return text
@@ -136,8 +134,43 @@ def call_arguments(arguments, secrets):
     return CallDetails(arguments=data, arguments_truncated=truncated)
 
 
-def call_result(details, content, artifact, secrets):
-    excerpt, truncated = _excerpt(content, secrets, OUTPUT_EXCERPT)
+def _failure_excerpt(content, secrets):
+    if len(content) > EXCERPT_SCAN * 2:
+        if PRIVATE_KEY_MARKER in content:
+            return "[含私钥的超长输出已省略]", True
+        # Do not copy partial lines at the edges of the scan windows.
+        head = content[:EXCERPT_SCAN].rpartition("\n")[0]
+        tail = content[-EXCERPT_SCAN:].partition("\n")[2]
+        content = "\n…\n".join(part for part in (head, tail) if part)
+        sampled = True
+    else:
+        sampled = False
+
+    safe = _clean_excerpt(content, secrets)
+    if len(safe) <= OUTPUT_EXCERPT:
+        return (safe or "[超长行已省略]"), sampled
+    prefix = 220
+    tail_start = len(safe) - (OUTPUT_EXCERPT - prefix - 6)
+    # If the last error is outside the tail, reserve space for its line
+    # and nearby context. Keep the end as well for summaries and exit status.
+    marker = None
+    for match in _ERROR_LINE.finditer(safe, prefix, tail_start):
+        marker = match
+    parts = [safe[:prefix].rstrip()]
+    if marker:
+        context_size = 400
+        start = max(prefix, marker.start() - 80)
+        parts.append(safe[start:start + context_size].strip())
+        tail_start += context_size
+    parts.append(safe[tail_start:].lstrip())
+    return "\n…\n".join(parts), True
+
+
+def call_result(details, content, artifact, secrets, *, status="success"):
+    if status in {"failed", "cancelled"} and content:
+        excerpt, truncated = _failure_excerpt(content, secrets)
+    else:
+        excerpt, truncated = _excerpt(content, secrets, OUTPUT_EXCERPT)
     return replace(details, output_excerpt=excerpt, output_truncated=truncated or bool(artifact.get("truncated")))
 
 
@@ -255,7 +288,7 @@ def _checkpoint(block, secrets, include_details):
     if include_details:
         details = call_arguments(block.arguments, secrets)
         if status in _TERMINAL:
-            details = call_result(details, block.content, artifact, secrets)
+            details = call_result(details, block.content, artifact, secrets, status=status)
     return ToolCallView(
         block.tool_call_id, name, status, "checkpoint", message_id=block.message_id,
         exit_code=block.exit_code,
@@ -376,9 +409,25 @@ def format_inspect_response(payload: Mapping[str, Any]) -> str:
             if len(result.encode()) <= RESPONSE_LIMIT:
                 return result
     if "result" in data and "arguments" in data:
-        data["arguments"] = {}
+        details = dict(data["result"])
+        data["result"] = details
+        excerpt = details["output_excerpt"]
+        for length in (700, 350):
+            if len(excerpt) > length:
+                if details["status"] in {"failed", "cancelled"}:
+                    details["output_excerpt"] = excerpt[:100] + "\n…\n" + excerpt[-(length - 103):]
+                else:
+                    details["output_excerpt"] = excerpt[:length - 1] + "…"
+                details["truncated"] = True
+                result = encode(data)
+                if len(result.encode()) <= RESPONSE_LIMIT:
+                    return result
+        command = data["arguments"].get("command")
+        if isinstance(command, str):
+            data["arguments"] = {"command": command if len(command) <= 800 else command[:799] + "…"}
+        else:
+            data["arguments"] = {}
         data["arguments_truncated"] = True
-        data["result"] = {**data["result"], "output_excerpt": "", "truncated": True}
         result = encode(data)
         if len(result.encode()) <= RESPONSE_LIMIT:
             return result

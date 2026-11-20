@@ -36,7 +36,7 @@ companion:
 - `observation_prompt` 定义如何分析异常摘要、何时主动开口。[`observation.md`](../agent/companion/observation.md)
 - `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `rpc_timeout_seconds` 限制一次宿主只读查询。`question_timeout_seconds` 限制一轮问答。单次模型 HTTP 超时为 15 秒，源码搜索的扫描预算为 1.5 秒。
-- `source_read_lines` 设置源码读取的默认行数和单次行数上限，可设为 40–60。工具可以请求更少的行数，返回内容也受字符数限制。
+- `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。
 - `gifs` 独立配置 `idle`、`observing`、`curious`、`focused`、`concerned` 和 `relieved` 的动画。
 
 省略配置项会使用默认值。提示词和动画路径也可设为 `null` 以使用内置文件。侧栏交互、Markdown 渲染与诊断数据边界见 [终端界面 · Lain Companion](tui.md#lain-companion) 和 [统计口径](companion-phase2.md)。

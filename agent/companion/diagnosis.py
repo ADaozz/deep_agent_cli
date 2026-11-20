@@ -11,18 +11,19 @@ class InvalidObservation(ValueError):
 
 
 def validate_observation(value):
-    if not isinstance(value, dict) or value.keys() != {"behavior", "message"}:
+    if not isinstance(value, dict):
         raise InvalidObservation("Expected behavior and message")
-    if value["behavior"] not in STATES or not isinstance(value["message"], str) or len(value["message"]) > 240:
+    behavior, message = value.get("behavior"), value.get("message")
+    if behavior not in STATES or not isinstance(message, str):
         raise InvalidObservation("Invalid behavior or message")
-    return value
+    return {"behavior": behavior, "message": message}
 
 
 def reply_text(value, *, proactive=False, partial=False):
     """Pass model speech through; only strip controls and cap length for the chat log."""
     del partial  # preview and final use the same visible text
     text = "".join(c for c in str(value or "") if c.isprintable() or c == "\n").strip()
-    limit = 80 if proactive else 1600
+    limit = 400 if proactive else 1600
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"

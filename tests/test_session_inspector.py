@@ -221,3 +221,42 @@ def test_live_result_overrides_stale_checkpoint_running_status():
     assert payload["arguments"] == {"command": "pytest -q"}
     assert payload["result"]["output_excerpt"] == "12 passed"
     assert inspect_session_payload(blocks, timeline)["tools"][0]["status"] == "success"
+
+
+def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
+    from agent.companion.redaction import redact_diagnostic_text
+    from agent.sessions.summary import redact_summary_input
+
+    endpoint = "https://api.example.test:9443/v1/items?limit=20"
+    text = (
+        endpoint + " https://user:opaque-password@api.example.test/v1/"
+        "%6Fpaque-known?limit=10&accessToken=opaque-token&X-Amz-Signature=opaque-signature#opaque-fragment"
+    )
+    clean = redact_diagnostic_text(text, ("opaque-known",))
+    assert endpoint in clean and "opaque-" not in clean and "user:" not in clean
+    assert "https://api.example.test/v1/[已隐藏]?limit=10" in clean
+    assert redact_diagnostic_text(clean) == clean
+    assert endpoint not in redact_summary_input(endpoint)
+
+
+def test_failure_excerpt_keeps_context_and_tail_and_command_has_priority():
+    from agent.companion.session_inspector import CallDetails, call_arguments, call_result
+
+    command = "pytest -q " + "tests/test_module.py " * 30
+    args = {**{f"other_{i}": "a" * 60 for i in range(16)}, "command": command}
+    details = call_arguments(args, ())
+    assert details.arguments["command"] == command
+    assert details.arguments_truncated
+    assert call_arguments({"command": command}, ()).matches_arguments(call_arguments({"command": command}, ()))
+
+    text = "starting tests\n" + "setup progress\n" * 150
+    text += "fixture initialization\nAssertionError: expected 200\nassertion context\n"
+    text += "cleanup progress\n" * 150 + "1 failed in 2 seconds\nExit code: 1\n"
+    failed = call_result(CallDetails(), text, {}, (), status="failed")
+    assert "starting tests" in failed.output_excerpt
+    assert "AssertionError: expected 200" in failed.output_excerpt
+    assert failed.output_excerpt.rstrip().endswith("Exit code: 1")
+    assert failed.output_truncated
+    success = call_result(CallDetails(), text, {}, ())
+    assert "starting tests" in success.output_excerpt
+    assert "Exit code" not in success.output_excerpt

@@ -62,9 +62,10 @@ def create_chat(model, query, *, persona=None, instructions=None):
     @tool
     async def search_workspace_text(
         term: Annotated[str, Field(description="要查找的非空原文片段，例如函数名或报错片段。")],
+        directory: Annotated[str, Field(description="相对于工作区的搜索目录，留空则从工作区根目录开始。")] = "",
     ) -> str:
         """在工作区可读取的源码中按字面匹配，忽略大小写，最多返回 12 条路径、行号和摘录。空结果仅代表已扫描的范围。"""
-        return await query("search", term=term)
+        return await query("search", term=term, directory=directory)
 
     @tool
     async def read_workspace_file(
@@ -78,9 +79,10 @@ def create_chat(model, query, *, persona=None, instructions=None):
     @tool
     async def list_workspace_files(
         term: Annotated[str, Field(description="文件名或相对路径的字面片段，留空时列出扫描到的文件。")] = "",
+        directory: Annotated[str, Field(description="相对于工作区的搜索目录，留空则从工作区根目录开始。")] = "",
     ) -> str:
         """按路径筛选工作区内可读取的源码，忽略大小写，最多返回 12 条相对路径。空结果仅代表已扫描的范围。"""
-        return await query("files", term=term)
+        return await query("files", term=term, directory=directory)
 
     @tool
     async def session_evidence(

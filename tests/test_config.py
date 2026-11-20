@@ -96,7 +96,7 @@ def test_companion_paths_resolve_relative_to_config_and_allow_partial_overrides(
         + "  chat_prompt: prompts/chat.md\n"
         + "  rpc_timeout_seconds: 2\n"
         + "  question_timeout_seconds: 70\n"
-        + "  source_read_lines: 55\n"
+        + "  source_read_lines: 150\n"
         + "  gifs:\n"
         + "    idle: animations/idle.gif\n"
         + "    focused: null\n",
@@ -107,7 +107,7 @@ def test_companion_paths_resolve_relative_to_config_and_allow_partial_overrides(
     assert config.chat_prompt == tmp_path / "prompts/chat.md"
     assert config.observation_prompt == Settings().companion.observation_prompt
     assert config.gifs == {"idle": tmp_path / "animations/idle.gif"}
-    assert (config.rpc_timeout_seconds, config.question_timeout_seconds, config.source_read_lines) == (2, 70, 55)
+    assert (config.rpc_timeout_seconds, config.question_timeout_seconds, config.source_read_lines) == (2, 70, 150)
     with pytest.raises(ValueError, match="unknown companion.gifs state"):
         Settings.from_mapping({"companion": {"gifs": {"typo": "idle.gif"}}})
     with pytest.raises(ValueError, match="companion.persona_prompt"):

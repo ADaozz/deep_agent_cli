@@ -28,15 +28,18 @@ from agent.companion.timeline import (
     transact,
 )
 from agent.companion.repository import Repository
+from agent.companion.redaction import redact_diagnostic_text
 from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
-    observation_views, redact_diagnostic_text, result_status,
+    observation_views, result_status,
 )
 from agent.companion.diagnosis import InvalidObservation, interpret_turn, reply_text, validate_observation
 from agent.companion.monitor import Resources, services
 
 
 REPLY_TICK_SECONDS = 0.25
+QUESTION_LIMIT = 4000
+CONVERSATION_LIMIT = 4000
 _REPLY_ERRORS = {
     "request_timeout": "这次问答已超时，可以重新提问。",
     "model_timeout": "模型响应超时，可以重新提问。",
@@ -178,9 +181,9 @@ class Companion:
             return "上一问还在看。"
         if self.connection == "OFFLINE" and not self.worker_ready:
             return "玲音离线。请检查 Companion 密钥和连接。"
-        text = " ".join(text.split())
-        if not text or len(text) > 800:
-            return "请输入问题，最多 800 字。"
+        text = text.strip()
+        if not text or len(text) > QUESTION_LIMIT:
+            return f"请输入问题，最多 {QUESTION_LIMIT} 字。"
         self.question = text
         self.question_deadline = perf_counter() + self.config.question_timeout_seconds
         self.reply_wait_started = monotonic()
@@ -237,14 +240,36 @@ class Companion:
 
     def log(self, message, speaker="Lain", *, stamp=None):
         self.log_sequence += 1
+        limit = QUESTION_LIMIT if speaker == "You" else 1600
         self.logs.append(
             (
                 stamp or datetime.now(self.timezone).strftime("%H:%M:%S"),
                 speaker,
-                "".join(c for c in str(message) if c.isprintable() or c == "\n")[:1600],
+                "".join(c for c in str(message) if c.isprintable() or c in "\n\t")[:limit],
             )
         )
         self.invalidate()
+
+    def chat_history(self, question):
+        remaining = CONVERSATION_LIMIT
+        history = []
+        current = "".join(c for c in question if c.isprintable() or c in "\n\t")
+        for _, role, message in reversed(self.logs):
+            if role not in ("You", "Lain"):
+                continue
+            if role == "You" and message == current:
+                current = None
+                continue
+            safe = redact_diagnostic_text(message, self.secrets)
+            remaining -= len(role) + 1
+            if remaining <= 0:
+                break
+            if len(safe) > remaining:
+                history.append((role, safe[:remaining - 1].rstrip() + "…"))
+                break
+            history.append((role, safe))
+            remaining -= len(safe)
+        return list(reversed(history))
 
     def sync_session(self):
         current = self.session()
@@ -495,7 +520,8 @@ class Companion:
             error = category(content, code) if outcome == "failed" else ""
             identity = obs.run_id, obs.tool_call_id
             self.calls[identity] = obs
-            details = call_result(self.call_cache.get(identity, CallDetails()), content, artifact, self.secrets)
+            details = call_result(self.call_cache.get(identity, CallDetails()), content, artifact, self.secrets,
+                                  status=outcome)
             self.cache_call(identity, details)
             self.close_call(obs, outcome, wall, tick, error, code)
             if outcome == "failed":
@@ -870,7 +896,7 @@ class Companion:
         if kind in ("search", "files"):
             return await asyncio.to_thread(
                 self.repository.search, str(args.get("term", ""))[:160],
-                paths_only=kind == "files", budget=budget,
+                directory=str(args.get("directory") or ""), paths_only=kind == "files", budget=budget,
             )
         if kind == "read":
             return await asyncio.to_thread(
@@ -986,8 +1012,7 @@ class Companion:
                         tool_evidence=self.chat_tool_evidence(question),
                         recent_errors=list(self.errors),
                         latest_review=self.session_evidence("turns")[-1:],
-                        conversation=[(r, redact_diagnostic_text(m, self.secrets)[:400])
-                                      for _, r, m in list(self.logs)[-5:]],
+                        conversation=self.chat_history(question),
                     )
                 elif state.queue:
                     key, incident_id, version = state.queue.popleft()

@@ -443,7 +443,8 @@ def test_turn_review_filters_evidence_and_voice():
         "完整命令需要 tool_detail。"
     )
     assert reply_text(long) == long
-    assert reply_text("x" * 90, proactive=True).endswith("…")
+    assert reply_text("x" * 90, proactive=True) == "x" * 90
+    assert reply_text("x" * 500, proactive=True).endswith("…")
 
 
 def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):

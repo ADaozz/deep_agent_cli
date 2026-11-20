@@ -366,13 +366,16 @@ def test_observer_makes_one_structured_decision_and_can_remain_silent():
     from agent.companion.diagnosis import InvalidObservation
 
     async def run():
+        longer = "更详细的观察。" * 50
         respond = create_observer(scripted_model([
             AIMessage(content='{"behavior":"curious","message":"看到变化了。"}'),
             AIMessage(content='{"behavior":"idle","message":""}'),
+            AIMessage(content=json.dumps({"behavior": "focused", "message": longer, "extra": "ignored"})),
             AIMessage(content='{"behavior":"busy","message":"Invalid"}'),
         ]))
         assert await respond({"windows": []}) == {"behavior":"curious","message":"看到变化了。"}
         assert await respond({"windows": []}) == {"behavior": "idle", "message": ""}
+        assert await respond({"windows": []}) == {"behavior": "focused", "message": longer}
         with pytest.raises(InvalidObservation):
             await respond({"windows": []})
     asyncio.run(run())
@@ -734,15 +737,30 @@ print(json.dumps(dict(**identity, message='这次是命令找不到。', status=
     asyncio.run(run())
 
 
-def test_sensitive_names_and_embedded_credentials_are_unavailable(tmp_path):
+def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     from agent.companion.repository import Repository
+
     repo = Repository(tmp_path, secrets=("fixture-sensitive-value",))
-    for name, content in (("credentials.json",'{"value":"private"}'),("config.yaml","private"),
-                          ("innocent.py","print('fixture-sensitive-value')"),
-                          ("example.md","api_key = 'private-value'")):
-        (tmp_path/name).write_text(content)
+    for name in ("auth.py", "tokenizer.py", "config.py", "authorization.py", "password_policy.py"):
+        (tmp_path / name).write_text("token = generate_token()\npassword = request.headers.get('Password')\n")
+        result = repo.read(name)
+        assert "token = generate_token()" in result
+        assert "request.headers.get('Password')" in result
+    for name, content in (
+        ("credentials.json", '{"value":"private"}'),
+        ("key_fixture.py", "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"),
+    ):
+        (tmp_path / name).write_text(content)
         assert repo.read(name) == "File unavailable."
-    assert repo.search("private").startswith("No match")
+
+    source = tmp_path / "example.py"
+    source.write_text("import client\napi_key = 'private-value'\nprint('fixture-sensitive-value')\nclient.connect()")
+    result = repo.read(source.name)
+    assert "example.py:4 client.connect()" in result
+    assert result.count("[已隐藏]") == 2
+    assert "private-value" not in result and "fixture-sensitive-value" not in result
+    assert "example.py:4" in repo.search("client.connect()")
+    assert repo.search("private-value").startswith("No match")
 
 
 def test_quiet_activity_does_not_request_model(tmp_path, monkeypatch):
@@ -992,10 +1010,14 @@ def test_source_reader_paginates_and_search_reports_partial_scan(tmp_path, monke
     result = repo.read(path.name, start=2, limit=50)
     assert f"{path.name}:51 line_51" in result
     assert "Continue with start=52" in result
-    monkeypatch.setattr(repository, "SEARCH_BYTES", 2)
-    assert "Scan incomplete: byte budget" in repo.search("absent")
-    monkeypatch.setattr(repository, "SEARCH_ENTRIES", 1)
-    assert "entry budget" in repo.search("absent")
+    directory = tmp_path / "src"
+    directory.mkdir()
+    (directory / "auth.py").write_text("def authenticate(): pass")
+    (tmp_path / "other.py").write_text("def authenticate(): pass")
+    found = repo.search("authenticate", directory="src")
+    assert "src/auth.py:1" in found and "other.py" not in found
+    assert repo.search("auth", directory="src", paths_only=True) == "src/auth.py"
+    assert repo.search("authenticate", directory="../src") == "Search directory unavailable."
     monkeypatch.setattr(repository, "SEARCH_SECONDS", 0)
     assert "Scan incomplete: time budget" in repo.search("absent")
 
@@ -1035,3 +1057,17 @@ def test_evidence_filters_failure_changes_and_checks_retry_arguments(tmp_path):
         assert [data["tool_call_id"] for _, _, data in timeline["records"]] == ["d", "c"]
 
     asyncio.run(run())
+
+
+
+def test_chat_history_uses_dialogue_budget_and_allows_long_questions(tmp_path):
+    c = companion(tmp_path, lambda: "session")
+    c.log("Earlier question", "You")
+    c.log("earlier reply " * 50, "Lain")
+    for _ in range(10):
+        c.log("Connection status", "Status")
+    question = "Compare these traces:\n" + "x" * 1800
+    assert c.ask(question) == "已发给玲音。"
+    assert c.question == question
+    assert c.logs[-1][2] == question
+    assert c.chat_history(question) == [("You", "Earlier question"), ("Lain", "earlier reply " * 50)]
