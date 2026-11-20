@@ -107,6 +107,7 @@ def messages_to_transcript(
                     name=str(call.get("name") or "tool"),
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     status="running",
+                    message_id=message.id or "",
                 ))
             timing = (turn_timings or {}).get(message.id or "")
             if timing is not None:

@@ -57,3 +57,4 @@ class TranscriptBlock:
     artifact: Any = None
     elapsed_seconds: float = 0.0
     finished_at: datetime | None = None
+    message_id: str = ""

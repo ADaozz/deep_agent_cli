@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
+from dataclasses import replace
 from functools import partial
 import logging
 import os
@@ -116,7 +117,7 @@ from agent.cli.input_actions import (
 from agent.runtime.metrics import model_metric_groups, tool_usage_by_model
 from agent.mcp.logging import MCPLogHandler
 from agent.runtime.runner import AgentRunner
-from agent.runtime.contracts import RunEvent
+from agent.runtime.contracts import RunEvent, observation_scope
 
 
 # Workspace/model and execution settings on the left; git/context on the right.
@@ -1316,8 +1317,7 @@ class CliApplication:
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
-    def _companion_session_blocks(self):
-        thread_id = self.runner.thread_id
+    def _companion_session_blocks(self, thread_id):
         store = self.runner.session_store
         if not thread_id or store is None:
             return []
@@ -1335,7 +1335,11 @@ class CliApplication:
         context = None
         if event.type in {"run_started", "turn_started", "turn_completed", "companion_tool", "tool_started", "tool_completed", "interaction_requested",
                           "run_failed", "run_completed", "run_cancelled"}:
-            context = (self.runner.thread_id, *self._companion_profile(), time.time(), time.monotonic())
+            scope = observation_scope.get()
+            thread_id = scope[0] if scope else self.runner.thread_id
+            if scope and not event.run_id:
+                event = replace(event, run_id=scope[1], turn_id=scope[2])
+            context = (thread_id, *self._companion_profile(), time.time(), time.monotonic())
         if self.run_view.loop is not None:
             self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch, context)
         else:

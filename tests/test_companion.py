@@ -800,3 +800,52 @@ print(json.dumps(dict(**identity,status='ok',message='old answer')),flush=True)
         assert release.with_suffix(".result").read_text()=="Expired request."
         assert not any(msg=="old answer" for _,_,msg in c.logs)
     asyncio.run(run())
+
+
+def test_inspector_live_completion_cache_and_session_boundary(tmp_path):
+    import json
+
+    from agent.companion.session_inspector import build_session_inspector
+    from agent.sessions.contracts import TranscriptBlock
+
+    async def run():
+        session = ["one"]
+        c = companion(tmp_path, lambda: session[0])
+        checkpoint = []
+        c.inspect_session = build_session_inspector(
+            load_blocks=lambda sid: list(checkpoint) if sid == "one" else [],
+            companion_provider=lambda: c,
+        )
+
+        async def query(**args):
+            return json.loads(await c.host_query("inspect_current_session", args))
+
+        c.event(RunEvent("run_started", run_id="run", turn_id="turn"), "model")
+        c.event(RunEvent("tool_started", tool_call_id="a", name="execute", message_id="message",
+                         arguments={"command": "pytest -q", "api_key": "opaque-private-value"}), "model")
+        assert (await query())["tools"][0]["status"] == "running"
+        c.event(RunEvent("tool_completed", tool_call_id="a", content="AssertionError: failed",
+                         artifact={"exit_code": 1}, is_error=True), "model")
+        detail = dict(view="tool_detail", tool_call_id="a")
+        result = await query(**detail)
+        assert result["arguments"]["command"] == "pytest -q"
+        assert "opaque-private-value" not in json.dumps(result)
+        assert result["result"]["error_category"] == "assertion"
+        assert result["result"]["output_excerpt"] == "AssertionError: failed"
+        checkpoint.append(TranscriptBlock(kind="tool", tool_call_id="a", name="execute",
+                                          message_id="message", status="error"))
+        assert len((await query())["tools"]) == 1
+
+        for i in range(130):
+            c.event(RunEvent("tool_started", tool_call_id=str(i), name="read_file"), "model")
+            c.event(RunEvent("tool_completed", tool_call_id=str(i), content=f"output {i}"), "model")
+        assert len(c.call_cache) == 128
+        assert not (await query(**detail))["result"]["output_excerpt"]
+        old_request = c.inspect_session(**detail)
+        session[0] = "two"
+        c.sync_session()
+        assert old_request()["error"]["code"] == "request_expired"
+        assert (await query(**detail))["error"]["code"] == "tool_call_not_found"
+        assert not c.call_cache
+
+    asyncio.run(run())

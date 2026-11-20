@@ -128,6 +128,16 @@ def create_chat(model, query, *, persona=None, instructions=None):
         limit: Annotated[
             int, Field(description="返回条数，1～20，默认 10。")
         ] = 10,
+        run_id: Annotated[
+            str | None, Field(description="tool_detail 中用于区分不同运行的同名调用 ID。")
+        ] = None,
+        status: Annotated[
+            Literal["running", "waiting", "success", "failed", "cancelled", "unknown"] | None,
+            Field(description="recent_tools 按执行状态筛选。"),
+        ] = None,
+        order: Annotated[
+            Literal["asc", "desc"], Field(description="近期调用按开始时间正序或倒序。")
+        ] = "asc",
     ) -> str:
         """只读检查主 Agent 当前 Session。Session 由宿主绑定，不能指定其他会话或数据库。"""
         return await query(
@@ -135,6 +145,9 @@ def create_chat(model, query, *, persona=None, instructions=None):
             view=view,
             tool_call_id=tool_call_id,
             limit=min(max(int(limit or 10), 1), 20),
+            run_id=run_id,
+            status=status,
+            order=order,
         )
 
     defaults = CompanionConfig()

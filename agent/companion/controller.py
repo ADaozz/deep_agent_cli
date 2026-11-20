@@ -28,6 +28,10 @@ from agent.companion.timeline import (
 )
 from agent.sessions.summary import redact_summary_input
 from agent.companion.repository import Repository
+from agent.companion.session_inspector import (
+    CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, format_inspect_response,
+    result_status,
+)
 from agent.companion.diagnosis import interpret_turn, reply_text
 from agent.companion.monitor import Resources, services
 
@@ -140,6 +144,7 @@ class Companion:
         self.last_git = None
         self.request_version = 0
         self.calls = {}
+        self.call_cache = OrderedDict()
         self.pending = []
         self.storage_lock = asyncio.Lock()
         self.batches = {}
@@ -238,6 +243,8 @@ class Companion:
             self.last_profile = None
             self.thread = current
             self.session_generation += 1
+            self.call_cache.clear()
+            self.starts.clear()
             self.errors.clear()
             self._clear_chat_reply()
             self.changed.clear()
@@ -257,7 +264,7 @@ class Companion:
             return
         obs.outcome = outcome
         obs.finished_at = wall
-        start = self.starts.pop(obs.tool_call_id, None)
+        start = self.starts.pop((obs.run_id, obs.tool_call_id), None)
         obs.duration_ms = (
             max(0, round((tick - start) * 1000)) if start is not None else None
         )
@@ -281,6 +288,8 @@ class Companion:
             return
         tools = {}
         for obs in self.calls.values():
+            if obs.outcome == "waiting" and outcome != "cancelled":
+                continue
             self.close_call(
                 obs, "cancelled" if outcome == "cancelled" else "unknown", wall, tick
             )
@@ -366,6 +375,8 @@ class Companion:
         wall = time() if wall is None else wall
         tick = monotonic() if tick is None else tick
         kind = event.type
+        run = event.run_id or self.run
+        identity = run, event.tool_call_id
         if kind in ("run_started", "turn_started"):
             if event.turn_id and (
                 self.turn == event.turn_id
@@ -393,21 +404,22 @@ class Companion:
         elif (
             kind == "tool_started"
             and event.tool_call_id
-            and event.tool_call_id not in self.calls
+            and identity not in self.timeline.active
         ):
-            if (self.run, event.tool_call_id) in self.timeline.finished:
+            if identity in self.timeline.finished:
                 return
             name = clean(event.name)
             obs = ToolObservation(
                 self.thread,
                 self.turn,
-                self.run,
+                run,
                 agent,
                 model,
                 effort,
                 name,
                 event.tool_call_id,
                 wall,
+                message_id=event.message_id,
             )
             series = self.timeline.series.get((model, effort, name))
             previous = series.last_failed if series else None
@@ -418,48 +430,48 @@ class Companion:
                 and 0 <= wall - previous.finished_at <= 60
             ):
                 obs.retry_of = previous.tool_call_id
-            self.calls[event.tool_call_id] = obs
-            self.starts[event.tool_call_id] = tick
+            self.calls[identity] = obs
+            self.starts[identity] = tick
+            self.cache_call(identity, call_arguments(event.arguments, self.secrets))
             self.timeline.started(obs)
             self.timeline.record(
                 "tool",
                 asdict(obs),
-                key=self.run + "/" + obs.tool_call_id,
+                key=run + "/" + obs.tool_call_id,
                 stamp=wall,
                 turn=self.turn,
             )
             if event.message_id:
                 self.batches.setdefault(event.message_id, []).append(name)
             self.queue_behavior("observing")
-        elif kind == "tool_completed":
-            obs = self.calls.get(event.tool_call_id)
+        elif kind == "tool_completed" and event.tool_call_id:
+            if identity in self.timeline.finished:
+                return
+            obs = self.timeline.active.get(identity)
             if obs is None:
                 # Resuming a checkpoint can deliver the end of a pre-crash call.
-                matches = [
-                    o
-                    for (run, call), o in self.timeline.interrupted.items()
-                    if call == event.tool_call_id
-                    and (not event.run_id or event.run_id == run)
-                ]
+                resumable = [*self.timeline.interrupted.values(), *(
+                    item for item in self.timeline.active.values() if item.outcome == "waiting"
+                )]
+                matches = [item for item in resumable if item.tool_call_id == event.tool_call_id]
                 obs = matches[0] if len(matches) == 1 else None
-            if obs is None or obs.finished_at is not None:
+            if obs is None:
+                obs = ToolObservation(self.thread, self.turn, run, agent, model, effort,
+                                      clean(event.name) or "tool", event.tool_call_id, wall)
+            if obs.finished_at is not None:
                 return
             artifact = event.artifact if isinstance(event.artifact, dict) else {}
             code = artifact.get("exit_code")
             code = code if type(code) is int else None
-            cancelled = (
-                artifact.get("cancelled")
-                or artifact.get("status") == "cancelled"
-                or artifact.get("termination_reason") == "cancelled"
-            )
-            outcome = (
-                "cancelled"
-                if cancelled
-                else "failed"
-                if event.is_error or code not in (None, 0)
-                else "success"
+            outcome = result_status(
+                "completed", name=obs.tool_name, content=event.content, artifact=artifact,
+                is_error=event.is_error or code not in (None, 0),
             )
             error = category(event.content, code) if outcome == "failed" else ""
+            identity = obs.run_id, obs.tool_call_id
+            self.calls[identity] = obs
+            self.cache_call(identity, call_result(self.call_cache.get(identity, CallDetails()),
+                                                 event.content, artifact, self.secrets))
             self.close_call(obs, outcome, wall, tick, error, code)
             if outcome == "failed":
                 self.errors.append(
@@ -471,6 +483,12 @@ class Companion:
         elif kind == "turn_completed":
             self.close_turn("completed", wall, tick)
         elif kind == "interaction_requested":
+            pending = {call.get("toolCallId") for call in getattr(event.result, "pending_tool_calls", ())}
+            for obs in self.timeline.active.values():
+                if obs.run_id == run and (obs.tool_call_id in pending or (
+                    obs.tool_name == "request_human_input" and getattr(event.result, "human_input", None)
+                )):
+                    obs.outcome = "waiting"
             self.queue_behavior("curious")
         elif kind in ("run_failed", "run_completed", "run_cancelled"):
             behavior = {
@@ -481,6 +499,12 @@ class Companion:
             self.queue_behavior(behavior, temporary=behavior != "idle")
             self.close_turn(kind.removeprefix("run_"), wall, tick)
         self.invalidate()
+
+    def cache_call(self, identity, details):
+        self.call_cache[identity] = details
+        self.call_cache.move_to_end(identity)
+        if len(self.call_cache) > CALL_CACHE_LIMIT:
+            self.call_cache.popitem(last=False)
 
     def child_event(self, event, wall):
         session, run, turn = event["scope"]
@@ -516,7 +540,7 @@ class Companion:
                 obs.error_category = category("", obs.exit_code)
             self.timeline.completed(obs)
             if turn == self.turn and self.turn_start is not None:
-                self.calls[call] = obs
+                self.calls[run, call] = obs
             else:
                 for summary in self.timeline.summaries:
                     if summary["turn"] == turn:
@@ -758,12 +782,12 @@ class Companion:
                 limit = int(args.get("limit") or 10)
             except (TypeError, ValueError):
                 limit = 10
-            return await asyncio.to_thread(
-                self.inspect_session,
-                str(args.get("view") or "recent_tools"),
-                args.get("tool_call_id"),
-                limit,
+            inspect = self.inspect_session(
+                view=str(args.get("view") or "recent_tools"),
+                tool_call_id=args.get("tool_call_id"), run_id=args.get("run_id"),
+                limit=limit, status=args.get("status"), order=args.get("order", "asc"),
             )
+            return format_inspect_response(await asyncio.to_thread(inspect))
         if kind in ("timeline", "git"):
             end = min(float(args.get("end") or time()), time())
             start = max(float(args.get("start") or end - 14 * 86400), end - 14 * 86400)

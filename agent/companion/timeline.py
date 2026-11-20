@@ -29,6 +29,7 @@ class ToolObservation:
     error_category: str = ""
     exit_code: int | None = None
     retry_of: str | None = None
+    message_id: str = ""
 
 
 def category(text, exit_code):
@@ -44,6 +45,7 @@ def category(text, exit_code):
             ),
         ),
         ("permission", ("permission denied", "operation not permitted")),
+        ("assertion", ("assertionerror", "assertion failed", "assertion failure")),
         ("timeout", ("timeout", "timed out")),
         ("not_found", ("no such file", "not found")),
         ("network", ("connection refused", "connection reset")),
@@ -145,6 +147,7 @@ class Timeline:
         self.samples = deque(maxlen=60)
         self.version = 0
         self.recent_tool_calls: list[ToolObservation] = []
+        self.diagnostic_calls = deque(maxlen=128)
         self.activity_version = 0
         self.pending = []
         self.queue = deque()
@@ -186,6 +189,7 @@ class Timeline:
             return
         self.finished.add(identity)
         self.active.pop(identity, None)
+        self.diagnostic_calls.append(obs)
         group = (obs.model_id, obs.reasoning_effort)
         key = (*group, obs.tool_name)
         if key not in self.series:
