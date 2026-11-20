@@ -182,7 +182,7 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
         prefix, input_window = middle.children
         assert top.height == bottom.height == 1
         assert top.style == bottom.style == prefix.style == input_window.style == "class:editor"
-        assert prefix.content.text == "› "
+        assert prefix.content.text == [("", "› ")]
         assert input_window.content is app.editor_control
 
 
