@@ -511,6 +511,21 @@ def test_log_anchor_survives_appends_and_resumes_at_bottom(tmp_path):
     assert "the next event" in "".join(text for row in view.visible_lines(30, 4) for _,text in row)
 
 
+def test_chat_rows_render_markdown_like_main_transcript(tmp_path):
+    from agent.companion.panel import ChatRows
+
+    c = companion(tmp_path, lambda: "session")
+    c.log("查到了：**失败率 40%**\n\n- execute\n- read_file")
+    plain = "\n".join(
+        "".join(text for _, text in line)
+        for line in ChatRows(c).visible_lines(48, 12)
+    )
+    assert "失败率 40%" in plain
+    assert "**失败率" not in plain
+    assert "execute" in plain
+    assert "read_file" in plain
+
+
 def test_broken_clip_is_local_and_other_behavior_recovers(tmp_path, monkeypatch):
     from agent.companion.config import CompanionConfig
 

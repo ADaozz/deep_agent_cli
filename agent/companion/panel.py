@@ -8,8 +8,11 @@ from prompt_toolkit.layout import HSplit, VSplit, Window, WindowAlign
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.utils import get_cwidth
+from rich.markdown import Markdown
+from rich.padding import Padding
 
 from agent.cli.formatting import _truncate_cells
+from agent.cli.rendering import _render_unit
 
 from agent.companion.chart import ACTIVITY_HEIGHT
 from agent.companion.theme import (
@@ -123,33 +126,20 @@ class ChatRows(Rows):
         if message is None:
             return rows
 
-        limit = max(2, width - 6)
-        text_rows = []
-        line, used = "", 0
-        for char in message:
-            cells = get_cwidth(char)
-            if char == "\n":
-                text_rows.append(line.rstrip())
-                line, used = "", 0
-                continue
-            if used + cells > limit:
-                head, space, tail = line.rpartition(" ")
-                if space and head:
-                    text_rows.append(head)
-                    line, used = tail, get_cwidth(tail)
-                else:
-                    text_rows.append(line)
-                    line, used = "", 0
-            if line or char != " ":
-                line += char
-                used += cells
-        text_rows.append(line)
-        size = max(get_cwidth(line) for line in text_rows) + 2
-        indent = " " * max(0, width - size) if user else ""
-        style = f"bg:{USER_BUBBLE if user else LAIN_BUBBLE} {TEXT}"
-        for line in text_rows:
-            padding = " " * (size - get_cwidth(line) - 1)
-            rows.append([("", indent), (style, f" {line}{padding}")])
+        bubble = USER_BUBBLE if user else LAIN_BUBBLE
+        # Same Rich Markdown → ANSI → FormattedText path as the main transcript.
+        unit = _render_unit(
+            Padding(Markdown(message), (0, 1), style=f"{TEXT} on {bubble}"),
+            max(4, width),
+        )
+        body = [list(unit.get_line(i)) for i in range(unit.line_count)]
+        if user and body:
+            size = max(
+                sum(get_cwidth(text) for _, text in line) for line in body
+            )
+            indent = " " * max(0, width - size)
+            body = [[("", indent), *line] for line in body]
+        rows.extend(body)
         return rows
 
     def scroll_lines(self, direction):

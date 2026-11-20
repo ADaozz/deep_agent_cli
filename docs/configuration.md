@@ -31,10 +31,10 @@ companion:
 
 - `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
 - `observation_prompt` 定义如何分析异常摘要、何时主动开口。[`observation.md`](../agent/companion/observation.md)
-- `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为。[`chat.md`](../agent/companion/chat.md)
+- `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `gifs` 独立配置 `idle`、`observing`、`curious`、`focused`、`concerned` 和 `relieved` 的动画。
 
-每项可以省略或设为 `null`，使用对应的内置文件。
+每项可以省略或设为 `null`，使用对应的内置文件。侧栏交互、Markdown 渲染与诊断数据边界见 [终端界面 · Lain Companion](tui.md#lain-companion) 和 [统计口径](companion-phase2.md)。
 
 ## 全局网络环境（`trust_env`）
 

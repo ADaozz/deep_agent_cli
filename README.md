@@ -9,6 +9,10 @@ OpenAI 兼容接口 · Bubblewrap
 
 [快速开始](#快速开始) · [常用操作](#常用操作) · [Lain Companion](#lain-companion) · [架构与安全](#架构与安全) · [文档](#文档)
 
+<br>
+
+![deep-agent 终端界面：主转录区与右侧 Lain Companion](assets/readme/terminal.png)
+
 </div>
 
 `deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，主 Agent 默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
@@ -147,8 +151,8 @@ python3.12 -m venv ~/.venvs/deep-agent
 终端至少为 **120 列 × 32 行**时，Lain 会显示在右侧。侧栏显示当前时间与运行环境、CPU / GPU / RAM / 磁盘使用率、Git 分支和工作区服务。
 
 - **Tool Health** 按完成顺序显示最近 60 次有明确结果的工具调用，每 3 次一列。颜色表示调用次数，出现失败时显示 `×`。
-- **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示，聊天历史可用鼠标滚轮翻看。
-- **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据简短说明异常，也可应用户要求复盘。
+- **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示并以 Markdown 渲染；聊天历史可用鼠标滚轮翻看。可只读检查当前会话的工具明细与近期消息。
+- **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据说明异常，也可应用户要求复盘。
 
 Lain 的模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，也可保存在 `~/.deep-agent/companion.key`。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
 
