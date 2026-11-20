@@ -222,7 +222,8 @@ def test_mouse_drag_copies_lain_chat_and_preserves_scroll_and_input_focus(monkey
             for i in range(20):
                 app.companion.log(f"history {i}")
             app.companion.log("你好", speaker="You")
-            app.companion.log("玲音 alpha line\n下一行 beta")
+            # Use a Markdown hard line break so the drag spans two rendered rows.
+            app.companion.log("玲音 alpha line  \n下一行 beta")
             paint(app)
             application.layout.update_parents_relations()
             renderer = application.renderer
@@ -239,6 +240,7 @@ def test_mouse_drag_copies_lain_chat_and_preserves_scroll_and_input_focus(monkey
 
             first_y, first_cells = find_line("玲音 alpha line")
             last_y, last_cells = find_line("下一行 beta")
+            assert first_y < last_y
             _, hint_cells = find_line("Ctrl←/→")
             hint_start = next(x for x in range(side_x, 180) if hint_cells[x].char == "C")
             _, user_cells = find_line("你 · ")
