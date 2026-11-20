@@ -16,6 +16,7 @@ from agent.execution.environment import (
     EnvironmentContextMiddleware,
     classify_runtime,
     collect_environment,
+    host_distribution,
     parse_probe,
     probe_sandbox,
     render_environment_context,
@@ -146,6 +147,13 @@ def test_permission_switch_does_not_probe_again(tmp_path: Path) -> None:
     assert first.permission == "ask"
     assert first.network == "per-command"
 
+    observer = cache.ensure(
+        "thread", config, PermissionMode.ALLOW, probe=probe, runtime="Linux", activate=False,
+    )
+    assert calls["n"] == 1
+    assert observer.permission == "allow"
+    assert cache.snapshot is first
+
     second = cache.ensure("thread", config, PermissionMode.ALLOW, probe=probe, runtime="Linux")
     assert calls["n"] == 1
     assert second.permission == "allow"
@@ -234,6 +242,17 @@ def test_runtime_classification_prefers_the_container() -> None:
     assert classify_runtime(
         environ={"WSL_DISTRO_NAME": "Ubuntu"}, dockerenv=True, cgroup="", osrelease="microsoft",
     ) == "container"
+
+
+@pytest.mark.parametrize(("release", "label"), [
+    ({"NAME": "Ubuntu", "VERSION_ID": "24.04"}, "Ubuntu 24.04"),
+    ({"NAME": "Fedora Linux", "VERSION_ID": "43"}, "Fedora Linux 43"),
+    ({"NAME": "Arch Linux", "PRETTY_NAME": "Arch Linux"}, "Arch Linux"),
+    ({}, ""),
+])
+def test_host_distribution_label(monkeypatch, release, label) -> None:
+    monkeypatch.setattr("agent.execution.environment.freedesktop_os_release", lambda: release)
+    assert host_distribution() == label
 
 
 def test_restored_thread_rechecks_the_sandbox(tmp_path: Path) -> None:

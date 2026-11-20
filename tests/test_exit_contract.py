@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 from deepagents.backends import StateBackend
 from langchain_core.messages import AIMessage
+from prompt_toolkit.application.current import set_app
+from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
@@ -51,8 +53,7 @@ def _open(store: SessionStore | None = None) -> tuple[Harness, object]:
         thread_id=None if store is not None else "exit-contract",
     )
     pipe = create_pipe_input()
-    pipe.__enter__()
-    app = CliApplication(runner, input=pipe, output=DummyOutput())
+    app = CliApplication(runner, input=pipe.__enter__(), output=DummyOutput())
     cancels: list[int] = []
     left: list[bool] = []
     runner.request_cancel = lambda: cancels.append(1)  # type: ignore[method-assign]
@@ -103,6 +104,43 @@ def test_ctrl_c_exit_window_is_one_clock(cli: Harness, monkeypatch: pytest.Monke
     assert cli.app._exiting
     assert cli.left == [True]
     assert cli.cancels == []
+
+
+@pytest.mark.parametrize("switch_to_main", [False, True])
+def test_lain_ctrl_c_shares_exit_window_and_preserves_main_draft(
+    cli: Harness, monkeypatch: pytest.MonkeyPatch, switch_to_main: bool
+) -> None:
+    clock = _clock(monkeypatch)
+    app = cli.app
+    terminal = app.application
+    terminal.output.get_size = lambda: Size(48, 180)
+    terminal.timeoutlen = None
+    payload = "main draft\n" * 100
+    app.buffer.text = app.drafts.pasted.display(payload)
+    app.lain_buffer.text = "Lain draft"
+
+    def press(sequence: bytes) -> None:
+        terminal.input.send_bytes(sequence)
+        terminal.key_processor.feed_multiple(terminal.input.read_keys())
+        terminal.key_processor.process_keys()
+
+    with set_app(terminal):
+        press(b"\x1b[1;5C")
+        assert terminal.layout.current_control is app.lain_editor
+        press(b"\x03")
+        assert app.lain_buffer.text == ""
+        assert app.drafts.pasted.has_blocks
+        assert app.drafts.pasted.expand(app.buffer.text) == payload
+        assert app._last_ctrl_c == 0.0
+        assert not app._exiting
+
+        if switch_to_main:
+            press(b"\x1b[1;5D")
+            assert terminal.layout.current_control is app.editor_control
+        clock[0] = 0.5
+        press(b"\x03")
+        assert app._exiting
+        assert cli.left == [True]
 
 
 def test_running_ctrl_c_then_exit_cancels_once_per_exit(cli: Harness, monkeypatch: pytest.MonkeyPatch) -> None:

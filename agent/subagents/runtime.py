@@ -17,9 +17,11 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import set_output_emitter
 from agent.models.stream_lifecycle import set_stream_owner
 from agent.models.messages import visible_text
+from agent.sessions.transcript import classify_tool_result
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import BackgroundTask, SubAgentManager
 
@@ -95,12 +97,14 @@ class LogCallback(BaseCallbackHandler):
         termination = artifact.get("termination_reason")
         content = getattr(output, "content", output if isinstance(output, str) else "")
         content = content if isinstance(content, str) else ""
-        failed = (getattr(output, "status", None) == "error" or bool(termination)
-                  or (type(exit_code) is int and exit_code != 0)
-                  or content.lower().startswith("error") or "cancelled by user" in content.lower())
-        result["status"] = "cancelled" if termination == "cancelled" or "cancelled by user" in content.lower() else (
-            "failed" if failed else "completed"
+        outcome = classify_tool_result(
+            status=str(getattr(output, "status", "") or ""),
+            content=content,
+            name=str(result["tool_name"] or ""),
+            artifact=artifact,
         )
+        failed = outcome != "success"
+        result["status"] = {"cancelled": "cancelled", "failed": "failed"}.get(outcome, "completed")
         if type(exit_code) is int:
             result["exit_code"] = exit_code
         if result["tool_name"] == "execute":
@@ -125,9 +129,10 @@ class LogCallback(BaseCallbackHandler):
 
 class SubAgentRuntime(Runnable):
     def __init__(self, manager: SubAgentManager, store: SubAgentLogStore,
-                 prepare: Callable, model_name: str) -> None:
+                 prepare: Callable, model_name: str, effort: str = "default") -> None:
         self.manager, self.store, self.prepare = manager, store, prepare
         self.model_name = model_name
+        self.effort = effort
 
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         parent = str((config or {}).get("configurable", {}).get("thread_id", ""))
@@ -140,7 +145,7 @@ class SubAgentRuntime(Runnable):
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
         try:
             with self.manager.running() as (run_id, controller):
-                return Context().run(self._run, input, parent, run_id, controller)
+                return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
             return {"messages": [AIMessage(content=f"Subagent failed: {str(exc)[:1000]}")]}
 
@@ -163,12 +168,13 @@ class SubAgentRuntime(Runnable):
         task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
                               description=description, controller=controller)
 
+        scope = observation_scope.get()
         def work() -> None:
             try:
                 # Same clean context as the synchronous path: no parent
                 # callbacks, stream writer or checkpoint namespace.
                 output = Context().run(
-                    self._run, {"messages": [HumanMessage(content=description)]}, parent, run_id, controller,
+                    self._run, {"messages": [HumanMessage(content=description)]}, parent, run_id, controller, scope,
                 )
                 content = str(output["messages"][-1].content)
             except BaseException as exc:  # noqa: BLE001
@@ -193,9 +199,14 @@ class SubAgentRuntime(Runnable):
         task.thread.start()
         return task
 
-    def _run(self, input: dict, parent: str, run_id: str, controller: Any) -> dict:
+    def _run(self, input: dict, parent: str, run_id: str, controller: Any, scope=None) -> dict:
         def write(event: str, **payload: Any) -> None:
             self.store.append(parent, run_id, event, model=self.model_name, **payload)
+            if scope and event in {"tool_start", "tool_finish", "tool_error"}:
+                fields = {k:payload[k] for k in ("tool_name","tool_run_id","status","elapsed_seconds","exit_code")
+                          if k in payload}
+                self.manager.parent._emit("companion_tool", dict(scope=scope, phase=event, agent=run_id,
+                                                               model=self.model_name, effort=self.effort, **fields))
 
         def brief(value: str, limit: int) -> str:
             # Exact known-value replacement precedes truncation so a boundary

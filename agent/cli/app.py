@@ -4,10 +4,12 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
+from dataclasses import replace
 from functools import partial
 import logging
 import os
 import signal
+import sqlite3
 import time
 import warnings
 from time import monotonic
@@ -19,11 +21,11 @@ from zoneinfo import ZoneInfo
 from prompt_toolkit import ANSI, Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
@@ -35,14 +37,26 @@ from prompt_toolkit.layout import (
     Window,
 )
 from prompt_toolkit.layout.containers import WindowAlign
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
+from langgraph.checkpoint.sqlite import SqliteSaver
 
+from agent.companion.chart import ActivityHeatmap
+from agent.companion.controller import Companion
+from agent.companion.diagnostic_io import readonly_database
+from agent.companion.session_inspector import build_session_inspector
+from agent.companion.theme import ACCENT as COMPANION_ACCENT
+from agent.companion.theme import BORDER as COMPANION_BORDER
+from agent.companion.panel import build_panel, geometry
+from agent.sessions.reader import read_transcript
 from agent.cli.widgets import (
+    EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
+    build_input_editor,
+    _SelectablePane,
     _ScrollableTextControl,
     _InteractionControl,
     _BackToBottomControl,
@@ -106,7 +120,7 @@ from agent.cli.input_actions import (
 from agent.runtime.metrics import model_metric_groups, tool_usage_by_model
 from agent.mcp.logging import MCPLogHandler
 from agent.runtime.runner import AgentRunner
-from agent.runtime.contracts import RunEvent
+from agent.runtime.contracts import RunEvent, observation_scope
 
 
 # Workspace/model and execution settings on the left; git/context on the right.
@@ -157,6 +171,8 @@ class CliApplication:
         self.run_view = RunPresentation()
         self.state.load_model_metrics(runner.model_metrics_history())
         self.state.context_pristine = not runner.thread_has_content()
+        if not self.state.context_pristine:
+            self.state.usage = runner.latest_usage()
         self.commands = command_table()
         self.command_by_name = {item.name: item for item in self.commands}
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
@@ -194,10 +210,28 @@ class CliApplication:
         self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
         timezone_name = runner.settings.ui_timezone if runner.settings is not None else DEFAULT_UI_TIMEZONE
         display_limits = runner.settings.ui_display_limits if runner.settings is not None else DEFAULT_UI_DISPLAY_LIMITS
-        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name), limits=display_limits)
+        self._renderer = TranscriptRenderer(ZoneInfo(timezone_name), limits=display_limits, show_header=False)
         self._git = GitProbe(self._workspace())
         self._git_summary = self._git.summary
         self._git_task: asyncio.Task[None] | None = None
+
+        sandbox = runner.settings.sandbox if runner.settings else runner._sandbox_config
+        protected = list(sandbox.protected_files) if sandbox else []
+        if sandbox and sandbox.protected_config_dir:
+            protected.append(sandbox.protected_config_dir)
+        self.companion = Companion(
+            workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
+            protected=protected, secrets=runner.summary_secrets(), profile=self._companion_profile,
+            config=runner.settings.companion if runner.settings is not None else None,
+            session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
+            invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
+            execute_environment=runner.execute_environment_context,
+            inspect_session=build_session_inspector(
+                load_blocks=self._companion_session_blocks,
+                companion_provider=lambda: self.companion,
+                secrets=runner.summary_secrets,
+            ),
+        )
 
         self.slash_completer = SlashCompleter(
             self.commands,
@@ -246,9 +280,8 @@ class CliApplication:
             invalidate=lambda: self.application.invalidate(),
         )
         self.transcript = TranscriptNavigation(
-            _copy_selection=lambda *args, **kwargs: self._copy_selection(*args, **kwargs),
+            _copy_selection=self._queue_clipboard_copy,
             _transcript_document=lambda *args, **kwargs: self._transcript_document(*args, **kwargs),
-            lifecycle=lambda: self.lifecycle,
             transcript_window=lambda: self.transcript_window,
             invalidate=lambda: self.application.invalidate(),
             output=lambda: self.application.output,
@@ -388,7 +421,6 @@ class CliApplication:
                 _PastedContentProcessor(self.drafts.skill, "skill-block"),
             ],
         )
-        self.bindings = self._create_bindings()
 
         interaction_visible = Condition(lambda: self.dialogs.current is not None)
         editor_visible = Condition(lambda: self.dialogs.current is None or self.dialogs.current.accepts_text)
@@ -497,20 +529,7 @@ class CliApplication:
                 filter=back_to_bottom_visible & ~interaction_visible,
             ),
             ConditionalContainer(
-                HSplit([
-                    Window(height=1, char=" ", style="class:editor"),
-                    VSplit([
-                        Window(FormattedTextControl(EDITOR_PROMPT), width=2, style="class:editor"),
-                        Window(
-                            self.editor_control,
-                            wrap_lines=True,
-                            height=editor_height,
-                            dont_extend_height=True,
-                            style="class:editor",
-                        ),
-                    ]),
-                    Window(height=1, char=" ", style="class:editor"),
-                ]),
+                build_input_editor(self.editor_control, height=editor_height),
                 filter=editor_visible,
             ),
             Window(
@@ -520,12 +539,68 @@ class CliApplication:
                 dont_extend_height=True,
             ),
         ])
+        left = FloatContainer(body, [
+            Float(xcursor=True, ycursor=True, content=CompletionsMenu(
+                max_height=display_limits.completion_menu_lines, scroll_offset=1)),
+        ])
+        visible = Condition(lambda: bool(self._companion_geometry()[0]))
+        self.lain_buffer = Buffer(multiline=False)
+        self.lain_editor = BufferControl(buffer=self.lain_buffer, focus_on_click=True)
+        chart = ActivityHeatmap(self.companion)
+        sidebar = _SelectablePane(
+            build_panel(
+                self.companion,
+                lambda: self._git_summary,
+                chart,
+                build_input_editor(self.lain_editor, height=1, prompt_style=COMPANION_ACCENT, wrap_lines=False),
+                footer_rows=FOOTER_LINES,
+            ),
+            copy_selection=self._queue_clipboard_copy,
+            invalidate=lambda: self.application.invalidate(),
+            selection_scope=lambda: self.companion.session_generation,
+        )
+        focused = has_focus(self.lain_editor)
+        self.bindings = create_bindings(self, lambda: time.monotonic(), ~focused)
+        available = visible & Condition(lambda: self.dialogs.current is None)
+        companion_keys = KeyBindings()
+
+        @companion_keys.add("c-right", filter=available & has_focus(self.editor_control))
+        def focus_lain(event):
+            event.app.layout.focus(self.lain_editor)
+
+        @companion_keys.add("c-left", filter=focused & available)
+        @companion_keys.add("escape", filter=focused)
+        def leave_lain(event):
+            event.app.layout.focus(self.editor_control)
+
+        @companion_keys.add("enter", filter=focused & available)
+        def send_lain(event):
+            result = self.companion.ask(self.lain_buffer.text)
+            if result == "已发给玲音。":
+                self.lain_buffer.reset()
+            else:
+                self.set_status(result)
+
+        def restore_focus(app):
+            if not visible():
+                sidebar.selection.clear_selection()
+            if app.layout.current_control is self.lain_editor and not available():
+                app.layout.focus(self.editor_control)
+        title = FormattedText([("#00d7e6 bold", "DeepAgentCLI"),
+                               ("#777777", f" v{package_version()}  terminal coding agent")])
+        title_bar = HSplit([Window(FormattedTextControl(title), height=1),
+                            Window(height=1, char="─", style="#505050")])
+        # A short approval needs room for its heading, selection and keyboard hints.
+        show_title = Condition(lambda: self.dialogs.current is None or self.application.output.get_size().rows >= 20)
+        root = HSplit([
+            ConditionalContainer(title_bar, show_title),
+            VSplit([left, ConditionalContainer(Window(width=1, char="│", style=COMPANION_BORDER), visible),
+                    ConditionalContainer(sidebar, visible)]),
+        ], style="bg:#08090b #d0d0d0")
         self.application: Application[None] = Application(
-            layout=Layout(FloatContainer(
-                content=body,
-                floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=display_limits.completion_menu_lines, scroll_offset=1))],
-            ), focused_element=self.editor_control),
-            key_bindings=self.bindings,
+            layout=Layout(root, focused_element=self.editor_control),
+            key_bindings=merge_key_bindings([self.bindings, companion_keys]),
+            before_render=restore_focus,
             full_screen=True,
             mouse_support=Condition(lambda: not self._exiting),
             style=Style.from_dict({
@@ -571,9 +646,12 @@ class CliApplication:
             with self._capture_runtime_logs():
                 try:
                     await self.sessions.start()
+                    for job in (self.companion.monitor, self.companion.animate, self.companion.observe):
+                        self.lifecycle.spawn(job(), stop=TaskStop.CANCEL, name=f"companion-{job.__name__}")
                     await self.application.run_async(pre_run=self._before_ui)
                 finally:
                     await self.lifecycle.shutdown()
+                    await self.companion.finish()
         finally:
             # Removing a handler restores SIG_DFL, so a signal during
             # runner.close() terminates the process directly.
@@ -689,9 +767,10 @@ class CliApplication:
         self._git_task = self.lifecycle.spawn(self._watch_git(), stop=TaskStop.CANCEL, name="git-watch")
 
     async def _watch_git(self) -> None:
-        """Keep the footer's git summary fresh without ever blocking a render pass."""
+        """Keep the Companion Git card fresh without ever blocking a render pass."""
         while True:
             summary = await self._git.refresh()
+            self.companion.git_changed(summary)
             if summary != self._git_summary:
                 self._git_summary = summary
                 self.application.invalidate()
@@ -911,6 +990,8 @@ class CliApplication:
 
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
+        self.companion.sync_session()
+        self.lain_buffer.reset()
         self.skills._clear_skill_draft()
         self.transcript.clear_transcript_selection()
         self.dialogs.current = None
@@ -1039,9 +1120,10 @@ class CliApplication:
             return
         if action is InputAction.CLEAR_INPUT:
             buffer.reset()
-            self.drafts.pasted.clear()
-            self.drafts.skill.clear()
-            self.state.attachments.clear()
+            if buffer is not self.lain_buffer:
+                self.drafts.pasted.clear()
+                self.drafts.skill.clear()
+                self.state.attachments.clear()
             self._show_input_cleared_hint()
             return
         if action is InputAction.REQUEST_EXIT:
@@ -1072,15 +1154,31 @@ class CliApplication:
         return Path(sandbox.workspace) if sandbox is not None else Path.cwd()
 
     def _editor_width(self) -> int:
-        return max(1, self.application.output.get_size().columns - get_cwidth(EDITOR_PROMPT))
+        return max(1, self._width() - get_cwidth(EDITOR_PROMPT))
+
+    def _companion_geometry(self) -> tuple[int, int]:
+        if not hasattr(self, "application"):
+            return 0, 0
+        size = self.application.output.get_size()
+        return geometry(
+            size.columns, size.rows, editor_bottom_rows=FOOTER_LINES + EDITOR_PADDING_LINES
+        )
+
+    def _companion_viewport(self) -> tuple[int, int]:
+        width, height = self._companion_geometry()
+        return max(0, width - 4), height
 
     def _width(self) -> int:
         try:
             columns = self.application.output.get_size().columns
         except Exception:  # noqa: BLE001
             columns = 100
-        return max(20, columns)
+        right, _ = self._companion_geometry()
+        return max(1, columns - right - bool(right))
 
+
+    def _queue_clipboard_copy(self, content: str) -> None:
+        self.lifecycle.spawn(self._copy_selection(content), stop=TaskStop.CANCEL, name="clipboard-copy")
 
     async def _copy_selection(self, content: str) -> None:
         try:
@@ -1183,7 +1281,7 @@ class CliApplication:
     def _footer_text(self):  # type: ignore[no-untyped-def]
         mode = self.runner.prepared.execution_mode.value.lower()
         if mode == "sandboxed":
-            mode = "sbx"
+            mode = "sandbox"
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
@@ -1203,64 +1301,78 @@ class CliApplication:
             self.state.usage, self.runner.context_window(),
             empty_session=self.state.context_pristine and not self.state.running,
         )
-        # Row 1: workspace · model · resume on the left, git on the right.
-        # Row 2: sandbox/permission on the left, context on the right.
-        # The left side always truncates before the right side.
-        git = self._git_summary.label() or "⎇ no git"
-        fs_labels = {"full-access": "full", "restricted": "rest"}
-        current_filesystem = self.runner.sandbox_mode()
-        filesystem = fs_labels.get(current_filesystem, current_filesystem)
+        filesystem = self.runner.sandbox_mode()
         pending_filesystem = self.runner.pending_sandbox_mode()
         if pending_filesystem is not None:
-            filesystem += f"→{fs_labels.get(pending_filesystem, pending_filesystem)}(pending)"
-        status = f" {mode}:{filesystem} · p:{perm}"
-        git_fit = _truncate_cells(git, width)
-        available = max(1, width - get_cwidth(git_fit) - 1)
-        fragments: list[tuple[str, str]] = []
-        if available < 6 + get_cwidth(resume_id) + 2:
-            # Extremely narrow: keep the session handle and the git label only.
-            resume_fit = _truncate_cells(resume_id, available)
-            gap = " " * max(1, width - get_cwidth(resume_fit) - get_cwidth(git_fit))
-            fragments.append(("class:footer-resume-id", resume_fit))
-            fragments.append(("class:footer", gap + git_fit + "\n"))
+            filesystem = f"{filesystem}→{pending_filesystem}(pending)"
+        status = f" {mode}/permission:{filesystem}/{perm}"
+        fragments = []
+        if width < get_cwidth(resume_id) + 8:
+            fragments.append(("class:footer-resume-id", _truncate_cells(resume_id, width)))
         else:
-            model_width = max(1, available - get_cwidth(resume_id) - 6)
-            model_fit = _truncate_cells(model_label, model_width)
-            workspace_width = max(1, available - get_cwidth(model_fit) - get_cwidth(resume_id) - 6)
-            workspace_fit = _truncate_cells(f" {format_workspace_path(self._workspace())}", workspace_width)
-            left_width = get_cwidth(workspace_fit) + get_cwidth(model_fit) + get_cwidth(resume_id) + 6
-            first_padding = " " * max(1, width - left_width - get_cwidth(git_fit))
-            if workspace_fit.startswith(" "):
-                fragments.append(("class:footer", " "))
-                fragments.append(("class:footer-workspace", workspace_fit[1:]))
-            else:
-                fragments.append(("class:footer-workspace", workspace_fit))
-            fragments.append(("class:footer", " · "))
-            fragments.append(("class:footer-model", model_fit))
-            fragments.append(("class:footer", " · "))
-            fragments.append(("class:footer-resume-id", resume_id))
-            fragments.append(("class:footer", first_padding + git_fit + "\n"))
+            model_fit = _truncate_cells(model_label, width - get_cwidth(resume_id) - 7)
+            workspace_fit = _truncate_cells(format_workspace_path(self._workspace()),
+                                            width - get_cwidth(model_fit) - get_cwidth(resume_id) - 7)
+            fragments.extend([("class:footer", " "), ("class:footer-workspace", workspace_fit),
+                              ("class:footer", " · "), ("class:footer-model", model_fit),
+                              ("class:footer", " · "), ("class:footer-resume-id", resume_id)])
+        fragments.append(("class:footer", "\n"))
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
-    def _create_bindings(self) -> KeyBindings:
-        return create_bindings(self, lambda: time.monotonic())
+    def _companion_session_blocks(self, thread_id, budget):
+        store = self.runner.session_store
+        if not thread_id or store is None:
+            return []
+        # The store owns schema creation and migrations. A private read-only
+        # connection avoids waiting on the active graph's saver lock.
+        with readonly_database(store.path, budget) as database:
+            database.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 8 * 1024 * 1024)
+            columns = {row[1] for row in database.execute("PRAGMA table_info(writes)")}
+            if not columns:
+                return []
+            saver = SqliteSaver(database, serde=store.checkpointer.serde)
+            saver.is_setup = True
+            saver._has_task_path = "task_path" in columns
+            graph = self.runner.prepared.graph.copy({"checkpointer": saver})
+            blocks, _, truncated = read_transcript(
+                graph, thread_id, max_messages=400, include_thinking=False,
+            )
+            return blocks, truncated
 
+    def _companion_profile(self):
+        model = self.runner.current_model()
+        return (model.id if model else "fixed model", self.runner.reasoning_effort())
 
     def _on_event_thread(self, event: RunEvent) -> None:
         epoch = _RUN_EPOCH.get()
+        context = None
+        if event.type in {"run_started", "turn_started", "turn_completed", "companion_tool", "tool_started", "tool_resumed", "tool_completed", "interaction_requested",
+                          "run_failed", "run_completed", "run_cancelled"}:
+            scope = observation_scope.get()
+            thread_id = scope[0] if scope else self.runner.thread_id
+            if scope and not event.run_id:
+                event = replace(event, run_id=scope[1], turn_id=scope[2])
+            context = (thread_id, *self._companion_profile(), time.time(), time.monotonic())
         if self.run_view.loop is not None:
-            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch)
+            self.run_view.loop.call_soon_threadsafe(self._apply_run_event, event, epoch, context)
         else:
-            self._apply_run_event(event, epoch)
+            self._apply_run_event(event, epoch, context)
 
-    def _apply_run_event(self, event: RunEvent, epoch: int | None) -> None:
+    def _apply_run_event(self, event: RunEvent, epoch: int | None, context=None) -> None:
+        if event.type == "companion_tool":
+            if context and event.result["scope"][0] == self.runner.thread_id:
+                self.companion.child_event(event.result, context[-2])
+            return
         # Events without an epoch come from the UI thread (steering, control).
         # Summary metadata carries its own thread_id and survives a later UI run.
         if (epoch is not None and epoch != self.run_view.epoch
                 and event.type != "session_summary_requested"):
             return
         self.run_events._apply_event(event)
+        if context and context[0] == self.runner.thread_id:
+            _, model, effort, wall, tick = context
+            self.companion.event(event, model, effort, "main", wall, tick)
 
 
     def _announce_mcp_switch(self) -> None:

@@ -40,7 +40,7 @@ def interrupt_payloads(interrupts: Any) -> list[dict[str, Any]]:
     return payloads
 
 
-def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, Any], *, state=None) -> list[dict[str, Any]]:
     requested: list[dict[str, Any]] = []
     for interrupt in interrupts if isinstance(interrupts, (list, tuple)) else [interrupts]:
         value = getattr(interrupt, "value", interrupt)
@@ -53,7 +53,8 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
                 })
     tool_call_ids: dict[str, list[str]] = {}
     try:
-        state = graph.get_state(config)
+        if state is None:
+            state = graph.get_state(config)
         messages = state.values.get("messages", [])
         for message in reversed(messages):
             if isinstance(message, AIMessage) and message.tool_calls:
@@ -100,7 +101,7 @@ def is_valid_hitl_interrupt(payload: Any) -> bool:
 
 
 def classify_interrupt(
-    interrupts: Any, graph: Any, config: dict[str, Any],
+    interrupts: Any, graph: Any, config: dict[str, Any], *, state=None,
 ) -> InterruptState:
     payloads = interrupt_payloads(interrupts)
     if not payloads:
@@ -114,7 +115,7 @@ def classify_interrupt(
         if kind == "runtime_config_boundary":
             return InterruptState(InterruptKind.RUNTIME_CONFIG_BOUNDARY, payload)
         if is_valid_hitl_interrupt(payload):
-            pending = resolve_pending_tool_calls(interrupts, graph, config)
+            pending = resolve_pending_tool_calls(interrupts, graph, config, state=state)
             return InterruptState(InterruptKind.WAITING_CONFIRMATION, payload, tuple(pending))
         if kind:
             raise UnknownInterruptError(f"Unsupported interrupt type: {kind!r}")
@@ -128,7 +129,7 @@ def interrupt_kind_from_state(graph: Any, config: dict[str, Any]) -> InterruptSt
     interrupts = getattr(state, "interrupts", ()) or ()
     if not interrupts:
         return None
-    return classify_interrupt(interrupts, graph, config)
+    return classify_interrupt(interrupts, graph, config, state=state)
 
 
 def _last_message_id(values: dict[str, Any]) -> str | None:
@@ -187,13 +188,17 @@ def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
     return {key: int(usage[key]) for key in _USAGE_KEYS if type(usage.get(key)) is int and usage[key] >= 0}
 
 
-def _usage_from_messages(messages: Any) -> dict[str, int]:
+def _usage_from_messages(messages: Any, *, model_id: str | None = None) -> dict[str, int]:
     """Most recent reported usage, which is the size of the context the model saw."""
     for message in reversed(list(messages or [])):
         if isinstance(message, AIMessage):
             if message.additional_kwargs.get("manual_compact_completed"):
                 return {}
-            return _usage_metadata_dict(message)
+            if model_id is not None and message.response_metadata.get("deep_agent_model_id") != model_id:
+                return {}
+            usage = _usage_metadata_dict(message)
+            if model_id is None or "input_tokens" in usage:
+                return usage
     return {}
 
 

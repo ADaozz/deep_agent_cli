@@ -38,8 +38,10 @@ from agent.runtime.configuration import RuntimeConfiguration
 from agent.runtime.graph_execution import GraphExecution
 from agent.execution.environment import (
     EnvironmentCache,
+    EnvironmentSnapshot,
     bubblewrap_backend,
     probe_sandbox,
+    render_environment_context,
     reset_environment_cache,
     set_environment_cache,
 )
@@ -64,6 +66,7 @@ from agent.runtime.events import (
     is_valid_hitl_interrupt as is_valid_hitl_interrupt,
 )
 from agent.runtime.contracts import (
+    observation_scope,
     CompactResult,
     InterruptKind,
     InterruptState,
@@ -534,7 +537,7 @@ class AgentRunner:
         return self.session_store.model_metrics_history(self.thread_id) if self.session_store is not None else []
 
     def latest_usage(self) -> dict[str, int]:
-        """Token usage of the most recent model call still held in the checkpoint."""
+        """Latest valid input usage from the current model in the effective checkpoint."""
         try:
             state = self.prepared.graph.get_state(self._thread_config())
             if self._context_usage_invalidated:
@@ -546,19 +549,7 @@ class AgentRunner:
                 messages = middleware._summarization._apply_event_to_messages(
                     messages, values.get("_summarization_event"),
                 )
-            last = next((item for item in reversed(messages) if isinstance(item, AIMessage)), None)
-            if last is None:
-                return {}
-            model_id = last.response_metadata.get("deep_agent_model_id")
-            if model_id != self.configuration.current_model_id:
-                # Without a source ID, usage cannot be safely attributed
-                # after a model/source switch.
-                return {}
-            if self.session_store is not None:
-                saved = self.session_store.get(self.thread_id)
-                if saved and saved.last_run_status in {StopReason.ABORTED, StopReason.ERROR}:
-                    return {}
-            return _usage_from_messages(messages)
+            return _usage_from_messages(messages, model_id=self.configuration.current_model_id)
         except Exception:  # noqa: BLE001
             # 恢复时压缩中间件私有接口或存储读取失败，保守返回 Unknown。
             return {}
@@ -1117,16 +1108,20 @@ class AgentRunner:
                 model_id=self.configuration.current_model_id, permission_mode=self.configuration.permission_mode.value,
                 reasoning_effort=self.configuration.reasoning_effort,
             )
+            summary = None
             if (self.settings is not None and isinstance(self._chat_model, ChatOpenAI)
                     and self._summary_eligibility.needs_inspection(self.thread_id)):
                 info = self.session_store.get(self.thread_id)
-                self._summary_eligibility.begin(
+                summary = self._summary_eligibility.begin(
                     self.thread_id, redact_summary_input(text, self.summary_secrets())[:2000],
+                    self.configuration.current_model_id,
                     has_content=self.thread_has_content(), has_summary=bool(info and info.summary),
                 )
             title = text.strip().splitlines()[0][:80] if text.strip() else None
             self.session_store.touch(self.thread_id, title=title,
                                      last_run_status=StopReason.PENDING)
+            if summary is not None:
+                _emit(on_event or self.on_event, RunEvent(type="session_summary_requested", result=summary))
         return self._stream(graph_input, on_delta=on_delta, on_event=on_event)
 
     def _can_materialize_attachments(self) -> bool:
@@ -1318,9 +1313,7 @@ class AgentRunner:
         event_handler = on_event or self.on_event
         config = self._thread_config()
         def stream_usage(usage: dict[str, int]) -> None:
-            if not usage:
-                self._context_usage_invalidated = True
-            elif "input_tokens" in usage:
+            if "input_tokens" in usage:
                 self._context_usage_invalidated = False
             _emit(event_handler, RunEvent(type="usage", result=usage))
 
@@ -1379,8 +1372,9 @@ class AgentRunner:
         environment_token = set_environment_cache(self._environment)
         stream_owner_token = set_stream_owner(self.control)
         self._busy = True
-        self._context_usage_invalidated = True
-        _emit(event_handler, RunEvent(type="run_started"))
+        run_id, turn_id = uuid4().hex, uuid4().hex
+        scope_token = observation_scope.set((self.thread_id, run_id, turn_id))
+        _emit(event_handler, RunEvent(type="run_started", run_id=run_id, turn_id=turn_id))
 
         result: RunResult | None = None
         turn_started = time.monotonic()
@@ -1403,11 +1397,6 @@ class AgentRunner:
                 content=output,
                 result=timing,
             ))
-            summary = self._summary_eligibility.complete(
-                self.thread_id, self.configuration.current_model_id,
-            )
-            if summary is not None:
-                _emit(event_handler, RunEvent(type="session_summary_requested", result=summary))
 
         try:
             result = self._stream_once(graph_input, config, run_control, event_handler)
@@ -1426,7 +1415,10 @@ class AgentRunner:
                 run_control = self.control.begin_run()
                 self._seen_tool_calls.clear()
                 turn_started = time.monotonic()
+                turn_id = uuid4().hex
+                observation_scope.set((self.thread_id, run_id, turn_id))
                 self._apply_pending_runtime_config(event_handler)
+                _emit(event_handler, RunEvent(type="turn_started", run_id=run_id, turn_id=turn_id))
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)] if text is not None
                      else [notification_message(item) for item in notices]},
@@ -1441,6 +1433,7 @@ class AgentRunner:
                 self._touch_status(StopReason.STOP)
             return result
         finally:
+            observation_scope.reset(scope_token)
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
@@ -1467,20 +1460,27 @@ class AgentRunner:
             result = self._stream_once(Command(resume=True), config, run_control, event_handler)
         return result
 
-    def _refresh_environment_snapshot(self) -> None:
+    def execute_environment_context(self) -> str:
+        """Provide the main agent's execute view without replacing its active snapshot."""
+        snapshot = self._ensure_environment_snapshot(activate=False)
+        return render_environment_context(snapshot) if snapshot is not None else ""
+
+    def _ensure_environment_snapshot(self, *, activate: bool) -> EnvironmentSnapshot | None:
         """Reuse a matching sandbox fingerprint. Probe again only when it changed."""
         try:
-            if self._runtime is None or self._runtime.thread_id is None:
-                return
+            runtime = self._runtime
+            thread_id = runtime.thread_id if runtime is not None else None
+            if thread_id is None:
+                return None
             backend = bubblewrap_backend(self.prepared.backend)
             if backend is None:
-                self._environment.snapshot = None
-                return
-            self._environment.ensure(
-                self._runtime.thread_id, backend.config, self.configuration.permission_mode, probe=lambda: probe_sandbox(backend),
+                return None
+            return self._environment.ensure(
+                thread_id, backend.config, self.configuration.permission_mode,
+                probe=lambda: probe_sandbox(backend), activate=activate,
             )
         except Exception:  # noqa: BLE001
-            self._environment.snapshot = None
+            return None
 
     def _stream_once(
         self,
@@ -1489,20 +1489,37 @@ class AgentRunner:
         run_control: Any,
         event_handler: RunEventHandler | None,
     ) -> RunResult:
-        self._refresh_environment_snapshot()
+        if self._ensure_environment_snapshot(activate=True) is None:
+            self._environment.snapshot = None
         state_values = self.prepared.graph.get_state(self._thread_config()).values or {}
-        self._subagent_tool_ids = {
-            str(call.get("id") or "") for message in state_values.get("messages", [])
-            if isinstance(message, AIMessage) for call in message.tool_calls or []
-            if call.get("name") == "start_task"
-        }
+        resume_calls = {}
+        self._subagent_tool_ids.clear()
+        if isinstance(graph_input, Command):
+            completed = set()
+            for message in reversed(state_values.get("messages", [])):
+                if isinstance(message, ToolMessage):
+                    completed.add(message.tool_call_id)
+                if isinstance(message, AIMessage):
+                    for call in message.tool_calls:
+                        call_id = str(call.get("id") or "")
+                        if not call_id or call_id in completed:
+                            continue
+                        resume_calls[call_id] = message.id or ""
+                        name = str(call.get("name") or "tool")
+                        if name == "start_task":
+                            self._subagent_tool_ids.add(call_id)
+                        _emit(event_handler, RunEvent(
+                            "tool_resumed", tool_call_id=call_id, message_id=message.id or "", name=name,
+                            arguments=call["args"],
+                        ))
+                    break
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
             graph=self.prepared.graph, control=self.control, record_status=self._touch_status,
         )
         return execution.run(
             graph_input, config, thread_config=self._thread_config(), run_control=run_control,
-            on_update=lambda chunk: self._emit_update_events(chunk, event_handler),
+            on_update=lambda chunk: self._emit_update_events(chunk, event_handler, resume_calls),
             handler=event_handler, on_cancelled=lambda: self._cancelled_result(event_handler),
             answer_committed=lambda: self._final_answer_committed(last_message_id),
         )
@@ -1551,15 +1568,21 @@ class AgentRunner:
         if self.session_store is not None:
             self.session_store.touch(self.thread_id, last_run_status=reason)
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
-            self._context_usage_invalidated = True
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
-    def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None) -> None:
+    def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None, resume_calls=None) -> None:
         events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
         # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
         if saw_input_usage:
             self._context_usage_invalidated = False
         for event in events:
+            if resume_calls and event.tool_call_id in resume_calls:
+                origin = resume_calls[event.tool_call_id]
+                if event.type == "tool_started" and event.message_id == origin:
+                    # HITL can replay the saved AI message after tool_resumed.
+                    event = replace(event, checkpoint_replay=True)
+                if event.type == "tool_completed":
+                    event = replace(event, message_id=resume_calls.pop(event.tool_call_id))
             if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:

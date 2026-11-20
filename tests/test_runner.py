@@ -597,7 +597,7 @@ def test_current_interrupt_is_none_without_pending_interrupt() -> None:
     assert runner.current_interrupt() is None
 
 
-def test_latest_usage_does_not_fall_back_after_response_without_usage():
+def test_latest_usage_keeps_last_input_count_after_response_without_usage():
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="first", usage_metadata={"input_tokens": 30, "output_tokens": 5, "total_tokens": 35}),
         AIMessage(content="no usage"),
@@ -605,10 +605,10 @@ def test_latest_usage_does_not_fall_back_after_response_without_usage():
     runner.invoke("first")
     assert runner.latest_usage()["input_tokens"] == 30
     runner.invoke("second")
-    assert runner.latest_usage() == {}
+    assert runner.latest_usage()["input_tokens"] == 30
 
 
-def test_usage_identity_is_checkpointed_and_invalidated_on_cancel():
+def test_usage_identity_is_checkpointed_and_preserved_on_cancel():
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="first", usage_metadata={"input_tokens": 0, "output_tokens": 5, "total_tokens": 5}),
     ]), backend=StateBackend())
@@ -618,7 +618,7 @@ def test_usage_identity_is_checkpointed_and_invalidated_on_cancel():
     assert last.response_metadata["deep_agent_model_id"] == runner.configuration.current_model_id
     from agent.sessions.contracts import StopReason
     runner._touch_status(StopReason.ABORTED)
-    assert runner.latest_usage() == {}
+    assert runner.latest_usage()["input_tokens"] == 0
 
 
 def test_legacy_checkpoint_usage_is_unknown_without_model_identity():
@@ -644,11 +644,11 @@ def test_graph_update_without_usage_preserves_current_stream_usage(input_tokens)
     runner._emit_update_events({"model": {"messages": [AIMessage(content="done")]}}, state.apply)
     assert state.usage["input_tokens"] == input_tokens
     assert runner._context_usage_invalidated is False
-    # Runner invalidates current usage; the footer retains the last reported reading.
+    # An empty start or graph update preserves the last reported reading.
     callback.on_llm_start({}, [])
     runner._emit_update_events({"model": {"messages": [AIMessage(content="no usage")]}}, state.apply)
     assert state.usage["input_tokens"] == input_tokens
-    assert runner._context_usage_invalidated is True
+    assert runner._context_usage_invalidated is False
 
 
 @pytest.mark.parametrize("error", [TypeError("signature changed"), RuntimeError("bad summary")])

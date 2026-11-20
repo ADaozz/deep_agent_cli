@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from agent.cli.lifecycle import TaskStop
 from agent.models.session_summary import generate_session_summary
 from agent.sessions.contracts import SessionInfo
-from agent.sessions.summary import SessionSummaryRequest, validate_summary
+from agent.sessions.summary import (
+    SessionSummaryRequest, fallback_query_summary, validate_summary,
+)
 
 if TYPE_CHECKING:
     from agent.cli.lifecycle import AppLifecycle
@@ -65,15 +67,25 @@ class SessionSummaries:
         )
 
     async def _complete(self, request: SessionSummaryRequest) -> None:
+        secrets = self.runner.summary_secrets()
+        title = None
         try:
             async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):
-                title = await self.generate(request)
-            title = validate_summary(title or "", self.runner.summary_secrets())
-            if title is None or self.lifecycle().exiting:
-                return
-            store = self.runner.session_store
-            if store is None:
-                return
+                raw = await self.generate(request)
+            title = validate_summary(raw or "", secrets)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Timeout or model errors fall back to a short query snippet.
+            title = None
+        if title is None:
+            title = fallback_query_summary(request.user_request, secrets)
+        if title is None or self.lifecycle().exiting:
+            return
+        store = self.runner.session_store
+        if store is None:
+            return
+        try:
             if store.set_summary_if_empty(request.thread_id, title):
                 self._labels[request.thread_id] = title
             else:
@@ -81,8 +93,6 @@ class SessionSummaries:
                 if info is not None:
                     self.remember(info)
             self.invalidate()
-        except asyncio.CancelledError:
-            raise
         except Exception:
             # An optional label must never fail or overwrite the coding task.
             return

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Callable
+
+
+# Captured before a delegated task enters its isolated execution context.
+observation_scope: ContextVar[tuple[str, str, str] | None] = ContextVar("observation_scope", default=None)
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,9 @@ class RunEvent:
     # Structured tool result payload (ToolMessage.artifact), forwarded as-is
     # for every tool, not just execute.
     artifact: Any = None
+    run_id: str = ""
+    turn_id: str = ""
+    checkpoint_replay: bool = False
 
 
 @dataclass(frozen=True)

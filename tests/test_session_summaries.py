@@ -19,7 +19,8 @@ from agent.models.session_summary import generate_session_summary
 from agent.runtime.runner import AgentRunner
 from agent.sessions.store import SessionStore
 from agent.sessions.summary import (
-    SessionSummaryRequest, SummaryEligibility, redact_summary_input, validate_summary,
+    SessionSummaryRequest, SummaryEligibility, fallback_query_summary,
+    redact_summary_input, validate_summary,
 )
 from tests.conftest import scripted_model
 from tests.test_protocol_api import make_model, response_body, sse
@@ -65,18 +66,12 @@ def test_summary_migration_preserves_catalog_and_checkpoint(tmp_path):
 
 def test_only_empty_new_sessions_become_eligible_and_attempt_once():
     policy = SummaryEligibility()
-    policy.begin("historical", "existing", has_content=True, has_summary=False)
-    assert policy.complete("historical", "a") is None
+    assert policy.begin("historical", "existing", "a", has_content=True, has_summary=False) is None
     assert not policy.needs_inspection("historical")
-    policy.begin("saved", "request", has_content=False, has_summary=True)
-    assert policy.complete("saved", "a") is None
-    policy.begin("new", "request", has_content=False, has_summary=False)
-    # A tool pause does not consume eligibility; the caller completes only after an answer.
-    policy.begin("new", "later request", has_content=True, has_summary=False)
-    request = policy.complete("new", "a")
+    assert policy.begin("saved", "request", "a", has_content=False, has_summary=True) is None
+    request = policy.begin("new", "request", "a", has_content=False, has_summary=False)
     assert request == SessionSummaryRequest("new", "request", "a")
-    policy.begin("new", "later task", has_content=True, has_summary=False)
-    assert policy.complete("new", "b") is None
+    assert policy.begin("new", "later task", "b", has_content=False, has_summary=False) is None
 
 
 @pytest.mark.parametrize("unsafe", [
@@ -90,10 +85,20 @@ def test_redaction_removes_paths_and_credentials(unsafe):
     assert validate_summary(TITLE + " " + unsafe) is None
 
 
-@pytest.mark.parametrize("invalid", ["", "修复登录", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,
+@pytest.mark.parametrize("invalid", ["", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,
                                        TITLE + " /private/key", TITLE + "\x1b[0m", "# " + TITLE, "1. " + TITLE])
 def test_invalid_titles_are_not_saved(invalid):
     assert validate_summary(invalid) is None
+
+
+def test_short_titles_are_accepted_without_han_count_floor():
+    assert validate_summary("修复登录") == "修复登录"
+
+
+def test_fallback_query_summary_truncates_to_ten_chars():
+    assert fallback_query_summary("从github上clone https://github.com/ADaozz/deep_agent_cli 仓库") == "从github上cl"
+    assert fallback_query_summary("短问") == "短问"
+    assert fallback_query_summary("https://example.test/only") is None
 
 
 def test_titles_keep_technical_names_and_filter_known_secrets():
@@ -142,8 +147,11 @@ def test_title_generator_uses_isolated_nonstreaming_protocol_request(api, monkey
 
 
 @pytest.mark.parametrize("api", ["responses", "chat_completions"])
-def test_first_completed_turn_emits_one_bound_summary_request(api, tmp_path):
+def test_first_message_emits_one_bound_summary_request_before_model_call(api, tmp_path):
+    events = []
+
     def serve(request):
+        assert any(event.type == "session_summary_requested" for event in events)
         if api == "chat_completions":
             return sse([{"id": "answer", "object": "chat.completion.chunk", "created": 0, "model": "arbitrary-model",
                          "choices": [{"index": 0, "delta": {"content": "已修复登录异常"}, "finish_reason": "stop"}]}], done=True)
@@ -157,11 +165,12 @@ def test_first_completed_turn_emits_one_bound_summary_request(api, tmp_path):
     store = SessionStore(tmp_path / "sessions.sqlite3")
     runner = AgentRunner(model=model, backend=StateBackend(), session_store=store,
                          settings=Settings(llm_profiles=(profile,), llm_default=profile.id))
-    events = []
     try:
         assert runner.invoke("修复登录 /private/config.env configured-secret", on_event=events.append).status == "completed"
         summaries = [e.result for e in events if e.type == "session_summary_requested"]
         assert len(summaries) == 1
+        event_types = [event.type for event in events]
+        assert event_types.index("session_summary_requested") < event_types.index("turn_completed")
         assert summaries[0].thread_id == runner.thread_id
         assert summaries[0].model_id == profile.id
         assert "/private" not in summaries[0].user_request and "configured-secret" not in summaries[0].user_request
@@ -238,10 +247,11 @@ def test_bad_background_result_falls_back_without_affecting_run(tmp_path, result
             return result
         app.session_summaries.generate = generate
         try:
-            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "default"))
+            query = "请修复登录流程中的状态同步"
+            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, query, "default"))
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
-            assert store.get(runner.thread_id).summary is None
-            assert app.session_summaries.label(runner.thread_id) == runner.thread_id
+            assert store.get(runner.thread_id).summary == "请修复登录流程中的状"
+            assert app.session_summaries.label(runner.thread_id) == "请修复登录流程中的状"
             assert app.state.status == "Ready"
         finally:
             await app.lifecycle.shutdown()
@@ -314,14 +324,14 @@ def test_summary_failure_does_not_retry_or_change_coding_state(tmp_path, monkeyp
             await asyncio.Event().wait()
         monkeypatch.setattr("agent.cli.session_summaries.SUMMARY_TIMEOUT_SECONDS", 0.01)
         app.session_summaries.generate = generate
-        request = SessionSummaryRequest(runner.thread_id, "request", "default")
+        request = SessionSummaryRequest(runner.thread_id, "请检查超时回退摘要", "default")
         try:
             app.session_summaries.request(request)
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
             app.session_summaries.request(request)
             assert len(calls) == 1
             assert app.state.status == "Ready"
-            assert store.get(runner.thread_id).summary is None
+            assert store.get(runner.thread_id).summary == "请检查超时回退摘要"
         finally:
             await app.lifecycle.shutdown()
             runner.close()
@@ -361,7 +371,7 @@ def test_model_title_timeout_and_cancellation_close_owned_clients(monkeypatch, c
     asyncio.run(scenario())
 
 
-def test_queued_turn_does_not_replace_first_request_or_first_result(tmp_path):
+def test_queued_turn_does_not_replace_first_summary_request(tmp_path):
     replies = iter(("first answer", "queued answer"))
     def serve(request):
         return sse([{

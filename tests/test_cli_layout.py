@@ -22,6 +22,7 @@ from agent.cli.rendering import (
 )
 from agent.cli.state import CliState, ToolBlock, touch
 from agent.bootstrap.config import Settings
+from agent.execution.types import ExecutionMode
 from agent.runtime.runner import AgentRunner
 from agent.runtime.contracts import RunEvent
 from agent.sessions.contracts import TranscriptBlock
@@ -700,13 +701,32 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         lines = footer.splitlines()
         assert len(lines) == FOOTER_LINES
         assert lines[0].startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-m")
-        assert lines[0].rstrip().endswith("⎇ checking git")
+        assert "⎇" not in lines[0]
         assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
         assert "Ready" not in footer
-        assert "p:" in lines[1]
+        assert lines[1].strip() == "custom/permission:restricted/ask"
         assert not app._status_visible()
         assert "".join(value for _, value in app._status_text()) == ""
+
+
+def test_footer_spells_out_sandbox_and_pending_mode(monkeypatch) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        settings=Settings.from_mapping({"sandbox": {"mode": "full-access"}}),
+    )
+    monkeypatch.setattr(runner.prepared, "execution_mode", ExecutionMode.SANDBOXED)
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 80)
+        assert fragment_list_to_text(app._footer_text()).splitlines()[1].strip() == (
+            "sandbox/permission:full-access/ask"
+        )
+        runner.configuration.pending_sandbox_mode = "restricted"
+        assert fragment_list_to_text(app._footer_text()).splitlines()[1].strip() == (
+            "sandbox/permission:full-access→restricted(pending)/ask"
+        )
 
 
 def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypatch) -> None:
@@ -722,7 +742,7 @@ def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypa
         fragments = list(app._footer_text())
         first_line = "".join(value for _, value in fragments).splitlines()[0]
         assert first_line.startswith(f" {format_workspace_path(app._workspace())} · qwen3.5-plus · default · footer-c")
-        assert first_line.rstrip().endswith("⎇ checking git")
+        assert "⎇" not in first_line
         assert any(style == "class:footer-workspace" and format_workspace_path(app._workspace()) in value for style, value in fragments)
         assert ("class:footer-resume-id", "footer-colors") in fragments
         assert ("class:footer-model", "qwen3.5-plus · default") in fragments
@@ -743,8 +763,8 @@ def test_footer_keeps_the_right_side_in_narrow_terminal(monkeypatch) -> None:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
         monkeypatch.setattr(app, "_width", lambda: 20)
         lines = "".join(value for _, value in app._footer_text()).splitlines()
-        # The right side wins in a narrow terminal; the left side truncates.
-        assert lines[0].rstrip().endswith("⎇ checking git")
+        # The session handle remains visible as workspace and model truncate.
+        assert "⎇" not in lines[0]
         assert "narr" in lines[0]
         assert len(lines[0]) <= 20
         assert len(lines[1]) <= 20
@@ -772,7 +792,7 @@ def test_footer_reports_workspace_git_and_context_usage() -> None:
         ))
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].rstrip().endswith("⎇ main · 5 changed")
+        assert "5 changed" not in lines[0]
         assert lines[1].rstrip().endswith("1.0m Context · 3.9% used")
 
 
@@ -810,7 +830,7 @@ def test_footer_places_context_on_execution_settings_line_when_git_unavailable()
         app._git_summary = GitSummary()
         lines = "".join(fragment[1] for fragment in app._footer_text()).splitlines()
         assert len(lines) == FOOTER_LINES
-        assert lines[0].rstrip().endswith("⎇ no git")
+        assert "no git" not in lines[0]
         assert lines[1].rstrip().endswith("1.0m Context · 0.0% used")
 
         app.state.apply(RunEvent(type="run_started"))

@@ -396,7 +396,8 @@ def _same_owner(cached: Any, current: Any) -> bool:
 class TranscriptRenderer:
     """Per-unit render cache: frozen history is replayed, only changes re-render."""
 
-    def __init__(self, timezone: ZoneInfo | None = None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> None:
+    def __init__(self, timezone: ZoneInfo | None = None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, show_header: bool = True) -> None:
+        self._show_header = show_header
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
         self._units: dict[bool, TranscriptUnitMemo] = {}
         self._documents: dict[bool, tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
@@ -411,6 +412,8 @@ class TranscriptRenderer:
         mode = state.tools_expanded
         memo = self._units.setdefault(mode, TranscriptUnitMemo())
         units = transcript_units(state, self._timezone, width, limits=self._limits, memo=memo)
+        if not self._show_header:
+            units = units[1:]
         live_ids = {id(block) for block in state.blocks}
         live = {"header"}
         live.update(key for key in self._cache if isinstance(key, tuple) and len(key) > 1 and key[1] in live_ids)

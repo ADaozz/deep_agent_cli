@@ -234,7 +234,7 @@ def test_async_cancellation_reaches_http_and_stdio_server_and_client_recovers(tm
         assert not manager._bridge._thread.is_alive()
 
 
-def test_async_timeout_and_cancel_context_match_sync(tmp_path, http_mcp):
+def test_async_timeout_matches_sync(tmp_path, http_mcp):
     import asyncio
 
     manager = MCPManager(tmp_path / "mcp.json", call_timeout=.15, connect_timeout=5)
@@ -253,6 +253,21 @@ def test_async_timeout_and_cancel_context_match_sync(tmp_path, http_mcp):
                 async with asyncio.timeout(3):
                     while not cancelled.exists():
                         await asyncio.sleep(.01)
+        asyncio.run(check())
+    finally:
+        manager.close()
+
+
+def test_async_cancel_context_reaches_server(tmp_path, http_mcp):
+    import asyncio
+
+    # Allow the server to signal readiness before testing explicit cancellation.
+    manager = MCPManager(tmp_path / "mcp.json", call_timeout=10, connect_timeout=5)
+    try:
+        assert manager.add_from_fields(name="local", transport="streamable_http", url=http_mcp.url).ok
+        tool = next(t for t in manager.get("local").tools if t.name.endswith("__wait_for_cancel"))
+
+        async def check():
             event = threading.Event()
             set_cancel_context(ToolCancelContext(tool.name, "async-context", event))
             try:

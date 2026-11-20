@@ -130,3 +130,178 @@ def test_http_pause_then_resume_without_repeating_tool():
             assert sum(message["role"] == "tool" for message in requests[1]["messages"]) == 1
         finally:
             runner.close()
+
+
+def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, monkeypatch):
+    import asyncio
+    import os
+    import shlex
+    import subprocess
+    import sys
+
+    from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+    from langchain_core.messages import AIMessage
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from agent.cli.app import CliApplication
+    from agent.companion.timeline import SESSION_RELIABILITY
+    from tests.conftest import scripted_model
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    blocked = workspace / "not-executable"
+    blocked.write_text("fixture")
+    blocked.chmod(0o600)
+    (workspace / "test_lain_fixture.py").write_text(
+        "def test_fixture_comparison():\n    assert False, 'fixture comparison failed'\n",
+    )
+    canary = "opaque-companion-integration-secret"
+    monkeypatch.setenv("COMPANION_DEEPSEEK_API_KEY", canary)
+
+    cases = {
+        "dependency": ["-c", "import _lain_missing_fixture_"],
+        "assertion": ["-m", "pytest", "-q", "test_lain_fixture.py"],
+        "permission": ["-c", f"import subprocess; subprocess.run([{str(blocked)!r}], check=True)"],
+        "success": ["-c", f"print('fixture success {canary}')"],
+    }
+    commands = {key: shlex.join([sys.executable, *args]) for key, args in cases.items()}
+    release = threading.Event()
+    running = threading.Event()
+
+    class FixtureBackend(StateBackend, SandboxBackendProtocol):
+        id = "lain-integration-fixture"
+
+        def execute(self, command, *, timeout=None):
+            assert command in commands.values()
+            if command == commands["dependency"]:
+                running.set()
+                assert release.wait(5)
+            result = subprocess.run(
+                shlex.split(command), cwd=workspace, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, timeout=timeout or 5, check=False,
+            )
+            return ExecuteResponse(result.stdout, result.returncode, False)
+
+    explanation = "先后出现缺少模块、测试断言和权限错误，最后一次命令成功。"
+    answers = [
+        {"tool": "session_evidence", "id": "evidence", "args": {"kind": "sequence", "tool_name": "execute"}},
+        *({"tool": "inspect_current_session", "id": "detail-" + case,
+           "args": {"view": "tool_detail", "tool_call_id": case}} for case in cases),
+        {"text": explanation},
+        {"text": '{"behavior":"curious","message":"错误类型发生了变化。"}'},
+    ]
+
+    async def scenario(endpoint, requests):
+        launch = """
+import asyncio, sys
+from dataclasses import replace
+from agent.companion import worker
+endpoint = sys.argv.pop(1)
+build = worker.build_chat_model
+worker.build_chat_model = lambda profile, **kwargs: build(replace(profile, base_url=endpoint), **kwargs)
+asyncio.run(worker.main())
+"""
+
+        async def start_worker(directory, config):
+            return await asyncio.create_subprocess_exec(
+                sys.executable, "-c", launch, endpoint, str(directory),
+                str(config.persona_prompt), str(config.observation_prompt), str(config.chat_prompt),
+                str(config.rpc_timeout_seconds), str(config.question_timeout_seconds),
+                env={"PATH": os.environ["PATH"], "COMPANION_DEEPSEEK_API_KEY": canary},
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+        monkeypatch.setattr("agent.companion.controller.start_worker", start_worker)
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        model = scripted_model([
+            AIMessage(content="", tool_calls=[
+                {"name": "execute", "id": case, "args": {"command": command}}
+                for case, command in commands.items()
+            ]),
+            AIMessage(content="Main agent completed the fixture"),
+        ])
+        runner = AgentRunner(model=model, backend=FixtureBackend(), session_store=store)
+        try:
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, config_dir=tmp_path / "config", input=pipe, output=DummyOutput())
+                app.run_view.loop = asyncio.get_running_loop()
+                companion = app.companion
+
+                async def inspect(**args):
+                    return json.loads(await companion.host_query("inspect_current_session", args))
+
+                waiting = await asyncio.to_thread(runner.invoke, "Run the fixture commands.")
+                assert waiting.status == "waiting_confirmation"
+                pending_rows = (await inspect())["tools"]
+                assert len(pending_rows) == len(cases)
+                assert {row["status"] for row in pending_rows} == {"waiting"}
+
+                decisions = [{"tool_call_id": case, "decision": "approve"} for case in cases]
+                approved = asyncio.create_task(asyncio.to_thread(runner.decide_tools, decisions))
+                try:
+                    assert await asyncio.to_thread(running.wait, 4)
+                    live = await inspect(view="tool_detail", tool_call_id="dependency")
+                    assert live.get("status") == "running", live
+                    assert live["run_id"] == pending_rows[0]["run_id"]
+                finally:
+                    release.set()
+                    completed = await approved
+                assert completed.status == "completed"
+                rows = (await inspect())["tools"]
+                assert len(rows) == len(cases)
+                assert [row["tool_call_id"] for row in rows] == list(cases)
+                assert [row["error_category"] for row in rows] == ["dependency", "assertion", "permission", ""]
+                await companion.save_statistics()
+                state = companion.timeline
+                state.queue.clear()
+                incident = dict(id="fixture-incident", version=1, state="open", scope="session",
+                                turn=rows[-1]["turn_id"])
+                state.incidents[SESSION_RELIABILITY] = incident
+                state.queue.append((SESSION_RELIABILITY, incident["id"], incident["version"]))
+                companion.ask("解释 execute 的失败变化。")
+                worker = asyncio.create_task(companion.worker_session())
+                try:
+                    async with asyncio.timeout(15):
+                        while companion.question or "analysis" not in incident:
+                            await asyncio.sleep(.02)
+                finally:
+                    worker.cancel()
+                    await asyncio.gather(worker, return_exceptions=True)
+                assert [message for _, role, message in companion.logs if role == "Lain"] == [
+                    explanation, "错误类型发生了变化。",
+                ]
+                runner.new_session()
+                missing = await inspect(view="tool_detail", tool_call_id="success")
+                assert missing["error"]["code"] == "tool_call_not_found"
+                assert not companion.call_cache
+                await companion.finish()
+        finally:
+            runner.close()
+            store.close()
+
+        final_request, observation = requests[-2:]
+        assert observation["response_format"] == {"type": "json_object"}
+        assert not observation.get("tools")
+        assert "fixture-incident" in observation["messages"][-1]["content"]
+        assert {item["function"]["name"] for item in final_request["tools"]} == {
+            "session_evidence", "inspect_current_session", "search_workspace_text",
+            "list_workspace_files", "read_workspace_file",
+        }
+        evidence, *details = [
+            json.loads(message["content"])
+            for message in final_request["messages"] if message["role"] == "tool"
+        ]
+        assert [row["tool_call_id"] for row in evidence["records"]] == list(cases)
+        assert {detail["tool_call_id"]: detail["result"]["error_category"] for detail in details} == {
+            "dependency": "dependency", "assertion": "assertion", "permission": "permission", "success": "",
+        }
+        for detail in details:
+            assert detail["arguments"]["command"]
+            assert detail["result"]["output_excerpt"]
+        assert "fixture success" in details[-1]["result"]["output_excerpt"]
+        assert canary not in json.dumps(requests, ensure_ascii=False)
+
+    with compatible_endpoint(answers) as (endpoint, requests):
+        asyncio.run(scenario(endpoint, requests))

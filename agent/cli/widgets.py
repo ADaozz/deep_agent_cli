@@ -2,26 +2,119 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import islice
 from typing import Any
 
 from prompt_toolkit import ANSI
 from prompt_toolkit.formatted_text import to_formatted_text
-from prompt_toolkit.layout import BufferControl, Window
+from prompt_toolkit.formatted_text.utils import split_lines
+from prompt_toolkit.layout import BufferControl, Container, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
-from prompt_toolkit.layout.screen import Char, WritePosition
+from prompt_toolkit.layout.dimension import AnyDimension
+from prompt_toolkit.layout.mouse_handlers import MouseHandlers
+from prompt_toolkit.layout.screen import Char, Screen, WritePosition
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
 from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.skills import SkillDraft
 from agent.cli.formatting import _truncate_cells
 from agent.cli.rendering import render_interaction_viewport
+from agent.cli.text_selection import TextSelection
 
 
 EDITOR_PROMPT = "› "
+EDITOR_PADDING_LINES = 1
+
+
+def build_input_editor(
+    editor: BufferControl, *, height: AnyDimension, prompt_style: str = "", wrap_lines: bool = True,
+) -> HSplit:
+    style = "class:editor"
+    return HSplit([
+        Window(height=EDITOR_PADDING_LINES, char=" ", style=style),
+        VSplit([
+            Window(FormattedTextControl([(prompt_style, EDITOR_PROMPT)]),
+                   width=get_cwidth(EDITOR_PROMPT), style=style),
+            Window(editor, height=height, wrap_lines=wrap_lines, dont_extend_height=True, style=style),
+        ]),
+        Window(height=EDITOR_PADDING_LINES, char=" ", style=style),
+    ])
+
+
+class _SelectablePane(VSplit):
+    """Select the visible characters across the windows in a read-mostly pane."""
+
+    def __init__(
+        self, child: Container, *, copy_selection: Callable[[str], None],
+        invalidate: Callable[[], None], selection_scope: Callable[[], int],
+    ) -> None:
+        super().__init__([child])
+        self.selection = TextSelection()
+        self._copy_selection = copy_selection
+        self._invalidate = invalidate
+        self._selection_scope = selection_scope
+        self._selection_key = None
+
+    def write_to_screen(
+        self, screen: Screen, mouse_handlers: MouseHandlers, write_position: WritePosition,
+        parent_style: str, erase_bg: bool, z_index: int | None,
+    ) -> None:
+        super().write_to_screen(screen, mouse_handlers, write_position, parent_style, erase_bg, z_index)
+        left, top = write_position.xpos, write_position.ypos
+        width, height = write_position.width, write_position.height
+        key = (self._selection_scope(), left, top, width, height)
+        if key != self._selection_key:
+            self._selection_key = key
+            self.selection.clear_selection()
+
+        self._highlight_selection(screen, write_position)
+        right, bottom = left + width, top + height
+        handlers = mouse_handlers.mouse_handlers
+        original = {
+            y: [handlers[y][x] for x in range(left, right)]
+            for y in range(top, bottom)
+        }
+
+        def get_line(row: int) -> list[tuple[str, str]]:
+            painted = screen.data_buffer[top + row]
+            return [(painted[x].style, painted[x].char) for x in range(left, right)]
+
+        def handle(event: MouseEvent):
+            x, y = event.position.x, event.position.y
+            normal = original[y][x - left]
+            kind = event.event_type
+            if kind in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+                self.selection.clear_selection()
+                return normal(event)
+            if not self.selection.update_pointer((y - top, x - left), kind, event.button):
+                return normal(event)
+            self._invalidate()
+            if kind is MouseEventType.MOUSE_DOWN:
+                return normal(event)
+            if kind is MouseEventType.MOUSE_UP:
+                if self.selection.selection_bounds() is None:
+                    return normal(event)
+                text = self.selection.selected_text(get_line, height)
+                if text.strip():
+                    self._copy_selection(text)
+            return None
+
+        mouse_handlers.set_mouse_handler_for_range(left, right, top, bottom, handle)
+
+    def _highlight_selection(self, screen: Screen, position: WritePosition) -> None:
+        bounds = self.selection.selection_bounds()
+        if bounds is None:
+            return
+        for y in range(bounds[0][0], bounds[1][0] + 1):
+            start, end = self.selection.selection_span(y, bounds)
+            row = screen.data_buffer[position.ypos + y]
+            for x in range(position.width):
+                cell = row[position.xpos + x]
+                if cell.width and x < end and x + cell.width > start:
+                    row[position.xpos + x] = Char(cell.char, f"{cell.style} class:transcript-selection")
 
 
 class _ScrollableTextControl(FormattedTextControl):
@@ -63,8 +156,8 @@ class _InteractionControl(_ScrollableTextControl):
         rendered, self._option_offset = render_interaction_viewport(
             controller, width, height or 1, self._option_offset,
         )
-        self.text = to_formatted_text(ANSI(rendered))
-        return super().create_content(width, height)
+        lines = list(split_lines(to_formatted_text(ANSI(rendered))))
+        return UIContent(get_line=lines.__getitem__, line_count=len(lines), show_cursor=False)
 
 
 class _BackToBottomControl(_ScrollableTextControl):

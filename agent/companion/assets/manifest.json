@@ -1,0 +1,109 @@
+{
+  "source": "User-uploaded Lain portrait / source_cutout_preview.png",
+  "states": {
+    "idle": {
+      "file": "lain_idle.gif",
+      "source": "lain_idle_blink_loop_fixed.gif",
+      "behavior": "常态眨眼循环",
+      "frame_durations_ms": [
+        320,
+        250,
+        150,
+        200,
+        170,
+        260,
+        260,
+        300,
+        320
+      ]
+    },
+    "observing": {
+      "file": "lain_observing.gif",
+      "behavior": "双眼睁大，伴随肩胸起伏，再恢复中性",
+      "frame_durations_ms": [
+        240,
+        150,
+        160,
+        250,
+        270,
+        220,
+        160,
+        160,
+        160
+      ]
+    },
+    "curious": {
+      "file": "lain_curious.gif",
+      "behavior": "一侧眼睑抬起、嘴微张，肩胸随呼吸起伏",
+      "frame_durations_ms": [
+        210,
+        140,
+        150,
+        210,
+        290,
+        220,
+        190,
+        170,
+        170
+      ]
+    },
+    "focused": {
+      "file": "lain_focused.gif",
+      "behavior": "沿用原始精灵图的轻微收眼动作、保持中性嘴型，肩胸随呼吸起伏",
+      "frame_durations_ms": [
+        240,
+        170,
+        170,
+        240,
+        350,
+        240,
+        200,
+        180,
+        180
+      ]
+    },
+    "concerned": {
+      "file": "lain_concerned.gif",
+      "behavior": "眨眼、嘴角微垂，肩胸吸气后回落",
+      "frame_durations_ms": [
+        240,
+        200,
+        150,
+        220,
+        330,
+        200,
+        230,
+        200,
+        200
+      ]
+    },
+    "relieved": {
+      "file": "lain_relieved.gif",
+      "behavior": "眼神放松，保持闭嘴，呼气时肩胸缓慢回落",
+      "frame_durations_ms": [
+        210,
+        170,
+        170,
+        200,
+        270,
+        300,
+        280,
+        230,
+        190
+      ]
+    }
+  },
+  "format": "GIF89a",
+  "nominal_frame_count": 9,
+  "canvas_px": {
+    "idle": [400, 412],
+    "expression": [418, 418]
+  },
+  "transparent_background": true,
+  "loop": 0,
+  "first_last_frame_identical": true,
+  "technique": "Expression clips from assets/lain-sprites/gifs; idle keeps the blink loop. Each clip loops with identical first and last frames.",
+  "note": "Animated GIF supports binary, not partial alpha. Transparent background and opaque black hair are preserved.",
+  "shared_neutral_frame": false,
+  "source_of_truth": "assets/lain-sprites/gifs/ for observing, curious, focused, concerned, relieved"
+}

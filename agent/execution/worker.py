@@ -76,7 +76,7 @@ def _open_cwd(path, mount_identity):
         raise
 
 
-def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None):
+def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None, owner=None):
     descriptors = []
     structured = argv is not None
     try:
@@ -102,6 +102,7 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
                 argv = [*argv[:-1], f"/proc/self/fd/{fd}"]
         process = subprocess.Popen(
             argv if structured else ["/bin/sh", "-lc", command],
+            env={**os.environ, "DEEP_AGENT_EXECUTION_OWNER": owner} if owner else None,
             shell=False,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
@@ -218,7 +219,7 @@ def main():
                 _shutdown()
             if op == "run":
                 threading.Thread(
-                    target=_run, args=(request_id, str(message["command"])), daemon=True,
+                    target=_run, args=(request_id, str(message["command"])), kwargs={"owner": message.get("owner")}, daemon=True,
                 ).start()
             elif op == "run_argv":
                 threading.Thread(

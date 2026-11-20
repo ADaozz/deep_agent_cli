@@ -175,14 +175,14 @@ def test_editor_has_matching_blank_rows_and_prefix() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        body = app.application.layout.container.content
+        body = app.application.layout.container.children[-1].children[0].content
         assert not any(getattr(child, "style", None) == "class:editor-border" for child in body.children)
         editor = next(child.content for child in body.children if hasattr(getattr(child, "content", None), "children"))
         top, middle, bottom = editor.children
         prefix, input_window = middle.children
         assert top.height == bottom.height == 1
         assert top.style == bottom.style == prefix.style == input_window.style == "class:editor"
-        assert prefix.content.text == "› "
+        assert prefix.content.text == [("", "› ")]
         assert input_window.content is app.editor_control
 
 
@@ -190,7 +190,7 @@ def test_back_to_bottom_hint_is_centered_above_editor() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        body = app.application.layout.container.content
+        body = app.application.layout.container.children[-1].children[0].content
         editor = next(child.content for child in body.children if hasattr(getattr(child, "content", None), "children"))
         hint = next(child.content for child in body.children if getattr(getattr(child, "content", None), "content", None) is app.back_to_bottom_control)
         divider = app.interaction_divider_window
@@ -205,7 +205,7 @@ def test_interaction_divider_only_appears_for_interactive_screens() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     with create_pipe_input() as pipe:
         app = CliApplication(runner, input=pipe, output=DummyOutput())
-        body = app.application.layout.container.content
+        body = app.application.layout.container.children[-1].children[0].content
         divider = next(child for child in body.children if getattr(child, "content", None) is app.interaction_divider_window)
         with set_app(app.application):
             assert not divider.filter()

@@ -45,14 +45,15 @@ flowchart TB
 
 | 层 | 实现 | 职责 |
 |---|---|---|
-| 交互入口 | `agent/cli/` | 输入、渲染、审批与提问界面 |
+| 交互入口 | `agent/cli/` | 输入、渲染、审批与提问界面；挂载 Lain 侧栏 |
 | 运行控制 | `agent/runtime/` | Run 生命周期、中断恢复、取消、steering、统一事件 |
 | 子任务 | `agent/subagents/` | 独立图执行、并发许可、取消关联和日志持久化 |
 | 图装配 | `agent/bootstrap/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/models/` | API 协议、思考流、工具调用、附件与 usage |
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
 | 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久进程、超时与清理 |
-| 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约与恢复 |
+| 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约、恢复与会话标题 |
+| Companion | `agent/companion/` | 侧栏监控、本地异常检测、独立对话 Worker 与宿主只读 RPC |
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
@@ -335,7 +336,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/models/messages.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
 
-`UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以 API 返回的 `input_tokens` 展示占用，缺失时显示 Unknown，不将估算数当成实际用量；取消、切换和压缩时清除旧值，恢复只读取当前来源的有效 usage。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
+`UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以当前会话和模型最近一次有效的 API `input_tokens` 展示占用。取消或响应未上报用量时保留上次读数，恢复从有效 checkpoint 读取。模型来源和压缩边界限制恢复时可用的读数。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
 
 新增兼容 Responses / Chat Completions 的模型应优先只改配置。非标准端点兼容局限在适配层，Runner、工具、会话与沙箱继续消费统一消息和事件。
 
@@ -364,9 +365,11 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展示、审批、提问及选择器。操作与显示见 [tui.md](tui.md)。
 
+宽终端下右侧挂载 Lain Companion：订阅同一套 RunEvent 做本地统计与热力图，对话走独立 Worker 与 Companion 模型，经宿主 RPC 只读访问工作区与当前 Session（含 `session_evidence`、`inspect_current_session`）。聊天气泡复用主转录区的 Rich Markdown 渲染；不执行写入、Shell 或主 Agent 工具。配置与统计口径见 [configuration.md](configuration.md#lain-侧栏companion)、[companion-phase2.md](companion-phase2.md)。
+
 ## 观察与验证
 
-主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。
+主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏在本地聚合同类事实做失败率异常与轮次复盘，主动开口或用户提问时才调用 Companion 模型。
 
 | 行为契约 | 相关测试 |
 |---|---|
@@ -375,6 +378,8 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 | 双沙箱复用、argv/Shell、网络模式、超时及 Worker 失效 | `test_sandbox.py`、`test_persistent_sandbox.py` |
 | 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
+| 会话标题生成与提问截断回退 | `test_session_summaries.py` |
+| Companion 侧栏、诊断与会话探针 | `test_companion.py`、`test_companion_timeline.py` |
 | 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
 | 宿主 MCP、全局开关、OAuth 与 TUI | `test_mcp_*.py`、`test_tui_pty.py` |
 
@@ -395,5 +400,6 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 - 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)。
 - 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
 - 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
+- Companion 侧栏：[companion/](../agent/companion/)、[cli 挂载与 RunEvent 转发](../agent/cli/app.py)。
 - 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_controller.py](../agent/cli/mcp_controller.py)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。
-- 会话与模型：[store.py](../agent/sessions/store.py)、[lifecycle.py](../agent/sessions/lifecycle.py)、[locks.py](../agent/sessions/locks.py)、[client.py](../agent/models/client.py)。
+- 会话与模型：[store.py](../agent/sessions/store.py)、[lifecycle.py](../agent/sessions/lifecycle.py)、[locks.py](../agent/sessions/locks.py)、[summary.py](../agent/sessions/summary.py)、[client.py](../agent/models/client.py)。

@@ -121,7 +121,7 @@ prepared = create_agent(
 
 - `runner.list_sessions()`、`runner.new_session()`、`runner.switch_session(id)`。
 - `SessionInfo.summary` 为可选中文摘要，与真实 `id` 分开保存。没有摘要时，展示层应回退为 ID。
-- CLI 在新会话首次成功完成一轮后后台生成摘要。使用配置模型客户端且启用持久化存储的 Runner，其 `session_summary_requested` 事件的 `result` 是 `agent.sessions.summary.SessionSummaryRequest`，包含绑定的 thread_id、脱敏限长的第一轮用户提问、该轮模型 ID。库调用方可自行订阅；Runner 本身不会额外调用模型。摘要生成不属于对话 checkpoint。
+- CLI 收到新会话的第一条用户提问时立即在后台生成摘要，与主任务并行。使用配置模型客户端且启用持久化存储的 Runner，其 `session_summary_requested` 事件的 `result` 是 `agent.sessions.summary.SessionSummaryRequest`，包含绑定的 thread_id、脱敏限长的第一轮用户提问、该轮模型 ID。库调用方可自行订阅；Runner 本身不会额外调用模型。摘要生成不属于对话 checkpoint。
 - 目标会话被其他进程持有时，`switch_session` 抛出 `SessionLockBusyError`。
 - 切换会话前需要先用 `runner.take_unapplied_messages()` 取回未生效的 steering / follow-up，否则抛出 `RuntimeError`。
 - 主 Agent 的人工输入仅使用 `request_human_input`；会话目录初始化时补齐可选摘要列，不支持的数据库结构会明确报错。

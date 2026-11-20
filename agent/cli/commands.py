@@ -21,6 +21,7 @@ class Command:
 def command_table() -> tuple[Command, ...]:
     return (
         Command("help", "Show commands and keyboard shortcuts", _help),
+        Command("lain", "Ask Lain (/lain <question>) or view local turn statistics (/lain stats)", _lain),
         Command("clear", "Clear the visible transcript", _clear),
         Command("status", "Show runtime and sandbox status", _status),
         Command("pause", "Pause at the next model safe point", _pause),
@@ -52,6 +53,24 @@ def command_table() -> tuple[Command, ...]:
 
 async def _help(app: "CliApplication", _arg: str) -> None:
     app.show_help()
+
+
+async def _lain(app: "CliApplication", arg: str) -> None:
+    if arg.strip().casefold() == "stats":
+        app.companion.sync_session()
+        turns = app.companion.timeline.summaries
+        lines = []
+        for row in turns[-1]["tools"] if turns else ():
+            rate = row.get("success_pct")
+            success = "—" if rate is None else f"{rate:g}%"
+            lines.append(f'{row["tool"]} · {row["model"]}/{row["effort"]} · '
+                         f'{sum(row["outcomes"].values())} 次 · {row["duration_ms"]/1000:.2f}s · 成功 {success}')
+        app.state.add_command_panel("/lain stats", "\n".join(lines) or "最近一轮没有工具记录。")
+        return
+    if not app._companion_geometry()[0]:
+        app.set_status("玲音侧栏需要至少 120 列、32 行。")
+        return
+    app.set_status(app.companion.ask(arg))
 
 
 async def _clear(app: "CliApplication", _arg: str) -> None:

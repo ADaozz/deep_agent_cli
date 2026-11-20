@@ -382,6 +382,35 @@ def test_messages_to_transcript_uses_execute_artifact_for_errors() -> None:
     assert timed_out[0].exit_code == 124
 
 
+def test_tool_result_classification_ignores_error_topic_bodies() -> None:
+    from agent.sessions.transcript import classify_tool_result, tool_message_is_error
+
+    guide = ToolMessage(
+        content="Error handling guide\n\n1. Catch exceptions early",
+        tool_call_id="read-1",
+        name="read_file",
+        status="success",
+    )
+    assert classify_tool_result(
+        status="success", content=guide.content, name="read_file",
+    ) == "success"
+    assert not tool_message_is_error(guide)
+
+    envelope = ToolMessage(
+        content="Error: file not found",
+        tool_call_id="read-2",
+        name="read",
+        status="success",
+    )
+    assert tool_message_is_error(envelope)
+    assert classify_tool_result(
+        status="success", content="Error: Search cancelled.", name="grep",
+    ) == "failed"
+    assert classify_tool_result(
+        status="error", content="Cancelled by user.", name="write",
+    ) == "cancelled"
+
+
 def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path) -> None:
     path = tmp_path / "catalog.sqlite3"
     store = SessionStore(path)
@@ -404,7 +433,7 @@ def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path)
 
 
 @pytest.mark.parametrize("aborted", [False, True])
-def test_context_usage_restore_requires_completed_current_model(tmp_path, aborted):
+def test_context_usage_restore_preserves_last_report_from_current_model(tmp_path, aborted):
     from agent.models.profile import ModelProfile
     from agent.bootstrap.config import Settings
     settings = Settings(llm_profiles=(ModelProfile("source/m", "m"),), llm_default="source/m")
@@ -424,13 +453,10 @@ def test_context_usage_restore_requires_completed_current_model(tmp_path, aborte
     resumed = AgentRunner(model=scripted_model([]), backend=StateBackend(), settings=settings,
                           session_store=reopened, thread_id=identifier)
     try:
-        if aborted:
-            assert resumed.latest_usage() == {}
-        else:
-            assert resumed.latest_usage()["input_tokens"] == 17
-            # Two sources may use the same model name; the source ID matters.
-            resumed.configuration.current_model_id = "other/m"
-            assert resumed.latest_usage() == {}
+        assert resumed.latest_usage()["input_tokens"] == 17
+        # Two sources may use the same model name; the source ID matters.
+        resumed.configuration.current_model_id = "other/m"
+        assert resumed.latest_usage() == {}
     finally:
         resumed.close()
         reopened.close()

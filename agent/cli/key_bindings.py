@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.filters import Condition, Filter
+from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.key_bindings import KeyBindingsBase
 from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit.keys import Keys
 
@@ -19,23 +20,26 @@ if TYPE_CHECKING:
     from agent.cli.app import CliApplication
 
 
-def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBindings:
+def create_bindings(
+    self: CliApplication, clock: Callable[[], float], main_only: Filter
+) -> KeyBindingsBase:
     kb = KeyBindings()
+    shared = KeyBindings()
     interaction_active = Condition(lambda: self.dialogs.current is not None)
 
-    def bind(action: str):  # type: ignore[no-untyped-def]
+    def bind(action: str, bindings: KeyBindings = kb):  # type: ignore[no-untyped-def]
         def register(handler):  # type: ignore[no-untyped-def]
             registered = False
             for sequence in self.keymap.sequences(action):
                 try:
-                    kb.add(*sequence)(handler)
+                    bindings.add(*sequence)(handler)
                     registered = True
                 except (KeyError, ValueError) as exc:
                     self.keymap.warning = f"Invalid keybinding for {action}: {' '.join(sequence)} ({exc})"
             if not registered:
                 for sequence in Keymap().sequences(action):
                     try:
-                        kb.add(*sequence)(handler)
+                        bindings.add(*sequence)(handler)
                     except (KeyError, ValueError):
                         continue
             return handler
@@ -192,7 +196,7 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
             return
         self.apply_input_action(action, buffer)
 
-    @bind("clear_or_exit")
+    @bind("clear_or_exit", shared)
     def ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
         buffer = event.current_buffer
         now = clock()
@@ -249,4 +253,4 @@ def create_bindings(self: CliApplication, clock: Callable[[], float]) -> KeyBind
     def model_backward(event) -> None:  # type: ignore[no-untyped-def]
         self.model_selection.cycle_model(delta=-1)
 
-    return kb
+    return merge_key_bindings([ConditionalKeyBindings(kb, main_only), shared])

@@ -84,6 +84,36 @@ def test_tail_lines_can_be_configured(tmp_path: Path) -> None:
     assert Settings.load(path).ui_display_limits.tail_lines == 3
 
 
+def test_companion_paths_resolve_relative_to_config_and_allow_partial_overrides(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        _MODEL_YAML
+        + "companion:\n"
+        + "  persona_prompt: prompts/persona.md\n"
+        + "  observation_prompt: null\n"
+        + "  chat_prompt: prompts/chat.md\n"
+        + "  rpc_timeout_seconds: 2\n"
+        + "  question_timeout_seconds: 70\n"
+        + "  source_read_lines: 150\n"
+        + "  gifs:\n"
+        + "    idle: animations/idle.gif\n"
+        + "    focused: null\n",
+        encoding="utf-8",
+    )
+    config = Settings.load(path).companion
+    assert config.persona_prompt == tmp_path / "prompts/persona.md"
+    assert config.chat_prompt == tmp_path / "prompts/chat.md"
+    assert config.observation_prompt == Settings().companion.observation_prompt
+    assert config.gifs == {"idle": tmp_path / "animations/idle.gif"}
+    assert (config.rpc_timeout_seconds, config.question_timeout_seconds, config.source_read_lines) == (2, 70, 150)
+    with pytest.raises(ValueError, match="unknown companion.gifs state"):
+        Settings.from_mapping({"companion": {"gifs": {"typo": "idle.gif"}}})
+    with pytest.raises(ValueError, match="companion.persona_prompt"):
+        Settings.from_mapping({"companion": {"persona_prompt": True}})
+
+
 @pytest.mark.parametrize("value", [0, -1, True, False, 3.5, "5", None])
 def test_tail_lines_rejects_invalid_values(value: object) -> None:
     with pytest.raises(ValueError, match="ui.tail_lines must be a positive integer"):

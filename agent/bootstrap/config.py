@@ -8,6 +8,8 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 
+from agent.companion import STATES
+from agent.companion.config import CompanionConfig
 from agent.execution.policy import BindMount, SandboxMode, parse_sandbox_mode, SandboxConfig
 from agent.subagents.configuration import SubAgentConfig
 from agent.cli.display import UiDisplayLimits, DEFAULT_UI_TIMEZONE
@@ -60,6 +62,7 @@ class Settings:
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     compaction_threshold: float = 0.85
+    companion: CompanionConfig = field(default_factory=CompanionConfig)
 
     def __post_init__(self) -> None:
         if (isinstance(self.compaction_threshold, bool)
@@ -199,6 +202,7 @@ class Settings:
             compaction_threshold=agent.get("compaction_threshold", 0.85),
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
+            companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),
             tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
                 web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
             ),
@@ -281,6 +285,31 @@ def _optional_path(value: Any, *, base_dir: Path) -> Path | None:
     if not path.is_absolute():
         path = base_dir / path
     return path.resolve()
+
+
+def _companion_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> CompanionConfig:
+    def path(value: Any, name: str) -> Path | None:
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"companion.{name} must be a non-empty path or null")
+        return _optional_path(value, base_dir=base_dir)
+
+    gifs = {}
+    for state, value in _section(data, "gifs").items():
+        if state not in STATES:
+            raise ValueError(f"unknown companion.gifs state: {state}")
+        configured = path(value, f"gifs.{state}")
+        if configured is not None:
+            gifs[state] = configured
+    defaults = CompanionConfig()
+    return CompanionConfig(
+        persona_prompt=path(data.get("persona_prompt"), "persona_prompt") or defaults.persona_prompt,
+        observation_prompt=path(data.get("observation_prompt"), "observation_prompt") or defaults.observation_prompt,
+        chat_prompt=path(data.get("chat_prompt"), "chat_prompt") or defaults.chat_prompt,
+        gifs=gifs,
+        rpc_timeout_seconds=data.get("rpc_timeout_seconds", defaults.rpc_timeout_seconds),
+        question_timeout_seconds=data.get("question_timeout_seconds", defaults.question_timeout_seconds),
+        source_read_lines=data.get("source_read_lines", defaults.source_read_lines),
+    )
 
 
 def _required_path(value: Any, *, base_dir: Path, default: Path) -> Path:

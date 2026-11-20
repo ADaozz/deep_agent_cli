@@ -335,7 +335,8 @@ def build_agent(
             return child
 
         runtime = SubAgentRuntime(manager, store, prepare_child,
-                                  cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__))
+                                  cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
+                                  cfg.subagents.reasoning_effort or "default")
         if cfg.subagents.background:
             tools.extend(build_background_task_tools(
                 runtime, manager,
