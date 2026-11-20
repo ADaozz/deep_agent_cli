@@ -7,15 +7,21 @@ from pathlib import Path
 import sys
 from typing import Annotated, Literal
 
+import httpx
+from openai import APIConnectionError, APITimeoutError
+
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 from pydantic import Field
 
 from agent.companion.config import CompanionConfig
+from agent.companion.session_inspector import diagnostic_error, format_inspect_response
 from agent.models.client import build_chat_model
 from agent.models.messages import StreamDeltaCallback, visible_text
 from agent.models.profile import ModelProfile
+from agent.models.stream_lifecycle import ModelStreamInterrupted
 
 
 def _system_message(prompt, environment):
@@ -175,7 +181,7 @@ def create_chat(model, query, *, persona=None, instructions=None):
             f"当前会话资料（供参考）\n{json.dumps(context, ensure_ascii=False)}"
             f"\n\n用户当前问题（question）\n{question}"
         )
-        config = {"recursion_limit": 10}
+        config = {"recursion_limit": 20}
         if on_chunk is not None:
             published = ""
 
@@ -199,6 +205,82 @@ def create_chat(model, query, *, persona=None, instructions=None):
     return respond
 
 
+async def serve(reader, send, *, build_chat, observe, config):
+    async def receive():
+        line = await reader.readline()
+        if not line:
+            return None
+        message = json.loads(line)
+        if not isinstance(message, dict):
+            raise ValueError("Expected a JSON object")
+        return message
+
+    lock = asyncio.Lock()
+    identity = {}
+    query_seq = 0
+
+    async def query(kind, **args):
+        nonlocal query_seq
+        # ReAct can issue tools in parallel; only one request reads from the pipe.
+        async with lock:
+            query_seq += 1
+            query_id = query_seq
+            try:
+                async with asyncio.timeout(config.rpc_timeout_seconds + 0.5):
+                    send(dict(**identity, query=kind, args=args, query_id=query_id))
+                    while True:
+                        reply = await receive()
+                        if reply is None:
+                            raise ConnectionError("Host disconnected")
+                        if reply.get("query_id") != query_id:
+                            continue
+                        if any(reply.get(key) != value for key, value in identity.items()):
+                            return format_inspect_response(diagnostic_error("request_expired", "The active request changed."))
+                        if not isinstance(reply.get("data"), str):
+                            raise ValueError("Invalid query reply")
+                        return reply["data"]
+            except TimeoutError:
+                return format_inspect_response(diagnostic_error("tool_timeout", "Host did not return a tool reply in time."))
+            except (OSError, ValueError):
+                return format_inspect_response(diagnostic_error("ipc_error", "Host query transport failed."))
+
+    chat = build_chat(query)
+    send({"status": "ready"})
+    while (request := await receive()) is not None:
+        if "snapshot" not in request:
+            # A reply can arrive after its tool timed out.
+            continue
+        identity = {k: request[k] for k in ("session", "seq", "token")}
+        result = identity.copy()
+        snapshot = request["snapshot"]
+
+        def publish(text):
+            send(dict(**identity, partial=text))
+
+        timeout = asyncio.timeout(config.question_timeout_seconds)
+        try:
+            async with timeout:
+                if "question" in snapshot:
+                    response = await chat(snapshot, on_chunk=publish)
+                else:
+                    response = await observe(snapshot)
+            result.update(response, status="ok")
+        except (APITimeoutError, httpx.TimeoutException, TimeoutError):
+            result["status"] = "request_timeout" if timeout.expired() else "model_timeout"
+        except ModelStreamInterrupted as exc:
+            result["status"] = (
+                "model_timeout" if isinstance(exc.__cause__, (APITimeoutError, httpx.TimeoutException, TimeoutError))
+                else "model_connection_error"
+            )
+        except (APIConnectionError, httpx.TransportError):
+            result["status"] = "model_connection_error"
+        except GraphRecursionError:
+            result["status"] = "recursion_limit"
+        except Exception:  # noqa: BLE001 - details can contain HTTP credentials
+            result["status"] = "model_error"
+        send(result)
+
+
 async def main():
     key = os.environ.get("COMPANION_DEEPSEEK_API_KEY")
     if not key:
@@ -213,7 +295,7 @@ async def main():
         print('{"status":"no key"}', flush=True)
         return
     defaults = CompanionConfig()
-    paths = tuple(map(Path, sys.argv[2:])) or (
+    paths = tuple(map(Path, sys.argv[2:5])) or (
         defaults.persona_prompt, defaults.observation_prompt, defaults.chat_prompt,
     )
     prompts = []
@@ -237,42 +319,23 @@ async def main():
         timeout=15,
     )
     try:
+        config = defaults if len(sys.argv) < 7 else CompanionConfig(
+            rpc_timeout_seconds=float(sys.argv[5]),
+            question_timeout_seconds=float(sys.argv[6]),
+        )
         respond = create_observer(model, persona=persona, instructions=observation)
-        identity = {}
-        lock = asyncio.Lock()
-
-        async def query(kind, **args):
-            async with lock:
-                return await exchange(kind, args)
-
-        async def exchange(kind, args):
-            print(json.dumps(dict(**identity, query=kind, args=args)), flush=True)
-            line = await asyncio.to_thread(sys.stdin.buffer.readline, 65536)
-            reply = json.loads(line)
-            if any(reply.get(k) != v for k, v in identity.items()):
-                return "Expired request."
-            return reply.get("data", "Unavailable.")
-
-        chat = create_chat(model, query, persona=persona, instructions=chat_instructions)
-        print('{"status":"ready"}', flush=True)
-        while line := await asyncio.to_thread(sys.stdin.buffer.readline, 65536):
-            request = json.loads(line)
-            identity = {k: request[k] for k in ("session", "seq", "token")}
-            result = identity.copy()
-            try:
-                snapshot = request["snapshot"]
-                if "question" in snapshot:
-                    def publish(text):
-                        print(json.dumps(dict(**identity, partial=text)), flush=True)
-
-                    response = chat(snapshot, on_chunk=publish)
-                else:
-                    response = respond(snapshot)
-                result.update(await response)
-                result["status"] = "ok"
-            except Exception:
-                result["status"] = "model unavailable"
-            print(json.dumps(result), flush=True)
+        reader = asyncio.StreamReader(limit=65536)
+        transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer,
+        )
+        try:
+            await serve(
+                reader, lambda message: print(json.dumps(message), flush=True),
+                build_chat=lambda query: create_chat(model, query, persona=persona, instructions=chat_instructions),
+                observe=respond, config=config,
+            )
+        finally:
+            transport.close()
     finally:
         model.http_client.close()
         await model.http_async_client.aclose()

@@ -130,3 +130,18 @@ def test_restored_start_is_unknown_until_checkpoint_provides_a_result():
     assert detail["error_category"] == "assertion"
     assert detail["run_id"] == "run"
     assert detail["source"] == "checkpoint"
+
+
+def test_json_budget_retains_recent_rows_and_marks_truncation():
+    from agent.companion.session_inspector import RESPONSE_LIMIT, format_inspect_response
+
+    blocks = [
+        TranscriptBlock(kind="assistant", content=f"{i} " + "测" * 420)
+        for i in range(25)
+    ]
+    data = format_inspect_response(inspect_session_payload(blocks, view="recent_messages", limit=20))
+    assert len(data.encode()) <= RESPONSE_LIMIT
+    payload = json.loads(data)
+    assert payload["truncated"]
+    assert payload["messages"][-1]["content"].startswith("24 ")
+    assert payload["messages"][-1]["truncated"]

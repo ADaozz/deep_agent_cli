@@ -443,7 +443,7 @@ print(json.dumps(dict(session=r['session'],seq=r['seq'],token=r['token'],behavio
             c.sync_session()
             signal_path.touch()
             await task
-        assert c.connection == "OFFLINE"
+        assert c.connection == "STARTING"
         assert all(text != "stale" for _, _, text in c.logs)
     asyncio.run(run())
 
@@ -797,7 +797,7 @@ print(json.dumps(dict(**identity,status='ok',message='old answer')),flush=True)
             c.sync_session()
             release.touch()
             await task
-        assert release.with_suffix(".result").read_text()=="Expired request."
+        assert not release.with_suffix(".result").exists()
         assert not any(msg=="old answer" for _,_,msg in c.logs)
     asyncio.run(run())
 
@@ -813,7 +813,7 @@ def test_inspector_live_completion_cache_and_session_boundary(tmp_path):
         c = companion(tmp_path, lambda: session[0])
         checkpoint = []
         c.inspect_session = build_session_inspector(
-            load_blocks=lambda sid: list(checkpoint) if sid == "one" else [],
+            load_blocks=lambda sid, budget: list(checkpoint) if sid == "one" else [],
             companion_provider=lambda: c,
         )
 
@@ -847,5 +847,119 @@ def test_inspector_live_completion_cache_and_session_boundary(tmp_path):
         assert old_request()["error"]["code"] == "request_expired"
         assert (await query(**detail))["error"]["code"] == "tool_call_not_found"
         assert not c.call_cache
+
+    asyncio.run(run())
+
+
+def test_host_query_timeout_stops_the_reader_and_next_query_works(tmp_path):
+    from threading import Event
+    from time import sleep
+
+    from agent.companion.config import CompanionConfig
+
+    async def run():
+        c = companion(tmp_path, lambda: "session")
+        c.config = CompanionConfig(rpc_timeout_seconds=.06)
+        finished = Event()
+
+        def slow(budget):
+            try:
+                while True:
+                    budget.check()
+                    sleep(.005)
+            finally:
+                finished.set()
+
+        c.inspect_session = lambda **args: slow
+        response = json.loads(await c.host_query("inspect_current_session", {}))
+        assert response["error"]["code"] == "tool_timeout"
+        assert await asyncio.to_thread(finished.wait, .5)
+        c.inspect_session = lambda **args: lambda budget: {"tools": [], "truncated": False}
+        assert json.loads(await c.host_query("inspect_current_session", {}))["tools"] == []
+
+    asyncio.run(run())
+
+
+def test_worker_ipc_recovers_after_tool_and_model_timeouts():
+    from agent.companion.config import CompanionConfig
+    from agent.companion.worker import serve
+    from httpx import ReadTimeout
+
+    async def run():
+        reader = asyncio.StreamReader()
+        outputs = asyncio.Queue()
+        queries = []
+
+        def build_chat(query):
+            async def chat(snapshot, *, on_chunk):
+                if snapshot["question"] == "model timeout":
+                    raise ReadTimeout("private API detail")
+                result = await query("turns")
+                queries.append(json.loads(result))
+                if snapshot["question"] == "tool timeout":
+                    return {"message": "Tool timed out"}
+                return {"message": "Recovered"}
+
+            return chat
+
+        async def observe(snapshot):
+            return {}
+
+        task = asyncio.create_task(serve(
+            reader, outputs.put_nowait, build_chat=build_chat, observe=observe,
+            config=CompanionConfig(rpc_timeout_seconds=.06, question_timeout_seconds=1),
+        ))
+
+        def feed(packet):
+            reader.feed_data(json.dumps(packet).encode() + b"\n")
+
+        def request(seq, question):
+            identity = dict(session="session", seq=seq, token=str(seq))
+            feed(dict(**identity, snapshot={"question": question}))
+            return identity
+
+        async with asyncio.timeout(3):
+            assert (await outputs.get())["status"] == "ready"
+            first = request(1, "tool timeout")
+            first_query = await outputs.get()
+            assert (await outputs.get())["message"] == "Tool timed out"
+            assert queries[0]["error"]["code"] == "tool_timeout"
+            request(2, "model timeout")
+            error = await outputs.get()
+            assert error["status"] == "model_timeout"
+            assert "private API detail" not in json.dumps(error)
+            identity = request(3, "recover")
+            query = await outputs.get()
+            feed(dict(**first, query_id=first_query["query_id"], data="late"))
+            feed(dict(**identity, query_id=query["query_id"], data='{"records": []}'))
+            assert (await outputs.get())["message"] == "Recovered"
+            assert queries[-1]["records"] == []
+            reader.feed_eof()
+            await task
+
+    asyncio.run(run())
+
+
+def test_inspector_reads_real_restored_checkpoint(tmp_path):
+    from agent.sessions.store import SessionStore
+
+    async def run():
+        store = SessionStore(tmp_path / "sessions.sqlite3")
+        model = scripted_model([AIMessage(content="checkpoint answer")])
+        runner = AgentRunner(model=model, backend=StateBackend(), session_store=store)
+        try:
+            runner.invoke("checkpoint question")
+            with create_pipe_input() as pipe:
+                app = CliApplication(runner, config_dir=tmp_path, input=pipe, output=DummyOutput())
+                result = json.loads(await app.companion.host_query(
+                    "inspect_current_session", {"view": "recent_messages"},
+                ))
+            assert not result.get("checkpoint_unavailable")
+            assert [(row["role"], row["content"]) for row in result["messages"]] == [
+                ("user", "checkpoint question"), ("assistant", "checkpoint answer"),
+            ]
+        finally:
+            runner.close()
+            store.close()
 
     asyncio.run(run())

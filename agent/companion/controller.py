@@ -12,11 +12,12 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
-from time import monotonic, time
+from time import monotonic, perf_counter, time
 from uuid import uuid4
 
 from agent.companion import STATES
 from agent.companion.config import CompanionConfig
+from agent.companion.diagnostic_io import QueryBudget
 from agent.companion.timeline import (
     SESSION_RELIABILITY,
     Timeline,
@@ -29,7 +30,7 @@ from agent.companion.timeline import (
 from agent.sessions.summary import redact_summary_input
 from agent.companion.repository import Repository
 from agent.companion.session_inspector import (
-    CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, format_inspect_response,
+    CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
     result_status,
 )
 from agent.companion.diagnosis import interpret_turn, reply_text
@@ -37,6 +38,14 @@ from agent.companion.monitor import Resources, services
 
 
 REPLY_TICK_SECONDS = 0.25
+_REPLY_ERRORS = {
+    "request_timeout": "这次问答已超时，可以重新提问。",
+    "model_timeout": "模型响应超时，可以重新提问。",
+    "model_connection_error": "无法连接玲音的模型，可以重新提问。",
+    "model_error": "玲音的模型请求出错，可以重新提问。",
+    "recursion_limit": "玲音达到本轮工具调用上限，可以缩小问题范围再问。",
+    "ipc_error": "玲音的进程通信出错，可以重新提问。",
+}
 
 
 def _frames(*key, path=None):
@@ -74,6 +83,8 @@ async def start_worker(config_dir, config: CompanionConfig):
         str(config.persona_prompt),
         str(config.observation_prompt),
         str(config.chat_prompt),
+        str(config.rpc_timeout_seconds),
+        str(config.question_timeout_seconds),
         env=env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -106,6 +117,8 @@ class Companion:
         self.inspect_session = inspect_session
         self.worker_ready = False
         self.question = None
+        self.question_deadline = 0.0
+        self.active_request: asyncio.Task | None = None
         self.reply_stamp = None
         self.reply_preview = ""
         self.reply_wait_started = 0.0
@@ -170,6 +183,7 @@ class Companion:
         if not text or len(text) > 800:
             return "请输入问题，最多 800 字。"
         self.question = text
+        self.question_deadline = perf_counter() + self.config.question_timeout_seconds
         self.reply_wait_started = monotonic()
         self._schedule_reply_refresh()
         self.anchor = None
@@ -243,6 +257,8 @@ class Companion:
             self.last_profile = None
             self.thread = current
             self.session_generation += 1
+            if self.active_request is not None:
+                self.active_request.cancel()
             self.call_cache.clear()
             self.starts.clear()
             self.errors.clear()
@@ -775,53 +791,112 @@ class Companion:
         return evidence[:4]
 
     async def host_query(self, kind, args):
+        self.sync_session()
+        thread, generation = self.thread, self.session_generation
+        budget = QueryBudget(self.config.rpc_timeout_seconds)
+        try:
+            async with asyncio.timeout(self.config.rpc_timeout_seconds):
+                result = await self._host_query(kind, args, thread, budget)
+            if self.session() != thread or generation != self.session_generation:
+                result = diagnostic_error("request_expired", "The active session changed.")
+        except TimeoutError:
+            result = diagnostic_error("tool_timeout", "Host read-only query timed out.")
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            result = diagnostic_error("query_failed", "Host read-only query failed.")
+        finally:
+            budget.cancelled.set()
+        return result if isinstance(result, str) else format_inspect_response(result)
+
+    async def _host_query(self, kind, args, thread, budget):
+        if not isinstance(kind, str) or not isinstance(args, dict):
+            return diagnostic_error("invalid_query", "Query arguments must be an object.")
         if kind == "inspect_current_session":
             if self.inspect_session is None:
-                return json.dumps({"error": "session inspector unavailable"}, ensure_ascii=False)
-            try:
-                limit = int(args.get("limit") or 10)
-            except (TypeError, ValueError):
-                limit = 10
+                return diagnostic_error("inspector_unavailable", "Session inspector unavailable.")
             inspect = self.inspect_session(
                 view=str(args.get("view") or "recent_tools"),
                 tool_call_id=args.get("tool_call_id"), run_id=args.get("run_id"),
-                limit=limit, status=args.get("status"), order=args.get("order", "asc"),
+                limit=args.get("limit", 10), status=args.get("status"), order=args.get("order", "asc"),
             )
-            return format_inspect_response(await asyncio.to_thread(inspect))
+            return await asyncio.to_thread(inspect, budget)
         if kind in ("timeline", "git"):
             end = min(float(args.get("end") or time()), time())
             start = max(float(args.get("start") or end - 14 * 86400), end - 14 * 86400)
-            rows = await asyncio.to_thread(
-                timeline_window, self.database, self.thread, kind, start, end
-            )
-            return json.dumps(rows, ensure_ascii=False)[:6000]
+            return await asyncio.to_thread(timeline_window, self.database, thread, kind, start, end, budget)
         if kind in ("search", "files"):
             return await asyncio.to_thread(
-                self.repository.search,
-                str(args.get("term", ""))[:160],
-                paths_only=kind == "files",
+                self.repository.search, str(args.get("term", ""))[:160],
+                paths_only=kind == "files", budget=budget,
             )
         if kind == "read":
             return await asyncio.to_thread(
-                self.repository.read,
-                str(args.get("path", ""))[:512],
-                int(args.get("start", 1)),
+                self.repository.read, str(args.get("path", ""))[:512],
+                int(args.get("start", 1)), budget=budget,
             )
-        return json.dumps(self.session_evidence(kind), ensure_ascii=False)[:6000]
+        if kind not in {"statistics", "failures", "retries", "turns"}:
+            return diagnostic_error("unknown_tool", "Unknown host query.")
+        evidence = self.session_evidence(kind)
+        if isinstance(evidence, list):
+            return {"records": evidence, "order": "asc", "truncated": False}
+        return {**evidence, "truncated": False}
 
     async def observe(self):
-        for attempt in range(3):
-            if attempt:
-                await asyncio.sleep(2 ** (attempt - 1))
+        failures = 0
+        while failures < 3:
+            if failures:
+                await asyncio.sleep(2 ** (failures - 1))
             try:
-                if await self.worker_session() in ("no key", "prompt error"):
-                    return
+                status = await self.worker_session()
             except (OSError, ValueError, TimeoutError, sqlite3.Error):
                 self.log("玲音的连接中断了。", "Status")
+                status = None
+            if status in ("no key", "prompt error"):
+                return
+            if status in ("request_expired", "request_timeout"):
+                failures = 0
+            else:
+                failures += 1
         self.log("玲音离线，本地监测继续。", "Status")
+
+    async def _exchange(self, process, identity, snapshot, current):
+        async def send(payload):
+            process.stdin.write(
+                json.dumps(dict(**identity, **payload), ensure_ascii=False).encode() + b"\n"
+            )
+            await process.stdin.drain()
+
+        if self.execute_environment is not None:
+            environment = await asyncio.to_thread(self.execute_environment)
+            if environment:
+                snapshot["execute_environment"] = environment
+        await send({"snapshot": snapshot})
+        question = "question" in snapshot
+        while True:
+            reply = json.loads(await process.stdout.readline())
+            if any(reply.get(k) != v for k, v in identity.items()):
+                raise ValueError("mismatched companion response")
+            if "partial" in reply:
+                if question and current() and isinstance(reply["partial"], str):
+                    self._update_chat_preview(reply["partial"])
+                continue
+            if "query" not in reply:
+                return reply
+            data = diagnostic_error("request_expired", "The active session changed.")
+            if current():
+                if question:
+                    data = await self.host_query(reply["query"], reply.get("args") or {})
+                else:
+                    data = diagnostic_error("forbidden_tool", "Observation cannot query the host.")
+            if not current():
+                data = diagnostic_error("request_expired", "The active session changed.")
+            await send(dict(
+                query_id=reply.get("query_id"),
+                data=data if isinstance(data, str) else format_inspect_response(data),
+            ))
 
     async def worker_session(self):
         process = None
+        restart = False
         spawn = asyncio.create_task(start_worker(self.config_dir, self.config))
         try:
             process = await asyncio.shield(spawn)
@@ -848,8 +923,6 @@ class Companion:
                         if process.returncode is not None:
                             return
                     continue
-                await self.save_statistics()
-                self.sync_session()
                 question = self.question
                 state = self.timeline
                 generation = self.session_generation
@@ -880,7 +953,6 @@ class Companion:
                         key=incident_id,
                         turn=incident["turn"],
                     )
-                    await self.save_statistics()
                     if (
                         self.session() != self.thread
                         or state is not self.timeline
@@ -914,49 +986,27 @@ class Companion:
                         and (not incident or state.incidents.get(key) is incident)
                     )
 
-                async def send(payload):
-                    process.stdin.write(
-                        json.dumps(
-                            dict(**identity, **payload), ensure_ascii=False
-                        ).encode()
-                        + b"\n"
-                    )
-                    await process.stdin.drain()
-
-                if self.execute_environment is not None:
-                    environment = await asyncio.to_thread(self.execute_environment)
-                    if not current():
-                        continue
-                    if environment:
-                        snapshot["execute_environment"] = environment
-                await send(dict(snapshot=snapshot))
-                while True:
-                    reply = json.loads(await process.stdout.readline())
-                    if any(reply.get(k) != v for k, v in identity.items()):
-                        raise ValueError("mismatched companion response")
-                    if "partial" in reply:
-                        if question and current() and isinstance(reply["partial"], str):
-                            self._update_chat_preview(reply["partial"])
-                        continue
-                    if "query" not in reply:
-                        break
-                    data = "Expired request."
-                    if question and current():
-                        try:
-                            data = await self.host_query(
-                                reply["query"], reply.get("args", {})
-                            )
-                        except (
-                            OSError,
-                            ValueError,
-                            TypeError,
-                            TimeoutError,
-                            sqlite3.Error,
-                        ):
-                            data = "Unavailable."
-                    await send(
-                        dict(data=data[:6000] if current() else "Expired request.")
-                    )
+                timeout = self.config.question_timeout_seconds
+                if question:
+                    timeout = max(0, self.question_deadline - perf_counter())
+                request = asyncio.create_task(self._exchange(process, identity, snapshot, current))
+                self.active_request = request
+                try:
+                    async with asyncio.timeout(timeout):
+                        reply = await request
+                except TimeoutError:
+                    if current() and question:
+                        self._clear_chat_reply()
+                        self.log(_REPLY_ERRORS["request_timeout"], "Status")
+                    restart = True
+                    return "request_timeout"
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                    restart = True
+                    return "request_expired"
+                finally:
+                    self.active_request = None
                 self.sync_session()
                 if not current():
                     continue
@@ -965,7 +1015,7 @@ class Companion:
                     if reply.get("status") == "ok":
                         self.log(reply_text(reply.get("message")), stamp=stamp)
                     else:
-                        self.log("这次没有收到模型回复，请稍后再试。", "Status")
+                        self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
                 else:
                     message = reply_text(reply.get("message"), proactive=True)
                     analysis = dict(
@@ -1002,11 +1052,12 @@ class Companion:
                     if message:
                         self.log(message)
         finally:
-            if self.question:
-                self.log("暂时无法连接玲音。", "Status")
+            if not restart:
+                if self.question:
+                    self.log("玲音的 IPC 连接中断了。", "Status")
+                self._clear_chat_reply()
             self.worker_ready = False
-            self._clear_chat_reply()
-            self.connection = "OFFLINE"
+            self.connection = "STARTING" if restart else "OFFLINE"
             if process is None and not spawn.cancelled():
                 try:
                     process = await spawn

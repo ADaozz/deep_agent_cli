@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 import json
 from math import isfinite
 import re
+import sqlite3
 from typing import Any, Mapping
 
 from agent.companion.timeline import category
@@ -280,7 +281,8 @@ def inspect_session_payload(
         rows = matched[-limit:]
         if order == "desc":
             rows.reverse()
-        return {"view": view, "tools": [row.row() for row in rows], "truncated": len(matched) > limit}
+        return {"view": view, "order": order, "tools": [row.row() for row in rows],
+                "truncated": len(matched) > limit}
     if not tool_call_id:
         return diagnostic_error("missing_tool_call_id", "tool_detail requires tool_call_id.")
     matches = [row for row in calls if row.tool_call_id == tool_call_id and (run_id is None or row.run_id == run_id)]
@@ -294,7 +296,30 @@ def inspect_session_payload(
 
 
 def format_inspect_response(payload: Mapping[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    def encode(data):
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+    result = encode(payload)
+    if len(result.encode()) <= RESPONSE_LIMIT:
+        return result
+    data = {**payload, "truncated": True}
+    for key in ("tools", "messages", "records"):
+        if key not in data:
+            continue
+        rows = list(data[key])
+        data[key] = rows
+        while rows:
+            rows.pop(0 if key == "messages" or data.get("order") == "asc" else -1)
+            result = encode(data)
+            if len(result.encode()) <= RESPONSE_LIMIT:
+                return result
+    if "result" in data and "arguments" in data:
+        data["arguments"] = {}
+        data["result"] = {**data["result"], "output_excerpt": "", "truncated": True}
+        result = encode(data)
+        if len(result.encode()) <= RESPONSE_LIMIT:
+            return result
+    return encode({**diagnostic_error("response_budget", "Response exceeded the diagnostic budget."), "truncated": True})
 
 
 def build_session_inspector(*, load_blocks, companion_provider, secrets=()):
@@ -307,21 +332,38 @@ def build_session_inspector(*, load_blocks, companion_provider, secrets=()):
         observations = observation_views(companion.timeline, cache=companion.call_cache)
         secret_values = tuple(secrets() if callable(secrets) else secrets) + companion.secrets
 
-        def inspect():
+        def inspect(budget=None):
             def current():
                 return companion.session() == thread and companion.session_generation == generation
 
             if not current():
                 return diagnostic_error("request_expired", "The active session changed.")
             try:
-                blocks = load_blocks(thread)
-            except (OSError, ValueError, RuntimeError):
-                blocks = None
+                loaded = load_blocks(thread, budget)
+            except TimeoutError:
+                raise
+            except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                if budget:
+                    budget.check()
+                loaded = None
+            truncated = False
+            if isinstance(loaded, tuple):
+                blocks, truncated = loaded
+            else:
+                blocks = loaded
+            if budget:
+                budget.check()
             if not current():
                 return diagnostic_error("request_expired", "The active session changed.")
             payload = inspect_session_payload(blocks or (), observations=observations, secrets=secret_values, **args)
+            if budget:
+                budget.check()
+            if not current():
+                return diagnostic_error("request_expired", "The active session changed.")
             if blocks is None:
                 payload["checkpoint_unavailable"] = True
+            if truncated:
+                payload.update(checkpoint_truncated=True, truncated=True)
             return payload
 
         return inspect

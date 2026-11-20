@@ -10,6 +10,7 @@ from time import time
 from uuid import uuid4
 
 from agent.companion.diagnosis import interpret_turn
+from agent.companion.diagnostic_io import readonly_database
 
 
 @dataclass
@@ -432,15 +433,14 @@ def restore_session(path, session, window):
     return state
 
 
-def timeline_window(path, session, kind, start, end):
+def timeline_window(path, session, kind, start, end, budget=None):
     """The host supplies session; the model supplies only a bounded time range."""
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.5)
-    try:
+    with readonly_database(path, budget) as db:
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 256 * 1024)
         query = "SELECT stamp,kind,payload FROM timeline WHERE session=? AND stamp BETWEEN ? AND ?"
         args = [session, start, end]
         if kind == "git":
             query += " AND kind='git'"
-        rows = db.execute(query + " ORDER BY stamp DESC LIMIT 16", args)
-        return [(stamp, k, json.loads(data)) for stamp, k, data in rows]
-    finally:
-        db.close()
+        rows = list(db.execute(query + " ORDER BY stamp DESC LIMIT 17", args))
+        return {"records": [(stamp, k, json.loads(data)) for stamp, k, data in rows[:16]],
+                "truncated": len(rows) > 16}

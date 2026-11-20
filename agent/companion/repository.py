@@ -65,7 +65,9 @@ class Repository:
         self.protected = tuple(Path(path).resolve() for path in protected)
 
     @contextmanager
-    def opened(self, path="", *, directory=False):
+    def opened(self, path="", *, directory=False, budget=None):
+        if budget:
+            budget.check()
         parts = path.split("/") if path else []
         if any(
             not p
@@ -89,6 +91,8 @@ class Repository:
         try:
             mount = _mount(fd)
             for i, part in enumerate(parts):
+                if budget:
+                    budget.check()
                 child = os.open(
                     part,
                     flags | (os.O_DIRECTORY if directory or i < len(parts) - 1 else 0),
@@ -120,10 +124,12 @@ class Repository:
         finally:
             os.close(fd)
 
-    def lines(self, path):
-        with self.opened(path) as fd:
+    def lines(self, path, budget=None):
+        with self.opened(path, budget=budget) as fd:
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 data = stream.read(MAX_FILE + 1)
+            if budget:
+                budget.check()
             if len(data) > MAX_FILE or b"\0" in data:
                 raise ValueError("unsupported content")
             text = data.decode("utf-8")
@@ -133,9 +139,11 @@ class Repository:
                 raise ValueError("sensitive source")
             return text.splitlines()
 
-    def read(self, path, start=1):
+    def read(self, path, start=1, *, budget=None):
         try:
-            lines = self.lines(path)
+            lines = self.lines(path, budget)
+        except TimeoutError:
+            raise
         except (OSError, ValueError):
             return "File unavailable."
         start = max(1, start)
@@ -147,21 +155,23 @@ class Repository:
             or "No lines."
         )
 
-    def search(self, term, *, paths_only=False):
+    def search(self, term, *, paths_only=False, budget=None):
         term = term.strip().casefold()
         if (not term and not paths_only) or len(term) > 160:
             return "Supply a short literal or filename."
         directories, hits = [""], []
         remaining = 3000
-        budget = 8 * 1024 * 1024
+        remaining_bytes = 8 * 1024 * 1024
         deadline = monotonic() + 1.5
-        while directories and remaining and budget > 0 and monotonic() < deadline:
+        while directories and remaining and remaining_bytes > 0 and monotonic() < deadline:
             base = directories.pop()
             try:
-                with self.opened(base, directory=True) as fd, os.scandir(fd) as entries:
+                with self.opened(base, directory=True, budget=budget) as fd, os.scandir(fd) as entries:
                     for entry in islice(entries, remaining):
                         if monotonic() >= deadline:
                             break
+                        if budget:
+                            budget.check()
                         remaining -= 1
                         name = entry.name
                         if name.startswith(".") or name in SKIP:
@@ -173,11 +183,13 @@ class Repository:
                         if not entry.is_file(follow_symlinks=False):
                             continue
                         size = entry.stat(follow_symlinks=False).st_size
-                        if size > min(budget, MAX_FILE):
+                        if size > min(remaining_bytes, MAX_FILE):
                             continue
-                        budget -= size
+                        remaining_bytes -= size
                         try:
-                            lines = self.lines(path)
+                            lines = self.lines(path, budget)
+                        except TimeoutError:
+                            raise
                         except (OSError, ValueError):
                             continue
                         if paths_only:
@@ -193,8 +205,10 @@ class Repository:
                                 hits.append(f"{path}:{i} {line[:180]}")
                             if len(hits) == 12:
                                 return "\n".join(hits)
-                        if budget <= 0:
+                        if remaining_bytes <= 0:
                             break
+            except TimeoutError:
+                raise
             except (OSError, ValueError):
                 continue
         return "\n".join(hits) or "No match in the inspected source."

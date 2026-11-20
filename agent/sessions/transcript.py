@@ -71,6 +71,7 @@ def tool_message_is_error(message: ToolMessage) -> bool:
 
 def messages_to_transcript(
     messages: list[BaseMessage], *, turn_timings: dict[str, tuple[float, datetime]] | None = None,
+    include_thinking: bool = True,
 ) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
@@ -96,7 +97,7 @@ def messages_to_transcript(
                 attachments=refs_from_message(message),
             ))
         elif isinstance(message, AIMessage):
-            thinking = reasoning_text(message)
+            thinking = reasoning_text(message) if include_thinking else ""
             text = visible_text(message)
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))

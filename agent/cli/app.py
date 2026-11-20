@@ -9,6 +9,7 @@ from functools import partial
 import logging
 import os
 import signal
+import sqlite3
 import time
 import warnings
 from time import monotonic
@@ -41,14 +42,16 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent.companion.chart import ActivityHeatmap
 from agent.companion.controller import Companion
+from agent.companion.diagnostic_io import readonly_database
 from agent.companion.session_inspector import build_session_inspector
 from agent.companion.theme import ACCENT as COMPANION_ACCENT
 from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
-from agent.sessions.reader import read_snapshot
+from agent.sessions.reader import read_transcript
 from agent.cli.widgets import (
     EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
@@ -1317,14 +1320,25 @@ class CliApplication:
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
-    def _companion_session_blocks(self, thread_id):
+    def _companion_session_blocks(self, thread_id, budget):
         store = self.runner.session_store
         if not thread_id or store is None:
             return []
-        info = store.get(thread_id)
-        if info is None:
-            return []
-        return read_snapshot(self.runner.prepared.graph, info, store).transcript
+        # The store owns schema creation and migrations. A private read-only
+        # connection avoids waiting on the active graph's saver lock.
+        with readonly_database(store.path, budget) as database:
+            database.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 8 * 1024 * 1024)
+            columns = {row[1] for row in database.execute("PRAGMA table_info(writes)")}
+            if not columns:
+                return []
+            saver = SqliteSaver(database, serde=store.checkpointer.serde)
+            saver.is_setup = True
+            saver._has_task_path = "task_path" in columns
+            graph = self.runner.prepared.graph.copy({"checkpointer": saver})
+            blocks, _, truncated = read_transcript(
+                graph, thread_id, max_messages=400, include_thinking=False,
+            )
+            return blocks, truncated
 
     def _companion_profile(self):
         model = self.runner.current_model()
