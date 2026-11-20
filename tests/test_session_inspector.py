@@ -156,13 +156,25 @@ def test_same_parent_message_coalesces_resume_completion_with_restored_start():
     old = ToolObservation("session", "one", "first", "main", "model", "default", "execute", "id", 1,
                           message_id="parent")
     resume = ToolObservation("session", "two", "second", "main", "model", "default", "execute", "id", 5,
-                             finished_at=5, outcome="success", message_id="parent")
+                             finished_at=5, outcome="success", message_id="parent", resumed_from_checkpoint=True)
     timeline.restore([("tool", 1, asdict(old)), ("tool", 5, asdict(resume))])
     cache = {("second", "id"): call_result(CallDetails(), "resolved", {}, ())}
     payload = inspect_session_payload([], observations=observation_views(timeline, cache=cache),
                                       view="tool_detail", run_id="first", tool_call_id="id")
     assert (payload["status"], payload["started_at"], payload["source"]) == ("success", 1, "live")
     assert payload["result"]["output_excerpt"] == "resolved"
+
+
+def test_independent_runs_are_distinct_even_if_the_model_reuses_message_ids():
+    from agent.companion.timeline import Timeline
+
+    timeline = Timeline("session", 20)
+    for i, run in enumerate(("one", "two"), 1):
+        timeline.completed(ToolObservation(
+            "session", run, run, "main", "model", "default", "execute", "same", i,
+            finished_at=i + .5, outcome="success", message_id="duplicate",
+        ))
+    assert [row["run_id"] for row in inspect_session_payload([], timeline)["tools"]] == ["one", "two"]
 
 
 def test_redaction_preserves_diagnostic_paths_but_hides_credentials():

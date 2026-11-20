@@ -1576,8 +1576,13 @@ class AgentRunner:
         if saw_input_usage:
             self._context_usage_invalidated = False
         for event in events:
-            if event.type == "tool_completed" and resume_calls and event.tool_call_id not in self._seen_tool_calls:
-                event = replace(event, message_id=resume_calls.get(event.tool_call_id, ""))
+            if resume_calls and event.tool_call_id in resume_calls:
+                origin = resume_calls[event.tool_call_id]
+                if event.type == "tool_started" and event.message_id == origin:
+                    # HITL can replay the saved AI message after tool_resumed.
+                    continue
+                if event.type == "tool_completed":
+                    event = replace(event, message_id=resume_calls.pop(event.tool_call_id))
             if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:

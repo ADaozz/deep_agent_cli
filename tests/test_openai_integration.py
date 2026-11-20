@@ -234,14 +234,17 @@ asyncio.run(worker.main())
 
                 waiting = await asyncio.to_thread(runner.invoke, "Run the fixture commands.")
                 assert waiting.status == "waiting_confirmation"
-                assert {row["status"] for row in (await inspect())["tools"]} == {"waiting"}
+                pending_rows = (await inspect())["tools"]
+                assert len(pending_rows) == len(cases)
+                assert {row["status"] for row in pending_rows} == {"waiting"}
 
                 decisions = [{"tool_call_id": case, "decision": "approve"} for case in cases]
                 approved = asyncio.create_task(asyncio.to_thread(runner.decide_tools, decisions))
                 try:
                     assert await asyncio.to_thread(running.wait, 4)
                     live = await inspect(view="tool_detail", tool_call_id="dependency")
-                    assert live["status"] == "running"
+                    assert live.get("status") == "running", live
+                    assert live["run_id"] == pending_rows[0]["run_id"]
                 finally:
                     release.set()
                     completed = await approved

@@ -33,6 +33,7 @@ class ToolObservation:
     retry_of: str | None = None
     message_id: str = ""
     retry_basis: str = ""
+    resumed_from_checkpoint: bool = False
 
 
 def category(text, exit_code):

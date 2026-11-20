@@ -157,6 +157,7 @@ class ToolCallView:
     error_category: str = ""
     details: CallDetails = field(default_factory=CallDetails)
     retry_of: str | None = None
+    resumed_from_checkpoint: bool = False
 
     def row(self):
         return dict(
@@ -185,7 +186,7 @@ def _observation(obs, status, source, details):
         row["tool_call_id"], row.get("tool_name") or "tool", status, source,
         **{key: row[key] for key in (
             "run_id", "turn_id", "message_id", "agent_id", "started_at", "finished_at",
-            "duration_ms", "exit_code", "error_category", "retry_of",
+            "duration_ms", "exit_code", "error_category", "retry_of", "resumed_from_checkpoint",
         ) if key in row},
         details=details,
     )
@@ -221,14 +222,16 @@ def observation_views(timeline, live_calls=None, cache=None):
 
     # A resume can finish before the persisted Timeline has been loaded.
     # The checkpoint's parent AI message identifies that same call across runs.
-    origins = {}
+    origins = defaultdict(list)
     for key, row in sorted(views.items(), key=lambda item: item[1].started_at or 0):
         if row.agent_id != "main" or not row.message_id:
             continue
         origin = row.message_id, row.tool_call_id
-        first_key = origins.setdefault(origin, key)
-        if first_key == key:
+        prior = origins[origin]
+        if not row.resumed_from_checkpoint or len(prior) != 1:
+            prior.append(key)
             continue
+        first_key = prior[0]
         first = views[first_key]
         if first.status in _TERMINAL and row.status not in _TERMINAL:
             views.pop(key)
