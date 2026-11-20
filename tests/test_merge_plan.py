@@ -433,17 +433,27 @@ def test_tui_enter_accepts_candidate_before_running_command() -> None:
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             task = asyncio.create_task(app.run_async())
-            await asyncio.sleep(0.03)
-            pipe.send_text("/elp")
-            await asyncio.sleep(0.08)
-            pipe.send_text("\r")
-            await asyncio.sleep(0.08)
-            assert app.buffer.text == "/help"
-            assert not any("Keyboard\n" in getattr(block, "content", "") for block in app.state.blocks)
-            pipe.send_text("\r")
-            await asyncio.sleep(0.08)
-            assert any("Keyboard\n" in getattr(block, "content", "") for block in app.state.blocks)
-            app.exit()
-            await task
+
+            async def wait_until(predicate) -> None:
+                async with asyncio.timeout(3):
+                    while not predicate():
+                        await asyncio.sleep(0.01)
+
+            def help_is_open() -> bool:
+                return any(block.command_title == "/help" for block in app.state.blocks)
+
+            try:
+                await wait_until(lambda: app.application.is_running)
+                pipe.send_text("/elp")
+                await wait_until(lambda: app.buffer.complete_state is not None)
+                pipe.send_text("\r")
+                await wait_until(lambda: app.buffer.text == "/help")
+                assert not help_is_open()
+                pipe.send_text("\r")
+                await wait_until(help_is_open)
+            finally:
+                if app.application.is_running:
+                    app.exit()
+                await task
 
     asyncio.run(scenario())
