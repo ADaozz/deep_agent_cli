@@ -31,6 +31,7 @@ class RunEvent:
     artifact: Any = None
     run_id: str = ""
     turn_id: str = ""
+    checkpoint_replay: bool = False
 
 
 @dataclass(frozen=True)

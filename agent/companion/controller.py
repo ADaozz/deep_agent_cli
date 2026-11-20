@@ -418,7 +418,7 @@ class Companion:
             self.batches.clear()
             self.queue_behavior("focused")
         elif kind in ("tool_started", "tool_resumed") and event.tool_call_id:
-            if identity in self.timeline.active or identity in self.timeline.finished:
+            if event.checkpoint_replay or identity in self.timeline.active or identity in self.timeline.finished:
                 return
             if kind == "tool_resumed":
                 resumed = self.resumable_call(event)

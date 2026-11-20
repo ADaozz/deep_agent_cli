@@ -1580,7 +1580,7 @@ class AgentRunner:
                 origin = resume_calls[event.tool_call_id]
                 if event.type == "tool_started" and event.message_id == origin:
                     # HITL can replay the saved AI message after tool_resumed.
-                    continue
+                    event = replace(event, checkpoint_replay=True)
                 if event.type == "tool_completed":
                     event = replace(event, message_id=resume_calls.pop(event.tool_call_id))
             if event.type == "tool_started" and event.name == "start_task":
