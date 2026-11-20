@@ -444,3 +444,24 @@ def test_turn_review_filters_evidence_and_voice():
     )
     assert reply_text(long) == long
     assert reply_text("x" * 90, proactive=True).endswith("…")
+
+
+def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):
+    from agent.companion.timeline import timeline_window, transact
+
+    path = tmp_path / "timeline.db"
+    transact(path, [
+        ("s", "tool", "call", 1, "turn", {"tool_name": "execute"}),
+        ("s", "incident", "notice", 2, "turn", {"state": "open"}),
+        ("s", "turn", "turn", 3, "turn", {"turn": "turn"}),
+        ("s", "git", "git", 4, "turn", {"branch": "fixture"}),
+        ("other", "incident", "other", 5, "turn", {"state": "resolved"}),
+        *(("s", "resources", str(i), i, "turn", {"percent": [50]}) for i in range(6, 25)),
+    ])
+    recent = timeline_window(path, "s", "timeline", 0, 30, limit=3)
+    assert [kind for _, kind, _ in recent["records"]] == ["turn", "incident", "tool"]
+    assert not recent["truncated"]
+    incidents = timeline_window(path, "s", "timeline", 0, 30, event_type="incident", turn_id="turn", limit=1)
+    assert incidents == {"records": [(2.0, "incident", {"state": "open"})], "truncated": False}
+    git = timeline_window(path, "s", "git", 0, 30, limit=1)
+    assert git["records"][0][1] == "git"

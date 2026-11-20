@@ -101,9 +101,14 @@ def create_chat(model, query, *, persona=None, instructions=None):
         tool_name: Annotated[str | None, Field(description="按工具名称筛选。git 不包含工具调用。")] = None,
         turn_id: Annotated[str | None, Field(description="按返回结果中的轮次 ID 筛选。")] = None,
         limit: Annotated[int | None, Field(description="返回条数，1～20。")] = None,
+        event_type: Annotated[
+            Literal["tool", "incident", "turn", "run", "analysis", "git"] | None,
+            Field(description="仅用于 timeline。按事件类型筛选，默认返回 tool、incident 和 turn。"),
+        ] = None,
     ) -> str:
         """查询当前会话的有限记录。timeline 和 git 最多查最近 14 天，按时间倒序。其他视图忽略起止时间。"""
-        return await query(kind, start=start, end=end, tool_name=tool_name, turn_id=turn_id, limit=limit)
+        return await query(kind, start=start, end=end, tool_name=tool_name, turn_id=turn_id,
+                           event_type=event_type, limit=limit)
 
     @tool
     async def inspect_current_session(

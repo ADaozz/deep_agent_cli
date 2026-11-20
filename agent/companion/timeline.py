@@ -441,16 +441,22 @@ def restore_session(path, session, window):
     return state
 
 
-def timeline_window(path, session, kind, start, end, budget=None, *, tool_name=None, turn_id=None, limit=16):
-    """The host supplies session; the model supplies only a bounded time range."""
+def timeline_window(path, session, kind, start, end, budget=None, *,
+                    tool_name=None, turn_id=None, event_type=None, limit=16):
+    """Read a bounded diagnostic window for the host-selected session."""
     with readonly_database(path, budget) as db:
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 256 * 1024)
         query = "SELECT stamp,kind,payload FROM timeline WHERE session=? AND stamp BETWEEN ? AND ?"
         args = [session, start, end]
         if kind == "git":
             query += " AND kind='git'"
+        elif event_type is not None:
+            if event_type not in {"tool", "incident", "turn", "run", "analysis", "git"}:
+                raise ValueError("Unsupported diagnostic event type")
+            query += " AND kind=?"
+            args.append(event_type)
         else:
-            query += " AND kind IN ('tool','turn','incident','run','analysis','git')"
+            query += " AND kind IN ('tool','incident','turn')"
         if tool_name:
             query += " AND kind='tool' AND json_extract(payload,'$.tool_name')=?"
             args.append(tool_name)

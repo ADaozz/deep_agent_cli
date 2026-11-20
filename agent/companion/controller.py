@@ -864,6 +864,7 @@ class Companion:
             return await asyncio.to_thread(
                 timeline_window, self.database, thread, kind, start, end, budget,
                 tool_name=args.get("tool_name"), turn_id=args.get("turn_id"),
+                event_type=args.get("event_type"),
                 limit=max(1, min(20, int(args.get("limit") or 16))),
             )
         if kind in ("search", "files"):

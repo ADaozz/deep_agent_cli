@@ -101,7 +101,8 @@ def _arguments(value, secrets):
 
 
 def result_status(status, *, name, content, artifact, is_error=False):
-    if status == "cancelled" or artifact.get("cancelled") or artifact.get("status") == "cancelled":
+    if (status == "cancelled" or artifact.get("cancelled") or artifact.get("status") == "cancelled"
+            or artifact.get("termination_reason") == "cancelled"):
         return "cancelled"
     if is_error or status in {"error", "failed", "completed", "success"}:
         return classify_tool_result(

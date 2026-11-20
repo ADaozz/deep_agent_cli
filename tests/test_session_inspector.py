@@ -190,3 +190,34 @@ def test_redaction_preserves_diagnostic_paths_but_hides_credentials():
     assert "tests/test_example.py" in details.arguments["command"]
     assert "tests/test_example.py:4" in details.output_excerpt
     assert "opaque-" not in json.dumps(details.arguments) + details.output_excerpt
+
+
+def test_waiting_and_cancelled_checkpoint_statuses_are_preserved():
+    blocks = [
+        TranscriptBlock(kind="tool", tool_call_id="waiting", name="execute", status="waiting"),
+        TranscriptBlock(kind="tool", tool_call_id="cancelled", name="execute", status="cancelled", is_error=True),
+        TranscriptBlock(kind="tool", tool_call_id="terminated", name="execute",
+                        artifact={"termination_reason": "cancelled"}),
+    ]
+    rows = inspect_session_payload(blocks)["tools"]
+    assert [row["status"] for row in rows] == ["waiting", "cancelled", "cancelled"]
+
+
+def test_live_result_overrides_stale_checkpoint_running_status():
+    from agent.companion.session_inspector import call_arguments, call_result, observation_views
+    from agent.companion.timeline import Timeline
+
+    timeline = Timeline("s", 20)
+    call = ToolObservation("s", "t", "r", "main", "m", "default", "execute", "id", 1,
+                           finished_at=2, outcome="success", message_id="parent", exit_code=0)
+    timeline.completed(call)
+    blocks = [TranscriptBlock(kind="tool", tool_call_id="id", name="execute",
+                              status="running", message_id="parent")]
+    details = call_result(call_arguments({"command": "pytest -q"}, ()), "12 passed", {}, ())
+    observations = observation_views(timeline, cache={("r", "id"): details})
+    payload = inspect_session_payload(blocks, observations=observations, view="tool_detail", tool_call_id="id")
+    assert payload["status"] == "success"
+    assert payload["result"]["exit_code"] == 0
+    assert payload["arguments"] == {"command": "pytest -q"}
+    assert payload["result"]["output_excerpt"] == "12 passed"
+    assert inspect_session_payload(blocks, timeline)["tools"][0]["status"] == "success"
