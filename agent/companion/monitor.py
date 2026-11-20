@@ -15,10 +15,11 @@ class Service:
     pid: int
     name: str
     sandbox: bool
+    ports: tuple[int, ...] = ()
 
 
-def _listening(directory: Path) -> set[str]:
-    inodes = set()
+def _listening(directory: Path) -> dict[str, int]:
+    inodes = {}
     for proto in ("tcp", "tcp6"):
         try:
             lines = (directory / "net" / proto).read_text().splitlines()[1:]
@@ -27,7 +28,10 @@ def _listening(directory: Path) -> set[str]:
         for line in lines:
             fields = line.split()
             if len(fields) > 9 and fields[3] == "0A":
-                inodes.add(f"socket:[{fields[9]}]")
+                try:
+                    inodes[f"socket:[{fields[9]}]"] = int(fields[1].rsplit(":", 1)[-1], 16)
+                except ValueError:
+                    continue
     return inodes
 
 
@@ -55,12 +59,12 @@ def services(proc: Path = Path("/proc")) -> tuple[Service, ...]:
             if ns not in listeners:
                 listeners[ns] = _listening(path)
             sockets = listeners[ns]
-            listening = False
+            ports = set()
             for fd in (path / "fd").iterdir():
                 try:
-                    if os.readlink(fd) in sockets:
-                        listening = True
-                        break
+                    port = sockets.get(os.readlink(fd))
+                    if port is not None:
+                        ports.add(port)
                 except OSError:
                     continue
             name = (path / "comm").read_text().strip()
@@ -70,8 +74,8 @@ def services(proc: Path = Path("/proc")) -> tuple[Service, ...]:
                     name = argv[2]
                 elif argv[1] and not argv[1].startswith("-"):
                     name = Path(argv[1]).name
-            record = Service(pid, stat[19], int(namespace[-1]), name, len(namespace) > 1)
-            owned[pid] = (int(stat[1]), marker.split(b"=", 1)[1].decode() not in active, listening, record)
+            record = Service(pid, stat[19], int(namespace[-1]), name, len(namespace) > 1, tuple(sorted(ports)))
+            owned[pid] = (int(stat[1]), marker.split(b"=", 1)[1].decode() not in active, bool(ports), record)
         except (OSError, ValueError, IndexError):
             continue
     parents = {parent for parent, *_ in owned.values()}

@@ -63,20 +63,17 @@ class SessionSummaryRequest:
 class SummaryEligibility:
     """Remember only sessions first seen empty; historical sessions are ineligible."""
     def __init__(self) -> None:
-        self._requests: dict[str, str] = {}
         self._observed: set[str] = set()
 
     def needs_inspection(self, thread_id: str) -> bool:
         return thread_id not in self._observed
 
-    def begin(self, thread_id: str, text: str, *, has_content: bool, has_summary: bool) -> None:
+    def begin(
+        self, thread_id: str, text: str, model_id: str, *, has_content: bool, has_summary: bool,
+    ) -> SessionSummaryRequest | None:
         if thread_id in self._observed:
-            return
+            return None
         self._observed.add(thread_id)
         if not has_content and not has_summary and text.strip():
-            self._requests[thread_id] = text
-
-    def complete(self, thread_id: str, model_id: str) -> SessionSummaryRequest | None:
-        if thread_id not in self._requests:
-            return None
-        return SessionSummaryRequest(thread_id, self._requests.pop(thread_id), model_id)
+            return SessionSummaryRequest(thread_id, text, model_id)
+        return None

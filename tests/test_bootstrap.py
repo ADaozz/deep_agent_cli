@@ -5,9 +5,10 @@ import pytest
 
 from agent.bootstrap.setup import initialize_user_files
 from agent.bootstrap.config import Settings
+from agent.companion import STATES
 
 
-def test_first_launch_creates_template_and_skills_then_preserves_config(
+def test_first_launch_creates_config_skills_and_companion_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
@@ -32,14 +33,44 @@ def test_first_launch_creates_template_and_skills_then_preserves_config(
     assert loaded.source_path == path
     assert loaded.active_profile.id == "deepseek/deepseek-flash"
     assert loaded.active_profile.api == "chat_completions"
+    companion = loaded.companion
+    assert companion.persona_prompt == path.parent / "companion/prompts/persona.md"
+    for prompt in (companion.persona_prompt, companion.observation_prompt, companion.chat_prompt):
+        assert prompt.is_relative_to(path.parent)
+        assert prompt.read_text(encoding="utf-8").strip()
+    assert set(companion.gifs) == set(STATES)
+    for state, gif in companion.gifs.items():
+        assert gif == path.parent / "companion/gifs" / f"lain_{state}.gif"
+        with gif.open("rb") as file:
+            assert file.read(6) in (b"GIF87a", b"GIF89a")
+    companion.persona_prompt.write_text("Custom persona", encoding="utf-8")
+    assert initialize_user_files(workspace=workspace) is None
+    assert companion.persona_prompt.read_text(encoding="utf-8") == "Custom persona"
 
 
-def test_existing_config_only_creates_missing_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_packaged_companion_gifs_match_sprite_sources() -> None:
+    root = Path(__file__).resolve().parents[1]
+    packaged = root / "agent" / "companion" / "assets"
+    sprites = root / "assets" / "lain-sprites" / "gifs"
+    for state in STATES:
+        if state == "idle":
+            continue
+        name = f"lain_{state}.gif"
+        assert (packaged / name).read_bytes() == (sprites / name).read_bytes()
+
+
+def test_existing_config_backfills_missing_companion_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     home = tmp_path / "home"
     root = home / ".deep-agent"
     root.mkdir(parents=True)
     config = root / "config.yaml"
     config.write_text("{}\n")
+    prompts = root / "companion" / "prompts"
+    prompts.mkdir(parents=True)
+    custom = prompts / "persona.md"
+    custom.write_text("kept persona\n", encoding="utf-8")
     work = tmp_path / "project"
     work.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -47,6 +78,14 @@ def test_existing_config_only_creates_missing_skills(tmp_path: Path, monkeypatch
     assert initialize_user_files(workspace=work) is None
     assert config.read_text() == "{}\n"
     assert (root / "skills").is_dir()
+    assert custom.read_text(encoding="utf-8") == "kept persona\n"
+    for name in ("observation.md", "chat.md"):
+        assert (prompts / name).is_file()
+        assert (prompts / name).read_text(encoding="utf-8").strip()
+    for state in STATES:
+        gif = root / "companion" / "gifs" / f"lain_{state}.gif"
+        with gif.open("rb") as file:
+            assert file.read(6) in (b"GIF87a", b"GIF89a")
 
 
 def test_init_rejects_home_workspace_and_skills_symlink(

@@ -22,24 +22,51 @@ def subagent_result_status(content: str, *, is_error: bool = False) -> str:
     return "completed"
 
 
+def classify_tool_result(
+    *,
+    status: str = "",
+    content: str = "",
+    name: str = "",
+    artifact: object = None,
+) -> str:
+    """Classify a tool result for transcripts, Companion, and subagent events.
+
+    Returns ``cancelled``, ``failed``, or ``success``. Prefer structured
+    ``status`` / execute artifacts over free text. Content matching only
+    accepts the project's ``Error:`` envelope so a successful read of a file
+    that starts with ``Error handling…`` is not counted as a failure.
+    """
+    status = str(status or "")
+    text = content.lower() if isinstance(content, str) else ""
+    payload = artifact if isinstance(artifact, dict) else {}
+    termination = payload.get("termination_reason")
+    # execute: structured artifact wins over free-text phrases in command output.
+    if name == "execute":
+        exit_code = payload.get("exit_code")
+        if termination == "cancelled":
+            return "cancelled"
+        if (
+            status == "error"
+            or termination is not None
+            or (isinstance(exit_code, int) and exit_code != 0)
+        ):
+            return "failed"
+        return "success"
+    if termination == "cancelled" or "cancelled by user" in text:
+        return "cancelled"
+    if status == "error" or text.lstrip().startswith("error:"):
+        return "failed"
+    return "success"
+
+
 def tool_message_is_error(message: ToolMessage) -> bool:
     """Match live tool_completed error classification, including execute artifacts."""
-    status = str(getattr(message, "status", "") or "")
-    content = message_text(message)
-    name = str(getattr(message, "name", "") or "")
-    artifact = getattr(message, "artifact", None)
-    if name == "execute" and isinstance(artifact, dict):
-        exit_code = artifact.get("exit_code")
-        return (
-            status == "error"
-            or artifact.get("termination_reason") is not None
-            or (isinstance(exit_code, int) and exit_code != 0)
-        )
-    return (
-        status == "error"
-        or content.lower().startswith("error")
-        or "cancelled by user" in content.lower()
-    )
+    return classify_tool_result(
+        status=str(getattr(message, "status", "") or ""),
+        content=message_text(message),
+        name=str(getattr(message, "name", "") or ""),
+        artifact=getattr(message, "artifact", None),
+    ) != "success"
 
 
 def messages_to_transcript(

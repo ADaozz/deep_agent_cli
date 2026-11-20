@@ -57,50 +57,136 @@ def test_timeline_identity_concurrent_calls_and_recovery(tmp_path):
     asyncio.run(run())
 
 
-def test_chart_filter_window_and_incident_cooldown(tmp_path):
-    from agent.companion.chart import FailureChart
-    from agent.companion.timeline import ToolObservation, Timeline
+def test_heatmap_uses_tool_results_and_preserves_cumulative_statistics(tmp_path):
+    from agent.companion.chart import ACTIVITY_CELLS, FAILED_CELL, ActivityHeatmap
+    from agent.companion.timeline import Timeline, restore_session
+
+    async def run():
+        c = companion(tmp_path, lambda: "s")
+        c.window = 2
+        c.timeline = Timeline("s", c.window)
+        chart = ActivityHeatmap(c)
+
+        def event(kind, call, **kwargs):
+            c.event(RunEvent(kind, name="read", tool_call_id=call, **kwargs), "fixed model")
+
+        empty = chart.draw(30, 8)
+        assert [row[0][1] for row in empty] == ["Tool Health", "No tool calls yet"]
+        event("tool_started", "a")
+        assert chart.draw(30, 8) is empty
+        await c.save_statistics()
+        assert chart.draw(30, 8) == empty
+        event("tool_completed", "a", content="timeout was handled")
+        assert chart.draw(30, 8)[2][-1] == ACTIVITY_CELLS[1]
+        event("tool_started", "b")
+        event("tool_completed", "b", artifact={"exit_code": 127})
+        event("tool_started", "c")
+        event("tool_completed", "c", artifact={"status": "cancelled"})
+        event("tool_started", "d")
+        event("tool_started", "d")
+        populated = chart.draw(30, 8)
+        assert populated[0][-1][1] == "50% success"
+        assert populated[1][0][1] == "Last 2 calls"
+        assert populated[2][-1] == FAILED_CELL
+        assert populated[-1][0][1] == "2 calls · 1 success · 1 failed"
+        assert len(c.timeline.series["fixed model", "default", "read"].recent) == 2
+        await c.save_statistics()
+        restored = restore_session(c.database, "s", c.window)
+        assert list(restored.chart_tools(("fixed model", "default"))) == [("read", 50, 4)]
+        assert [obs.tool_call_id for obs in restored.recent_tool_calls] == ["a", "b"]
+        c.timeline = restored
+        assert chart.draw(30, 8) == populated
+
+    asyncio.run(run())
+
+
+def _observe_tool(timeline, i, name, *, failed=False, model="fixed model"):
+    from agent.companion.timeline import ToolObservation
+
+    obs = ToolObservation(
+        "s", "t", "r", "main", model, "default", name, str(i), i - 1, i, 1,
+        "failed" if failed else "success", "timeout" if failed else "",
+    )
+    timeline.completed(obs)
+    timeline.record("tool", vars(obs), key=f"r/{i}", stamp=i)
+
+
+def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
+    from prompt_toolkit.utils import get_cwidth
+
+    from agent.companion.chart import ACTIVITY_CELLS, FAILED_CELL, ActivityHeatmap
 
     c = companion(tmp_path, lambda: "s")
-    c.timeline = Timeline("s", 20)
-    chart = FailureChart(c)
+    long_name = "甲乙丙工具执行记录"
+    groups = [
+        ("read", "read", "read"),
+        ("read", "read", "shell"),
+        ("write", "write", "read"),
+        (long_name, long_name, long_name),
+        ("shell", "web", "extra"),
+        ("shell", "read", "extra"),
+        (long_name,),
+    ]
+    for i, name in enumerate(name for group in groups for name in group):
+        _observe_tool(c.timeline, i, name, failed=i in (3, 4, 13, 14))
+    chart = ActivityHeatmap(c)
+    rows = chart.draw(30, 8)
+    assert len(rows) == 8
+    assert rows[0][-1][1] == "78.9% success"
+    assert rows[1][0][1] == "Last 19 calls"
+    assert all(sum(get_cwidth(text) for _, text in row) <= 30 for row in rows)
+    matrix = rows[2:6]
+    assert [row[0][1].strip() for row in matrix] == ["read", "甲乙丙…", "shell", "other"]
+    assert len({get_cwidth(row[0][1]) for row in matrix}) == 1
+    for width in (30, 47, 64):
+        for row in chart.draw(width, 8)[2:6]:
+            label = row[0][1]
+            left = len(label) - len(label.lstrip())
+            right = width - sum(get_cwidth(text) for _, text in row)
+            assert abs(right - left) <= 1
+    cells = [row[1::2] for row in matrix]
+    assert cells[0][:3] == [ACTIVITY_CELLS[3], FAILED_CELL, ACTIVITY_CELLS[1]]
+    assert cells[2][:2] == [ACTIVITY_CELLS[0], ACTIVITY_CELLS[1]]
+    assert cells[3][2] == ACTIVITY_CELLS[2]
+    assert cells[3][4:6] == [FAILED_CELL, ACTIVITY_CELLS[1]]
+    assert all(len(row) == 7 for row in cells)
+    assert all(set(row[2::2]) == {("", " ")} for row in matrix)
+    assert all(get_cwidth(glyph) == 1 and glyph in "■×" for row in cells for _, glyph in row)
+    legend = rows[-2]
+    assert [cell for cell in legend if cell[1] == "■"] == [
+        ("#FFFFFF", "■"), ("#FFD5EC", "■"), ("#F7BDD7", "■"), ("#F18AB6", "■"),
+    ]
+    assert "× Failed" in "".join(text for _, text in legend)
+    assert rows[-1][0][1] == "19 calls·15 success·4 failed"
 
-    def add(i, failed, tool="read"):
-        obs = ToolObservation(
-            "s",
-            "t",
-            "r",
-            "main",
-            "fixed model",
-            "default",
-            tool,
-            tool + str(i),
-            i,
-            i,
-            1,
-            "failed" if failed else "success",
-            "dependency" if failed else "",
+
+def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp_path):
+    from agent.companion.chart import ACTIVITY_CELLS, FAILED_CELL, ActivityHeatmap
+    from agent.companion.timeline import restore_session, transact
+
+    c = companion(tmp_path, lambda: "s")
+    chart = ActivityHeatmap(c)
+    for i in reversed(range(65)):
+        _observe_tool(
+            c.timeline, i, "retired" if i < 5 else "execute", failed=i < 11,
+            model=f"model-{i % 2}",
         )
-        c.timeline.completed(obs)
-
-    for i in range(20):
-        add(i, i < 3)
-    assert c.timeline.series["fixed model", "default", "read"].rate == 15
-    assert "15% n=20" in str(chart.draw(38, 6))
-    add(20, False)
-    assert "No elevated" in str(chart.draw(38, 5))
-    assert len(c.timeline.queue) == 1
-    for i in range(3):
-        add(21 + i, True, "edit")
-    assert "100% n=3" in str(chart.draw(38, 6))
-    add(24, True, "edit")
-    assert len(c.timeline.queue) == 2
-    for i in range(4):
-        add(i, True, "other" + str(i))
-    chart.draw(38, 5)
-    assert chart.pages == 2
-    chart.scroll(1)
-    assert "2/2" in str(chart.draw(38, 5))
+    assert [obs.finished_at for obs in c.timeline.recent_tool_calls] == list(range(5, 65))
+    wide = chart.draw(64, 9)
+    assert wide[0][-1][1] == "90% success"
+    assert wide[1][0][1] == "Last 60 calls"
+    assert wide[2][0][1].strip() == "execute"
+    assert wide[2][1::2] == [FAILED_CELL] * 2 + [ACTIVITY_CELLS[3]] * 18
+    assert wide[-1][0][1] == "60 calls · 54 success · 6 failed"
+    _observe_tool(c.timeline, -1, "old", failed=True)
+    assert chart.draw(64, 9) is wide
+    narrow = chart.draw(30, 9)
+    assert narrow[1][0][1] == "Last 60 calls · 33 shown"
+    assert narrow[2][1::2] == [ACTIVITY_CELLS[3]] * 11
+    assert narrow[-1][0][1] == "60 calls·54 success·6 failed"
+    transact(c.database, c.timeline.pending)
+    c.timeline = restore_session(c.database, "s", c.window)
+    assert chart.draw(64, 9) == wide
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):
@@ -171,7 +257,7 @@ def test_worker_restart_limit_and_local_operation_without_key(tmp_path, monkeypa
     asyncio.run(run())
 
 
-def test_focus_returns_on_resize_and_preserves_both_drafts():
+def test_focus_shortcuts_and_resize_preserve_both_drafts():
     from deepagents.backends import StateBackend
     from prompt_toolkit.application.current import set_app
     from prompt_toolkit.data_structures import Size
@@ -186,12 +272,25 @@ def test_focus_returns_on_resize_and_preserves_both_drafts():
         with create_pipe_input() as pipe:
             app = CliApplication(runner, input=pipe, output=DummyOutput())
             app.application.output.get_size = lambda: Size(48, 180)
+            app.application.timeoutlen = None
+
+            def press(sequence):
+                pipe.send_bytes(sequence)
+                app.application.key_processor.feed_multiple(pipe.read_keys())
+                app.application.key_processor.process_keys()
+
             with set_app(app.application):
                 app.buffer.text = "main draft"
-                app.application.layout.focus(app.lain_editor)
+                press(b"\x1b[1;5C")
+                assert app.application.layout.current_control is app.lain_editor
                 app.lain_buffer.text = "chat draft"
+                press(b"\x1b[1;5D")
+                assert app.application.layout.current_control is app.editor_control
+                press(b"\x1b[1;5C")
+                assert app.application.layout.current_control is app.lain_editor
                 app.application.output.get_size = lambda: Size(24, 80)
                 app.application.before_render.fire()
+                press(b"\x1b[1;5C")
                 assert app.application.layout.current_control is app.editor_control
                 assert (app.buffer.text, app.lain_buffer.text) == (
                     "main draft",
@@ -229,8 +328,7 @@ def test_first_live_window_on_resume_uses_persisted_baseline(tmp_path):
     asyncio.run(run())
 
 
-def test_distributed_decline_with_no_visible_bars_survives_resume(tmp_path):
-    from agent.companion.chart import FailureChart
+def test_distributed_decline_with_low_individual_rates_survives_resume(tmp_path):
     from agent.companion.timeline import (
         SESSION_RELIABILITY,
         ToolObservation,
@@ -266,7 +364,6 @@ def test_distributed_decline_with_no_visible_bars_survives_resume(tmp_path):
             c.timeline.completed(obs)
             c.timeline.record("tool", vars(obs), key=str(call), stamp=obs.finished_at)
     assert all(v.rate == 10 for v in c.timeline.series.values())
-    assert "No elevated failure rates" in str(FailureChart(c).draw(45, 6))
     assert c.timeline.overall.rate == 10
     incident = c.timeline.incidents[SESSION_RELIABILITY]
     assert incident["state"] == "open" and incident["scope"] == "session"
@@ -277,46 +374,17 @@ def test_distributed_decline_with_no_visible_bars_survives_resume(tmp_path):
     assert restored.incidents[SESSION_RELIABILITY]["id"] == incident["id"]
 
 
-def test_bars_sorted_across_pages_and_recover_only_after_clean_results(tmp_path):
-    from agent.companion.chart import FailureChart
-    from agent.companion.timeline import ToolObservation
-
+def test_incident_recovers_only_after_clean_results(tmp_path):
     c = companion(tmp_path, lambda: "s")
-
-    def add(tool, i, failed):
-        obs = ToolObservation(
-            "s",
-            "t",
-            "r",
-            "main",
-            "fixed model",
-            "default",
-            tool,
-            tool + str(i),
-            i,
-            i,
-            1,
-            "failed" if failed else "success",
-            "timeout" if failed else "",
-        )
-        c.timeline.completed(obs)
-
-    for tool, count in (("edit", 3), ("execute", 7), ("read", 2), ("grep", 1)):
-        for i in range(10):
-            add(tool, i, i < count)
-    chart = FailureChart(c)
-    rows = chart.draw(25, 6)
-    assert [s.strip() for _, s in rows[-2]] == ["execute", "edit"]
-    assert [s.strip() for _, s in rows[-1]] == ["70% n=10", "30% n=10"]
-    chart.scroll(1)
-    assert [s.strip() for _, s in chart.draw(25, 6)[-2]] == ["read"]
-    for i in range(3):
-        add("probe", i, True)
     key = ("fixed model", "default", "probe")
-    add("probe", 3, False)
+    for i in range(3):
+        _observe_tool(c.timeline, i, "probe", failed=True)
+    assert len(c.timeline.queue) == 1
     assert c.timeline.incidents[key]["state"] == "open"
-    for i in range(4, 8):
-        add("probe", i, False)
+    for i in range(3, 7):
+        _observe_tool(c.timeline, i, "probe")
+        assert c.timeline.incidents[key]["state"] == "open"
+    _observe_tool(c.timeline, 7, "probe")
     assert c.timeline.incidents[key]["state"] == "resolved"
 
 
@@ -366,5 +434,5 @@ def test_turn_review_filters_evidence_and_voice():
     assert all(term in findings for term in ("上升", "疑似重试", "RAM", "更慢"))
     assert "4200" not in findings and "Git" not in findings
     assert reply_text("Uncertain.", proactive=True) == ""
-    assert "可靠" in reply_text("No evidence.")
+    assert reply_text("No evidence.") == "我没想好怎么答。你能再说具体一点吗？"
     assert reply_text("先看依赖声明。") == "先看依赖声明。"

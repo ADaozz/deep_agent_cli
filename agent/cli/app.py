@@ -23,7 +23,7 @@ from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (
     ConditionalContainer,
@@ -41,12 +41,16 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
-from agent.companion.chart import FailureChart
+from agent.companion.chart import ActivityHeatmap
 from agent.companion.controller import Companion
+from agent.companion.theme import ACCENT as COMPANION_ACCENT
 from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
 from agent.cli.widgets import (
+    EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
+    build_input_editor,
+    _SelectablePane,
     _ScrollableTextControl,
     _InteractionControl,
     _BackToBottomControl,
@@ -161,6 +165,8 @@ class CliApplication:
         self.run_view = RunPresentation()
         self.state.load_model_metrics(runner.model_metrics_history())
         self.state.context_pristine = not runner.thread_has_content()
+        if not self.state.context_pristine:
+            self.state.usage = runner.latest_usage()
         self.commands = command_table()
         self.command_by_name = {item.name: item for item in self.commands}
         keymap_path = (config_dir / "keybindings.json") if config_dir else None
@@ -210,8 +216,10 @@ class CliApplication:
         self.companion = Companion(
             workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
             protected=protected, secrets=runner.summary_secrets(), profile=self._companion_profile,
+            config=runner.settings.companion if runner.settings is not None else None,
             session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
             invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
+            execute_environment=runner.execute_environment_context,
         )
 
         self.slash_completer = SlashCompleter(
@@ -261,9 +269,8 @@ class CliApplication:
             invalidate=lambda: self.application.invalidate(),
         )
         self.transcript = TranscriptNavigation(
-            _copy_selection=lambda *args, **kwargs: self._copy_selection(*args, **kwargs),
+            _copy_selection=self._queue_clipboard_copy,
             _transcript_document=lambda *args, **kwargs: self._transcript_document(*args, **kwargs),
-            lifecycle=lambda: self.lifecycle,
             transcript_window=lambda: self.transcript_window,
             invalidate=lambda: self.application.invalidate(),
             output=lambda: self.application.output,
@@ -403,7 +410,6 @@ class CliApplication:
                 _PastedContentProcessor(self.drafts.skill, "skill-block"),
             ],
         )
-        self.bindings = self._create_bindings()
 
         interaction_visible = Condition(lambda: self.dialogs.current is not None)
         editor_visible = Condition(lambda: self.dialogs.current is None or self.dialogs.current.accepts_text)
@@ -512,20 +518,7 @@ class CliApplication:
                 filter=back_to_bottom_visible & ~interaction_visible,
             ),
             ConditionalContainer(
-                HSplit([
-                    Window(height=1, char=" ", style="class:editor"),
-                    VSplit([
-                        Window(FormattedTextControl(EDITOR_PROMPT), width=2, style="class:editor"),
-                        Window(
-                            self.editor_control,
-                            wrap_lines=True,
-                            height=editor_height,
-                            dont_extend_height=True,
-                            style="class:editor",
-                        ),
-                    ]),
-                    Window(height=1, char=" ", style="class:editor"),
-                ]),
+                build_input_editor(self.editor_control, height=editor_height),
                 filter=editor_visible,
             ),
             Window(
@@ -542,16 +535,29 @@ class CliApplication:
         visible = Condition(lambda: bool(self._companion_geometry()[0]))
         self.lain_buffer = Buffer(multiline=False)
         self.lain_editor = BufferControl(buffer=self.lain_buffer, focus_on_click=True)
-        chart = FailureChart(self.companion)
-        sidebar = build_panel(self.companion, lambda: self._git_summary, chart, self.lain_editor)
+        chart = ActivityHeatmap(self.companion)
+        sidebar = _SelectablePane(
+            build_panel(
+                self.companion,
+                lambda: self._git_summary,
+                chart,
+                build_input_editor(self.lain_editor, height=1, prompt_style=COMPANION_ACCENT, wrap_lines=False),
+                footer_rows=FOOTER_LINES,
+            ),
+            copy_selection=self._queue_clipboard_copy,
+            invalidate=lambda: self.application.invalidate(),
+            selection_scope=lambda: self.companion.session_generation,
+        )
         focused = has_focus(self.lain_editor)
+        self.bindings = create_bindings(self, lambda: time.monotonic(), ~focused)
         available = visible & Condition(lambda: self.dialogs.current is None)
         companion_keys = KeyBindings()
 
-        @companion_keys.add("f6", filter=available)
-        def toggle_lain(event):
-            event.app.layout.focus(self.editor_control if focused() else self.lain_editor)
+        @companion_keys.add("c-right", filter=available & has_focus(self.editor_control))
+        def focus_lain(event):
+            event.app.layout.focus(self.lain_editor)
 
+        @companion_keys.add("c-left", filter=focused & available)
         @companion_keys.add("escape", filter=focused)
         def leave_lain(event):
             event.app.layout.focus(self.editor_control)
@@ -564,11 +570,9 @@ class CliApplication:
             else:
                 self.set_status(result)
 
-        @companion_keys.add("f7", filter=available)
-        def next_tools(event):
-            chart.scroll(1)
-
         def restore_focus(app):
+            if not visible():
+                sidebar.selection.clear_selection()
             if app.layout.current_control is self.lain_editor and not available():
                 app.layout.focus(self.editor_control)
         title = FormattedText([("#00d7e6 bold", "DeepAgentCLI"),
@@ -584,7 +588,7 @@ class CliApplication:
         ], style="bg:#08090b #d0d0d0")
         self.application: Application[None] = Application(
             layout=Layout(root, focused_element=self.editor_control),
-            key_bindings=merge_key_bindings([ConditionalKeyBindings(self.bindings, ~focused), companion_keys]),
+            key_bindings=merge_key_bindings([self.bindings, companion_keys]),
             before_render=restore_focus,
             full_screen=True,
             mouse_support=Condition(lambda: not self._exiting),
@@ -1105,9 +1109,10 @@ class CliApplication:
             return
         if action is InputAction.CLEAR_INPUT:
             buffer.reset()
-            self.drafts.pasted.clear()
-            self.drafts.skill.clear()
-            self.state.attachments.clear()
+            if buffer is not self.lain_buffer:
+                self.drafts.pasted.clear()
+                self.drafts.skill.clear()
+                self.state.attachments.clear()
             self._show_input_cleared_hint()
             return
         if action is InputAction.REQUEST_EXIT:
@@ -1144,7 +1149,9 @@ class CliApplication:
         if not hasattr(self, "application"):
             return 0, 0
         size = self.application.output.get_size()
-        return geometry(size.columns, size.rows)
+        return geometry(
+            size.columns, size.rows, editor_bottom_rows=FOOTER_LINES + EDITOR_PADDING_LINES
+        )
 
     def _companion_viewport(self) -> tuple[int, int]:
         width, height = self._companion_geometry()
@@ -1158,6 +1165,9 @@ class CliApplication:
         right, _ = self._companion_geometry()
         return max(1, columns - right - bool(right))
 
+
+    def _queue_clipboard_copy(self, content: str) -> None:
+        self.lifecycle.spawn(self._copy_selection(content), stop=TaskStop.CANCEL, name="clipboard-copy")
 
     async def _copy_selection(self, content: str) -> None:
         try:
@@ -1260,7 +1270,7 @@ class CliApplication:
     def _footer_text(self):  # type: ignore[no-untyped-def]
         mode = self.runner.prepared.execution_mode.value.lower()
         if mode == "sandboxed":
-            mode = "sbx"
+            mode = "sandbox"
         perm = self.runner.permission_mode().value
         pending_permission = self.runner.pending_permission_mode()
         if pending_permission is not None:
@@ -1280,13 +1290,11 @@ class CliApplication:
             self.state.usage, self.runner.context_window(),
             empty_session=self.state.context_pristine and not self.state.running,
         )
-        fs_labels = {"full-access": "full", "restricted": "rest"}
-        current_filesystem = self.runner.sandbox_mode()
-        filesystem = fs_labels.get(current_filesystem, current_filesystem)
+        filesystem = self.runner.sandbox_mode()
         pending_filesystem = self.runner.pending_sandbox_mode()
         if pending_filesystem is not None:
-            filesystem += f"→{fs_labels.get(pending_filesystem, pending_filesystem)}(pending)"
-        status = f" {mode}:{filesystem} · p:{perm}"
+            filesystem = f"{filesystem}→{pending_filesystem}(pending)"
+        status = f" {mode}/permission:{filesystem}/{perm}"
         fragments = []
         if width < get_cwidth(resume_id) + 8:
             fragments.append(("class:footer-resume-id", _truncate_cells(resume_id, width)))
@@ -1300,10 +1308,6 @@ class CliApplication:
         fragments.append(("class:footer", "\n"))
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
-
-    def _create_bindings(self) -> KeyBindings:
-        return create_bindings(self, lambda: time.monotonic())
-
 
     def _companion_profile(self):
         model = self.runner.current_model()

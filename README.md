@@ -7,19 +7,15 @@
 Linux / WSL2 · Python 3.12+<br>
 OpenAI 兼容接口 · Bubblewrap
 
-[快速开始](#快速开始) · [常用操作](#常用操作) · [架构与安全](#架构与安全) · [文档](#文档)
+[快速开始](#快速开始) · [常用操作](#常用操作) · [Lain Companion](#lain-companion) · [架构与安全](#架构与安全) · [文档](#文档)
 
 </div>
-
-<p align="center">
-  <img src="终端.png" width="760" alt="deep-agent 真实终端空闲界面，底栏显示工作区、模型来源、SANDBOXED 和 perm:ask。">
-</p>
 
 `deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，主 Agent 默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
-> 当前版本 **0.2.2**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
+> 当前版本 **v0.3.0**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
 
@@ -28,6 +24,7 @@ OpenAI 兼容接口 · Bubblewrap
 - **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
 - **拆分独立任务** — 仅当问题能分解为多个独立、互不干扰的子问题时派生 SubAgent；默认最多并行 2 个；主 Agent 可同步等待最终结果，也可把耗时子任务放到后台继续工作，完成后自动收到结果。TUI 为每个子任务显示独立卡片、状态及可展开的完整返回结果，内部思考和工具输出保持隔离。
 - **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
+- **观察当前会话** — Lain 侧栏显示工具活动热力图、资源占用、Git 状态和正在运行的服务，也可以通过流式对话查询异常。
 
 支持通过 Skills 和 `AGENTS.md` 扩展项目指令。SubAgent 配置、独立思考强度及日志查询见 [SubAgent 委派](docs/configuration.md#subagent-委派)。
 
@@ -53,7 +50,7 @@ deep-agent --version
 
 ### 2. 初始化与配置
 
-从项目目录启动，首次运行会创建 `~/.deep-agent/config.yaml` 和 Skills 目录，然后退出。已有配置不会被覆盖；设置了 `DEEP_AGENT_CONFIG` 时使用指定配置。
+从项目目录启动，首次运行会创建 `~/.deep-agent/config.yaml`、Skills 目录，以及 Lain 的提示词和 GIF，然后退出。已有配置会保留。设置了 `DEEP_AGENT_CONFIG` 时使用指定配置。
 
 ```bash
 cd ~/projects/my-app  # 替换为你的项目目录
@@ -64,11 +61,11 @@ deep-agent
 
 默认模板是 `mode: restricted`，不预置工具挂载；需要 Node、Cargo / Rustup、Chrome、X11 或浏览器缓存时，按 [默认工具挂载](docs/configuration.md#默认工具挂载) 中的示例手动添加，可选源不存在时跳过。NVM 挂载整个版本目录后，使用哪个版本由用户在沙箱 `PATH` 中指定；程序不自动发现工具安装位置或选择版本。已有配置需手动对照模板合并，升级不会覆盖用户配置。
 
-默认模板使用 `token-plan/qwen3.8-flash`。在启动 Agent 的同一个 Bash 终端中输入对应密钥：
+默认模板使用 `deepseek/deepseek-flash`。在启动 Agent 的同一个 Bash 终端中输入 DeepSeek 密钥。
 
 ```bash
-read -rsp 'Token Plan API key: ' TOKEN_PLAN_API_KEY
-export TOKEN_PLAN_API_KEY
+read -rsp 'DeepSeek API key: ' DEEPSEEK_API_KEY
+export DEEPSEEK_API_KEY
 printf '\n'
 ```
 
@@ -81,20 +78,16 @@ printf '\n'
 
 ```yaml
 llm:
-  default: token-plan/qwen3.8-flash
+  default: deepseek/deepseek-flash
   timeout: 60
   models:
-    token-plan:
-      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-      api_key: ${TOKEN_PLAN_API_KEY}
+    deepseek:
+      base_url: https://api.deepseek.com/v1
+      api_key: ${DEEPSEEK_API_KEY}
       api: chat_completions
-      max_retries: 5
-      stream_chunk_timeout: 120
-      reasoning_efforts: [none, low, medium, xhigh]
+      reasoning_efforts: [none, low, high, max]
       models:
-        qwen3.8-flash:
-          input: [text, image]
-          context_window: 1m
+        deepseek-flash: {}
 ```
 
 端点、上下文窗口、输入模态和推理强度取决于所选服务，完整说明见 [配置参考](docs/configuration.md)。
@@ -121,7 +114,7 @@ deep-agent resume 01a08aae   # 换成已有会话的 ID 或前缀
 pipx upgrade deep-agent-cli
 ```
 
-恢复只加载状态，不自动继续未完成任务；旧数据库格式不自动迁移。取消不回滚已发生的文件修改或外部副作用。
+会话按工作区保存，请从原项目目录运行 `resume`。新会话收到第一条提问后会在后台生成中文标题，恢复命令仍使用会话 ID。底栏显示当前模型最近一次有效的上下文用量。恢复只加载状态，不自动继续未完成任务；旧数据库格式不自动迁移。取消不回滚已发生的文件修改或外部副作用。
 
 不使用 pipx 时，也可安装到虚拟环境：
 
@@ -142,11 +135,22 @@ python3.12 -m venv ~/.venvs/deep-agent
 | `Enter` / `Alt+Enter` | 提交或运行中追加指令 / 排队后续任务 |
 | `Esc` | 请求取消当前任务 |
 | `Ctrl+O` / `Ctrl+T` | 展开工具输出 / 思考内容 |
+| `Ctrl+C` | 清空当前输入框，1 秒内再按一次退出 |
 | `/resume` / `/new` | 恢复或新建会话 |
 | `/mcp` | 查看、开关和配置宿主 MCP 服务 |
 | `/help` / `/status` | 查看完整操作与当前状态 |
 
 更多按键、图片附件、队列、Skills 和显示设置见 [终端界面](docs/tui.md)。
+
+## Lain Companion
+
+终端至少为 **120 列 × 32 行**时，Lain 会显示在右侧。侧栏显示当前时间与运行环境、CPU / GPU / RAM / 磁盘使用率、Git 分支和工作区服务。
+
+- **Tool Health** 按完成顺序显示最近 60 次有明确结果的工具调用，每 3 次一列。颜色表示调用次数，出现失败时显示 `×`。
+- **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示，聊天历史可用鼠标滚轮翻看。
+- **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据简短说明异常，也可应用户要求复盘。
+
+Lain 的模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，也可保存在 `~/.deep-agent/companion.key`。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
 
 ## 架构与安全
 

@@ -178,6 +178,27 @@ def test_callback_bounds_arguments_errors_and_keeps_parallel_tool_identity():
     assert 'PRIVATE_FILE' not in json.dumps(records)
 
 
+def test_callback_does_not_treat_error_topic_bodies_as_failures():
+    from uuid import uuid4
+    from langchain_core.messages import ToolMessage
+    from agent.subagents.runtime import LogCallback
+    records = []
+    callback = LogCallback(lambda event, **payload: records.append({'event': event, **payload}))
+    run_id = uuid4()
+    callback.on_tool_start({'name': 'read_file'}, '', inputs={'file_path': 'guide.md'}, run_id=run_id)
+    callback.on_tool_end(
+        ToolMessage(
+            content='Error handling guide\n\n1. Catch exceptions early',
+            tool_call_id='read-1',
+            name='read_file',
+            status='success',
+        ),
+        run_id=run_id,
+    )
+    assert records[-1]['status'] == 'completed'
+    assert records[-1]['summary'] == 'Completed'
+
+
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp_path, cancelled):
     from types import SimpleNamespace

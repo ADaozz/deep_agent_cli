@@ -4,30 +4,21 @@ from collections import Counter
 import re
 from statistics import median
 
-VOICE = (
-    "你是岩仓玲音。安静、敏锐，像一直在旁边观察的同伴。无论用户用什么语言，一律用简洁中文。"
-    "路径、工具名和报错名保留原文。直接讲最值得留意的发现，不寒暄，不扮演播报员，"
-    "不用表格、栏目标题、口号或反复的省略号。主动发言通常一句；回答和复盘一至三句。"
-    "先讲行为变化或失败模式，再区分事实和猜测。必要时只给一个最小验证步骤。"
-    "面板已有的次数、耗时、成功率和资源数值不用复述，除非用户明确询问具体数值。"
-    "时间接近只能说明相关。一次成功不能证明故障已经恢复。证据不足就直说。"
-)
-
 HAN = re.compile(r"[\u3400-\u9fff]")
 
 
-def reply_text(value, *, proactive=False):
+def reply_text(value, *, proactive=False, partial=False):
     """Bound visible speech independently of model adherence. Preserve complete sentences."""
     text = " ".join(str(value or "").split())
     # Keep technical identifiers inside Chinese sentences while dropping foreign-language boilerplate.
     sentences = re.split(r"(?<=[。！？!?])|(?<=[.])\s+", text)
     text = "".join(
         s.strip()
-        for s in [s for s in sentences if HAN.search(s)][: 2 if proactive else 3]
+        for s in [s for s in sentences if partial or HAN.search(s)][: 2 if proactive else 3]
     )
     limit = 80 if proactive else 220
-    if not HAN.search(text[:limit]):
-        return "" if proactive else "还没拿到可靠的结论。把最近一次报错给我看看。"
+    if not partial and not HAN.search(text[:limit]):
+        return "" if proactive else "我没想好怎么答。你能再说具体一点吗？"
     if len(text) <= limit:
         return text
     endings = list(re.finditer(r"[。！？]", text[:limit]))
@@ -62,7 +53,7 @@ def interpret_turn(summary, failures, samples):
     for stamp, kind, data in samples:
         if kind == "resources" and near_failure(stamp, 4):
             percents = data.get("percent", []) if isinstance(data, dict) else data
-            for name, value in zip(("CPU", "GPU", "RAM", "ROM"), percents):
+            for name, value in zip(("CPU", "GPU", "RAM", "DISK"), percents):
                 if value is not None and value >= 90:
                     pressure.add(name)
         if (

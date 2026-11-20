@@ -21,6 +21,7 @@ from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import set_output_emitter
 from agent.models.stream_lifecycle import set_stream_owner
 from agent.models.messages import visible_text
+from agent.sessions.transcript import classify_tool_result
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import BackgroundTask, SubAgentManager
 
@@ -96,12 +97,14 @@ class LogCallback(BaseCallbackHandler):
         termination = artifact.get("termination_reason")
         content = getattr(output, "content", output if isinstance(output, str) else "")
         content = content if isinstance(content, str) else ""
-        failed = (getattr(output, "status", None) == "error" or bool(termination)
-                  or (type(exit_code) is int and exit_code != 0)
-                  or content.lower().startswith("error") or "cancelled by user" in content.lower())
-        result["status"] = "cancelled" if termination == "cancelled" or "cancelled by user" in content.lower() else (
-            "failed" if failed else "completed"
+        outcome = classify_tool_result(
+            status=str(getattr(output, "status", "") or ""),
+            content=content,
+            name=str(result["tool_name"] or ""),
+            artifact=artifact,
         )
+        failed = outcome != "success"
+        result["status"] = {"cancelled": "cancelled", "failed": "failed"}.get(outcome, "completed")
         if type(exit_code) is int:
             result["exit_code"] = exit_code
         if result["tool_name"] == "execute":

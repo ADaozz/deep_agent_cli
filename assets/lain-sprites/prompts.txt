@@ -1,0 +1,26 @@
+Lain sprite sheets — built-in imagegen
+
+References
+1. 25d8a34d-b41a-4847-bd1f-62f56c935248.png
+2. First frame of lain_idle_blink_loop_fixed.gif
+
+Create one transparent 3-by-3 animation sprite sheet of Lain, with nine equal square tiles, reading left to right then top to bottom. Reference 1 is the sole character and neutral pose reference for tiles 1 and 9. Reference 2 is only a style guide from the existing idle GIF: heavily inked, hard pure black and pure white fills, zero gray pixels or haloes, tidy transparent exterior. Internal black shapes, hair, and clothing remain opaque. Keep the exact neutral head silhouette, asymmetrical hair and long lock, white X clip, anchored front-facing eye gaze, nose, hoodie silhouette, scale, crop and position throughout. No gutters/gridlines/text/numbers. Use ample equal margins sufficient to fit the complete portrait into each tile. Make the final tile an exact duplicate of the first tile. In the inner tiles edit only the local details specified. Nothing moves except those details. Preserve the shape of the original eyes and move only the eyelids for eye animation.
+
+observing
+Quietly notices a detail. 1 neutral; 2 hold; 3 both upper lids lift slightly; 4 lift a touch more; 5 hold; 6 hold; 7 lids return halfway; 8 return almost to neutral; 9 same as tile 1. Locked head, fixed pupil centers, no blink or mouth change.
+
+curious
+An unspoken question. 1 neutral; 2 hold; 3 viewer-left upper eyelid lifts slightly; 4 the short mouth line parts a tiny amount; 5 hold; 6 lips close; 7 eyelid lowers halfway; 8 lids return nearly to neutral; 9 same as tile 1. No head tilt or gaze movement.
+
+focused
+Quiet concentration. 1 neutral; 2 hold; 3 both upper lids lower slightly; 4 the eyes are a little narrower, lips press lightly; 5 hold; 6 hold; 7 mouth releases; 8 eyelids almost return to neutral; 9 exact neutral duplicate. Eyes stay open, no blink or frown.
+
+concerned
+Restrained worry, a single slow blink. 1 neutral; 2 breath briefly pauses; 3 mouth corners dip very slightly; 4 lids half closed; 5 both eyes completely shut, mouth subtly down; 6 eyes half open; 7 eyes open, lips softening; 8 neutral; 9 same as tile 1. No tears, no head movement.
+
+relieved
+Quiet relief, a subtle closed-mouth smile and a soft exhale. 1 neutral; 2 begin exhaling; 3 shoulders settle by barely a pixel, eyelids soft; 4 mouth corners lift just slightly; 5 hold; 6 smile eases; 7 lips neutral; 8 breath and eyelids reset; 9 same as tile 1. No teeth, no open mouth, no head movement.
+
+Export
+FFmpeg cropped and registered each tile on a 418×418 grid, converted RGB and alpha to binary values, and reused each sheet's first tile as its final tile.
+

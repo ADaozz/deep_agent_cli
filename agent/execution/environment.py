@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 import logging
 import os
 from pathlib import Path
+from platform import freedesktop_os_release
 import re
 import subprocess
 from typing import Any, Callable, Mapping
@@ -108,6 +109,18 @@ def detect_runtime_environment() -> str:
     )
 
 
+def host_distribution() -> str:
+    """Return the CLI host's distribution name and release when available."""
+    try:
+        release = freedesktop_os_release()
+    except OSError:
+        return ""
+    name = release.get("NAME", "")
+    version = release.get("VERSION_ID", "")
+    label = f"{name} {version}" if name and version else release.get("PRETTY_NAME") or name
+    return " ".join(label.split())
+
+
 @dataclass(frozen=True)
 class EnvironmentFingerprint:
     mode: str
@@ -174,13 +187,15 @@ class EnvironmentCache:
         *,
         probe: Callable[[], str | None],
         runtime: str | None = None,
+        activate: bool = True,
     ) -> EnvironmentSnapshot:
         fingerprint = environment_fingerprint(config)
         cached = self._entries.get(thread_id)
         if cached is not None and cached[0] == fingerprint:
             updated = with_permission(cached[1], permission)
             self._entries[thread_id] = (fingerprint, updated)
-            self.snapshot = updated
+            if activate:
+                self.snapshot = updated
             return updated
         try:
             output = probe()
@@ -189,7 +204,8 @@ class EnvironmentCache:
             output = None
         snapshot = collect_environment(config, permission, probe_output=output, runtime=runtime)
         self._entries[thread_id] = (fingerprint, snapshot)
-        self.snapshot = snapshot
+        if activate:
+            self.snapshot = snapshot
         return snapshot
 
     def invalidate(self, thread_id: str) -> None:

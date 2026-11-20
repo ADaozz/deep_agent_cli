@@ -4,65 +4,38 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable
 import asyncio
-from collections.abc import Iterator
 from typing import Any
 
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.utils import get_cwidth
 
-from agent.cli.lifecycle import TaskStop
+from agent.cli.text_selection import TextSelection
 
 
 if TYPE_CHECKING:
-    from agent.cli.lifecycle import AppLifecycle
     from prompt_toolkit.output import Output
     from prompt_toolkit.layout import Window
 
 
-def _iter_selection_marks(fragments: Any, left: float, right: float) -> Iterator[tuple[Any, str, bool]]:
-    """Yield ``(fragment, char, marked)`` for cells overlapping ``[left, right)``.
-
-    Zero-width characters (combining marks, ZWJ, variation selectors) share the
-    cell of the preceding character, so they follow its marked state instead of
-    being judged on their own empty span.
-    """
-    column = 0
-    previous = False
-    for fragment in fragments:
-        if "[ZeroWidthEscape]" in fragment[0]:
-            yield fragment, fragment[1], False
-            continue
-        for char in fragment[1]:
-            width = max(0, get_cwidth(char))
-            marked = previous if width == 0 else column < right and column + width > left
-            yield fragment, char, marked
-            previous = marked
-            column += width
-
-
-class TranscriptNavigation:
+class TranscriptNavigation(TextSelection):
     def __init__(
         self, *,
         _copy_selection: Callable[..., Any],
         _transcript_document: Callable[..., Any],
-        lifecycle: Callable[[], AppLifecycle],
         transcript_window: Callable[[], Window],
         invalidate: Callable[[], None],
         output: Callable[[], Output],
     ) -> None:
+        super().__init__()
         self._copy_selection = _copy_selection
         self._transcript_document = _transcript_document
-        self.lifecycle = lifecycle
         self.transcript_window = transcript_window
         self.invalidate = invalidate
         self.output = output
         self.jump_message_id: str | None = None
         self.transcript_line_count = 1
         self.transcript_anchor: int | None = None
-        self.selection_start: tuple[int, int] | None = None
-        self.selection_end: tuple[int, int] | None = None
-        self.selection_dragging = False
         self.selection_edge = 0
         self.selection_edge_x = 0
         self.selection_scroll_step = 0
@@ -168,40 +141,30 @@ class TranscriptNavigation:
         return column
 
     def _update_selection(self, row: int, column: int, event_type: Any, button: Any) -> None:
-        position = (row, column)
-        if event_type is MouseEventType.MOUSE_DOWN and button is MouseButton.LEFT:
+        if not self.update_pointer((row, column), event_type, button):
+            return
+        if event_type is MouseEventType.MOUSE_DOWN:
             self._stop_selection_scroll()
-            self.selection_start = self.selection_end = position
-            self.selection_dragging = True
             # Reinforce mouse reporting so IDE terminals drop their native
             # selection overlay instead of stacking it on ours.
             try:
                 self.output().enable_mouse_support()
             except Exception:  # noqa: BLE001
                 pass
-        elif event_type is MouseEventType.MOUSE_MOVE and self.selection_dragging:
-            if button is MouseButton.NONE:
-                # The MOUSE_UP never arrived (released outside the terminal window
-                # or over a control without a selection handler). Plain motion must
-                # not keep dragging, or the 1003 any-motion events spin the UI.
-                self.selection_dragging = False
-                self._stop_selection_scroll()
-            else:
-                self.selection_end = position
+        elif event_type is MouseEventType.MOUSE_MOVE:
+            if self.selection_dragging:
                 top = self.transcript_top()
                 bottom = top + self.transcript_viewport_rows() - 1
-                edge = -1 if position[0] <= top else (1 if position[0] >= bottom else 0)
-                self.selection_edge_x = position[1]
+                edge = -1 if row <= top else (1 if row >= bottom else 0)
+                self.selection_edge_x = column
                 self._set_selection_edge(edge)
-        elif event_type is MouseEventType.MOUSE_UP and self.selection_dragging:
-            self.selection_end = position
-            self.selection_dragging = False
+            else:
+                self._stop_selection_scroll()
+        elif event_type is MouseEventType.MOUSE_UP:
             self._stop_selection_scroll()
             selected = self._selected_transcript_text()
             if selected:
-                self.lifecycle().spawn(self._copy_selection(selected), stop=TaskStop.CANCEL, name="clipboard-copy")
-        else:
-            return
+                self._copy_selection(selected)
         self.invalidate()
 
     def _select_below_transcript(self, event: Any) -> bool:
@@ -247,41 +210,14 @@ class TranscriptNavigation:
 
     def clear_transcript_selection(self) -> None:
         self._stop_selection_scroll()
-        self.selection_dragging = False
-        self.selection_start = self.selection_end = None
+        self.clear_selection()
         self.invalidate()
 
-    def _selection_bounds(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
-        if self.selection_start is None or self.selection_end is None:
-            return None
-        start, end = sorted((self.selection_start, self.selection_end))
-        return (start, end) if start != end else None
-
-    def _selection_span(self, row: int, bounds: tuple[tuple[int, int], tuple[int, int]]) -> tuple[float, float]:
-        # The cell under the pointer is part of the selection: clicks right of a
-        # line's text resolve to its last character, which must still be copied.
-        left = bounds[0][1] if row == bounds[0][0] else 0
-        right = bounds[1][1] + 1 if row == bounds[1][0] else float("inf")
-        return left, right
-
     def _selected_transcript_line(self, row: int, fragments: Any) -> Any:
-        bounds = self._selection_bounds()
-        if bounds is None or not bounds[0][0] <= row <= bounds[1][0]:
-            return fragments
-        left, right = self._selection_span(row, bounds)
-        return [
-            (f"{style} class:transcript-selection" if marked else style, char, *rest)
-            for (style, _text, *rest), char, marked in _iter_selection_marks(fragments, left, right)
-        ]
+        return self.highlight_line(row, fragments)
 
     def _selected_transcript_text(self) -> str:
-        bounds = self._selection_bounds()
-        if bounds is None:
+        if self.selection_bounds() is None:
             return ""
         document = self._transcript_document()
-        lines = []
-        for row in range(bounds[0][0], min(bounds[1][0], document.line_count - 1) + 1):
-            left, right = self._selection_span(row, bounds)
-            chars = [char for _, char, marked in _iter_selection_marks(document.get_line(row), left, right) if marked]
-            lines.append("".join(chars).rstrip())
-        return "\n".join(lines).strip("\n")
+        return self.selected_text(document.get_line, document.line_count)

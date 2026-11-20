@@ -65,18 +65,12 @@ def test_summary_migration_preserves_catalog_and_checkpoint(tmp_path):
 
 def test_only_empty_new_sessions_become_eligible_and_attempt_once():
     policy = SummaryEligibility()
-    policy.begin("historical", "existing", has_content=True, has_summary=False)
-    assert policy.complete("historical", "a") is None
+    assert policy.begin("historical", "existing", "a", has_content=True, has_summary=False) is None
     assert not policy.needs_inspection("historical")
-    policy.begin("saved", "request", has_content=False, has_summary=True)
-    assert policy.complete("saved", "a") is None
-    policy.begin("new", "request", has_content=False, has_summary=False)
-    # A tool pause does not consume eligibility; the caller completes only after an answer.
-    policy.begin("new", "later request", has_content=True, has_summary=False)
-    request = policy.complete("new", "a")
+    assert policy.begin("saved", "request", "a", has_content=False, has_summary=True) is None
+    request = policy.begin("new", "request", "a", has_content=False, has_summary=False)
     assert request == SessionSummaryRequest("new", "request", "a")
-    policy.begin("new", "later task", has_content=True, has_summary=False)
-    assert policy.complete("new", "b") is None
+    assert policy.begin("new", "later task", "b", has_content=False, has_summary=False) is None
 
 
 @pytest.mark.parametrize("unsafe", [
@@ -142,8 +136,11 @@ def test_title_generator_uses_isolated_nonstreaming_protocol_request(api, monkey
 
 
 @pytest.mark.parametrize("api", ["responses", "chat_completions"])
-def test_first_completed_turn_emits_one_bound_summary_request(api, tmp_path):
+def test_first_message_emits_one_bound_summary_request_before_model_call(api, tmp_path):
+    events = []
+
     def serve(request):
+        assert any(event.type == "session_summary_requested" for event in events)
         if api == "chat_completions":
             return sse([{"id": "answer", "object": "chat.completion.chunk", "created": 0, "model": "arbitrary-model",
                          "choices": [{"index": 0, "delta": {"content": "已修复登录异常"}, "finish_reason": "stop"}]}], done=True)
@@ -157,11 +154,12 @@ def test_first_completed_turn_emits_one_bound_summary_request(api, tmp_path):
     store = SessionStore(tmp_path / "sessions.sqlite3")
     runner = AgentRunner(model=model, backend=StateBackend(), session_store=store,
                          settings=Settings(llm_profiles=(profile,), llm_default=profile.id))
-    events = []
     try:
         assert runner.invoke("修复登录 /private/config.env configured-secret", on_event=events.append).status == "completed"
         summaries = [e.result for e in events if e.type == "session_summary_requested"]
         assert len(summaries) == 1
+        event_types = [event.type for event in events]
+        assert event_types.index("session_summary_requested") < event_types.index("turn_completed")
         assert summaries[0].thread_id == runner.thread_id
         assert summaries[0].model_id == profile.id
         assert "/private" not in summaries[0].user_request and "configured-secret" not in summaries[0].user_request
@@ -361,7 +359,7 @@ def test_model_title_timeout_and_cancellation_close_owned_clients(monkeypatch, c
     asyncio.run(scenario())
 
 
-def test_queued_turn_does_not_replace_first_request_or_first_result(tmp_path):
+def test_queued_turn_does_not_replace_first_summary_request(tmp_path):
     replies = iter(("first answer", "queued answer"))
     def serve(request):
         return sse([{

@@ -335,7 +335,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 图片在 checkpoint 中保存附件引用，仅模型请求时展开。`agent/models/messages.py` 将思考与正文分开，也处理正文中的 `<think>…</think>` 标签。
 
-`UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以 API 返回的 `input_tokens` 展示占用，缺失时显示 Unknown，不将估算数当成实际用量；取消、切换和压缩时清除旧值，恢复只读取当前来源的有效 usage。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
+`UsageIdentityMiddleware` 标记模型来源，流式回调将 usage-only chunk 转成既有事件。界面以当前会话和模型最近一次有效的 API `input_tokens` 展示占用。取消或响应未上报用量时保留上次读数，恢复从有效 checkpoint 读取。模型来源和压缩边界限制恢复时可用的读数。配置 `context_window` 时写入模型 profile 的 `max_input_tokens`。
 
 新增兼容 Responses / Chat Completions 的模型应优先只改配置。非标准端点兼容局限在适配层，Runner、工具、会话与沙箱继续消费统一消息和事件。
 

@@ -9,12 +9,14 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from time import monotonic, time
 from uuid import uuid4
 
 from agent.companion import STATES
+from agent.companion.config import CompanionConfig
 from agent.companion.timeline import (
     SESSION_RELIABILITY,
     Timeline,
@@ -30,18 +32,21 @@ from agent.companion.diagnosis import interpret_turn, reply_text
 from agent.companion.monitor import Resources, services
 
 
-def _frames(*key):
+REPLY_TICK_SECONDS = 0.25
+
+
+def _frames(*key, path=None):
     # Import NumPy and decode the first GIF on the background worker.
     from agent.companion.animation import frames
 
-    yield from frames(*key)
+    yield from frames(*key, path=path)
 
 
 def clean(value):
     return "".join(c for c in str(value)[:512] if c.isprintable())[:240]
 
 
-async def start_worker(config_dir):
+async def start_worker(config_dir, config: CompanionConfig):
     # Isolated Python ignores user site packages and PYTHONPATH. Inject only
     # the install root so the same entry point also works in a source checkout.
     root = str(Path(__file__).resolve().parents[2])
@@ -62,6 +67,9 @@ async def start_worker(config_dir):
         bootstrap,
         root,
         str(config_dir),
+        str(config.persona_prompt),
+        str(config.observation_prompt),
+        str(config.chat_prompt),
         env=env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -83,6 +91,8 @@ class Companion:
         secrets=(),
         profile=None,
         window=None,
+        execute_environment=None,
+        config: CompanionConfig | None = None,
     ):
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
@@ -90,14 +100,20 @@ class Companion:
         self.secrets = secrets
         self.worker_ready = False
         self.question = None
+        self.reply_stamp = None
+        self.reply_preview = ""
+        self.reply_wait_started = 0.0
+        self.reply_refresh = None
         self.errors = deque(maxlen=10)
         self.session_generation = 0
         self.session = session
         self.geometry = geometry
         self.invalidate = invalidate
         self.timezone = timezone
+        self.execute_environment = execute_environment
         workspace_id = sha256(os.fsencode(workspace.resolve())).hexdigest()[:24]
         self.config_dir = config_dir
+        self.config = config or CompanionConfig()
         self.database = config_dir / "companion" / (workspace_id + ".sqlite3")
         self.thread = session()
         self.run = uuid4().hex
@@ -127,6 +143,7 @@ class Companion:
         self.batches = {}
         self.behavior = "idle"
         self.until = 0
+        self.behavior_queue: deque[tuple[str, bool]] = deque()
         self.connection = "STARTING"
         self.metrics = (None, None, None, None)
         self.services = ()
@@ -146,16 +163,62 @@ class Companion:
         if not text or len(text) > 800:
             return "请输入问题，最多 800 字。"
         self.question = text
+        self.reply_wait_started = monotonic()
+        self._schedule_reply_refresh()
         self.anchor = None
         self.log(text, speaker="You")
         self.changed.set()
         return "已发给玲音。"
 
-    def log(self, message, speaker="Lain"):
+    def _schedule_reply_refresh(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.reply_refresh = loop.call_later(REPLY_TICK_SECONDS, self._refresh_waiting_reply)
+
+    def _refresh_waiting_reply(self):
+        self.reply_refresh = None
+        if self.question and self.reply_stamp is None:
+            self.invalidate()
+            self._schedule_reply_refresh()
+
+    def _stop_reply_refresh(self):
+        if self.reply_refresh is not None:
+            self.reply_refresh.cancel()
+            self.reply_refresh = None
+
+    def chat_preview(self):
+        if not self.question:
+            return None
+        if self.reply_stamp is None:
+            ticks = int((monotonic() - self.reply_wait_started) / REPLY_TICK_SECONDS)
+            return "·" * (1 + ticks % 3), "Lain", None
+        return self.reply_stamp, "Lain", self.reply_preview or None
+
+    def _update_chat_preview(self, text):
+        text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"), partial=True)
+        if self.reply_stamp is None:
+            if not text:
+                return
+            self.reply_stamp = datetime.now(self.timezone).strftime("%H:%M:%S")
+            self._stop_reply_refresh()
+        if text != self.reply_preview:
+            self.reply_preview = text
+            self.invalidate()
+
+    def _clear_chat_reply(self):
+        stamp = self.reply_stamp
+        self.question = self.reply_stamp = None
+        self.reply_preview = ""
+        self._stop_reply_refresh()
+        return stamp
+
+    def log(self, message, speaker="Lain", *, stamp=None):
         self.log_sequence += 1
         self.logs.append(
             (
-                datetime.now(self.timezone).strftime("%H:%M:%S"),
+                stamp or datetime.now(self.timezone).strftime("%H:%M:%S"),
                 speaker,
                 "".join(c for c in str(message) if c.isprintable() or c == "\n")[:1600],
             )
@@ -174,13 +237,14 @@ class Companion:
             self.thread = current
             self.session_generation += 1
             self.errors.clear()
-            self.question = None
+            self._clear_chat_reply()
             self.changed.clear()
             self.logs.clear()
             self.log_sequence += 1
             self.anchor = None
             self.behavior = "idle"
             self.until = 0
+            self.behavior_queue.clear()
             self.batches.clear()
             self.run = uuid4().hex
             self.turn = self.run
@@ -323,7 +387,7 @@ class Companion:
                 turn=self.turn,
             )
             self.batches.clear()
-            self.behavior, self.until = "focused", 0
+            self.queue_behavior("focused")
         elif (
             kind == "tool_started"
             and event.tool_call_id
@@ -354,6 +418,7 @@ class Companion:
                 obs.retry_of = previous.tool_call_id
             self.calls[event.tool_call_id] = obs
             self.starts[event.tool_call_id] = tick
+            self.timeline.started(obs)
             self.timeline.record(
                 "tool",
                 asdict(obs),
@@ -363,7 +428,7 @@ class Companion:
             )
             if event.message_id:
                 self.batches.setdefault(event.message_id, []).append(name)
-            self.behavior = "observing"
+            self.queue_behavior("observing")
         elif kind == "tool_completed":
             obs = self.calls.get(event.tool_call_id)
             if obs is None:
@@ -404,14 +469,14 @@ class Companion:
         elif kind == "turn_completed":
             self.close_turn("completed", wall, tick)
         elif kind == "interaction_requested":
-            self.behavior = "curious"
+            self.queue_behavior("curious")
         elif kind in ("run_failed", "run_completed", "run_cancelled"):
-            self.behavior = {
+            behavior = {
                 "run_failed": "concerned",
                 "run_completed": "relieved",
                 "run_cancelled": "idle",
             }[kind]
-            self.until = monotonic() + 4.8
+            self.queue_behavior(behavior, temporary=behavior != "idle")
             self.close_turn(kind.removeprefix("run_"), wall, tick)
         self.invalidate()
 
@@ -435,7 +500,9 @@ class Companion:
         )
         if (run, call) in self.timeline.finished:
             return
-        if event["phase"] != "tool_start":
+        if event["phase"] == "tool_start":
+            self.timeline.started(obs)
+        else:
             obs.finished_at, obs.duration_ms = wall, round(duration * 1000)
             obs.exit_code = event.get("exit_code")
             obs.outcome = {
@@ -481,6 +548,8 @@ class Companion:
                 if state is not self.timeline:
                     return
                 combined.merge_live_events(state.pending)
+                for obs in state.active.values():
+                    combined.started(obs)
                 self.timeline = state = combined
                 self.loaded = True
                 self.invalidate()
@@ -531,11 +600,11 @@ class Companion:
             except OSError:
                 current = self.services
             if current != self.services:
-                old = set(self.services)
+                old = {(row.host_pid, row.started): row for row in self.services}
                 for row in current:
-                    if row not in old:
+                    if old.pop((row.host_pid, row.started), None) is None:
                         self.log(f"服务已启动：{row.name}（PID {row.pid}）", "Status")
-                for row in old.difference(current):
+                for row in old.values():
                     self.log(f"服务已停止：{row.name}（PID {row.pid}）", "Status")
                 self.services = current
                 self.timeline.sample(
@@ -546,6 +615,25 @@ class Companion:
             self.invalidate()
             await asyncio.sleep(2)
 
+    def queue_behavior(self, behavior: str, *, temporary: bool = False) -> None:
+        # Repeated tool events often ask for the same expression.
+        if self.behavior_queue and self.behavior_queue[-1][0] == behavior:
+            self.behavior_queue[-1] = (behavior, temporary)
+        elif not self.behavior_queue and self.behavior == behavior:
+            self.until = monotonic() + 4.8 if temporary else 0
+        else:
+            self.behavior_queue.append((behavior, temporary))
+
+    def _advance_behavior(self) -> bool:
+        if self.behavior_queue:
+            self.behavior, temporary = self.behavior_queue.popleft()
+            self.until = monotonic() + 4.8 if temporary else 0
+            return True
+        if self.until and monotonic() >= self.until:
+            self.behavior, self.until = "idle", 0
+            return True
+        return False
+
     async def animate(self):
         clips = OrderedDict()
         key = iterator = None
@@ -553,35 +641,53 @@ class Companion:
         index = 0
         while True:
             width, height = self.geometry()
-            if self.until and monotonic() >= self.until:
-                self.behavior, self.until = "idle", 0
+            if key is None or not width:
+                self._advance_behavior()
             current = self.behavior, width, height
+            generation = self.session_generation
             if current != key:
                 if key and iterator is not None:
                     clips[key] = (iterator, cache)
                     if len(clips) > 3:
                         old, _ = clips.popitem(last=False)[1]
                         old.close()
+                # Keep the last frame on screen while the next clip decodes.
                 iterator, cache = clips.pop(current, (None, []))
                 key, index = current, 0
-                self.frame = []
             delay = 0.2
             if width:
                 try:
                     if iterator is None:
-                        iterator = _frames(*current)
+                        iterator = _frames(*current, path=self.config.gifs.get(self.behavior))
                     if index == len(cache):
                         item = await asyncio.to_thread(next, iterator, None)
-                        if item is None:
-                            index = 0
-                        else:
+                        if item is not None:
                             cache.append(item)
-                    if (self.behavior, *self.geometry()) == current:
-                        self.frame, delay = cache[index]
-                        self.invalidate()
+                        if (
+                            generation != self.session_generation
+                            or (self.behavior, *self.geometry()) != current
+                        ):
+                            continue
+                        if item is None:
+                            # The last frame has already had its full display delay.
+                            if not cache:
+                                raise ValueError("Empty companion animation")
+                            if self._advance_behavior():
+                                continue
+                            index = 0
+                    self.frame, delay = cache[index]
+                    self.invalidate()
                     index += 1
                 except Exception:
+                    if (
+                        generation != self.session_generation
+                        or (self.behavior, *self.geometry()) != current
+                    ):
+                        continue
+                    if self._advance_behavior():
+                        continue
                     self.frame = [("#777777", "Animation unavailable")]
+                    self.invalidate()
                     delay = 1
             await asyncio.sleep(max(0.04, delay))
 
@@ -620,6 +726,28 @@ class Companion:
             ]
         return []
 
+    def chat_tool_evidence(self, question):
+        mentioned = set(re.findall(r"[a-z0-9_]+(?:[.-][a-z0-9_]+)*", question.casefold()))
+        profile = self.profile()
+        state = self.timeline
+        evidence = []
+        for name, rate, count in state.chart_tools(profile):
+            if name.casefold() not in mentioned:
+                continue
+            series = state.series.get((*profile, name))
+            failures = [
+                {"category": item["error_category"], "exit_code": item["exit_code"]}
+                for item in state.failures
+                if item["tool_name"] == name and (item["model_id"], item["reasoning_effort"]) == profile
+            ]
+            evidence.append(dict(
+                tool=name, calls=count, recent_failure_pct=rate,
+                recent_completed=len(series.recent) if series else 0,
+                recent_failed=series.window_failed if series else 0,
+                retained_failure_examples=failures[-4:],
+            ))
+        return evidence[:4]
+
     async def host_query(self, kind, args):
         if kind in ("timeline", "git"):
             end = min(float(args.get("end") or time()), time())
@@ -647,7 +775,7 @@ class Companion:
             if attempt:
                 await asyncio.sleep(2 ** (attempt - 1))
             try:
-                if await self.worker_session() == "no key":
+                if await self.worker_session() in ("no key", "prompt error"):
                     return
             except (OSError, ValueError, TimeoutError, sqlite3.Error):
                 self.log("玲音的连接中断了。", "Status")
@@ -655,14 +783,18 @@ class Companion:
 
     async def worker_session(self):
         process = None
-        spawn = asyncio.create_task(start_worker(self.config_dir))
+        spawn = asyncio.create_task(start_worker(self.config_dir, self.config))
         try:
             process = await asyncio.shield(spawn)
             hello = json.loads(await asyncio.wait_for(process.stdout.readline(), 30))
             if hello.get("status") == "no key":
                 self.log("未配置 Companion 密钥，本地监测继续。", "Status")
-                self.question = None
+                self._clear_chat_reply()
                 return "no key"
+            if hello.get("status") == "prompt error":
+                self.log(f"无法读取玲音提示词：{clean(hello.get('path', ''))}。", "Status")
+                self._clear_chat_reply()
+                return "prompt error"
             if hello.get("status") != "ready":
                 raise ValueError("worker unavailable")
             self.worker_ready = True
@@ -688,6 +820,7 @@ class Companion:
                         question=question,
                         snapshot_version=state.version,
                         profile=self.profile(),
+                        tool_evidence=self.chat_tool_evidence(question),
                         recent_errors=list(self.errors),
                         latest_review=self.session_evidence("turns")[-1:],
                         conversation=[(r, m[:400]) for _, r, m in list(self.logs)[-5:]],
@@ -751,12 +884,22 @@ class Companion:
                     )
                     await process.stdin.drain()
 
+                if self.execute_environment is not None:
+                    environment = await asyncio.to_thread(self.execute_environment)
+                    if not current():
+                        continue
+                    if environment:
+                        snapshot["execute_environment"] = environment
                 await send(dict(snapshot=snapshot))
                 async with asyncio.timeout(35):
                     while True:
                         reply = json.loads(await process.stdout.readline())
                         if any(reply.get(k) != v for k, v in identity.items()):
                             raise ValueError("mismatched companion response")
+                        if "partial" in reply:
+                            if question and current() and isinstance(reply["partial"], str):
+                                self._update_chat_preview(reply["partial"])
+                            continue
                         if "query" not in reply:
                             break
                         data = "Expired request."
@@ -783,8 +926,11 @@ class Companion:
                 if not current():
                     continue
                 if question:
-                    self.question = None
-                    self.log(reply_text(reply.get("message")))
+                    stamp = self._clear_chat_reply()
+                    if reply.get("status") == "ok":
+                        self.log(reply_text(reply.get("message")), stamp=stamp)
+                    else:
+                        self.log("这次没有收到模型回复，请稍后再试。", "Status")
                 else:
                     message = reply_text(reply.get("message"), proactive=True)
                     analysis = dict(
@@ -817,14 +963,14 @@ class Companion:
                         turn=incident["turn"],
                     )
                     if reply.get("behavior") in STATES:
-                        self.behavior, self.until = reply["behavior"], monotonic() + 4.8
+                        self.queue_behavior(reply["behavior"], temporary=True)
                     if message:
                         self.log(message)
         finally:
             if self.question:
                 self.log("暂时无法连接玲音。", "Status")
             self.worker_ready = False
-            self.question = None
+            self._clear_chat_reply()
             self.connection = "OFFLINE"
             if process is None and not spawn.cancelled():
                 try:

@@ -12,19 +12,20 @@ LEVELS = {char: level for level, char in enumerate(PRESETS["standard"])}
 # (row offset, column offset, Unicode Braille bit, ordered dither threshold)
 DOTS = ((0, 0, 1, 1), (0, 1, 8, 6), (1, 0, 2, 7), (1, 1, 16, 3),
         (2, 0, 4, 2), (2, 1, 32, 5), (3, 0, 64, 8), (3, 1, 128, 4))
-REFERENCE_COLUMNS = 150
-REFERENCE_ROWS = 86
+CELL_HEIGHT_TO_WIDTH = 2
 
 
-def frames(state: str, width: int, height: int):
-    """Fit the reference portrait grid to the terminal, preserving GIF delays."""
+def frames(state: str, width: int, height: int, *, path: Path | None = None):
+    """Fit the GIF to the terminal, preserving its proportions and delays."""
     if state not in STATES:
         raise ValueError("unknown animation")
-    cols = max(1, min(width, round(height * REFERENCE_COLUMNS / REFERENCE_ROWS)))
-    rows = max(1, min(height, round(cols * REFERENCE_ROWS / REFERENCE_COLUMNS)))
-    left = (width - cols) // 2
-    top = (height - rows) // 2
-    with Image.open(ASSETS / f"lain_{state}.gif") as clip:
+    with Image.open(path if path is not None else ASSETS / f"lain_{state}.gif") as clip:
+        # A typical terminal cell is twice as tall as it is wide.
+        columns_per_row = CELL_HEIGHT_TO_WIDTH * clip.width / clip.height
+        cols = max(1, min(width, round(height * columns_per_row)))
+        rows = max(1, min(height, round(cols / columns_per_row)))
+        left = (width - cols) // 2
+        top = (height - rows) // 2
         black = Image.new("RGBA", clip.size, "black")
         # Browser canvas uses local bilinear samples. Pillow.resize widens
         # its filter when shrinking, which softens the source's fine strokes.

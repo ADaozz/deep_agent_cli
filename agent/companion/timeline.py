@@ -1,5 +1,6 @@
 """Session-local evidence, rolling statistics and bounded SQLite persistence."""
 
+from bisect import insort_right
 from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from math import sqrt
@@ -54,6 +55,11 @@ def category(text, exit_code):
 
 # A session-wide population, including calls from tools hidden in the panel.
 SESSION_RELIABILITY = ("", "", "*")
+TOOL_ACTIVITY_LIMIT = 60
+
+
+def _completion_key(obs):
+    return obs.finished_at, obs.run_id, obs.tool_call_id
 
 
 class Series:
@@ -128,6 +134,7 @@ class Timeline:
         self.window = window
         self.finished = set()
         self.interrupted = {}
+        self.active = {}
         self.retries = deque(maxlen=32)
         self.series = {}
         self.models = {}
@@ -137,7 +144,8 @@ class Timeline:
         self.failures = deque(maxlen=32)
         self.samples = deque(maxlen=60)
         self.version = 0
-        self.plot_version = 0
+        self.recent_tool_calls: list[ToolObservation] = []
+        self.activity_version = 0
         self.pending = []
         self.queue = deque()
 
@@ -154,11 +162,30 @@ class Timeline:
             )
         )
 
+    def started(self, obs):
+        identity = (obs.run_id, obs.tool_call_id)
+        if identity not in self.finished and identity not in self.active:
+            self.active[identity] = obs
+
+    def chart_tools(self, group):
+        active = Counter(
+            obs.tool_name for identity, obs in self.active.items()
+            if (obs.model_id, obs.reasoning_effort) == group and identity not in self.interrupted
+        )
+        for (model, effort, name), series in self.series.items():
+            if (model, effort) == group:
+                count = series.counts.total() + active.pop(name, 0)
+                if count:
+                    yield name, series.rate if series.recent else None, count
+        for name, count in active.items():
+            yield name, None, count
+
     def completed(self, obs, *, replay=False):
         identity = obs.run_id, obs.tool_call_id
         if identity in self.finished:
             return
         self.finished.add(identity)
+        self.active.pop(identity, None)
         group = (obs.model_id, obs.reasoning_effort)
         key = (*group, obs.tool_name)
         if key not in self.series:
@@ -181,7 +208,13 @@ class Timeline:
                     outcome=obs.outcome,
                 )
             )
-        self.plot_version += 1
+        if obs.finished_at is not None and obs.outcome in ("success", "failed"):
+            calls = self.recent_tool_calls
+            if len(calls) < TOOL_ACTIVITY_LIMIT or _completion_key(obs) > _completion_key(calls[0]):
+                insort_right(calls, obs, key=_completion_key)
+                if len(calls) > TOOL_ACTIVITY_LIMIT:
+                    del calls[0]
+                self.activity_version += 1
         series.add(obs)
         aggregate.add(obs)
         self.overall.add(obs)

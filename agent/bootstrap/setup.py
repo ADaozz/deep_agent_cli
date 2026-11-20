@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-from importlib.resources import files
+from importlib.resources import abc, files
 from pathlib import Path
 import tempfile
 
 from agent.bootstrap.config import default_skills_dir, require_outside_workspace
+from agent.companion import STATES
 
 
 def initialize_user_files(*, workspace: Path | None = None) -> Path | None:
@@ -24,22 +25,51 @@ def initialize_user_files(*, workspace: Path | None = None) -> Path | None:
     skills.mkdir(mode=0o700, exist_ok=True)
     if os.environ.get("DEEP_AGENT_CONFIG"):
         return None
+    # Creating config.yaml and filling missing companion prompts/GIFs are
+    # independent: an older config must still receive newly required assets.
+    initialize_companion_files(root)
     if config.exists() or config.is_symlink():
         if not config.is_file():
             raise ValueError(f"configuration path must be a file: {config}")
         return None
     template = files("agent").joinpath("config.example.yaml")
-    with tempfile.NamedTemporaryFile(mode="wb", dir=root, prefix=".config-", delete=False) as temporary:
+    return config if _write_default(config, template) else None
+
+
+def initialize_companion_files(config_dir: Path) -> None:
+    source = files("agent.companion")
+    companion_dir = config_dir / "companion"
+    prompts = companion_dir / "prompts"
+    gifs = companion_dir / "gifs"
+    for directory in (companion_dir, prompts, gifs):
+        if directory.is_symlink():
+            raise ValueError(f"Companion directory must not be a symlink: {directory}")
+        directory.mkdir(mode=0o700, exist_ok=True)
+    for name in ("persona.md", "observation.md", "chat.md"):
+        _write_default(prompts / name, source.joinpath(name))
+    for state in STATES:
+        name = f"lain_{state}.gif"
+        _write_default(gifs / name, source.joinpath("assets", name))
+
+
+def _write_default(destination: Path, source: abc.Traversable) -> bool:
+    if destination.exists() or destination.is_symlink():
+        if not destination.is_file():
+            raise ValueError(f"configuration asset must be a file: {destination}")
+        return False
+    with tempfile.NamedTemporaryFile(mode="wb", dir=destination.parent, prefix=".config-", delete=False) as temporary:
         temp_path = Path(temporary.name)
         try:
             os.chmod(temp_path, 0o600)
-            temporary.write(template.read_bytes())
+            temporary.write(source.read_bytes())
             temporary.flush()
             os.fsync(temporary.fileno())
             try:
-                os.link(temp_path, config)
+                os.link(temp_path, destination)
             except FileExistsError:
-                return None
+                if not destination.is_file():
+                    raise ValueError(f"configuration asset must be a file: {destination}") from None
+                return False
         finally:
             temp_path.unlink(missing_ok=True)
-    return config
+    return True

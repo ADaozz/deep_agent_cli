@@ -1,36 +1,27 @@
-## v0.2.2 更新内容
+## v0.3.0 更新内容
 
-### 会话中文摘要（PR #33）
+### Lain Companion 侧栏
 
-- 新会话首次成功完成一轮后，后台额外请求一次中文标题（目标 12～25 个汉字），用于 `/resume`、`deep-agent resume` 列表和底栏；无摘要时显示 thread_id，选择项始终绑定真实会话 ID。
-- 标题生成使用独立客户端，不调用工具、不写入聊天历史、不计入 TPS、不阻塞输入；超时 10 秒且不重试，请求和结果均先脱敏并限长。
-- 历史会话不自动补全摘要；数据库初始化时自动补齐摘要列，已有记录保持不变。
+- 终端达到 **120 列 × 32 行** 时，右侧显示 Lain：时间与运行环境、CPU / GPU / RAM / 磁盘、Git 分支与工作区服务。
+- **Tool Health** 按完成顺序展示当前会话最近 60 次有明确结果的工具调用（每 3 次一列）；颜色表示次数，失败显示 `×`。
+- **Talk To Lain**：`Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入；回复流式显示，聊天区支持滚轮与文本选择（与主聊天区共用选择逻辑）。
+- 本地统计可触发主动观察；也可在侧栏或 `/lain …` 中查询失败、复盘与项目问题。无 Companion 密钥时，监控与动画仍可用。
+- 人设、观察提示词、聊天提示词与各状态 GIF 可在 `config.yaml` 的 `companion` 段配置；首次启动写入 `~/.deep-agent/companion/`。详见 [Lain 侧栏配置](https://github.com/ADaozz/deep_agent_cli/blob/v0.3.0/docs/configuration.md) 与 [统计口径](https://github.com/ADaozz/deep_agent_cli/blob/v0.3.0/docs/companion-phase2.md)。
 
-### 上下文压缩与超大请求恢复
+### 动画与提示词
 
-- 新增 `agent.compaction_threshold`，按模型上下文窗口比例触发自动压缩（取值大于 0 且不超过 1，省略时为 0.85，实际取其与 0.85 的较小值）。示例配置设为 0.60。
-- 新增请求体恢复中间件：工具结果中的内嵌媒体在请求前限制在约 2 MiB，优先保留最近的媒体；收到 HTTP 413 时移除剩余内嵌媒体、截短超长工具文本并重试一次。原始 checkpoint、用户消息和附件均不改动，修复超大工具结果导致会话无法继续的问题。
+- 五个非待机动画以 `assets/lain-sprites/gifs/` 为事实源，打包进 `agent/companion/assets/`（体积约数十 KB，替代原先数 MB 的旧 GIF）。
+- 内置 `persona.md` 精简为核心设定；`observation.md` / `chat.md` 约定观察与对话边界。
 
-### 追加消息队列与中断发送
+### 发布前修复
 
-- 排队的 steering / follow-up 改为在独立区域逐条显示，可滚动查看，不再挤在状态栏中。
-- 有排队消息时 `Esc` 或 `Alt+Up` 将队列撤回到输入框，不中断当前任务；连续按两次 `Enter` 则中断当前任务并在停止后立即发送队列。
-- `Ctrl+B` 只负责展开 / 收起已发送的长消息。
+- **工具结果判定**：主 Agent 与子 Agent 共用 `classify_tool_result`。成功读取以 `Error handling…` 开头的文件不再记为失败；正文仅认 `Error:` 信封，`execute` 仍以 artifact / 退出码为准。
+- **初始化补齐**：已有 `config.yaml` 时仍会补齐缺失的 Companion 提示词与 GIF，不覆盖用户已编辑文件。
 
-### TUI 与状态栏
+### 其他
 
-- 长会话转录渲染改为增量复用未变化的单元，5000 块场景下 `render_document` P95 由约 220 ms 降至约 18 ms（PR #32）。
-- 底栏显示模型原始名称；推理强度选单始终把 `default` 放在首位；选择类弹窗精简冗余提示；沙箱模式显示为 `sandbox`。
-- `/status` 新增按模型统计的工具调用表（子智能体请求不计入主会话）。
-- 收到 SIGTERM / SIGHUP 时走正常退出流程并恢复终端模式，第二次信号立即退出；Git 改动数不再统计未跟踪文件。
-- 修复 `TERM=dumb` / `unknown` 终端（部分 IDE 内嵌终端、Emacs shell 等）下转录区固定按 80 列折行、忽略实际终端宽度的问题。
-- 精简内置提示词与 `ls` / `read_file` / `request_human_input` 工具说明，减少多余调用轮次。
-
-### 内部重构与依赖
-
-- 按领域边界拆分核心模块：模型、会话、运行控制、执行环境与启动装配各自独立，CLI 控制器通过显式依赖协作；不保留旧模块路径转发，直接引用内部模块的 Python 代码需按 [架构文档](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/architecture.md) 调整导入路径。
-- 新增 `RunMetrics` 与 `examples/benchmark.py`，用于对照 agent、cli、sandbox 耗时。
-- 升级依赖：`deepagents>=0.7.35`、`langchain-core>=1.7.7`、`langchain-openai>=1.7.4,<1.8.0`，同步提高 `langchain[mcp]`、`langgraph`、`langgraph-checkpoint-sqlite` 下限。
+- 默认模型模板改为 `deepseek/deepseek-flash`（仍可通过配置切换其他 OpenAI 兼容端点）。
+- README 增加 Lain Companion 说明；相关架构、TUI、配置文档已同步。
 
 ### 安装与升级
 
@@ -40,8 +31,10 @@
 pipx install deep-agent-cli
 # 已安装：
 pipx upgrade deep-agent-cli
+# 或指定版本：
+pipx install deep-agent-cli==0.3.0
 ```
 
-已有用户配置不会自动覆盖；如需调整压缩阈值，请手动在 `agent` 段加入 `compaction_threshold`。
+已有用户配置不会被覆盖。若在旧配置中按文档加入了 `companion/prompts/…` 路径，升级后重启一次即可自动补齐缺失默认文件；若本地已有自定义 `persona.md`，不会被替换。
 
-更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/tui.md)和[配置参考](https://github.com/ADaozz/deep_agent_cli/blob/v0.2.2/docs/configuration.md)。
+更多说明见 [README](https://github.com/ADaozz/deep_agent_cli#readme)、[终端界面](https://github.com/ADaozz/deep_agent_cli/blob/v0.3.0/docs/tui.md) 和 [配置参考](https://github.com/ADaozz/deep_agent_cli/blob/v0.3.0/docs/configuration.md)。

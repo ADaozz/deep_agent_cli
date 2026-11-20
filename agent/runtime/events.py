@@ -187,13 +187,17 @@ def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
     return {key: int(usage[key]) for key in _USAGE_KEYS if type(usage.get(key)) is int and usage[key] >= 0}
 
 
-def _usage_from_messages(messages: Any) -> dict[str, int]:
+def _usage_from_messages(messages: Any, *, model_id: str | None = None) -> dict[str, int]:
     """Most recent reported usage, which is the size of the context the model saw."""
     for message in reversed(list(messages or [])):
         if isinstance(message, AIMessage):
             if message.additional_kwargs.get("manual_compact_completed"):
                 return {}
-            return _usage_metadata_dict(message)
+            if model_id is not None and message.response_metadata.get("deep_agent_model_id") != model_id:
+                return {}
+            usage = _usage_metadata_dict(message)
+            if model_id is None or "input_tokens" in usage:
+                return usage
     return {}
 
 

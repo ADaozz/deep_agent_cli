@@ -565,13 +565,13 @@ def test_cli_permission_allow_requires_typed_confirm(tmp_path: Path) -> None:
             assert app.runner.permission_mode() is PermissionMode.ALLOW
             assert app.runner.pending_permission_mode() is None
             assert app.dialogs.current is None
-            assert "p:allow" in "".join(text for _, text in app._footer_text())
+            assert "sandbox/permission:restricted/allow" in "".join(text for _, text in app._footer_text())
             app.show_status()
             assert "pending" not in getattr(app.state.blocks[-1], "content", "").lower()
             await app.access_selection.select_permission("ask")
             assert runner.permission_mode() is PermissionMode.ASK
             assert runner.pending_permission_mode() is None
-            assert "p:ask" in "".join(text for _, text in app._footer_text())
+            assert "sandbox/permission:restricted/ask" in "".join(text for _, text in app._footer_text())
             await app.access_selection.select_permission("allow")
             assert app.dialogs.current.accept("ALLOW")
             app.interaction_flow._finish_interaction()

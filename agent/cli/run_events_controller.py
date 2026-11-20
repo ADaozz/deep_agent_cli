@@ -57,6 +57,7 @@ class RunEventsController:
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
         if event.type == "session_summary_requested" and isinstance(event.result, SessionSummaryRequest):
             self.request_summary(event.result)
+            return
         previous_status = self.state.status
         self.state.apply(event)
         if self.state.status != previous_status:

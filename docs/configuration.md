@@ -16,6 +16,26 @@ CLI 按以下顺序查找主配置：
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
 - 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
+## Lain 侧栏（`companion`）
+
+安装后首次运行时，CLI 会在 `~/.deep-agent/companion/` 创建可编辑的提示词和 GIF，并写入 `~/.deep-agent/config.yaml`。已有配置和自定义文件会保留。相对路径以配置文件所在目录为准，也支持绝对路径和 `~`。提示词文件使用 UTF-8 Markdown。编辑文件或切换路径后重启 CLI。
+
+```yaml
+companion:
+  persona_prompt: companion/prompts/persona.md
+  observation_prompt: companion/prompts/observation.md
+  chat_prompt: companion/prompts/chat.md
+  gifs:
+    idle: companion/gifs/lain_idle.gif
+```
+
+- `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
+- `observation_prompt` 定义如何分析异常摘要、何时主动开口。[`observation.md`](../agent/companion/observation.md)
+- `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为。[`chat.md`](../agent/companion/chat.md)
+- `gifs` 独立配置 `idle`、`observing`、`curious`、`focused`、`concerned` 和 `relieved` 的动画。
+
+每项可以省略或设为 `null`，使用对应的内置文件。
+
 ## 全局网络环境（`trust_env`）
 
 在主配置 `config.yaml` 顶层设置，修改后重启生效：
@@ -174,7 +194,7 @@ HTTP 首字节超时由 `llm.timeout` 配置，默认 60 秒，所有模型共�
 
 Chat Completions 固定请求 `stream_options.include_usage=true`；Responses 从完成事件读取 usage。服务端明确拒绝该参数时报告错误，不会关闭参数重试。普通响应缺失 usage 不影响调用成功。
 
-Context 百分比只使用最近一次 API 响应的 `usage_metadata.input_tokens / context_window * 100`，不使用 `total_tokens`、累计用量、Tokenizer 或字符估算。输入为零显示 `0.0%`；缺失时显示 `Unknown`。生成过程中在服务端返回 usage 前显示 `Unknown`，收到 usage-only 数据块立即更新。
+Context 百分比使用当前会话、当前模型最近一次有效的 `usage_metadata.input_tokens / context_window * 100`。新请求开始、取消或响应缺失用量时沿用上一次读数，收到新读数后立即更新。恢复会话时从 checkpoint 读取。有效输入为零时显示 `0.0% used`，没有有效读数时显示 `Unknown`。
 
 每次模型调用开始、取消/失败、切换模型、压缩完成都会清除旧值。checkpoint 保存响应所属的模型来源 ID；恢复会话时只使用当前模型、当前有效消息的最后一次 usage。旧会话仍可读取，但无法确认模型来源的旧 usage 显示 `Unknown`，下一次调用后重新获得准确数据。
 

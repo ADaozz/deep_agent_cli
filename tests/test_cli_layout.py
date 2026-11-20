@@ -22,6 +22,7 @@ from agent.cli.rendering import (
 )
 from agent.cli.state import CliState, ToolBlock, touch
 from agent.bootstrap.config import Settings
+from agent.execution.types import ExecutionMode
 from agent.runtime.runner import AgentRunner
 from agent.runtime.contracts import RunEvent
 from agent.sessions.contracts import TranscriptBlock
@@ -704,9 +705,28 @@ def test_footer_puts_workspace_model_and_resume_id_on_first_line(monkeypatch) ->
         assert "· default ·" in lines[0]
         assert "qwen3.5-plus" not in lines[1]
         assert "Ready" not in footer
-        assert "p:" in lines[1]
+        assert lines[1].strip() == "custom/permission:restricted/ask"
         assert not app._status_visible()
         assert "".join(value for _, value in app._status_text()) == ""
+
+
+def test_footer_spells_out_sandbox_and_pending_mode(monkeypatch) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        settings=Settings.from_mapping({"sandbox": {"mode": "full-access"}}),
+    )
+    monkeypatch.setattr(runner.prepared, "execution_mode", ExecutionMode.SANDBOXED)
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        monkeypatch.setattr(app, "_width", lambda: 80)
+        assert fragment_list_to_text(app._footer_text()).splitlines()[1].strip() == (
+            "sandbox/permission:full-access/ask"
+        )
+        runner.configuration.pending_sandbox_mode = "restricted"
+        assert fragment_list_to_text(app._footer_text()).splitlines()[1].strip() == (
+            "sandbox/permission:full-access→restricted(pending)/ask"
+        )
 
 
 def test_footer_uses_terminal_palette_for_workspace_resume_id_and_model(monkeypatch) -> None:

@@ -1,0 +1,15 @@
+Generate a transparent 3x3 sprite sheet, exactly nine equal square cells, reading across, for a very low-resolution terminal anime avatar. Attached image 1 is the only character and pose reference. Image 2 is the style reference from the existing animation. Preserve the exact front-facing pose, asymmetric haircut, white X hairpin, hoodie, black and white color blocks, hair strands and position. Keep the head, gaze, body geometry, fixed camera and background locked; do not change the underlying character design. Tile 1 is the neutral reference expression, tile 9 repeats tile 1. Carefully register silhouettes across all nine cells. All frames have true transparent background with opaque blacks inside the avatar, pure white and pure black only, crisp contours. No text or grid borders. No tilt, no translation or camera zoom. Very important: the face action described below needs to remain clearly legible rendered as 20 by 12 two-color character cells, so use bold high-contrast anime eye/mouth shapes, visibly stronger than subtle real-world acting. Tile 4–6 should hold the strongest pose.
+
+observing
+OBSERVING. Only both eyes change together. At peak, clearly raise both upper eyelids well above their neutral position, with evident white sclera, like suddenly noticing a detail, but keep pupil centers exactly where they were. No head or mouth change. 1 neutral, 2 ready, 3 rising, 4 widened, 5 widened, 6 widened, 7 midway back, 8 neutral, 9 duplicate first.
+
+curious
+CURIOUS. A visibly asymmetrical anime expression: one upper lid rises, the other remains near neutral, and the small short line of the mouth becomes a clearly readable small black oval on a white face. Do not draw a head tilt, alter the hair, or change pupil position. 1 neutral, 2 slight lift, 3 open one eye wider, 4 and 5 obvious asymmetry and small oval, 6 hold, 7 close mouth, 8 neutral, 9 duplicate first.
+
+focused
+FOCUSED. Both eyes narrow decisively to about half their normal open height (never close) and the exposed inner eyebrows pull slightly down in a clearly readable anime focus. Short mouth stays a firm, slightly wider black line, no head or gaze move. 1 neutral, 2 neutral, 3 narrowing, 4 and 5 and 6 strongly narrowed, 7 halfway back, 8 neutral, 9 duplicate first.
+
+relieved
+RELIEVED. Keep head and gaze fixed. A readable anime smile in the middle: a distinct broad upward open curved smile with black contour against the white face, no teeth, soft crescent eyes and a minimal breathing release. Still the same quiet character. 1 neutral, 2 relax lids, 3 smile begins, 4 and 5 and 6 clear broad smile with crescents, 7 smile fades, 8 neutral, 9 duplicate first.
+
+关切状态沿用之前的闭眼精灵图。导出时使用现有 idle 首帧固定轮廓、透明蒙版和首尾帧，仅装配局部表情。
