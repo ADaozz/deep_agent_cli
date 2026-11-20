@@ -761,6 +761,8 @@ def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     assert "private-value" not in result and "fixture-sensitive-value" not in result
     assert "example.py:4" in repo.search("client.connect()")
     assert repo.search("private-value").startswith("No match")
+    (tmp_path / "pem_parser.py").write_text('HEADER = "-----BEGIN PRIVATE KEY-----"\nparse_header(HEADER)')
+    assert "pem_parser.py:2 parse_header(HEADER)" in repo.read("pem_parser.py")
 
 
 def test_quiet_activity_does_not_request_model(tmp_path, monkeypatch):

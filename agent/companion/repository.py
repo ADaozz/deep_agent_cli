@@ -7,7 +7,7 @@ import stat
 from time import monotonic
 
 from agent.companion.config import SOURCE_READ_MAX_LINES
-from agent.companion.redaction import PRIVATE_KEY_MARKER, redact_source_text
+from agent.companion.redaction import redact_source_text, source_contains_private_key
 
 SOURCE = {
     ".py",
@@ -142,7 +142,7 @@ class Repository:
             if len(data) > MAX_FILE or b"\0" in data:
                 raise ValueError("unsupported content")
             text = data.decode("utf-8")
-            if PRIVATE_KEY_MARKER in text and "-----BEGIN " in text or any(
+            if source_contains_private_key(text) or any(
                 "\n" in secret and secret in text for secret in self.secrets
             ):
                 raise ValueError("private key material")

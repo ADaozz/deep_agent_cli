@@ -7,6 +7,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 HIDDEN = "[已隐藏]"
 PRIVATE_KEY_MARKER = "PRIVATE KEY-----"
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)")
+_SOURCE_PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*(?:\r?\n|(?:\\r)?\\n)")
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _AUTH_HEADER = re.compile(r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*(?:Bearer|Basic)[ \t]+[^\s,;]+", re.I)
 _TOKEN = re.compile(
@@ -87,7 +88,8 @@ _SOURCE_TOKENS = re.compile(
 
 def _redact(text, secrets, *, source):
     text = _ANSI_ESCAPE.sub("", text)
-    text = _PRIVATE_KEY.sub(HIDDEN, text)
+    if not source:
+        text = _PRIVATE_KEY.sub(HIDDEN, text)
     text = _AUTH_HEADER.sub(HIDDEN, text)
     locations = _SOURCE_TOKENS if source else _DIAGNOSTIC_TOKENS
     result = []
@@ -115,3 +117,7 @@ def redact_diagnostic_text(text, secrets=()):
 
 def redact_source_text(text, secrets=()):
     return _redact(text, secrets, source=True)
+
+
+def source_contains_private_key(text):
+    return _SOURCE_PRIVATE_KEY.search(_ANSI_ESCAPE.sub("", text)) is not None

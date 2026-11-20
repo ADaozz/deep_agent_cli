@@ -56,9 +56,10 @@ def _excerpt(text, secrets, limit):
 def _arguments(value, secrets):
     budget = 1750
     truncated = False
+    redacted = False
 
     def visit(item, depth=0, field=""):
-        nonlocal budget, truncated
+        nonlocal budget, truncated, redacted
         if budget <= 0 or depth > 3:
             truncated = True
             return "…"
@@ -75,7 +76,11 @@ def _arguments(value, secrets):
                 name, clipped = _excerpt(key, secrets, 64)
                 truncated |= clipped
                 budget -= len(name)
-                result[name] = "[已隐藏]" if _SECRET_FIELD.search(key[:128]) else visit(child, depth + 1, key)
+                if _SECRET_FIELD.search(key[:128]):
+                    result[name] = "[已隐藏]"
+                    redacted = True
+                else:
+                    result[name] = visit(child, depth + 1, key)
             return result
         if isinstance(item, (list, tuple)):
             result = []
@@ -93,9 +98,10 @@ def _arguments(value, secrets):
         text, clipped = _excerpt(item if isinstance(item, str) else "[未展示]", secrets, max(1, min(budget, field_limit)))
         budget -= len(text)
         truncated |= clipped
+        redacted |= not clipped and text != item
         return text
 
-    return visit(value or {}), truncated
+    return visit(value or {}), truncated, redacted
 
 
 def result_status(status, *, name, content, artifact, is_error=False):
@@ -116,6 +122,7 @@ class CallDetails:
     output_excerpt: str = ""
     arguments_truncated: bool = False
     output_truncated: bool = False
+    arguments_redacted: bool = False
 
     @property
     def truncated(self):
@@ -124,14 +131,15 @@ class CallDetails:
     def matches_arguments(self, other):
         return (
             bool(self.arguments) and not (self.arguments_truncated or other.arguments_truncated)
+            and not (self.arguments_redacted or other.arguments_redacted)
             and self.arguments == other.arguments
             and "[已隐藏]" not in json.dumps(self.arguments, ensure_ascii=False)
         )
 
 
 def call_arguments(arguments, secrets):
-    data, truncated = _arguments(arguments, secrets)
-    return CallDetails(arguments=data, arguments_truncated=truncated)
+    data, truncated, redacted = _arguments(arguments, secrets)
+    return CallDetails(arguments=data, arguments_truncated=truncated, arguments_redacted=redacted)
 
 
 def _failure_excerpt(content, secrets):

@@ -224,6 +224,7 @@ def test_live_result_overrides_stale_checkpoint_running_status():
 
 
 def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
+    from agent.companion.session_inspector import call_arguments
     from agent.companion.redaction import redact_diagnostic_text
     from agent.sessions.summary import redact_summary_input
 
@@ -237,6 +238,10 @@ def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
     assert "https://api.example.test/v1/[已隐藏]?limit=10" in clean
     assert redact_diagnostic_text(clean) == clean
     assert endpoint not in redact_summary_input(endpoint)
+    left = call_arguments({"command": "curl https://a:first@api.example.test/v1"}, ())
+    right = call_arguments({"command": "curl https://a:second@api.example.test/v1"}, ())
+    assert left.arguments == right.arguments
+    assert not left.matches_arguments(right)
 
 
 def test_failure_excerpt_keeps_context_and_tail_and_command_has_priority():
