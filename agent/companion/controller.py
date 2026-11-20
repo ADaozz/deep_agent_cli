@@ -93,11 +93,13 @@ class Companion:
         window=None,
         execute_environment=None,
         config: CompanionConfig | None = None,
+        inspect_session=None,
     ):
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
         self.repository = Repository(self.workspace, self.protected, secrets)
         self.secrets = secrets
+        self.inspect_session = inspect_session
         self.worker_ready = False
         self.question = None
         self.reply_stamp = None
@@ -749,6 +751,19 @@ class Companion:
         return evidence[:4]
 
     async def host_query(self, kind, args):
+        if kind == "inspect_current_session":
+            if self.inspect_session is None:
+                return json.dumps({"error": "session inspector unavailable"}, ensure_ascii=False)
+            try:
+                limit = int(args.get("limit") or 10)
+            except (TypeError, ValueError):
+                limit = 10
+            return await asyncio.to_thread(
+                self.inspect_session,
+                str(args.get("view") or "recent_tools"),
+                args.get("tool_call_id"),
+                limit,
+            )
         if kind in ("timeline", "git"):
             end = min(float(args.get("end") or time()), time())
             start = max(float(args.get("start") or end - 14 * 86400), end - 14 * 86400)
@@ -891,37 +906,33 @@ class Companion:
                     if environment:
                         snapshot["execute_environment"] = environment
                 await send(dict(snapshot=snapshot))
-                async with asyncio.timeout(35):
-                    while True:
-                        reply = json.loads(await process.stdout.readline())
-                        if any(reply.get(k) != v for k, v in identity.items()):
-                            raise ValueError("mismatched companion response")
-                        if "partial" in reply:
-                            if question and current() and isinstance(reply["partial"], str):
-                                self._update_chat_preview(reply["partial"])
-                            continue
-                        if "query" not in reply:
-                            break
-                        data = "Expired request."
-                        if question and current():
-                            try:
-                                data = await asyncio.wait_for(
-                                    self.host_query(
-                                        reply["query"], reply.get("args", {})
-                                    ),
-                                    2,
-                                )
-                            except (
-                                OSError,
-                                ValueError,
-                                TypeError,
-                                TimeoutError,
-                                sqlite3.Error,
-                            ):
-                                data = "Unavailable."
-                        await send(
-                            dict(data=data[:6000] if current() else "Expired request.")
-                        )
+                while True:
+                    reply = json.loads(await process.stdout.readline())
+                    if any(reply.get(k) != v for k, v in identity.items()):
+                        raise ValueError("mismatched companion response")
+                    if "partial" in reply:
+                        if question and current() and isinstance(reply["partial"], str):
+                            self._update_chat_preview(reply["partial"])
+                        continue
+                    if "query" not in reply:
+                        break
+                    data = "Expired request."
+                    if question and current():
+                        try:
+                            data = await self.host_query(
+                                reply["query"], reply.get("args", {})
+                            )
+                        except (
+                            OSError,
+                            ValueError,
+                            TypeError,
+                            TimeoutError,
+                            sqlite3.Error,
+                        ):
+                            data = "Unavailable."
+                    await send(
+                        dict(data=data[:6000] if current() else "Expired request.")
+                    )
                 self.sync_session()
                 if not current():
                     continue

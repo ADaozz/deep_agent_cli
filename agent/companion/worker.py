@@ -112,6 +112,31 @@ def create_chat(model, query, *, persona=None, instructions=None):
         """查询当前会话的有限记录。timeline 和 git 最多查最近 14 天，按时间倒序返回最多 16 条。其余类型忽略时间参数。"""
         return await query(kind, start=start, end=end)
 
+    @tool
+    async def inspect_current_session(
+        view: Annotated[
+            Literal["recent_tools", "tool_detail", "recent_messages"],
+            Field(description=(
+                "recent_tools 列出近期工具调用结果；"
+                "tool_detail 按 tool_call_id 查看参数、输出和退出码；"
+                "recent_messages 查看最近的用户与主 Agent 可见消息。"
+            )),
+        ] = "recent_tools",
+        tool_call_id: Annotated[
+            str | None, Field(description="tool_detail 所需的工具调用 ID。")
+        ] = None,
+        limit: Annotated[
+            int, Field(description="返回条数，1～20，默认 10。")
+        ] = 10,
+    ) -> str:
+        """只读检查主 Agent 当前 Session。Session 由宿主绑定，不能指定其他会话或数据库。"""
+        return await query(
+            "inspect_current_session",
+            view=view,
+            tool_call_id=tool_call_id,
+            limit=min(max(int(limit or 10), 1), 20),
+        )
+
     defaults = CompanionConfig()
     if persona is None:
         persona = defaults.persona_prompt.read_text(encoding="utf-8")
@@ -125,6 +150,7 @@ def create_chat(model, query, *, persona=None, instructions=None):
             read_workspace_file,
             list_workspace_files,
             session_evidence,
+            inspect_current_session,
         ],
     )
 
@@ -147,12 +173,8 @@ def create_chat(model, query, *, persona=None, instructions=None):
                     published = text
                     on_chunk(text)
 
-            def after_model(metrics):
-                if metrics["tool_calls"]:
-                    publish("")
-
             callback = StreamDeltaCallback(
-                lambda *_: None, on_assistant=publish, on_metrics=after_model,
+                lambda *_: None, on_assistant=publish,
             )
             callback.run_inline = True
             config["callbacks"] = [callback]
@@ -233,7 +255,7 @@ async def main():
                     response = chat(snapshot, on_chunk=publish)
                 else:
                     response = respond(snapshot)
-                result.update(await asyncio.wait_for(response, 25))
+                result.update(await response)
                 result["status"] = "ok"
             except Exception:
                 result["status"] = "model unavailable"

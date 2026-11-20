@@ -433,6 +433,13 @@ def test_turn_review_filters_evidence_and_voice():
     )
     assert all(term in findings for term in ("上升", "疑似重试", "RAM", "更慢"))
     assert "4200" not in findings and "Git" not in findings
-    assert reply_text("Uncertain.", proactive=True) == ""
-    assert reply_text("No evidence.") == "我没想好怎么答。你能再说具体一点吗？"
+    assert reply_text("Uncertain.", proactive=True) == "Uncertain."
+    assert reply_text("No evidence.") == "No evidence."
     assert reply_text("先看依赖声明。") == "先看依赖声明。"
+    long = (
+        "查了。先把面板没说的数字摊开。failures：4 条，都在同一个 turn 里。"
+        "Order: call_1 exit_code, call_2 exit_code, call_3 exit_code, call_4 permission."
+        "完整命令需要 tool_detail。"
+    )
+    assert reply_text(long) == long
+    assert reply_text("x" * 90, proactive=True).endswith("…")

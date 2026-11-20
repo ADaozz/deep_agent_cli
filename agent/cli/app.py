@@ -43,9 +43,11 @@ from prompt_toolkit.utils import get_cwidth
 
 from agent.companion.chart import ActivityHeatmap
 from agent.companion.controller import Companion
+from agent.companion.session_inspector import build_session_inspector
 from agent.companion.theme import ACCENT as COMPANION_ACCENT
 from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
+from agent.sessions.reader import read_snapshot
 from agent.cli.widgets import (
     EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
@@ -220,6 +222,11 @@ class CliApplication:
             session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
             invalidate=lambda: self.application.invalidate(), timezone=ZoneInfo(timezone_name),
             execute_environment=runner.execute_environment_context,
+            inspect_session=build_session_inspector(
+                load_blocks=self._companion_session_blocks,
+                companion_provider=lambda: self.companion,
+                secrets=runner.summary_secrets,
+            ),
         )
 
         self.slash_completer = SlashCompleter(
@@ -1308,6 +1315,16 @@ class CliApplication:
         fragments.append(("class:footer", "\n"))
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
+
+    def _companion_session_blocks(self):
+        thread_id = self.runner.thread_id
+        store = self.runner.session_store
+        if not thread_id or store is None:
+            return []
+        info = store.get(thread_id)
+        if info is None:
+            return []
+        return read_snapshot(self.runner.prepared.graph, info, store).transcript
 
     def _companion_profile(self):
         model = self.runner.current_model()

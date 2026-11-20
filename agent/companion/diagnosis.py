@@ -1,28 +1,16 @@
 """Locally select evidence worth interpreting; keep numeric reports in the timeline."""
 
 from collections import Counter
-import re
 from statistics import median
 
-HAN = re.compile(r"[\u3400-\u9fff]")
-
-
 def reply_text(value, *, proactive=False, partial=False):
-    """Bound visible speech independently of model adherence. Preserve complete sentences."""
-    text = " ".join(str(value or "").split())
-    # Keep technical identifiers inside Chinese sentences while dropping foreign-language boilerplate.
-    sentences = re.split(r"(?<=[。！？!?])|(?<=[.])\s+", text)
-    text = "".join(
-        s.strip()
-        for s in [s for s in sentences if partial or HAN.search(s)][: 2 if proactive else 3]
-    )
-    limit = 80 if proactive else 220
-    if not partial and not HAN.search(text[:limit]):
-        return "" if proactive else "我没想好怎么答。你能再说具体一点吗？"
+    """Pass model speech through; only strip controls and cap length for the chat log."""
+    del partial  # preview and final use the same visible text
+    text = "".join(c for c in str(value or "") if c.isprintable() or c == "\n").strip()
+    limit = 80 if proactive else 1600
     if len(text) <= limit:
         return text
-    endings = list(re.finditer(r"[。！？]", text[:limit]))
-    return text[: endings[-1].end()] if endings else text[: limit - 1].rstrip() + "…"
+    return text[: limit - 1].rstrip() + "…"
 
 
 def interpret_turn(summary, failures, samples):

@@ -19,7 +19,8 @@ from agent.models.session_summary import generate_session_summary
 from agent.runtime.runner import AgentRunner
 from agent.sessions.store import SessionStore
 from agent.sessions.summary import (
-    SessionSummaryRequest, SummaryEligibility, redact_summary_input, validate_summary,
+    SessionSummaryRequest, SummaryEligibility, fallback_query_summary,
+    redact_summary_input, validate_summary,
 )
 from tests.conftest import scripted_model
 from tests.test_protocol_api import make_model, response_body, sse
@@ -84,10 +85,20 @@ def test_redaction_removes_paths_and_credentials(unsafe):
     assert validate_summary(TITLE + " " + unsafe) is None
 
 
-@pytest.mark.parametrize("invalid", ["", "修复登录", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,
+@pytest.mark.parametrize("invalid", ["", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,
                                        TITLE + " /private/key", TITLE + "\x1b[0m", "# " + TITLE, "1. " + TITLE])
 def test_invalid_titles_are_not_saved(invalid):
     assert validate_summary(invalid) is None
+
+
+def test_short_titles_are_accepted_without_han_count_floor():
+    assert validate_summary("修复登录") == "修复登录"
+
+
+def test_fallback_query_summary_truncates_to_ten_chars():
+    assert fallback_query_summary("从github上clone https://github.com/ADaozz/deep_agent_cli 仓库") == "从github上cl"
+    assert fallback_query_summary("短问") == "短问"
+    assert fallback_query_summary("https://example.test/only") is None
 
 
 def test_titles_keep_technical_names_and_filter_known_secrets():
@@ -236,10 +247,11 @@ def test_bad_background_result_falls_back_without_affecting_run(tmp_path, result
             return result
         app.session_summaries.generate = generate
         try:
-            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, "request", "default"))
+            query = "请修复登录流程中的状态同步"
+            app.session_summaries.request(SessionSummaryRequest(runner.thread_id, query, "default"))
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
-            assert store.get(runner.thread_id).summary is None
-            assert app.session_summaries.label(runner.thread_id) == runner.thread_id
+            assert store.get(runner.thread_id).summary == "请修复登录流程中的状"
+            assert app.session_summaries.label(runner.thread_id) == "请修复登录流程中的状"
             assert app.state.status == "Ready"
         finally:
             await app.lifecycle.shutdown()
@@ -312,14 +324,14 @@ def test_summary_failure_does_not_retry_or_change_coding_state(tmp_path, monkeyp
             await asyncio.Event().wait()
         monkeypatch.setattr("agent.cli.session_summaries.SUMMARY_TIMEOUT_SECONDS", 0.01)
         app.session_summaries.generate = generate
-        request = SessionSummaryRequest(runner.thread_id, "request", "default")
+        request = SessionSummaryRequest(runner.thread_id, "请检查超时回退摘要", "default")
         try:
             app.session_summaries.request(request)
             await asyncio.gather(*(task for task, _ in app.lifecycle._tracked))
             app.session_summaries.request(request)
             assert len(calls) == 1
             assert app.state.status == "Ready"
-            assert store.get(runner.thread_id).summary is None
+            assert store.get(runner.thread_id).summary == "请检查超时回退摘要"
         finally:
             await app.lifecycle.shutdown()
             runner.close()
