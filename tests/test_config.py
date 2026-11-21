@@ -45,19 +45,20 @@ def test_secret_environment_references_and_web_tools_precedence(monkeypatch: pyt
         "llm": {"default": "local/test", "models": {"local": {
             "api_key": "${MODEL_API_KEY}", "models": {"test": {}},
         }}},
-        "web_tools": {"api_key": "${YAML_WEB_TOOLS_KEY}"},
+
     }
+    data["llm"]["models"]["deepseek"] = {"api_key": "${YAML_WEB_TOOLS_KEY}", "models": {"flash": {}}}
     settings = Settings.from_mapping(data)
     assert settings.llm_api_key == "model-secret"
-    assert settings.web_tools_api_key == "yaml-secret"
+    assert settings.resolved_deepseek_api_key == "yaml-secret"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "env-secret")
-    assert Settings.from_mapping(data).resolved_web_tools_api_key == "env-secret"
+    assert Settings.from_mapping(data).resolved_deepseek_api_key == "yaml-secret"
 
 
 def test_missing_secret_reference_reports_field_without_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MISSING_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="web_tools.api_key references missing environment variable MISSING_API_KEY"):
+    with pytest.raises(ValueError, match="web_tools.api_key was removed"):
         Settings.from_mapping({"web_tools": {"api_key": "${MISSING_API_KEY}"}})
     with pytest.raises(ValueError, match="llm.models.local.models.test.api_key references missing environment variable MISSING_API_KEY"):
         Settings.from_mapping({"llm": {"default": "local/test", "models": {

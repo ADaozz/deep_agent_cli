@@ -221,6 +221,7 @@ class CliApplication:
             protected.append(sandbox.protected_config_dir)
         self.companion = Companion(
             workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
+            api_key=runner.prepared.spec.deepseek_api_key,
             protected=protected, secrets=runner.summary_secrets(), profile=self._companion_profile,
             config=runner.settings.companion if runner.settings is not None else None,
             session=lambda: self.runner.thread_id, geometry=self._companion_viewport,

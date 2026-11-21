@@ -533,6 +533,8 @@ def build_chat_model(
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
 ) -> ChatOpenAI:
     """Build a chat client from a ModelProfile."""
+    if profile.source == "deepseek" and not profile.api_key:
+        raise ValueError("Missing llm.models.deepseek.api_key")
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
         raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
     if profile.api == "responses":

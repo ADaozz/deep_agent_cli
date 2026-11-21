@@ -16,7 +16,7 @@ from time import monotonic, perf_counter, time
 from uuid import uuid4
 
 from agent.companion import STATES
-from agent.companion.config import CompanionConfig, companion_key
+from agent.companion.config import CompanionConfig
 from agent.companion.diagnostic_io import QueryBudget
 from agent.companion.timeline import (
     SESSION_RELIABILITY,
@@ -61,7 +61,7 @@ def clean(value):
     return "".join(c for c in str(value)[:512] if c.isprintable())[:240]
 
 
-async def start_worker(config_dir, config: CompanionConfig):
+async def start_worker(config_dir, config: CompanionConfig, api_key=None):
     # Isolated Python ignores user site packages and PYTHONPATH. Inject only
     # the install root so the same entry point also works in a source checkout.
     root = str(Path(__file__).resolve().parents[2])
@@ -71,9 +71,11 @@ async def start_worker(config_dir, config: CompanionConfig):
     )
     env = {
         k: os.environ[k]
-        for k in ("HOME", "PATH", "LANG", "COMPANION_DEEPSEEK_API_KEY")
+        for k in ("HOME", "PATH", "LANG")
         if k in os.environ
     }
+    if api_key:
+        env["DEEPSEEK_API_KEY"] = api_key
     return await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
@@ -106,6 +108,7 @@ class Companion:
         timezone,
         protected=(),
         secrets=(),
+        api_key=None,
         profile=None,
         window=None,
         execute_environment=None,
@@ -114,7 +117,8 @@ class Companion:
     ):
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
-        self.secrets = tuple(filter(None, (*secrets, companion_key(config_dir))))
+        self.api_key = api_key
+        self.secrets = tuple(filter(None, (*secrets, api_key)))
         self.repository = Repository(self.workspace, self.protected, self.secrets)
         self.inspect_session = inspect_session
         self.worker_ready = False
@@ -174,6 +178,9 @@ class Companion:
         self.anchor = None
         self.frame = []
         self.changed = asyncio.Event()
+        if os.environ.get("COMPANION_DEEPSEEK_API_KEY") or (config_dir / "companion.key").exists():
+            import warnings
+            warnings.warn("旧 Companion 凭据已停用，请配置 llm.models.deepseek.api_key", UserWarning, stacklevel=2)
 
     def ask(self, text):
         self.sync_session()
@@ -974,7 +981,7 @@ class Companion:
     async def worker_session(self):
         process = None
         restart = False
-        spawn = asyncio.create_task(start_worker(self.config_dir, self.config))
+        spawn = asyncio.create_task(start_worker(self.config_dir, self.config, self.api_key))
         try:
             process = await asyncio.shield(spawn)
             hello = json.loads(await asyncio.wait_for(process.stdout.readline(), 30))

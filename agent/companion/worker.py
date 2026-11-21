@@ -3,6 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
+import os
 import sys
 from typing import Annotated, Literal
 
@@ -15,7 +16,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 from pydantic import Field
 
-from agent.companion.config import CompanionConfig, companion_key
+from agent.companion.config import CompanionConfig
 from agent.companion.diagnosis import InvalidObservation, validate_observation
 from agent.companion.session_inspector import diagnostic_error, format_inspect_response
 from agent.models.client import build_chat_model
@@ -278,8 +279,7 @@ async def serve(reader, send, *, build_chat, observe, config):
 
 
 async def main():
-    directory = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / ".deep-agent"
-    key = companion_key(directory)
+    key = os.environ.get("DEEPSEEK_API_KEY")
     if not key:
         print('{"status":"no key"}', flush=True)
         return

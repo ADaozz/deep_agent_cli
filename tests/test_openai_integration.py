@@ -157,7 +157,7 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
         "def test_fixture_comparison():\n    assert False, 'fixture comparison failed'\n",
     )
     canary = "opaque-companion-integration-secret"
-    monkeypatch.setenv("COMPANION_DEEPSEEK_API_KEY", canary)
+    from agent.bootstrap.config import Settings
 
     cases = {
         "dependency": ["-c", "import _lain_missing_fixture_"],
@@ -203,12 +203,12 @@ worker.build_chat_model = lambda profile, **kwargs: build(replace(profile, base_
 asyncio.run(worker.main())
 """
 
-        async def start_worker(directory, config):
+        async def start_worker(directory, config, api_key):
             return await asyncio.create_subprocess_exec(
                 sys.executable, "-c", launch, endpoint, str(directory),
                 str(config.persona_prompt), str(config.observation_prompt), str(config.chat_prompt),
                 str(config.rpc_timeout_seconds), str(config.question_timeout_seconds),
-                env={"PATH": os.environ["PATH"], "COMPANION_DEEPSEEK_API_KEY": canary},
+                env={"PATH": os.environ["PATH"], "DEEPSEEK_API_KEY": api_key},
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -222,7 +222,7 @@ asyncio.run(worker.main())
             ]),
             AIMessage(content="Main agent completed the fixture"),
         ])
-        runner = AgentRunner(model=model, backend=FixtureBackend(), session_store=store)
+        runner = AgentRunner(model=model, backend=FixtureBackend(), session_store=store, settings=Settings(resolved_deepseek_api_key=canary))
         try:
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, config_dir=tmp_path / "config", input=pipe, output=DummyOutput())

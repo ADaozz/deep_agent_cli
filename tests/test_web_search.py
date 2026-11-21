@@ -161,21 +161,20 @@ def test_web_search_api_key_not_exposed(monkeypatch) -> None:
 
 
 def test_agent_exposes_web_search_when_key_exists(monkeypatch) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     model = scripted_model([AIMessage(content="done")])
-    prepared = create_agent(model=model, backend=StateBackend(), skills=[])
+    prepared = create_agent(model=model, backend=StateBackend(), skills=[], settings=Settings(resolved_deepseek_api_key="test-key"))
     assert {"web_search", "web_fetch"} <= set(prepared.exposed_tool_names)
     runner = AgentRunner(prepared=prepared)
     runner.set_permission_mode("ask")
     assert {"web_search", "web_fetch"} <= set(runner.prepared.exposed_tool_names)
     direct = AgentRunner(model=scripted_model([AIMessage(content="done")]),
-                         backend=StateBackend(), settings=Settings())
+                         backend=StateBackend(), settings=Settings(resolved_deepseek_api_key="test-key"))
     assert {"web_search", "web_fetch"} <= set(direct.prepared.exposed_tool_names)
 
 
 def test_agent_hides_web_search_without_key(monkeypatch) -> None:
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    settings = Settings(web_tools_api_key=None)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ignored")
+    settings = Settings(resolved_deepseek_api_key=None)
     prepared = create_agent(model=scripted_model([AIMessage(content="done")]),
                             backend=StateBackend(), skills=[], settings=settings)
     assert {"web_search", "web_fetch"}.isdisjoint(prepared.exposed_tool_names)
@@ -187,12 +186,11 @@ def test_agent_hides_web_search_without_key(monkeypatch) -> None:
 def test_ask_requires_approval_for_each_search(monkeypatch):
     """每次搜索分别暂停，只有批准之后才发送对应的 HTTP 请求。"""
     requests = _mock_deepseek(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="", tool_calls=[{"id": "search-1", "name": "web_search", "args": {"query": "first"}}]),
         AIMessage(content="", tool_calls=[{"id": "search-2", "name": "web_search", "args": {"query": "second"}}]),
         AIMessage(content="done"),
-    ]), backend=StateBackend())
+    ]), backend=StateBackend(), settings=Settings(resolved_deepseek_api_key="test-key"))
     waiting = runner.invoke("搜索两次")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "web_search"
@@ -208,11 +206,10 @@ def test_ask_requires_approval_for_each_search(monkeypatch):
 def test_rejected_search_sends_no_request(monkeypatch):
     """拒绝搜索时不访问搜索服务。"""
     requests = _mock_deepseek(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="", tool_calls=[{"id": "denied-search", "name": "web_search", "args": {"query": "x"}}]),
         AIMessage(content="done"),
-    ]), backend=StateBackend())
+    ]), backend=StateBackend(), settings=Settings(resolved_deepseek_api_key="test-key"))
     assert runner.invoke("搜索").status == "waiting_confirmation"
     assert runner.reject_tool("denied-search").status == "completed"
     assert not requests
@@ -221,13 +218,12 @@ def test_rejected_search_sends_no_request(monkeypatch):
 def test_parallel_search_and_write_both_require_approval(monkeypatch):
     """混合工具调用的审批列表必须包含搜索和写文件两个动作。"""
     requests = _mock_deepseek(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     runner = AgentRunner(model=scripted_model([
         AIMessage(content="", tool_calls=[
             {"id": "parallel-search", "name": "web_search", "args": {"query": "x"}},
             {"id": "parallel-write", "name": "write", "args": {"file_path": "/workspace/result.txt", "content": "result"}},
         ]),
-    ]), backend=StateBackend())
+    ]), backend=StateBackend(), settings=Settings(resolved_deepseek_api_key="test-key"))
     waiting = runner.invoke("搜索并写入")
     assert waiting.status == "waiting_confirmation"
     assert {item["name"] for item in waiting.pending_tool_calls} == {"web_search", "write"}
@@ -237,14 +233,13 @@ def test_parallel_search_and_write_both_require_approval(monkeypatch):
 def test_search_approval_returns_after_allow_to_ask_switch(monkeypatch):
     """切回 ask 后恢复每次搜索的审批，allow 下继续自动执行。"""
     requests = _mock_deepseek(monkeypatch)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(model=scripted_model([
             AIMessage(content="", tool_calls=[{"id": "allow-search", "name": "web_search", "args": {"query": "first"}}]),
             AIMessage(content="done"),
             AIMessage(content="", tool_calls=[{"id": "ask-search", "name": "web_search", "args": {"query": "second"}}]),
             AIMessage(content="done"),
-        ]))
+        ]), settings=Settings(resolved_deepseek_api_key="test-key"))
         runner.set_permission_mode("allow")
         assert runner.invoke("搜索").status == "completed"
         assert len(requests) == 1
@@ -257,7 +252,6 @@ def test_search_approval_returns_after_allow_to_ask_switch(monkeypatch):
 
 def test_search_default_approval_cannot_be_overridden(monkeypatch):
     """自定义审批配置不能关闭 ask 模式内置的搜索审批。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     with pytest.raises(ValueError, match="default approval rule for web_search"):
         create_agent(model=scripted_model([AIMessage(content="done")]), backend=StateBackend(),
                      interrupt_on={"web_search": False})
@@ -273,7 +267,7 @@ def test_ask_waits_for_fetch_approval(monkeypatch, approve):
             ]),
             AIMessage(content="done"),
         ]),
-        backend=StateBackend(), settings=Settings(web_tools_api_key="test-key"),
+        backend=StateBackend(), settings=Settings(resolved_deepseek_api_key="test-key"),
     )
     waiting = runner.invoke("读取网页")
     assert waiting.status == "waiting_confirmation"

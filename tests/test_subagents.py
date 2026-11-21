@@ -414,7 +414,7 @@ def test_log_redacts_only_configured_model_and_deepseek_keys(tmp_path, monkeypat
     monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     monkeypatch.setenv('UNKNOWN_SERVICE_TOKEN', 'unknown-output-key')
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
-    cfg = Settings(config_dir=tmp_path, web_tools_api_key='known-deepseek-key', llm_profiles=(
+    cfg = Settings(config_dir=tmp_path, resolved_deepseek_api_key='known-deepseek-key', llm_profiles=(
         ModelProfile('default', 'main', api_key='known-main-key'),
         ModelProfile('unused', 'unused', api_key='known-unused-key')))
     description = 'known-main-key known-unused-key known-deepseek-key password=unknown-output-key'

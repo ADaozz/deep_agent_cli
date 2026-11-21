@@ -161,7 +161,7 @@ class AgentSpec:
     skills: tuple[str, ...] | None = None
     backend: BackendProtocol | None = None
     sandbox: SandboxConfig | None = None
-    web_tools_api_key: str | None = field(default=None, repr=False)
+    deepseek_api_key: str | None = field(default=None, repr=False)
     hidden_tools: tuple[str, ...] = ()
     trust_env: bool = False
     role: str = "main"
@@ -234,10 +234,10 @@ def build_agent(
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
     tools = [*build_human_input_tools(), *spec.tools] if spec.role == "main" else []
-    if spec.web_tools_api_key:
+    if spec.deepseek_api_key:
         tools.extend((
-            build_web_search_tool(spec.web_tools_api_key, trust_env=spec.trust_env),
-            build_web_fetch_tool(spec.web_tools_api_key, trust_env=spec.trust_env),
+            build_web_search_tool(spec.deepseek_api_key, trust_env=spec.trust_env),
+            build_web_fetch_tool(spec.deepseek_api_key, trust_env=spec.trust_env),
         ))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
     filesystem_tools = list(DEFAULT_FS_TOOLS)
@@ -296,7 +296,7 @@ def build_agent(
             run_controller.subagent_manager = manager
         manager.max_concurrent = cfg.subagents.max_concurrent
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-        store = SubAgentLogStore(root, tuple(p.api_key for p in cfg.llm_profiles) + (spec.web_tools_api_key or "",))
+        store = SubAgentLogStore(root, tuple(p.api_key for p in cfg.llm_profiles) + (spec.deepseek_api_key or "",))
         tools.append(build_subagent_log_tool(store))
 
         def prepare_child(controller: RunController) -> PreparedAgent:
@@ -457,7 +457,7 @@ def create_agent(
         skills=tuple(skills) if skills is not None else None,
         backend=backend,
         sandbox=sandbox_config or cfg.sandbox,
-        web_tools_api_key=cfg.resolved_web_tools_api_key,
+        deepseek_api_key=cfg.resolved_deepseek_api_key,
     )
     if role == "subagent":
         interrupt_on = {}

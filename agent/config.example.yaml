@@ -139,11 +139,6 @@ llm:
     # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
 
 
-web_tools:
-  # 可选配置。DEEPSEEK_API_KEY 环境变量优先；未配置凭据时不注册 web_search 和 web_fetch。
-  # 也可以在私有配置 ~/.deep-agent/config.yaml 中直接填写密钥。
-  api_key: null
-
 sandbox:
   # 本段是最小基线，只覆盖常见本机布局。请按实际部署以及需要保护的目录调整挂载、PATH 和环境变量。
   # 可选挂载在源路径不存在时跳过，不表示对应工具已经可用。

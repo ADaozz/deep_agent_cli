@@ -58,7 +58,7 @@ class Settings:
     ui_timezone: str = DEFAULT_UI_TIMEZONE
     ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
     hidden_tools: tuple[str, ...] = ()
-    web_tools_api_key: str | None = field(default=None, repr=False)
+    resolved_deepseek_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     compaction_threshold: float = 0.85
@@ -84,10 +84,6 @@ class Settings:
             self, "request_timeout",
             _model_request_timeout(self.request_timeout, field_name="llm.timeout"),
         )
-
-    @property
-    def resolved_web_tools_api_key(self) -> str | None:
-        return os.environ.get("DEEPSEEK_API_KEY", "").strip() or (self.web_tools_api_key or "").strip() or None
 
     @property
     def llm_model(self) -> str:
@@ -179,6 +175,8 @@ class Settings:
             raise ValueError(
                 "sandbox.dev was removed; use extra_read_write_mounts with dev_bind: true for host device nodes"
             )
+        if web_tools.get("api_key") not in (None, ""):
+            raise ConfigError("web_tools.api_key was removed; use llm.models.deepseek.api_key")
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
         request_timeout = _model_request_timeout(llm.get("timeout"), field_name="llm.timeout")
         instructions = agent.get("instructions")
@@ -207,9 +205,7 @@ class Settings:
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
             companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),
-            web_tools_api_key=_optional_secret(
-                web_tools.get("api_key"), field_name="web_tools.api_key"
-            ),
+            resolved_deepseek_api_key=next((p.api_key or None for p in profiles if p.source == "deepseek"), None),
             request_timeout=request_timeout,
         )
         if result.source_path is not None:
@@ -469,6 +465,8 @@ def _grouped_llm_profiles(
                 f"llm.models.{source}.timeout is not per model; set llm.timeout once for every model"
             )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
+        if source == "deepseek":
+            deepseek_key = _optional_secret(group.get("api_key"), field_name="llm.models.deepseek.api_key", allow_missing=True)
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
                 raise ValueError(f"llm.models.{source}.models keys must be non-empty strings containing no slash")
@@ -487,10 +485,12 @@ def _grouped_llm_profiles(
             model_name = item.get("model", name)
             if not isinstance(model_name, str) or not model_name.strip():
                 raise ValueError(f"{field}.model must be a non-empty string")
+            if source == "deepseek" and item.get("api_key") not in (None, ""):
+                raise ConfigError(f"{field}.api_key was removed; use llm.models.deepseek.api_key")
             profiles.append(ModelProfile(
                 id=f"{source}/{name}",
                 model=model_name.strip(),
-                api_key=_optional_secret(
+                api_key=(deepseek_key or "") if source == "deepseek" else _optional_secret(
                     _model_text(inherited("api_key"), field_name=f"{field}.api_key", default="sk-local"),
                     field_name=f"{field}.api_key",
                 ) or "sk-local",
@@ -525,7 +525,7 @@ def _model_text(value: Any, *, field_name: str, default: str) -> str:
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
-def _optional_secret(value: Any, *, field_name: str) -> str | None:
+def _optional_secret(value: Any, *, field_name: str, allow_missing: bool = False) -> str | None:
     if value is None or value == "":
         return None
     if not isinstance(value, str) or not value.strip():
@@ -535,6 +535,8 @@ def _optional_secret(value: Any, *, field_name: str) -> str | None:
     if match:
         variable = match.group(1)
         secret = os.environ.get(variable, "").strip()
+        if not secret and allow_missing:
+            return None
         if not secret:
             raise ValueError(f"{field_name} references missing environment variable {variable}")
     return secret
