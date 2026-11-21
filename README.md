@@ -15,7 +15,7 @@ OpenAI 兼容接口 · Bubblewrap
 
 </div>
 
-`deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，主 Agent 默认在文件变更、命令执行和网页搜索前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
+`deep-agent` 是基于 [Deep Agents](https://github.com/langchain-ai/deepagents) 和 LangGraph 的终端 Coding Agent。它在当前项目中工作，主 Agent 默认在文件变更、命令执行和网页工具调用前请求批准，通过 [Bubblewrap](https://github.com/containers/bubblewrap) 隔离命令执行。
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
@@ -161,7 +161,7 @@ Lain 的模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，也可保存在 
 **审批决定是否执行，隔离决定命令能访问哪些资源。** 文件工具和命令走不同通路：
 
 - **文件工具 → 宿主进程**：Backend 使用工作区的真实绝对路径（如 `/mnt/d/test`），`/skills` 可写。`restricted` 下，启动时声明的额外挂载按同样的只读或读写属性授权；未声明路径拒绝访问。
-- **命令 → Bubblewrap**：`execute` 经沙箱池运行，会话内按需复用有网、无网 Worker。模型与 Tavily 请求从宿主发送，不受命令网络策略约束。
+- **命令 → Bubblewrap**：`execute` 经沙箱池运行，会话内按需复用有网、无网 Worker。模型与 DeepSeek 网页工具请求从宿主发送，不受命令网络策略约束。
 
 <details>
 <summary>展开运行架构图</summary>
@@ -174,7 +174,7 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 
 | 模式 | 审批 | 命令网络 |
 |---|---|---|
-| **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
+| **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索和抓取、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
 | 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
 SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权限，即使主 Agent 处于 `ask` 也不弹出子任务审批；子 Agent 不装载 MCP、人工输入或递归委派工具。其默认思考强度使用子模型原生默认，不继承主 Agent 的强度。
@@ -188,8 +188,8 @@ SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权
 
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。模型与会话切换复用 Pool，关闭 Runner 或更换文件系统模式时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
-- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，只精确替换已知模型及 Tavily Key；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
-- **客户端**：模型、MCP、Tavily 和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
+- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，只精确替换已知模型及 DeepSeek 网页工具密钥；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **客户端**：模型、MCP、DeepSeek 网页工具和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。
 
@@ -202,9 +202,9 @@ SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权
 - **集成**：[Python API](docs/library.md) · [开发指南](docs/development.md)
 
 <details>
-<summary>扩展 Skills 与网页搜索</summary>
+<summary>扩展 Skills 与网页搜索和抓取</summary>
 
-Skills 位于 `~/.deep-agent/skills/<技能目录>/SKILL.md`，使用 `/skill` 选择；配置 Tavily key 后启用 `web_search`。外部工具与浏览器需预先安装并通过沙箱挂载，见 [Skills 用法](docs/tui.md#skills) 与 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)。
+Skills 位于 `~/.deep-agent/skills/<技能目录>/SKILL.md`，使用 `/skill` 选择；配置 [DeepSeek API Key](docs/configuration.md#网页搜索与抓取) 后启用 `web_search` 和 `web_fetch`。外部工具与浏览器需预先安装并通过沙箱挂载，见 [Skills 用法](docs/tui.md#skills) 与 [沙箱工具链](docs/sandbox.md#playwright-与有头-x11)。
 
 </details>
 

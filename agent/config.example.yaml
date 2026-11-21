@@ -3,7 +3,7 @@
 #
 # 通过 DEEP_AGENT_CONFIG=/path/outside/workspace/config.yaml 指定配置文件路径。
 
-# 全局代理/CA 环境变量：模型 API、MCP HTTP/OAuth、Tavily、stdio MCP 和 execute。
+# 全局代理/CA 环境变量：模型 API、MCP HTTP/OAuth、DeepSeek 网页工具、stdio MCP 和 execute。
 # false（默认）：HTTP 客户端忽略代理/CA 环境变量，子进程也不传递这些变量。
 # true：继承 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY（含小写）和 CA 配置。
 # 子进程额外支持 REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE / NODE_EXTRA_CA_CERTS；
@@ -139,10 +139,10 @@ llm:
     # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
 
 
-web_search:
-  # 可选配置。TAVILY_API_KEY 环境变量优先于此值；两者均未设置时隐藏 web_search 工具。
+web_tools:
+  # 可选配置。DEEPSEEK_API_KEY 环境变量优先；未配置凭据时不注册 web_search 和 web_fetch。
   # 也可以在私有配置 ~/.deep-agent/config.yaml 中直接填写密钥。
-  tavily_api_key: null
+  api_key: null
 
 sandbox:
   # 本段是最小基线，只覆盖常见本机布局。请按实际部署以及需要保护的目录调整挂载、PATH 和环境变量。

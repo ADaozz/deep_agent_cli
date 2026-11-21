@@ -588,6 +588,16 @@ def build_web_search_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
+def build_web_fetch_preview(block: ToolBlock) -> ToolPreview:
+    url = str(block.arguments.get("url") or "…").replace("\n", " ")
+    artifact = block.artifact if isinstance(block.artifact, dict) else {}
+    title = str(artifact.get("title") or "").replace("\n", " ")
+    return ToolPreview(
+        kind="web_fetch", verb="web_fetch", target=url[:100],
+        detail=title[:100], group="web", action="expand",
+    )
+
+
 def build_human_input_preview(block: ToolBlock) -> ToolPreview:
     question = str(block.arguments.get("question") or "input required").replace("\n", " ")
     return ToolPreview(
@@ -633,6 +643,7 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "execute": build_execute_preview,
 
     "web_search": build_web_search_preview,
+    "web_fetch": build_web_fetch_preview,
 
     "request_human_input": build_human_input_preview,
 }
@@ -647,6 +658,7 @@ _TOOL_GROUPS: dict[str, PreviewGroup] = {
     "delete": "mutation",
     "execute": "command",
     "web_search": "web",
+    "web_fetch": "web",
 }
 
 

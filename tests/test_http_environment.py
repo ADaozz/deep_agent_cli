@@ -15,7 +15,7 @@ from agent.models.client import build_chat_model
 from agent.mcp.adapter import build_transport
 from agent.mcp.config import parse_server
 from agent.execution.layout import sandbox_environment
-from agent.tools.web_search import build_web_search_tool
+from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 
 
 @pytest.mark.parametrize("value", [True, False])
@@ -94,7 +94,11 @@ def test_model_and_mcp_clients_route_via_environment_proxy(monkeypatch, enabled)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_tavily_uses_global_policy(monkeypatch, enabled):
+@pytest.mark.parametrize(("build_tool", "args", "payload"), [
+    (build_web_search_tool, {"query": "test"}, {"results": []}),
+    (build_web_fetch_tool, {"url": "https://example.com"}, {"title": "", "content": "Text"}),
+])
+def test_deepseek_web_tools_use_global_policy(monkeypatch, enabled, build_tool, args, payload):
     import httpx
     original = httpx.Client
     policies = []
@@ -102,11 +106,11 @@ def test_tavily_uses_global_policy(monkeypatch, enabled):
     def client(**kwargs):
         policies.append(kwargs["trust_env"])
         return original(transport=httpx.MockTransport(lambda req: httpx.Response(
-            200, json={"results": []}, request=req,
+            200, json=payload, request=req,
         )), **kwargs)
 
-    monkeypatch.setattr("agent.tools.web_search.httpx.Client", client)
-    build_web_search_tool("test-key", trust_env=enabled).invoke({"query": "test"})
+    monkeypatch.setattr("agent.tools.web.httpx.Client", client)
+    build_tool("test-key", trust_env=enabled).invoke(args)
     assert policies == [enabled]
 
 

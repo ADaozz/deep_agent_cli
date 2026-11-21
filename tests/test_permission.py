@@ -52,6 +52,7 @@ def test_interrupt_on_for_modes() -> None:
     assert "send_email" not in ask
     assert ask["execute"] == {"allowed_decisions": ["approve", "reject"]}
     assert ask["web_search"] == {"allowed_decisions": ["approve", "reject"]}
+    assert ask["web_fetch"] == {"allowed_decisions": ["approve", "reject"]}
     assert "when" not in ask["execute"]
     assert interrupt_on_for_mode(PermissionMode.ALLOW) == {}
 

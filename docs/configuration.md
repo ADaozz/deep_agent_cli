@@ -14,7 +14,7 @@ CLI 按以下顺序查找主配置：
 - 主配置、`~/.deep-agent/skills/` 和按键配置目录必须位于工作区之外，否则启动报错。因此不能把家目录（或其上层目录）作为工作区启动。
 - 配置中的相对路径相对于配置文件所在目录解析；例外是 `sandbox.workspace: .`，它表示启动时的当前目录。
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
-- 只有 `api_key` 和 `web_search.tavily_api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
+- 只有 `api_key` 和 `web_tools.api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
 
 ## Lain 侧栏（`companion`）
 
@@ -51,7 +51,7 @@ trust_env: false
 
 只接受 YAML 布尔值 `true` / `false`，不要写成字符串 `"true"`，也不要放在 `llm`、`sandbox` 或 `mcp.json` 中。
 
-默认 `false`。设为 `true` 后，模型 API（同步和异步）、MCP HTTP/OAuth 和 Tavily 客户端读取代理与 CA 环境变量；stdio MCP 子进程和 `execute` 命令也自动继承这些变量。
+默认 `false`。设为 `true` 后，模型 API（同步和异步）、MCP HTTP/OAuth 和 DeepSeek 网页工具客户端读取代理与 CA 环境变量；stdio MCP 子进程和 `execute` 命令也自动继承这些变量。
 
 - 代理：`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，以及对应的小写名称。
 - CA：`SSL_CERT_FILE`、`SSL_CERT_DIR`；子进程还传递 `REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`。
@@ -112,7 +112,7 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
 }
 ```
 
-MCP HTTP 请求与模型、Tavily 客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_list` / `mcp_add` / `mcp_remove` 修改。`mcp_list` 只读、免审批；`mcp_add` / `mcp_remove` 在 `ask` 下需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。全局关闭时不注入这些管理工具。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
+MCP HTTP 请求与模型、DeepSeek 网页工具客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_list` / `mcp_add` / `mcp_remove` 修改。`mcp_list` 只读、免审批；`mcp_add` / `mcp_remove` 在 `ask` 下需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。全局关闭时不注入这些管理工具。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
 
 同一服务的并发连接请求合并为一次，避免启动连接、`/mcp test` 和 `mcp_add` 相互覆盖。同一 MCP 客户端连接上的工具调用由宿主排队执行，模型可一次提交多个工具，宿主会自动串行发送；不同 MCP 连接仍可并行。排队时间计入调用超时，排队期间取消的调用不会发送。会话关闭后，下一次调用会先通过 SDK 公共接口重建连接；已失败的工具不会自动重放。同名 `mcp_add` 会检查客户端实际连接状态，坏连接可直接重建，无需先删除服务。
 
@@ -257,16 +257,23 @@ agent:
 
 system prompt 按顺序由三部分组成：内置身份说明、`agent.instructions`、工作区根目录的 `AGENTS.md`（若存在）。启用 MCP 且注入工具时，构图阶段还会在末尾追加一段宿主运行与不可信数据说明。切换模型或权限模式时会重新读取 `AGENTS.md`。它在构图时确定，不包含环境快照。环境快照由中间件在每次模型调用时附到系统提示后面，不写入 checkpoint。它不是配置项。沙箱模式、工作区、HOME 或额外挂载变化后重新采集；恢复会话时按当前沙箱重新检查；切换模型不会因此重新探测。已给出的字段不要再查。
 
-## Web 搜索（`web_search`）
+## 网页搜索与抓取
+
+设置 `DEEPSEEK_API_KEY` 环境变量，或在私有配置中填写 `web_tools.api_key`。
 
 ```yaml
-web_search:
-  tavily_api_key: ${TAVILY_API_KEY}
+web_tools:
+  api_key: ${MY_DEEPSEEK_API_KEY}
 ```
 
-也可以只设置环境变量 `TAVILY_API_KEY`；两者都有值时环境变量优先。两者都没有时不注册 `web_search` 工具。
+`DEEPSEEK_API_KEY` 优先于配置文件的值。两个工具使用同一个 DeepSeek API Key，凭据配置独立于当前对话模型。没有凭据时，两者均不注册。
 
-`web_search` 由 `deep-agent` 进程在宿主机上直接请求 `https://api.tavily.com/search`，超时 20 秒，不经过沙箱，也不会给 `execute` 开放网络。`ask` 模式下每次搜索都需先批准；拒绝时不会发送搜索请求。它只返回标题、URL 和摘要，不抓取完整网页。模型可用的参数：`query`、`max_results`（1–20，默认 5）、`topic`（`general` / `news`）、`time_range`（`day` / `week` / `month` / `year`）、`include_domains`。
+| 工具 | 参数与结果 |
+| --- | --- |
+| `web_search` | `query` 必填，1–128 个字符。可选 `count`（1–50，默认 10）、`ori_question`（用户原始问题，最多 128 个字符）、`localization`（用于本地化的 IP 地址）、`need_content`（默认 `false`）。返回标题、链接、摘要和可选正文。用 `site:`、`lang:`、`after:`、`before:` 等操作符限定结果。 |
+| `web_fetch` | `url` 必填，为最长 8192 字符、含主机且不带用户名或密码的 HTTP(S) URL。返回页面标题和 Markdown 正文。 |
+
+工具从宿主进程请求 DeepSeek 官方的 `/v1/tools/search` 和 `/v1/tools/fetch`，遵循全局 `trust_env`，HTTP 超时设为 20 秒。`ask` 模式每次调用均需批准。搜索参数或待抓取 URL 会发送给 DeepSeek。两个接口分别按成功且返回内容的请求次数计费。详见 [DeepSeek 网页搜索与抓取指南](https://api-docs.deepseek.com/zh-cn/guides/search/)。
 
 ## 沙箱（`sandbox`）
 
@@ -408,7 +415,7 @@ fgo:
 | `DEEP_AGENT_CONFIG` | 主配置文件路径 |
 | `DEEP_AGENT_CONFIG_DIR` | `paths.config_dir` 未设置时的按键与文案目录 |
 | `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径 |
-| `TAVILY_API_KEY` | Tavily 密钥，优先于配置文件 |
+| `DEEPSEEK_API_KEY` | DeepSeek 网页工具密钥，优先于 `web_tools.api_key` |
 
 
 ## 百炼官方来源
@@ -474,7 +481,7 @@ subagents:
 当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
-SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills 和 AGENTS.md，
+SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，
 不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
 `start_task` 等待任务实际完成后才返回。
@@ -524,7 +531,7 @@ SandboxPool。可使用文件工具、execute、已配置的 web_search、Skills
 取消或进程崩溃时仍能识别最后启动的工具，不伪造未收到的工具完成事件。
 每项存储事件仍最多约 24 KB，日志顺序追加并 flush；不引入新日志格式系统。
 主 Agent 收到的正常 start_task 最终结果保持完整，仅落盘的回答摘要受 1,000 字符限制。
-日志只对已掌握的模型 API Key 和已配置的 Tavily API Key 做精确字符串替换。
+日志只对已掌握的模型 API Key 和已配置的 DeepSeek 网页工具密钥 做精确字符串替换。
 不按字段名或文本格式识别凭据，不扫描其他环境变量；未知的 `password=...`、`token=...`
 和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
 日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。

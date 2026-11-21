@@ -1885,16 +1885,16 @@ def test_write_and_delete_previews_use_real_schema() -> None:
 
 
 def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
-    lines = ["# Tavily 接口调研报告", "", "> 生成时间：待核实", "", "---", *[f"line {index}" for index in range(297)]]
+    lines = ["# DeepSeek 接口调研报告", "", "> 生成时间：待核实", "", "---", *[f"line {index}" for index in range(297)]]
     content = "\n".join(lines) + "\n"
-    args = {"file_path": "/workspace/tavily-api-research.md", "content": content}
+    args = {"file_path": "/workspace/deepseek-api-research.md", "content": content}
     state = CliState(blocks=[ToolBlock(
         tool_call_id="write-302", name="write", arguments=args, status="completed",
     )])
     preview = _plain(render_transcript(state, 100))
-    assert "write workspace/tavily-api-research.md" in preview
+    assert "write workspace/deepseek-api-research.md" in preview
     assert "+302 lines" in preview
-    assert "+# Tavily 接口调研报告" in preview
+    assert "+# DeepSeek 接口调研报告" in preview
     assert "+> 生成时间：待核实" in preview
     assert "… 298 lines hidden · Ctrl+R to review" in preview
     assert "--- /dev/null" not in preview
@@ -2035,7 +2035,7 @@ def test_cli_state_stores_generic_tool_artifact() -> None:
         type="tool_completed", tool_call_id="search-1", name="web_search",
         content="Web search results for: deepagents\n5 results",
         artifact={
-            "provider": "tavily", "query": "deepagents",
+            "provider": "deepseek", "query": "deepagents",
             "results": [{"title": "Deep Agents", "url": "https://example.com"}],
             "response_time": 0.42,
         },
@@ -2044,7 +2044,7 @@ def test_cli_state_stores_generic_tool_artifact() -> None:
         block for block in state.blocks
         if isinstance(block, ToolBlock) and block.tool_call_id == "search-1"
     )
-    assert block.artifact["provider"] == "tavily"
+    assert block.artifact["provider"] == "deepseek"
     assert block.artifact["response_time"] == 0.42
     assert block.status == "completed"
 
@@ -2057,7 +2057,7 @@ def test_transcript_restores_tool_artifact() -> None:
         content="Web search results for: deepagents\n5 results",
         status="completed",
         artifact={
-            "provider": "tavily",
+            "provider": "deepseek",
             "results": [
                 {"title": "Deep Agents", "url": "https://example.com"},
                 {"title": "Docs", "url": "https://docs.example.com"},
@@ -2067,7 +2067,7 @@ def test_transcript_restores_tool_artifact() -> None:
     )])
     block = state.blocks[0]
     assert isinstance(block, ToolBlock)
-    assert block.artifact["provider"] == "tavily"
+    assert block.artifact["provider"] == "deepseek"
     assert len(block.artifact["results"]) == 2
     assert block.status == "completed"
 

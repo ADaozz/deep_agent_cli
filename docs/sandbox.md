@@ -37,7 +37,7 @@
 没有经过验证的 `SANDBOXED` 身份时明确拒绝委派，不退化到宿主免审批执行。
 
 父任务取消会终止关联子任务的模型流和命令，单个任务结束不会关闭共享 Pool。
-子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 Tavily Key 做精确替换，
+子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 DeepSeek 网页工具密钥 做精确替换，
 未知凭据原样保存。配置和日志访问边界见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ## 文件系统模式
@@ -163,7 +163,7 @@
 - `ask`：每条 `execute` 都要审批；`network=true` 走有网沙箱，`network=false` 走无网沙箱。
 - `allow`：自动批准，且每条 `execute` 都走有网沙箱。
 - 已经在跑的后台进程不受权限模式切换影响。需要停掉它们时，让 Agent 结束进程，或退出 CLI。`/sandbox` 会结束当前沙箱进程，因此也会结束其中的后台进程；两种模式各自目录里的文件都保留。
-- `web_search` 在宿主进程中运行，与沙箱网络无关；`ask` 模式下每次搜索均需审批。
+- `web_search` 和 `web_fetch` 在宿主进程中请求 DeepSeek API，独立于沙箱网络。`ask` 模式下每次调用均需审批。
 
 ## 文件工具
 
@@ -198,7 +198,7 @@ CUSTOM backend 保留调用方自己的规则。
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`web_search`、`write`、`edit`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
+| `ask`（默认） | `execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
 | `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。

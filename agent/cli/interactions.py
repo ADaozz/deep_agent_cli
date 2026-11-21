@@ -190,8 +190,16 @@ class InteractionController:
             elif name in {"write", "edit", "delete"}:
                 target = args.get("file_path")
                 details.append(f"Target: {_approval_summary(target, kind='target')}")
-            elif name == "web_search":
-                details.append("Network: public web search via Tavily")
+            elif name in {"web_search", "web_fetch"}:
+                details.append("Network: request to DeepSeek API")
+                if name == "web_search":
+                    details.append(f"Query: {_approval_summary(args.get('query'))}")
+                    if args.get("ori_question"):
+                        details.append(f"Original question: {_approval_summary(args['ori_question'])}")
+                    if args.get("localization"):
+                        details.append(f"Localization: {_approval_summary(args['localization'])}")
+                else:
+                    details.append(f"URL: {_approval_summary(args.get('url'), kind='target')}")
             elif name == "mcp_add":
                 transport = str(args.get("transport") or "")
                 details.append(f"Transport: {transport or '<not supplied>'}")

@@ -44,7 +44,7 @@ def test_auto_and_manual_compaction_share_configured_trigger(monkeypatch, config
 
 
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     assert prepared.exposed_tool_names == [
         "read_task_log", "start_background_task", "check_background_task", "cancel_background_task",
@@ -257,12 +257,12 @@ def test_runner_forwards_generic_tool_artifact() -> None:
     events = []
     runner._emit_update_events({"tools": {"messages": [ToolMessage(
         content="Web search results for: deepagents", name="web_search", tool_call_id="search-1",
-        artifact={"provider": "tavily", "query": "deepagents", "results": [
+        artifact={"provider": "deepseek", "query": "deepagents", "results": [
             {"title": "Deep Agents", "url": "https://example.com"},
         ]},
     )]}}, events.append)
     assert len(events) == 1
-    assert events[0].artifact["provider"] == "tavily"
+    assert events[0].artifact["provider"] == "deepseek"
     assert events[0].artifact["results"][0]["url"] == "https://example.com"
 
 

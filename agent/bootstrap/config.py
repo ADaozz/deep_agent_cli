@@ -58,7 +58,7 @@ class Settings:
     ui_timezone: str = DEFAULT_UI_TIMEZONE
     ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
     hidden_tools: tuple[str, ...] = ()
-    tavily_api_key: str | None = field(default=None, repr=False)
+    web_tools_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     compaction_threshold: float = 0.85
@@ -84,6 +84,10 @@ class Settings:
             self, "request_timeout",
             _model_request_timeout(self.request_timeout, field_name="llm.timeout"),
         )
+
+    @property
+    def resolved_web_tools_api_key(self) -> str | None:
+        return os.environ.get("DEEPSEEK_API_KEY", "").strip() or (self.web_tools_api_key or "").strip() or None
 
     @property
     def llm_model(self) -> str:
@@ -161,7 +165,7 @@ class Settings:
         sandbox_raw = dict(_section(raw, "sandbox"))
         if workspace is not None:
             sandbox_raw["workspace"] = workspace.expanduser().resolve()
-        web_search = _section(raw, "web_search")
+        web_tools = _section(raw, "web_tools")
         if "protected_workspace_paths" in sandbox_raw:
             raise ValueError(
                 "sandbox.protected_workspace_paths was removed; move skills to "
@@ -203,8 +207,8 @@ class Settings:
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
             companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),
-            tavily_api_key=os.environ.get("TAVILY_API_KEY") or _optional_secret(
-                web_search.get("tavily_api_key"), field_name="web_search.tavily_api_key"
+            web_tools_api_key=_optional_secret(
+                web_tools.get("api_key"), field_name="web_tools.api_key"
             ),
             request_timeout=request_timeout,
         )

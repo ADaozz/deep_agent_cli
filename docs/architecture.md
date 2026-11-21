@@ -86,7 +86,7 @@ flowchart TB
 | `ls`、`read` | Deep Agents 文件系统中间件 | 免审批 |
 | `write`、`edit`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
-| `web_search` | 配置 `TAVILY_API_KEY` 或 `web_search.tavily_api_key` 时注册 | 每次审批 |
+| `web_search`、`web_fetch` | 配置 `DEEPSEEK_API_KEY` 或 `web_tools.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
 | `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
 | `read_task_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
@@ -96,7 +96,7 @@ flowchart TB
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
 | `extra_tools` | 调用方显式注入 | 有副作用的工具需显式加入审批规则 |
 
-`web_search` 是可用的内置工具，有密钥时正常提供，未配置时不注册。其 Tavily 请求在宿主进程中发送，不受 Shell 的网络命名空间约束。
+网页工具将搜索词或目标 URL 发往 DeepSeek 官方 API。请求由宿主进程发送，独立于 Shell 的网络命名空间。
 
 文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read`、`write`、`edit` 和 `delete`，不包含 `grep` 或 `glob`。
 
@@ -139,7 +139,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
-已配置的 web_search 和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
+已配置的网页工具和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
 主 Agent 的 `ask` 不会触发子任务审批；不能提供已验证沙箱时明确拒绝委派。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
 显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
@@ -150,7 +150,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 操作描述由结构化参数直接生成，不额外调用模型；文件工具仅记录路径，execute 保留有界命令、
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
-摘要只精确替换已知模型和 Tavily Key；未知凭据原样保存。
+摘要只精确替换已知模型和 DeepSeek 网页工具密钥；未知凭据原样保存。
 主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
@@ -234,7 +234,7 @@ sequenceDiagram
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
 
-`ask` 默认审批文件修改、每次 `execute`、每次 `web_search`，以及宿主 MCP 工具和 `mcp_add` / `mcp_remove`。`ls`、`read`、`mcp_list` 等只读查询免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
+`ask` 默认审批文件修改、每次 `execute`、每次 `web_search` 和 `web_fetch`，以及宿主 MCP 工具和 `mcp_add` / `mcp_remove`。`ls`、`read`、`mcp_list` 等只读查询免审批；通过 `execute` 调用 `rg` 的代码搜索仍需审批。`allow` 只在已知的 `SANDBOXED` 模式可用，免除工具审批，并使所有 execute 使用有网实例，即使参数为 `network=false`。`ask` 下的 `execute(network=true)` 仍需审批，获批后进入有网实例。
 
 找不到 `bwrap` 时启动失败，没有宿主机执行回退。`CUSTOM` 由调用方注入的 Backend 决定资源边界。`restricted` 与 `full-access` 只改变文件系统挂载，不改变审批，也不提权。`/sandbox` 在下一次模型调用前更换挂载并关闭当前会话的两个沙箱；模式不写入会话库，恢复会话时回到配置文件中的 `sandbox.mode`。
 
@@ -383,7 +383,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 | 模型协议、usage 与附件 | `test_llm.py`、`test_protocol_api.py`、`test_attachments.py` |
 | 宿主 MCP、全局开关、OAuth 与 TUI | `test_mcp_*.py`、`test_tui_pty.py` |
 
-运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟模型端点、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 Tavily 配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
+运行方式见 [development.md](development.md)。报告测试时区分 Mock、本地模拟模型端点、真实 Bubblewrap、浏览器及真实模型调用；本架构文档不作为某次测试已通过的证明。工具注册测试需显式控制 DeepSeek 网页工具配置，终端渲染测试需明确 TERM，避免把环境差异当作运行时回归。
 
 ## 扩展边界
 

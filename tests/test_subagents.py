@@ -408,16 +408,16 @@ def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, mo
         runner.close()
 
 
-def test_log_redacts_only_configured_model_and_tavily_keys(tmp_path, monkeypatch):
+def test_log_redacts_only_configured_model_and_deepseek_keys(tmp_path, monkeypatch):
     import agent.bootstrap.factory as factory
     from agent.models.profile import ModelProfile
-    monkeypatch.delenv('TAVILY_API_KEY', raising=False)
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     monkeypatch.setenv('UNKNOWN_SERVICE_TOKEN', 'unknown-output-key')
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
-    cfg = Settings(config_dir=tmp_path, tavily_api_key='known-tavily-key', llm_profiles=(
+    cfg = Settings(config_dir=tmp_path, web_tools_api_key='known-deepseek-key', llm_profiles=(
         ModelProfile('default', 'main', api_key='known-main-key'),
         ModelProfile('unused', 'unused', api_key='known-unused-key')))
-    description = 'known-main-key known-unused-key known-tavily-key password=unknown-output-key'
+    description = 'known-main-key known-unused-key known-deepseek-key password=unknown-output-key'
     parent = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
             'description': description, 'subagent_type': 'general-purpose'}}]),
@@ -426,7 +426,7 @@ def test_log_redacts_only_configured_model_and_tavily_keys(tmp_path, monkeypatch
     try:
         assert runner.invoke('go').output == 'parent result'
         log = next((tmp_path / 'subagents').rglob('*.jsonl')).read_text()
-        assert all(key not in log for key in ('known-main-key', 'known-unused-key', 'known-tavily-key'))
+        assert all(key not in log for key in ('known-main-key', 'known-unused-key', 'known-deepseek-key'))
         assert 'password=unknown-output-key' in log
         assert '[REDACTED]' in log
     finally:

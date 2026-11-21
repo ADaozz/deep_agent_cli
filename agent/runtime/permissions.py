@@ -11,13 +11,14 @@ from agent.execution.types import ExecutionMode
 class PermissionMode(StrEnum):
     """两态工具权限策略。"""
 
-    ASK = "ask"  # 有副作用的工具、每次 execute 和 web_search 都暂停等待审批。
+    ASK = "ask"  # 有副作用的工具、每次 execute 和网页工具调用 都暂停等待审批。
     ALLOW = "allow"  # 自动批准所有工具（含宿主 MCP）；沙箱网络开放（仅 SANDBOXED）。
 
 
 ASK_INTERRUPT_ON: dict[str, Any] = {
     "execute": {"allowed_decisions": ["approve", "reject"]},
     "web_search": {"allowed_decisions": ["approve", "reject"]},
+    "web_fetch": {"allowed_decisions": ["approve", "reject"]},
     "write": True,
     "edit": True,
     "delete": True,

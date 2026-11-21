@@ -285,7 +285,7 @@ def test_messages_to_transcript_restores_generic_tool_artifact() -> None:
             content="Web search results for: deepagents\n5 results",
             tool_call_id="search-1", name="web_search",
             artifact={
-                "provider": "tavily", "query": "deepagents",
+                "provider": "deepseek", "query": "deepagents",
                 "results": [{"title": "Deep Agents", "url": "https://example.com"}],
                 "response_time": 0.42,
             },
@@ -293,7 +293,7 @@ def test_messages_to_transcript_restores_generic_tool_artifact() -> None:
     ])
     tool = blocks[0]
     assert tool.kind == "tool"
-    assert tool.artifact["provider"] == "tavily"
+    assert tool.artifact["provider"] == "deepseek"
     assert tool.artifact["response_time"] == 0.42
     assert tool.artifact["results"][0]["title"] == "Deep Agents"
     assert tool.exit_code is None

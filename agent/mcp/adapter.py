@@ -35,7 +35,7 @@ from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _RESERVED = MANAGEMENT_TOOLS | {
     "ls", "read", "write", "edit", "delete", "execute",
-    "web_search", "request_human_input", "compact_conversation",
+    "web_search", "web_fetch", "request_human_input", "compact_conversation",
 }
 
 

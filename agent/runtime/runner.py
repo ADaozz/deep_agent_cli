@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
-import os
 import tempfile
 import time
 from threading import Lock
@@ -220,7 +219,7 @@ class AgentRunner:
             instructions=cfg.agent_instructions,
             hidden_tools=cfg.hidden_tools,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
-            web_search_api_key=os.environ.get("TAVILY_API_KEY") or cfg.tavily_api_key,
+            web_tools_api_key=cfg.resolved_web_tools_api_key,
         )
         self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
         self._custom_interrupt_on = None
@@ -737,12 +736,13 @@ class AgentRunner:
         return [item.text for item in self.control.take_unapplied()]
 
     def summary_secrets(self) -> tuple[str, ...]:
-        settings = self.settings
+        settings = self.settings or self._spec.settings
         if settings is None:
-            return ()
+            key = self._spec.web_tools_api_key
+            return (key,) if key else ()
         return tuple(value for value in (
             *(profile.api_key for profile in settings.llm_profiles),
-            settings.tavily_api_key, os.environ.get("TAVILY_API_KEY"),
+            settings.web_tools_api_key, self._spec.web_tools_api_key,
         ) if value)
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
