@@ -968,3 +968,26 @@ def test_subagent_auto_is_reserved_and_rejected():
     from agent.subagents.configuration import SubAgentConfig
     with pytest.raises(ValueError, match='auto is not supported'):
         SubAgentConfig(reasoning_effort='auto')
+
+
+def test_deepseek_optional_reference_is_resolved_once(monkeypatch):
+    from agent.models.client import build_chat_model
+
+    monkeypatch.delenv("UNIFIED_TEST_KEY", raising=False)
+    data = {"llm": {"default": "other/model", "models": {
+        "other": {"api_key": "other-secret", "models": {"model": {}}},
+        "deepseek": {"api_key": "${UNIFIED_TEST_KEY}", "models": {"a": {}, "b": {}}},
+    }}}
+    settings = Settings.from_mapping(data)
+    assert settings.resolved_deepseek_api_key is None
+    assert settings.llm_api_key == "other-secret"
+    with pytest.raises(ValueError, match="llm.models.deepseek.api_key"):
+        build_chat_model(settings.get_profile("deepseek/a"))
+    monkeypatch.setenv("UNIFIED_TEST_KEY", "unified")
+    settings = Settings.from_mapping(data)
+    monkeypatch.setenv("UNIFIED_TEST_KEY", "rotated")
+    assert settings.resolved_deepseek_api_key == "unified"
+    assert {settings.get_profile(f"deepseek/{m}").api_key for m in ("a", "b")} == {"unified"}
+    data["llm"]["models"]["deepseek"]["models"]["a"]["api_key"] = "override"
+    with pytest.raises(ValueError, match="use llm.models.deepseek.api_key"):
+        Settings.from_mapping(data)

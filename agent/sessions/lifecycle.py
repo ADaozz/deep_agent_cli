@@ -230,7 +230,7 @@ class SessionRuntime:
             return False
         return self._store.has_checkpoint(thread_id)
 
-    def restore_plan(self, info: SessionInfo, *, execution_mode: Any) -> RestorePlan:
+    def restore_plan(self, info: SessionInfo, *, execution_mode: Any, auto_available: bool = False) -> RestorePlan:
         """Decide which model and permission the target thread should run with."""
         notices: list[str] = []
         profile = self._settings.active_profile if self._settings is not None else None
@@ -247,7 +247,10 @@ class SessionRuntime:
                 notices.append(f"Saved reasoning effort {effort} is unavailable; using default.")
             effort = "default"
         mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
-        if mode in {PermissionMode.ALLOW, PermissionMode.AUTO} and not allow_mode_available(execution_mode):
+        if mode is PermissionMode.AUTO and not auto_available:
+            mode = PermissionMode.ASK
+            notices.append("Saved auto permission requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+        if mode is PermissionMode.ALLOW and not allow_mode_available(execution_mode):
             mode = PermissionMode.ASK
             notices.append("Saved allow permission is unavailable here; using ask.")
         return RestorePlan(

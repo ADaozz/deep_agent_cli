@@ -269,7 +269,7 @@ class AgentRunner:
         if self.session_store is not None:
             saved = self.session_store.get(self.thread_id)
             if saved is not None:
-                plan = self._runtime.restore_plan(saved, execution_mode=self.prepared.execution_mode)
+                plan = self._runtime.restore_plan(saved, execution_mode=self.prepared.execution_mode, auto_available=self.auto_available())
                 try:
                     self._apply_restore_plan(plan)
                 except Exception:
@@ -864,7 +864,7 @@ class AgentRunner:
         previous = (self._chat_model, self.configuration.current_model_id, self.configuration.permission_mode,
                     self.configuration.pending_model_id, self.configuration.pending_permission_mode,
                     self.configuration.reasoning_effort, self.configuration.pending_reasoning_effort)
-        plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
+        plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode, auto_available=self.auto_available())
         try:
             snapshot = self.load_session(info.id)
             if snapshot is None:

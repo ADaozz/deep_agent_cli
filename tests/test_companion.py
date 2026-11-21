@@ -757,7 +757,8 @@ def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     source.write_text("import client\napi_key = 'private-value'\nprint('fixture-sensitive-value')\nclient.connect()")
     result = repo.read(source.name)
     assert "example.py:4 client.connect()" in result
-    assert result.count("[已隐藏]") == 2
+    assert result.count("[已隐藏]") == 1
+    assert result.count("[REDACTED]") == 1
     assert "private-value" not in result and "fixture-sensitive-value" not in result
     assert "example.py:4" in repo.search("client.connect()")
     assert repo.search("private-value").startswith("No match")
@@ -1073,3 +1074,23 @@ def test_chat_history_uses_dialogue_budget_and_allows_long_questions(tmp_path):
     assert c.question == question
     assert c.logs[-1][2] == question
     assert c.chat_history(question) == [("You", "Earlier question"), ("Lain", "earlier reply " * 50)]
+
+
+def test_worker_environment_uses_only_injected_key(tmp_path, monkeypatch):
+    from agent.companion.config import CompanionConfig
+    from agent.companion.controller import start_worker
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "host-key")
+    monkeypatch.setenv("COMPANION_DEEPSEEK_API_KEY", "legacy")
+    monkeypatch.setenv("UNRELATED_CREDENTIAL", "private")
+    captured = []
+
+    async def spawn(*args, **kwargs):
+        captured.append(kwargs["env"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    asyncio.run(start_worker(tmp_path, CompanionConfig(), "from-config"))
+    asyncio.run(start_worker(tmp_path, CompanionConfig()))
+    assert captured[0]["DEEPSEEK_API_KEY"] == "from-config"
+    assert "DEEPSEEK_API_KEY" not in captured[1]
+    assert all(set(env) <= {"HOME", "PATH", "LANG", "DEEPSEEK_API_KEY"} for env in captured)

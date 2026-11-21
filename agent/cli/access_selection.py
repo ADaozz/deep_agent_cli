@@ -102,6 +102,8 @@ class AccessSelection:
             mode = parse_permission_mode(raw)
             if mode is None:
                 hint = "ask or allow" if self._allow_available() else "ask"
+                if self.runner.auto_available():
+                    hint = "ask, auto or allow"
                 self.state.add_system(
                     f"Unknown permission mode. Use /permission {hint}",
                     error=True,
@@ -206,7 +208,7 @@ class AccessSelection:
         self.dialogs.current = InteractionController(
             kind="sandbox",
             title="Sandbox filesystem",
-            question="Choose which files execute and file tools can change. ask/allow is unchanged.",
+            question="Choose which files execute and file tools can change.",
             fields=[{
                 "id": "mode",
                 "type": "single_select",

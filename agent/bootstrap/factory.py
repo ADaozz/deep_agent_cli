@@ -285,8 +285,11 @@ def build_agent(
                 hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
     auto_middleware = []
-    if permission is PermissionMode.AUTO:
-        from agent.runtime.auto_approval import ApprovalJournal, AutoApprovalMiddleware
+    from agent.runtime.auto_approval import ApprovalJournal, AutoApprovalMiddleware
+    # An interrupted Auto batch can be reopened after its key or sandbox became
+    # unavailable. Preserve the original human decision indices and block its
+    # pending automatic grants; subsequent turns follow the regular Ask rules.
+    if permission is PermissionMode.AUTO or (permission is PermissionMode.ASK and ApprovalJournal.exists(saver)):
 
         if approval_journal is None:
             approval_journal = getattr(saver, "_auto_approval_journal", None)
@@ -295,6 +298,8 @@ def build_agent(
             saver._auto_approval_journal = approval_journal
         auto_middleware.append(AutoApprovalMiddleware(
             spec=spec, backend=fs_backend, controller=run_controller, journal=approval_journal,
+            trusted=mcp.snapshot_trusted_tools(mcp_revision) if include_mcp and permission is PermissionMode.AUTO else (),
+            ask_rules=hitl if permission is PermissionMode.ASK else None,
         ))
     subagents: list[CompiledSubAgent] = []
     manager = None
@@ -343,8 +348,9 @@ def build_agent(
                                    | {"start_task", "request_human_input", "read_task_log"}),
             )
             try:
-                child = build_agent(child_spec, child_model, PermissionMode.ALLOW, None,
-                                    controller, lambda: False, backend_selection=selected, settings=cfg)
+                child_permission = PermissionMode.AUTO if permission is PermissionMode.AUTO else PermissionMode.ALLOW
+                child = build_agent(child_spec, child_model, child_permission, None, controller, lambda: False,
+                                    backend_selection=selected, settings=cfg, approval_journal=approval_journal)
             except BaseException:
                 if child_model is not model:
                     from agent.models.stream_lifecycle import close_model_http_clients

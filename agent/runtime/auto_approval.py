@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -33,6 +36,7 @@ _REASONS = {
     "destructive": "操作可能造成未经授权的破坏。",
     "uncertain": "缺少足够上下文，需要人工确认。",
 }
+delegating_user_request = ContextVar("delegating_user_request", default="")
 _MANUAL = Decision("ask", _REASONS["uncertain"])
 _READ_ONLY = frozenset({"ls", "read", "mcp_list", "read_task_log", "check_background_task",
                         "request_human_input", "compact_conversation", "web_search", "web_fetch"})
@@ -62,6 +66,8 @@ async def classify(api_key, trust_env, evidence, cancelled):
                 outcome, reason = value["decision"], value["reason"]
                 if outcome not in {"allow", "deny", "ask"} or reason not in _REASONS:
                     return _MANUAL
+                if outcome == "allow" and reason != "authorized":
+                    return _MANUAL
                 if outcome != "ask" or attempt:
                     return Decision(outcome, _REASONS[reason])
 
@@ -82,6 +88,15 @@ async def classify(api_key, trust_env, evidence, cancelled):
 
 class ApprovalJournal:
     """Use the session saver's connection and transaction lock, or a private memory DB."""
+    @staticmethod
+    def exists(saver):
+        if isinstance(saver, SqliteSaver):
+            with saver.lock:
+                return saver.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_approval'"
+                ).fetchone() is not None
+        return hasattr(saver, "_auto_approval_journal")
+
     def __init__(self, saver):
         if isinstance(saver, SqliteSaver):
             self.conn, self.lock = saver.conn, saver.lock
@@ -128,8 +143,9 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
     def name(self):
         return "HumanInTheLoopMiddleware"
 
-    def __init__(self, *, spec, backend, controller, journal, trusted=()):
-        super().__init__(interrupt_on={})
+    def __init__(self, *, spec, backend, controller, journal, trusted=(), ask_rules=None):
+        super().__init__(interrupt_on=ask_rules or {})
+        self.ask_only = ask_rules is not None
         self.spec = spec
         self.backend = backend
         self.controller = controller
@@ -141,11 +157,13 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         name = call["name"]
         if name in self.custom:
             return _MANUAL
-        if name in _READ_ONLY or name in self.trusted:
+        if name in self.trusted:
+            return Decision("allow", "受信任的 MCP 服务。")
+        if name in _READ_ONLY:
             return Decision("allow", _REASONS["authorized"])
         if name in {"write", "edit"} and isinstance(self.backend, WorkspaceCompositeBackend):
             if self.backend.is_workspace_mutation(call["args"].get("file_path")):
-                return Decision("allow", _REASONS["authorized"])
+                return Decision("allow", "授权工作区内的写入。")
         if name not in {"execute", "delete", "write", "edit"}:
             return _MANUAL
         return None
@@ -158,7 +176,12 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         config = getattr(getattr(self.backend, "executor", None), "config", None) or self.spec.sandbox
         if config is None:
             return None
-        payload = {"user_request": user.text, "tool": call["name"], "arguments": call["args"],
+        original = user.text
+        if self.spec.role == "subagent":
+            original = getattr(self.controller, "approval_user_request", "")
+            if not original:
+                return None
+        payload = {"user_request": original, "current_task": user.text, "tool": call["name"], "arguments": call["args"],
                    "workspace": str(config.workspace), "sandbox": config.mode,
                    "network_policy": "per-command", "read_write_mounts": [
                        str(m.destination) for m in config.extra_read_write_mounts if not m.modes or config.mode in m.modes]}
@@ -170,6 +193,10 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         if not isinstance(message, AIMessage) or not message.tool_calls:
             return None
         thread = get_config()["configurable"]["thread_id"]
+        if self.ask_only and not any(
+            self.journal.lookup(_call_key(thread, self.spec.role, message, call)) for call in message.tool_calls
+        ):
+            return super().after_model(state, runtime)
         decisions = {}
         keys = {}
         for call in message.tool_calls:
@@ -178,7 +205,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             key = _call_key(thread, self.spec.role, message, call)
             decision = self.journal.lookup(key)
             if decision is None:
-                decision = self.rule(call)
+                decision = _MANUAL if self.ask_only else self.rule(call)
                 if decision is None:
                     evidence = self.evidence(state, call)
                     decision = await classify(self.spec.deepseek_api_key, self.spec.trust_env, evidence,
@@ -203,7 +230,14 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         return update
 
     def after_model(self, state, runtime):
-        return asyncio.run(self.aafter_model(state, runtime))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.aafter_model(state, runtime))
+        # A library caller may invoke the synchronous graph inside an asyncio
+        # application. Keep LangGraph's context without nesting event loops.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(copy_context().run, asyncio.run, self.aafter_model(state, runtime)).result()
 
     def _before_tool(self, request):
         call = request.tool_call
@@ -213,13 +247,19 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         decision = self.journal.lookup(key)
         if self.controller.cancel_requested:
             reason = "Cancelled by user."
+        elif decision is None and self.ask_only:
+            return None, None
         elif decision is None:
             reason = "缺少审批记录，操作已阻止。"
         elif decision.decision == "deny":
             reason = decision.reason
         elif decision.decision == "ask" and self.spec.role == "subagent":
             reason = "此操作需要人工审批，请由父 Agent 重新发起。"
-        elif call["name"] in _READ_ONLY and call["name"] not in self.custom:
+        elif self.ask_only and decision.decision == "allow":
+            reason = "已退回 Ask；请在当前权限模式下重新发起操作。"
+        elif decision.reason in {"受信任的 MCP 服务。", "授权工作区内的写入。"} and self.rule(call) != decision:
+            reason = "工具信任或文件路径已改变，请重新发起调用。"
+        elif call["name"] == "request_human_input" and call["name"] not in self.custom:
             return None, None
         else:
             before = "approved" if decision.decision == "ask" else "pending"
@@ -228,11 +268,25 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             reason = "此调用已处理或执行结果未知，已阻止重复执行。"
         return None, ToolMessage(content=reason, name=call["name"], tool_call_id=call["id"], status="error")
 
+    @contextmanager
+    def delegation_context(self, request):
+        if request.tool_call["name"] not in {"start_task", "start_background_task"}:
+            yield
+            return
+        user = next((m for m in reversed(request.state["messages"]) if isinstance(m, HumanMessage)
+                     and NOTIFICATION_KEY not in m.additional_kwargs), None)
+        token = delegating_user_request.set(user.text if user else "")
+        try:
+            yield
+        finally:
+            delegating_user_request.reset(token)
+
     def wrap_tool_call(self, request, handler):
         key, blocked = self._before_tool(request)
         if blocked is not None:
             return blocked
-        result = handler(request)
+        with self.delegation_context(request):
+            result = super().wrap_tool_call(request, handler) if self.ask_only else handler(request)
         if key:
             self.journal.transition(key, "started", "finished")
         return result
@@ -241,7 +295,8 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         key, blocked = self._before_tool(request)
         if blocked is not None:
             return blocked
-        result = await handler(request)
+        with self.delegation_context(request):
+            result = await super().awrap_tool_call(request, handler) if self.ask_only else await handler(request)
         if key:
             self.journal.transition(key, "started", "finished")
         return result

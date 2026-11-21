@@ -55,9 +55,12 @@ class MCPServerConfig:
     args: tuple[str, ...] = ()
     env_passthrough: tuple[str, ...] = ()
     auth: MCPAuth | None = None
+    auto_approve: bool = False
 
     def to_json(self) -> dict[str, Any]:
         body: dict[str, Any] = {"transport": self.transport, "enabled": self.enabled}
+        if self.auto_approve:
+            body["auto_approve"] = True
         if self.transport == "streamable_http":
             body["url"] = self.url
             if self.auth is not None:
@@ -109,14 +112,17 @@ def parse_server(name: str, raw: Any) -> MCPServerConfig:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise MCPConfigError(f"MCP server {name} enabled must be a boolean")
-    unknown = set(raw) - {"transport", "enabled", "url", "command", "args", "env_passthrough", "auth"}
+    auto_approve = raw.get("auto_approve", False)
+    if not isinstance(auto_approve, bool):
+        raise MCPConfigError(f"MCP server {name} auto_approve must be a boolean")
+    unknown = set(raw) - {"auto_approve", "transport", "enabled", "url", "command", "args", "env_passthrough", "auth"}
     if unknown:
         raise MCPConfigError(f"MCP server {name} has unknown fields: {', '.join(sorted(unknown))}")
     if transport == "streamable_http":
         return MCPServerConfig(
             name=name,
             transport=transport,
-            enabled=enabled,
+            enabled=enabled, auto_approve=auto_approve,
             url=_http_url(name, raw.get("url")),
             auth=_auth(name, raw.get("auth")),
         )
@@ -129,7 +135,7 @@ def parse_server(name: str, raw: Any) -> MCPServerConfig:
     return MCPServerConfig(
         name=name,
         transport="stdio",
-        enabled=enabled,
+        enabled=enabled, auto_approve=auto_approve,
         command=_command(name, raw.get("command")),
         args=_args(name, raw.get("args", [])),
         env_passthrough=_env_names(name, raw.get("env_passthrough", [])),

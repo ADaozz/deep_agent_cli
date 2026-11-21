@@ -17,6 +17,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from agent.runtime.auto_approval import delegating_user_request
 from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import set_output_emitter
 from agent.models.stream_lifecycle import set_stream_owner
@@ -145,6 +146,7 @@ class SubAgentRuntime(Runnable):
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
         try:
             with self.manager.running() as (run_id, controller):
+                controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
             return {"messages": [AIMessage(content=f"Subagent failed: {str(exc)[:1000]}")]}
@@ -165,6 +167,7 @@ class SubAgentRuntime(Runnable):
         Raises when no permit is available; nothing is started in that case.
         """
         run_id, controller = self.manager.admit()
+        controller.approval_user_request = delegating_user_request.get()
         task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
                               description=description, controller=controller)
 

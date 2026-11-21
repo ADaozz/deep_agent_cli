@@ -47,6 +47,7 @@ class _Snapshot(NamedTuple):
     clients: list[Any]
     holders: int
     include_mcp: bool
+    trusted_tools: frozenset[str]
 
 
 class MCPManager:
@@ -409,15 +410,23 @@ class MCPManager:
             include = self._document.enabled and not self._config_error
             tools: list[BaseTool] = []
             clients: list[Any] = []
+            trusted: set[str] = set()
+            untrusted: set[str] = set()
             if include:
                 for state in self._states.values():
                     if state.config.enabled and state.status is ServerStatus.CONNECTED and state.client is not None:
                         tools.extend(state.tools)
+                        names = trusted if state.config.auto_approve else untrusted
+                        names.update(tool.name for tool in state.tools)
                         clients.append(state.client)
             current = self._snapshots.get(self._revision)
             holders = current.holders if current is not None else 0
-            self._snapshots[self._revision] = _Snapshot(clients, holders + 1, include)
+            self._snapshots[self._revision] = _Snapshot(clients, holders + 1, include, frozenset(trusted - untrusted))
             return self._revision, tools
+
+    def snapshot_trusted_tools(self, revision: int) -> frozenset[str]:
+        with self._lock:
+            return self._snapshots[revision].trusted_tools
 
     def snapshot_includes_mcp(self, revision: int) -> bool:
         """Whether the graph built from this snapshot should register MCP tools."""
@@ -435,7 +444,7 @@ class MCPManager:
         item = self._snapshots.get(revision)
         if item is not None:
             if item.holders > 1:
-                self._snapshots[revision] = _Snapshot(item.clients, item.holders - 1, item.include_mcp)
+                self._snapshots[revision] = item._replace(holders=item.holders - 1)
             else:
                 self._snapshots.pop(revision)
 
