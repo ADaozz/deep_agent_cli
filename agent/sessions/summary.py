@@ -1,6 +1,9 @@
 """First-turn summary eligibility, redaction and title validation."""
 from __future__ import annotations
 
+from agent.redaction import replace_known_secrets
+
+
 from dataclasses import dataclass
 import re
 
@@ -28,9 +31,7 @@ FALLBACK_SUMMARY_CHARS = 10
 
 
 def redact_summary_input(text: str, secrets: tuple[str, ...] = ()) -> str:
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        if secret:
-            text = text.replace(secret, "[已隐藏]")
+    text = replace_known_secrets(text, secrets)
     return _SENSITIVE.sub(
         lambda match: match[0] if match[0].lower() in _TECH_NAMES else "[已隐藏]", text,
     )
@@ -40,7 +41,7 @@ def validate_summary(text: str, secrets: tuple[str, ...] = ()) -> str | None:
     title = text.strip().strip("\"'“”‘’")
     if (not title or any(char in title for char in "\n\r\x1b`")
             or title.startswith(("关于", "讨论", "标题", "摘要"))
-            or "[已隐藏]" in title or len(title) > 80):
+            or "[REDACTED]" in title or "[已隐藏]" in title or len(title) > 80):
         return None
     if any(ord(char) < 32 or ord(char) == 127 for char in title):
         return None
@@ -53,7 +54,7 @@ def validate_summary(text: str, secrets: tuple[str, ...] = ()) -> str | None:
 
 def fallback_query_summary(user_request: str, secrets: tuple[str, ...] = ()) -> str | None:
     """Truncate the first line of the redacted query when the model title fails."""
-    line = redact_summary_input(user_request, secrets).replace("[已隐藏]", "").strip()
+    line = redact_summary_input(user_request, secrets).replace("[已隐藏]", "").replace("[REDACTED]", "").strip()
     line = line.splitlines()[0].strip() if line else ""
     line = "".join(char for char in line if char.isprintable() and ord(char) >= 32)
     if not line:

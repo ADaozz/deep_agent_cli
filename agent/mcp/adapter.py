@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from agent.redaction import replace_known_secrets
+
+
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -47,10 +50,7 @@ class LoadedServer:
 
 
 def redact(text: str, secrets: list[str]) -> str:
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, "[redacted]")
-    return text
+    return replace_known_secrets(text, secrets)
 
 
 def open_server(

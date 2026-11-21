@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from agent.redaction import replace_known_secrets
+
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -28,10 +31,7 @@ class SubAgentLogStore:
         return self.root / hashlib.sha256(parent.encode()).hexdigest()
 
     def _redact(self, text: str) -> str:
-        for secret in self.secrets:
-            if secret:
-                text = text.replace(secret, "[REDACTED]")
-        return text
+        return replace_known_secrets(text, self.secrets)
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):

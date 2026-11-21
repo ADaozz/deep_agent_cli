@@ -280,14 +280,14 @@ def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkey
             echo = next(tool for tool in manager.get(name).tools if tool.name.endswith("__echo"))
             result = echo.invoke({"text": token})
             assert token not in str(result)
-            assert "[redacted]" in str(result)
+            assert "[REDACTED]" in str(result)
             unknown = '{  "api_key": "unknown", "Authorization": "Bearer unknown", "payload": "' + "A" * 600 + '" }\n'
             for text in (unknown, json.dumps({"token": token, "unknown": unknown})):
                 args = {"text": text}
                 result = echo.invoke(args)
                 returned = next(block["text"] for block in result if block["type"] == "text")
-                assert returned == text.replace(token, "[redacted]")
-                assert json.loads(returned) == json.loads(text.replace(token, "[redacted]"))
+                assert returned == text.replace(token, "[REDACTED]")
+                assert json.loads(returned) == json.loads(text.replace(token, "[REDACTED]"))
                 assert args == {"text": text}
         assert token not in manager.describe()
         from agent.mcp.middleware import MCPMiddleware

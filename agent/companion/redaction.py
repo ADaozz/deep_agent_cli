@@ -1,5 +1,8 @@
 """Credential redaction for source and diagnostic evidence."""
 
+from agent.redaction import replace_known_secrets
+
+
 import re
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
@@ -105,10 +108,7 @@ def _redact(text, secrets, *, source):
         end = match.end()
     result.append(_redact_outside_locations(text[end:], source=source))
     safe = "".join(result)
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        if secret:
-            safe = safe.replace(secret, HIDDEN)
-    return safe
+    return replace_known_secrets(safe, secrets)
 
 
 def redact_diagnostic_text(text, secrets=()):

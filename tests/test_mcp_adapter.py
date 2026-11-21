@@ -186,7 +186,7 @@ def test_sync_and_async_results_errors_and_redaction_match(tmp_path, http_mcp, m
             assert type(sync) is type(asynchronous)
             assert without_ids(sync) == without_ids(asynchronous)
             assert secret not in str(asynchronous)
-            assert "[redacted]" in str(asynchronous)
+            assert "[REDACTED]" in str(asynchronous)
             failed = tools["mcp__local__fail"]
             assert without_ids(failed.invoke({})) == without_ids(await failed.ainvoke({}))
         asyncio.run(check())
@@ -360,14 +360,14 @@ def test_exact_secret_replacement_preserves_unknown_json_and_nested_values():
     assert redact(unknown, [secret, ""]) == unknown
     assert _redact_value(unknown, [secret]) == unknown
     known = json.dumps({"api_key": secret, "text": f"Bearer {secret}", "unknown": unknown})
-    expected = known.replace(secret, "[redacted]")
+    expected = known.replace(secret, "[REDACTED]")
     assert _redact_value(known, [secret]) == expected
-    assert json.loads(expected)["api_key"] == "[redacted]"
+    assert json.loads(expected)["api_key"] == "[REDACTED]"
     assert json.loads(expected)["unknown"] == unknown
     values = {"api_key": "unknown", "rows": [known, {"token": "unknown"}], "pair": (secret, 3)}
     original = deepcopy(values)
     assert _redact_value(values, [secret]) == {
-        "api_key": "unknown", "rows": [expected, {"token": "unknown"}], "pair": ("[redacted]", 3),
+        "api_key": "unknown", "rows": [expected, {"token": "unknown"}], "pair": ("[REDACTED]", 3),
     }
     assert values == original
 
@@ -396,7 +396,7 @@ def test_wrapped_tool_uses_exact_replacement_and_only_bounds_errors():
         assert tool.description.startswith(redact(original.description, [secret]))
         assert len(tool.description) > 400
         args = {"text": f"{secret} Authorization: Bearer unknown-input"}
-        expected = {"api_key": "[redacted] Authorization: Bearer unknown-input",
+        expected = {"api_key": "[REDACTED] Authorization: Bearer unknown-input",
                     "Authorization": "Bearer unknown-result"}
         assert tool.invoke(args) == expected
         assert asyncio.run(tool.ainvoke(args)) == expected
