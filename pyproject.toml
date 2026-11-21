@@ -34,6 +34,7 @@ dependencies = [
   "Pillow>=11,<14",
   "langgraph-prebuilt>=1.1.1,<2",
   "rich>=13.9,<15.0",
+  "pygments>=2.13,<3.0",
 ]
 
 [project.optional-dependencies]

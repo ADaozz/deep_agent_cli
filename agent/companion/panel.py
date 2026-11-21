@@ -215,7 +215,7 @@ def build_panel(companion, git_summary, chart, editor, *, footer_rows):
     )
 
     def chat_header(w, h):
-        return [aligned([(ACCENT, "Talk TO Lain")], [(ACCENT, "Ctrl←/→")], w)]
+        return [[(ACCENT, "Talk TO Lain")]]
 
     runtime = detect_runtime_environment()
     distribution = host_distribution()
@@ -280,7 +280,7 @@ def build_panel(companion, git_summary, chart, editor, *, footer_rows):
             workspace,
             rule(ACCENT),
             Window(Rows(heatmap_rows), height=heatmap_height),
-            Window(height=1),
+            rule(ACCENT),
             Window(Rows(chat_header), height=1),
             Window(ChatRows(companion)),
             editor,

@@ -108,9 +108,10 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                                   for y in range(rows))
                 for label in (
                     "CPU", "GPU", "RAM", "DISK", "GIT", "SERVICES",
-                    "Talk TO Lain", "Ctrl←/→", "Tool Health",
+                    "Talk TO Lain", "Tool Health",
                 ):
                     assert label in right
+                assert "Ctrl←/→" not in right
                 panel = right.splitlines()[2:]
                 timestamp = f"2026-11-20 13:16:{seconds:02d}"
                 separator = "·" if columns == 120 else " · "
@@ -132,7 +133,7 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 assert chart_heading == heading + 3 + count
                 assert set(panel[chart_heading - 1].strip()) == {"─"}
                 assert panel[chart_heading + 1].strip() == "No tool calls yet"
-                assert not panel[chart_heading + 2].strip()
+                assert panel[chart_heading + 2].strip() == "─" * (columns - width - 5)
                 assert panel[chart_heading + 3].strip().startswith("Talk TO Lain")
                 watching = chart_heading + 4
                 assert panel[watching].strip() == "Watching current session..."
@@ -147,7 +148,10 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 assert panel[heading].index("│") == resource_dividers[1]
                 assert panel[heading + 1].index("│") == resource_dividers[1]
                 title_divider = 1 if suffix else 2
-                for divider in (title_divider, resources - 1, resources + 2, chart_heading - 1):
+                for divider in (
+                    title_divider, resources - 1, resources + 2,
+                    chart_heading - 1, chart_heading + 2,
+                ):
                     assert panel[divider].strip() == "─" * (columns - width - 5)
                     assert ACCENT in screen.data_buffer[divider + 2][width + 3].style
                 for service in app.companion.services:
@@ -190,7 +194,7 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 side_rows = ["".join(screen.data_buffer[y][x].char for x in range(width + 1, columns))
                              for y in range(rows)]
                 chat_y = next(y for y, row in enumerate(side_rows) if "Talk TO Lain" in row)
-                assert not side_rows[chat_y - 1].strip()
+                assert set(side_rows[chat_y - 1].strip()) == {"─"}
                 assert side_rows[chat_y - 2].strip().endswith("failed")
                 assert side_rows[chat_y + 1].strip() == "Watching current session..."
                 editor = next(pos for window, pos in screen.visible_windows_to_write_positions.items()
@@ -241,13 +245,13 @@ def test_mouse_drag_copies_lain_chat_and_preserves_scroll_and_input_focus(monkey
             first_y, first_cells = find_line("玲音 alpha line")
             last_y, last_cells = find_line("下一行 beta")
             assert first_y < last_y
-            _, hint_cells = find_line("Ctrl←/→")
-            hint_start = next(x for x in range(side_x, 180) if hint_cells[x].char == "C")
+            _, talk_cells = find_line("Talk TO Lain")
+            talk_start = next(x for x in range(side_x, 180) if talk_cells[x].char == "T")
             _, user_cells = find_line("你 · ")
             user_start = next(x for x in range(side_x, 180) if user_cells[x].char == "你")
             _, lain_cells = find_line("玲音 · ")
             lain_start = next(x for x in range(side_x, 180) if lain_cells[x].char == "玲")
-            assert ACCENT in hint_cells[hint_start].style
+            assert ACCENT in talk_cells[talk_start].style
             assert ACCENT in user_cells[user_start].style
             assert ACCENT in lain_cells[lain_start].style
             first_x = next(x for x in range(side_x, 180) if first_cells[x].char == "玲")

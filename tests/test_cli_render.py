@@ -1100,9 +1100,9 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
     assert "- keep-0" in rendered
     assert "keep-15" not in rendered
     assert "Ctrl+R to review" in rendered
-    review = render_review([("edit", {
+    review = _plain(render_review([("edit", {
         "file_path": "/workspace/tests/test_cache.py", "old_string": old, "new_string": new,
-    })], 80)
+    })], 80))
     assert "keep-15" in review
     assert "--- a/workspace/tests/test_cache.py" in review
 
@@ -1188,9 +1188,11 @@ def test_grouped_edits_identify_independent_snippet_line_numbers() -> None:
     ])]
     rendered = _plain(render_transcript(CliState(blocks=blocks), 100))
     assert rendered.count("Edited /workspace/App.vue") == 1
-    assert rendered.index("Edit 1 · snippet line numbers") < rendered.index("2- old first")
-    assert rendered.index("2+ new first") < rendered.index("Edit 2 · snippet line numbers")
-    assert rendered.index("Edit 2 · snippet line numbers") < rendered.index("1- old second")
+    assert rendered.index("Edit 1 · snippet line numbers") < rendered.index("2+ new first")
+    assert rendered.index("2+ new first") < rendered.index("2- old first")
+    assert rendered.index("2- old first") < rendered.index("Edit 2 · snippet line numbers")
+    assert rendered.index("Edit 2 · snippet line numbers") < rendered.index("1+ new second")
+    assert rendered.index("1+ new second") < rendered.index("1- old second")
     assert "(+2 -2)" in rendered
     review = _plain(render_review([("edit", block.arguments) for block in blocks], 100))
     assert review.count("edit /workspace/App.vue · snippet line numbers") == 2
@@ -1290,9 +1292,33 @@ def test_edit_context_stays_unhighlighted_while_changed_rows_use_content_width(m
     )
     red = _diff_background_rows(rendered, "95;0;0")
     green = _diff_background_rows(rendered, "0;95;0")
-    assert red == ["2- old"]
     assert green == ["2+ new"]
+    assert red == ["2- old"]
+    # Same line number: add row appears before delete in the review body.
+    assert plain.index("2+ new") < plain.index("2- old")
     assert _diff_background_rows(rendered, "12;12;12")
+
+
+def test_python_diff_keeps_syntax_foreground_on_add_delete_background(monkeypatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    args = {
+        "file_path": "/workspace/demo.py",
+        "old_string": "def foo():\n    return 1\n",
+        "new_string": "def foo():\n    return 2\n",
+    }
+    for rendered in (
+        render_review([("edit", args)], 80),
+        render_transcript(CliState(blocks=[ToolBlock(
+            "edit-syntax", "edit", args, status="completed",
+        )]), 80),
+    ):
+        assert "48;2;95;0;0" in rendered
+        assert "48;2;0;95;0" in rendered
+        # Dark+ keyword #569CD6 (38;2;86;156;214) survives on the diff bg.
+        assert re.search(
+            r"\x1b\[[0-9;]*38;2;86;156;214[0-9;]*48;2;(?:95;0;0|0;95;0)m",
+            rendered,
+        )
 
 
 @pytest.mark.parametrize("view", ["preview", "review"])
@@ -1479,9 +1505,8 @@ def test_edit_preview_many_deletions_keep_one_addition() -> None:
     assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     assert texts == [
-        "- keep-0",
         "+ replaced",
-        *[f"- keep-{index}" for index in range(1, 7)],
+        *[f"- keep-{index}" for index in range(7)],
         "… 13 changed lines hidden · Ctrl+R to review",
     ]
     assert "  ⋮" not in texts
@@ -1506,8 +1531,9 @@ def test_edit_preview_many_additions_keep_one_deletion() -> None:
     assert "… 13 changed lines hidden · Ctrl+R to review" in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     assert texts == [
+        "+ add-0",
         "- keep",
-        *[f"+ add-{index}" for index in range(7)],
+        *[f"+ add-{index}" for index in range(1, 7)],
         "… 13 changed lines hidden · Ctrl+R to review",
     ]
     assert "  ⋮" not in texts
@@ -1523,12 +1549,12 @@ def test_edit_preview_under_budget_shows_all_without_hidden_hint() -> None:
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
     assert "Edited /workspace/notes.md (+2 -3)" in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
-    assert texts == ["- l1", "+ n1", "- l2", "+ n2", "- l3"]
+    assert texts == ["+ n1", "- l1", "+ n2", "- l2", "- l3"]
     assert "changed lines hidden" not in rendered
     assert "⋮" not in rendered
 
 
-def test_edit_preview_pairs_same_number_delete_before_add() -> None:
+def test_edit_preview_pairs_same_number_add_before_delete() -> None:
     block = ToolBlock(
         tool_call_id="edit-number-order",
         name="edit",
@@ -1551,10 +1577,10 @@ def test_edit_preview_pairs_same_number_delete_before_add() -> None:
     )
     lines = build_tool_preview(block).lines
     assert [line.text for line in lines] == [
-        "   2- { frame: 0, cx: 960, cy: 300, zoom: 1.1 },",
         "   2+ { frame: 0, cx: 960, cy: 190, zoom: 1.15 },",
-        "   3- { frame: 75, cx: 960, cy: 760, zoom: 1.0 },",
+        "   2- { frame: 0, cx: 960, cy: 300, zoom: 1.1 },",
         "   3+ { frame: 75, cx: 960, cy: 320, zoom: 1.0 },",
+        "   3- { frame: 75, cx: 960, cy: 760, zoom: 1.0 },",
     ]
 
 
@@ -1578,7 +1604,7 @@ def test_edit_preview_marks_hunk_jumps_with_separator() -> None:
     assert "+ new2" in rendered
     assert "changed lines hidden" not in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
-    assert texts == ["- old1", "+ new1", "  ⋮", "- old2", "+ new2"]
+    assert texts == ["+ new1", "- old1", "  ⋮", "+ new2", "- old2"]
 
 
 def test_edit_preview_single_hunk_never_shows_separator() -> None:
@@ -1589,7 +1615,7 @@ def test_edit_preview_single_hunk_never_shows_separator() -> None:
         status="completed",
     )
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
-    assert texts == ["- c", "+ x"]
+    assert texts == ["+ x", "- c"]
 
 
 def test_edit_preview_separator_does_not_consume_budget() -> None:
@@ -1610,7 +1636,7 @@ def test_edit_preview_separator_does_not_consume_budget() -> None:
     assert len(changed) == 8
     assert texts.count("  ⋮") == 2
     assert texts == [
-        "- A", "+ A2", "  ⋮", "- B1", "+ B", "- B2", "  ⋮", "+ D1", "- D", "+ D2",
+        "+ A2", "- A", "  ⋮", "+ B", "- B1", "- B2", "  ⋮", "+ D1", "+ D2", "- D",
     ]
     assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
 

@@ -18,6 +18,7 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
 from rich.segment import Segment
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
@@ -34,6 +35,11 @@ from agent.cli.previews import (
     format_numbered_change,
     normalize_file_mutation,
     tool_group,
+)
+from agent.cli.highlighting import (
+    HighlightMarkdown,
+    code_renderer,
+    parse_numbered_change,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
 from agent.cli.skills import skill_message_display
@@ -552,6 +558,7 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
         if mutation is None or mutation.diff is None or not mutation.diff.full_diff:
             continue
         diff = mutation.diff
+        highlighter = code_renderer.diff_from_unified(diff.full_diff, path=diff.path)
         parts.append(Text(""))
         if mutation.operation == "overwrite":
             parts.append(Text(f"write {diff.path}", style="bold"))
@@ -559,20 +566,29 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
             parts.append(Group(*(
                 row
                 for number, line in enumerate(diff.lines, 1)
-                for row in _diff_row(format_numbered_change(number, line.text), "add", width)
+                for row in _diff_row(
+                    format_numbered_change(number, line.text), "add", width, highlighter=highlighter,
+                )
             )))
         elif mutation.operation == "delete":
             parts.append(Text(f"delete {diff.path}", style="dim"))
         else:
             parts.append(Text(f"edit {diff.path} · snippet line numbers", style="dim"))
-            parts.append(Group(*_numbered_diff(diff.full_diff, width)))
+            parts.append(Group(*_numbered_diff(diff.full_diff, width, highlighter=highlighter)))
     if len(parts) == 2:
         parts.append(Text("Nothing to review.", style="dim"))
     return _capture(Group(*parts), width)
 
 
-def _diff_row(content: str, kind: str, width: int) -> list[Text]:
+def _diff_row(
+    content: str,
+    kind: str,
+    width: int,
+    *,
+    highlighter=None,
+) -> list[Text]:
     """Wrap a diff line; add/delete highlight from line number through last visible char."""
+
     available = max(1, width - 1)  # Spare terminal column avoids auto-wrap.
     console = Console(width=max(20, width))
     if kind not in {"add", "delete"}:
@@ -580,15 +596,29 @@ def _diff_row(content: str, kind: str, width: int) -> list[Text]:
 
     bg = DIFF_ADD_BG if kind == "add" else DIFF_DELETE_BG
     marker_fg = DIFF_ADD_MARKER if kind == "add" else DIFF_DELETE_MARKER
-    text = Text(content)
-    end = len(content.rstrip())
-    # Group 1 = line number, group 2 = +/- glued to the number; space before body.
-    matched = re.match(r"^ *([0-9]+)([-+])", content)
-    if matched and matched.start(1) < end:
-        text.stylize(f"white on {bg}", matched.start(1), end)
-        text.stylize(f"{marker_fg} on {bg}", matched.start(2), matched.end(2))
-    elif end:
-        text.stylize(f"white on {bg}", 0, end)
+    parsed = parse_numbered_change(content) if highlighter is not None else None
+    if parsed is None or highlighter is None:
+        text = Text(content)
+        end = len(content.rstrip())
+        matched = re.match(r"^ *([0-9]+)([-+])", content)
+        if matched and matched.start(1) < end:
+            text.stylize(f"white on {bg}", matched.start(1), end)
+            text.stylize(f"{marker_fg} on {bg}", matched.start(2), matched.end(2))
+        elif end:
+            text.stylize(f"white on {bg}", 0, end)
+    else:
+        indent, number, diff_kind, body = parsed
+        mark = "-" if diff_kind == "delete" else "+"
+        text = Text()
+        text.append(indent)
+        text.append(str(number), Style(color="white", bgcolor=bg))
+        text.append(mark, Style(color=marker_fg, bgcolor=bg))
+        # format_numbered_change: space before body only when body is non-empty.
+        if body:
+            text.append(" ", Style(color="white", bgcolor=bg))
+            styled = highlighter.style_body(diff_kind, number, body)
+            styled.stylize(Style(bgcolor=bg), 0, len(styled))
+            text.append_text(styled)
     rows = list(text.wrap(console, available, overflow="fold"))
     for row in rows:
         pad = max(0, available - row.cell_len)
@@ -597,30 +627,57 @@ def _diff_row(content: str, kind: str, width: int) -> list[Text]:
     return rows
 
 
-def _numbered_diff(raw: str, width: int) -> list[Text]:
-    """Render source line numbers from unified hunk coordinates."""
+def _numbered_diff(
+    raw: str,
+    width: int,
+    *,
+    highlighter=None,
+    path: str | None = None,
+) -> list[Text]:
+    """Render source line numbers from unified hunk coordinates.
+
+    Consecutive -/+ rows are flushed in unified card order: line number
+    ascending, then add before delete (same as compact mutation previews).
+    """
+    active = highlighter or code_renderer.diff_from_unified(raw, path=path)
     result: list[Text] = []
+    pending: list[tuple[str, str, int]] = []
     old_number = new_number = 0
+
+    def flush_changes() -> None:
+        nonlocal pending
+        if not pending:
+            return
+        pending.sort(key=lambda item: (item[2], 0 if item[1] == "add" else 1))
+        for content, kind, _number in pending:
+            result.extend(_diff_row(content, kind, width, highlighter=active))
+        pending = []
+
     for line in raw.splitlines():
         if line.startswith("@@"):
+            flush_changes()
             match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
             if match:
                 old_number, new_number = map(int, match.groups())
             result.extend(_diff_row(line, "hunk", width))
         elif line.startswith(("---", "+++")):
+            flush_changes()
             result.extend(_diff_row(line, "dim", width))
         elif line.startswith("-"):
-            result.extend(_diff_row(format_numbered_change(old_number, line), "delete", width))
+            pending.append((format_numbered_change(old_number, line), "delete", old_number))
             old_number += 1
         elif line.startswith("+"):
-            result.extend(_diff_row(format_numbered_change(new_number, line), "add", width))
+            pending.append((format_numbered_change(new_number, line), "add", new_number))
             new_number += 1
         elif line.startswith(" "):
+            flush_changes()
             result.extend(_diff_row(f"{new_number:>4} {line}", "dim", width))
             old_number += 1
             new_number += 1
         else:
+            flush_changes()
             result.extend(_diff_row(line, "dim", width))
+    flush_changes()
     return result
 
 
@@ -655,11 +712,11 @@ class _ThinkingDetails:
             yield row
 
 
-class _SkillMessageMarkdown(Markdown):
+class _SkillMessageMarkdown(HighlightMarkdown):
     """保留用户正文的 Markdown 格式，在折行前为技能引用添加块样式。"""
 
     def __init__(self, text: str, labels: tuple[str, ...]) -> None:
-        super().__init__(text)
+        super().__init__(text, renderer=code_renderer)
         self.inlines = self.inlines | {"skill"}
         pattern = re.compile("(" + "|".join(re.escape(label) for label in labels) + ")")
 
@@ -690,7 +747,7 @@ class _SkillMessageMarkdown(Markdown):
 
 def _user_message_content(text: str) -> Markdown:
     displayed, labels = skill_message_display(text)
-    return _SkillMessageMarkdown(displayed, labels) if labels else Markdown(text)
+    return _SkillMessageMarkdown(displayed, labels) if labels else code_renderer.markdown(text)
 
 
 @dataclass(frozen=True)
@@ -749,7 +806,10 @@ def _message(
             body.append(Padding(details, (0, 0, 0, 2)))
             items.append(Padding(Group(*body), (top, 1, 0, 1)))
         if block.content:
-            items.append(Padding(Markdown(block.content), (1 if block.thinking else top, 1, 0, 1)))
+            items.append(Padding(
+                code_renderer.markdown(block.content),
+                (1 if block.thinking else top, 1, 0, 1),
+            ))
     elif block.kind == "error":
         items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
@@ -940,10 +1000,14 @@ def render_tool_preview(
     else:
         output = block.output.strip()
         if output:
+            error = block.is_error
+            syntax = preview.syntax if preview.kind == "read" and not error else None
             body.extend(_output_tail(
                 output.splitlines(), console, width,
                 expanded=expanded, limit=limits.tail_lines, indent=2,
-                style="dim" if not block.is_error else "red", earlier=False,
+                style="dim" if not error else "red", earlier=False,
+                filename=preview.target if syntax else None,
+                language=syntax,
             ))
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
@@ -1036,20 +1100,44 @@ def _file_branch_row(content: str) -> Text | None:
     return text
 
 
+def _mutation_highlighters(preview: ToolPreview):
+    """Primary highlighter plus per-path map for multi-file └ sections."""
+    mutation = preview.file_mutation
+    by_path = {}
+    if mutation is not None and mutation.diff is not None and mutation.diff.full_diff:
+        primary = code_renderer.diff_from_unified(
+            mutation.diff.full_diff, path=mutation.diff.path, language=preview.syntax,
+        )
+        by_path[mutation.path] = primary
+        return primary, by_path
+    path = mutation.path if mutation is not None else preview.target
+    primary = code_renderer.diff_for_path(path, language=preview.syntax)
+    if path:
+        by_path[path] = primary
+    return primary, by_path
+
+
 def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
     body: list[Any] = []
     console = Console(width=max(20, width))
+    primary, by_path = _mutation_highlighters(preview)
+    current = primary
     for line in preview.lines:
         if not line.text:
             body.append(Text(""))
         elif line.style in {"add", "delete"}:
-            body.extend(_diff_row(f"  {line.text}", line.style, width))
+            body.extend(_diff_row(f"  {line.text}", line.style, width, highlighter=current))
         else:
             header = _file_branch_row(line.text)
-            text = (
-                Text.assemble(("  ", ""), header) if header is not None
-                else Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
-            )
+            if header is not None:
+                match = re.match(r"^└ (.+?)(?: \(\+(\d+) -(\d+)\))?$", line.text)
+                if match is not None:
+                    path = match.group(1)
+                    current = by_path.get(path) or code_renderer.diff_for_path(path)
+                    by_path[path] = current
+                text = Text.assemble(("  ", ""), header)
+            else:
+                text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
             body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
     return body
 
@@ -1082,12 +1170,29 @@ def _failure_code(block: ToolBlock) -> int:
 def _output_tail(
     lines: list[str], console: Console, width: int, *, expanded: bool, limit: int,
     indent: int = 4, style: str = "dim", earlier: bool = True,
+    filename: str | None = None, language: str | None = None,
 ) -> list[Text]:
     """Apply the output budget after terminal wrapping, preserving the full output."""
-    rows = [
-        row for line in lines
-        for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
-    ]
+    use_syntax = language is not None or (
+        filename is not None and code_renderer.syntax_for_path(filename) is not None
+    )
+    if use_syntax and style != "red":
+        blob = "\n".join(lines)
+        highlighted = code_renderer.render_code(blob, filename=filename, language=language)
+        styled_lines = list(highlighted.split("\n"))
+        # Pad if split under-counts blank trailing lines.
+        while len(styled_lines) < len(lines):
+            styled_lines.append(Text())
+        rows: list[Text] = []
+        for styled in styled_lines[:len(lines)]:
+            line = Text(f"{' ' * indent}")
+            line.append_text(styled)
+            rows.extend(_wrap_card_line(line, console, width, indent=indent))
+    else:
+        rows = [
+            row for line in lines
+            for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
+        ]
     if expanded or len(rows) <= limit:
         return rows
     hidden = len(rows) - limit

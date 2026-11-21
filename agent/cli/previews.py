@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
+from agent.cli.highlighting import code_renderer
 from agent.subagents.notifications import START_TOOL
 from agent.execution.mutations import FileMutationOperation
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
@@ -111,8 +112,8 @@ class _ChangedLine:
 
 
 def _changed_line_sort_key(line: _ChangedLine) -> tuple[int, int]:
-    """Compact preview order: snippet line number, then delete before add."""
-    return (line.number, 0 if line.kind == "delete" else 1)
+    """Unified diff display order: line number ascending, then add before delete."""
+    return (line.number, 0 if line.kind == "add" else 1)
 
 
 PreviewBuilder = Callable[[ToolBlock], ToolPreview]
@@ -191,7 +192,7 @@ def _select_changed_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimit
     """Pick the compact-preview lines: first N, then a +/- floor, then re-sort.
 
     With a budget of at least two, show both - and + when both sides exist.
-    Display order is snippet line number ascending, delete before add.
+    Display order is snippet line number ascending, add before delete.
     """
     if len(changed) <= limits.head_lines:
         return sorted(changed, key=_changed_line_sort_key)
@@ -391,6 +392,7 @@ def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
         detail=_mutation_count_detail(mutation.diff, mutation.operation),
         lines=mutation.compact_lines,
         group="mutation", action="review", file_mutation=mutation,
+        syntax=None if multi else code_renderer.syntax_for_path(mutation.path),
     )
 
 
@@ -405,7 +407,7 @@ def _same_path_modify_rows(
     source: list[tuple[int, PreviewLine]] = []
     for index, mutation in enumerate(mutations):
         if mutation.diff and mutation.diff.full_diff:
-            for changed in _changed_lines(mutation.diff.full_diff):
+            for changed in sorted(_changed_lines(mutation.diff.full_diff), key=_changed_line_sort_key):
                 source.append((index, PreviewLine(
                     format_numbered_change(changed.number, changed.text, indent=indent),
                     "add" if changed.kind == "add" else "delete",
@@ -516,9 +518,11 @@ def aggregate_file_mutations(
 
 def build_read_preview(block: ToolBlock) -> ToolPreview:
     target = _operand(block.arguments)
+    path = block.arguments.get("file_path") or block.arguments.get("path")
     return ToolPreview(
         kind="read", verb="read", target=target, summary=f"Read {target}",
         group="explore", action="expand",
+        syntax=code_renderer.syntax_for_path(str(path) if path else target),
     )
 
 
@@ -566,6 +570,7 @@ def build_write_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_U
         kind="write", verb="write", target=diff.path,
         detail=_mutation_count_detail(diff, "overwrite"),
         lines=lines, group="mutation", action="review",
+        syntax=code_renderer.syntax_for_path(diff.path),
     )
 
 
@@ -587,6 +592,7 @@ def build_edit_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI
     return ToolPreview(
         kind="edit", verb=verb, target=diff.path, detail=detail,
         lines=lines, group="mutation", action="review",
+        syntax=code_renderer.syntax_for_path(diff.path),
     )
 
 

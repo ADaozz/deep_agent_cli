@@ -183,7 +183,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 - **用户长消息**：发送后默认显示前 3 个终端显示行，超出时显示隐藏行数和 `Ctrl+B` 提示。`Ctrl+B` 切换长消息的展开状态；只改变显示，发送给模型和会话中保存的内容保持完整。待发送队列保持可见，可滚动查看。
 - **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。命令正文默认保留前 4 个显示行（`ui.head_lines`），实时输出保留按当前终端宽度折行后的最后 4 个显示行（`ui.tail_lines`），标题和隐藏提示另计，`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**（`ls`、`read`，以及历史会话里的 `glob`、`grep`）连续调用时合并显示：运行中为 `Exploring N items`，全部成功后为 `Explored N items`；等待、失败或中断时显示中性 `Explore` 并附状态提示。当前模型工具表不再提供 `glob` 和 `grep`。
-- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。`Edited` / `Wrote` 标题带 `(+n -m)`；`Created` 仅在新建文件附带非空内容时带 `(+n -0)` 并显示内容预览。单文件摘要行与 diff 块之间无空行。连续成功的同语义变更若涉及多个路径，合并为 `Edited N files (+total)` / `Created N files` / `Wrote N files`，每个文件一行 `└ path (+n -m)` 及各自 compact diff；每文件默认保留前 4 行变更（`ui.head_lines`），末尾汇总隐藏行数，`Ctrl+R` 查看完整内容。连续编辑同一文件的合并预览以 `Edit N` 标明每次编辑；行号相对于各自的替换片段，不代表文件中的绝对行号，完整审阅也会注明这一点。
+- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。`Edited` / `Wrote` 标题带 `(+n -m)`；`Created` 仅在新建文件附带非空内容时带 `(+n -0)` 并显示内容预览。单文件摘要行与 diff 块之间无空行。连续成功的同语义变更若涉及多个路径，合并为 `Edited N files (+total)` / `Created N files` / `Wrote N files`，每个文件一行 `└ path (+n -m)` 及各自 compact diff；每文件默认保留前 4 行变更（`ui.head_lines`），末尾汇总隐藏行数，`Ctrl+R` 查看完整内容。连续编辑同一文件的合并预览以 `Edit N` 标明每次编辑；行号相对于各自的替换片段，不代表文件中的绝对行号，完整审阅也会注明这一点。文件变更卡片、完整审阅、`read` 展开与助手 Markdown 围栏共用独立的 `CodeRenderer`（Pygments Lexer + `VSCodeDarkPlusStyle`，对齐 VS Code Dark+）；diff 在保留增删底色的同时叠加 token 前景色，旧/新两侧分别词法以免串色。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。耗时写入会话数据库，恢复会话时重建历史回合的耗时行；升级前未记录耗时的旧回合不补算。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。

@@ -6,10 +6,10 @@ import re
 from typing import Any
 
 from rich.console import Group
-from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
+from agent.cli.highlighting import code_renderer
 from agent.tools.human_interaction import ensure_other_option
 
 
@@ -349,7 +349,10 @@ class InteractionController:
         if self.reason:
             parts.append(Text(self.reason, style="dim"))
         if self.question:
-            parts.append(Text(self.question) if self.kind in {"approval", "mcp_confirm"} else Markdown(self.question))
+            parts.append(
+                Text(self.question) if self.kind in {"approval", "mcp_confirm"}
+                else code_renderer.markdown(self.question)
+            )
         if self.recommendation:
             value = self.recommendation.get("value") or ""
             why = self.recommendation.get("reason") or ""
