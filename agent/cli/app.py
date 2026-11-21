@@ -1398,14 +1398,12 @@ class CliApplication:
             block = self.state.blocks[index]
             if isinstance(block, ToolBlock) and is_mutation_tool(block.name):
                 mutation = normalize_file_mutation(block)
-                if mutation is not None and mutation.operation in {"create", "modify"}:
+                if mutation is not None and mutation.operation in {"create", "modify", "overwrite"}:
                     first = index
                     while first > 0:
                         prior = self.state.blocks[first - 1]
                         prior_mutation = normalize_file_mutation(prior) if isinstance(prior, ToolBlock) else None
                         if prior_mutation is None or prior_mutation.operation != mutation.operation:
-                            break
-                        if mutation.operation == "modify" and prior_mutation.path != mutation.path:
                             break
                         first -= 1
                     return [

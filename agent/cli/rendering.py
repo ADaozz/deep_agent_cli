@@ -31,6 +31,7 @@ from agent.cli.previews import (
     build_review_mutation,
     build_tool_preview,
     file_tool_preview,
+    format_numbered_change,
     normalize_file_mutation,
     tool_group,
 )
@@ -40,17 +41,37 @@ from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, Ui
 from agent.version import package_version
 
 
+# Diff palette: exact hex so truecolor terminals keep the intended shades.
+DIFF_ADD_BG = "#005f00"
+DIFF_DELETE_BG = "#5f0000"
+DIFF_ADD_MARKER = "#00af00"
+DIFF_DELETE_MARKER = "#af0000"
+DIFF_ADD_STAT = "#13a10e"
+DIFF_DELETE_STAT = "#c50f1f"
+DIFF_TRAIL_BG = "#0c0c0c"
+# Shared style for tree leaders (Ran └ output, explore ├/└, multi-file └ path, …).
+TREE_BRANCH_STYLE = "dim"
+
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {
     "plain": "",
     "dim": "dim",
     "hunk": "bold cyan",
-    # Use exact xterm-256 colors: muted RGB shades quantize to grayscale.
-    "add": "white on #005f00",
-    "delete": "white on #5f0000",
+    "add": f"white on {DIFF_ADD_BG}",
+    "delete": f"white on {DIFF_DELETE_BG}",
     "error": "red",
     "url": "bright_cyan",
 }
+
+
+def _tree_branch(
+    label: str, *, glyph: str = "└", indent: str = "  ", label_style: str | None = None,
+) -> Text:
+    """Shared `└` / `├` row. Default matches Ran: whole line dim; pass label_style to keep label undimmed."""
+    leader = f"{indent}{glyph} "
+    if label_style is None:
+        return Text(f"{leader}{label}", style=TREE_BRANCH_STYLE)
+    return Text.assemble((leader, TREE_BRANCH_STYLE), (label, label_style))
 
 
 def render_transcript(
@@ -267,12 +288,20 @@ def _next_unit(
             group.append(next_block)
             index += 1
         return _explore_unit(group, width, limits=limits, after_user=after_user), index
-    edit_path = _mergeable_modify_path(block)
-    if edit_path is not None:
+    if _is_mergeable_modify(block):
         group = [block]
         while index + len(group) < len(blocks):
             candidate = blocks[index + len(group)]
-            if _mergeable_modify_path(candidate) != edit_path:
+            if not _is_mergeable_modify(candidate):
+                break
+            group.append(candidate)
+        if len(group) > 1:
+            return _modify_group_unit(group, width, limits=limits, after_user=after_user), index + len(group)
+    if _is_mergeable_overwrite(block):
+        group = [block]
+        while index + len(group) < len(blocks):
+            candidate = blocks[index + len(group)]
+            if not _is_mergeable_overwrite(candidate):
                 break
             group.append(candidate)
         if len(group) > 1:
@@ -318,9 +347,14 @@ def _explore_unit(
     )
 
 
-def _mergeable_modify_path(block: Any) -> str | None:
+def _is_mergeable_modify(block: Any) -> bool:
     mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
-    return mutation.path if mutation and mutation.operation == "modify" and mutation.diff else None
+    return bool(mutation and mutation.operation == "modify" and mutation.diff)
+
+
+def _is_mergeable_overwrite(block: Any) -> bool:
+    mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
+    return bool(mutation and mutation.operation == "overwrite")
 
 
 def _created_file_path(block: Any) -> str | None:
@@ -347,12 +381,8 @@ def _create_group(
     mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
     if len(mutation.paths) == 1:
         return _tool(blocks[-1], expanded, width, limits=limits, after_user=after_user)
-    symbol, color = _tool_status_marker("completed")
-    title = Text.assemble((f"{symbol} ", color), (f"Created {len(mutation.paths)} files", "bold"))
-    rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
-    for row in (title, *rows):
-        row.truncate(max(1, width - 1), overflow="ellipsis")
-    return Group(*([] if after_user else [Text("")]), title, *rows)
+    preview = file_tool_preview(mutation)
+    return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
 
 
 def _modify_group_unit(
@@ -525,11 +555,11 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
         parts.append(Text(""))
         if mutation.operation == "overwrite":
             parts.append(Text(f"write {diff.path}", style="bold"))
-            parts.append(Text(added_line_label(diff.added or 0), style="green"))
+            parts.append(Text(added_line_label(diff.added or 0), style=DIFF_ADD_STAT))
             parts.append(Group(*(
                 row
                 for number, line in enumerate(diff.lines, 1)
-                for row in _diff_row(f"{number:>4} {line.text}", "add", width)
+                for row in _diff_row(format_numbered_change(number, line.text), "add", width)
             )))
         elif mutation.operation == "delete":
             parts.append(Text(f"delete {diff.path}", style="dim"))
@@ -542,20 +572,28 @@ def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
 
 
 def _diff_row(content: str, kind: str, width: int) -> list[Text]:
-    """Fill every visual row of a changed line, including wrapped rows."""
-    style = _PREVIEW_LINE_STYLES[kind]
+    """Wrap a diff line; add/delete highlight from line number through last visible char."""
     available = max(1, width - 1)  # Spare terminal column avoids auto-wrap.
     console = Console(width=max(20, width))
-    text = Text(content, style=style)
-    if kind in {"add", "delete"}:
-        marker = re.match(r"^ *[0-9]+ ([-+])", content)
-        if marker:
-            color = "#459745" if kind == "add" else "#c45555"
-            text.stylize(color, marker.start(1), marker.end(1))
+    if kind not in {"add", "delete"}:
+        return list(Text(content, style=_PREVIEW_LINE_STYLES[kind]).wrap(console, available, overflow="fold"))
+
+    bg = DIFF_ADD_BG if kind == "add" else DIFF_DELETE_BG
+    marker_fg = DIFF_ADD_MARKER if kind == "add" else DIFF_DELETE_MARKER
+    text = Text(content)
+    end = len(content.rstrip())
+    # Group 1 = line number, group 2 = +/- glued to the number; space before body.
+    matched = re.match(r"^ *([0-9]+)([-+])", content)
+    if matched and matched.start(1) < end:
+        text.stylize(f"white on {bg}", matched.start(1), end)
+        text.stylize(f"{marker_fg} on {bg}", matched.start(2), matched.end(2))
+    elif end:
+        text.stylize(f"white on {bg}", 0, end)
     rows = list(text.wrap(console, available, overflow="fold"))
-    if kind in {"add", "delete"}:
-        for row in rows:
-            row.pad_right(max(0, available - row.cell_len))
+    for row in rows:
+        pad = max(0, available - row.cell_len)
+        if pad:
+            row.append(" " * pad, f"on {DIFF_TRAIL_BG}")
     return rows
 
 
@@ -572,10 +610,10 @@ def _numbered_diff(raw: str, width: int) -> list[Text]:
         elif line.startswith(("---", "+++")):
             result.extend(_diff_row(line, "dim", width))
         elif line.startswith("-"):
-            result.extend(_diff_row(f"{old_number:>4} {line}", "delete", width))
+            result.extend(_diff_row(format_numbered_change(old_number, line), "delete", width))
             old_number += 1
         elif line.startswith("+"):
-            result.extend(_diff_row(f"{new_number:>4} {line}", "add", width))
+            result.extend(_diff_row(format_numbered_change(new_number, line), "add", width))
             new_number += 1
         elif line.startswith(" "):
             result.extend(_diff_row(f"{new_number:>4} {line}", "dim", width))
@@ -791,27 +829,27 @@ def _explore_group(
     rows: list[Text] = []
     hidden = count - limits.explore_preview_items
     if hidden > 0:
-        row = Text(f"  ├ … {hidden} more", style="dim")
+        row = _tree_branch(f"… {hidden} more", glyph="├")
         row.truncate(max(1, width - 1), overflow="ellipsis")
         rows.append(row)
     shown = previews[-limits.explore_preview_items:]
     for index, preview in enumerate(shown):
-        branch = "└" if index == len(shown) - 1 else "├"
-        row = Text.assemble((f"  {branch} ", "dim"), (_preview_label(preview), ""))
+        glyph = "└" if index == len(shown) - 1 else "├"
+        row = _tree_branch(_preview_label(preview), glyph=glyph, label_style="")
         row.truncate(max(1, width - 1), overflow="ellipsis")
         rows.append(row)
     if failed:
         omitted = max(0, len(failed) - limits.explore_failure_items)
         if omitted:
-            row = Text(f"  ├ … {omitted} more failed", style="dim")
+            row = _tree_branch(f"… {omitted} more failed", glyph="├")
             row.truncate(max(1, width - 1), overflow="ellipsis")
             rows.append(row)
         for block, preview in failed[-limits.explore_failure_items:]:
             reason = preview.detail
             row = Text.assemble(
-                (f"  ├ Failed (exit {_failure_code(block)}) ", "dim"),
+                (f"  ├ Failed (exit {_failure_code(block)}) ", TREE_BRANCH_STYLE),
                 (_preview_label(preview), ""),
-                (f": {reason}" if reason else "", "dim"),
+                (f": {reason}" if reason else "", TREE_BRANCH_STYLE),
             )
             row.truncate(max(1, width - 1), overflow="ellipsis")
             rows.append(row)
@@ -871,11 +909,12 @@ def render_tool_preview(
         summary = f"{'Running SubAgent' if block.status == 'running' else 'SubAgent'} · {preview.target}"
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
     mutation = preview.file_mutation
-    if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
+    counts = preview.detail if preview.detail.startswith("(+") and preview.detail.endswith(")") else ""
+    if mutation is not None and mutation.diff is not None and counts:
         title.append(" (")
-        title.append(f"+{mutation.diff.added or 0}", style="green")
+        title.append(f"+{mutation.diff.added or 0}", style=DIFF_ADD_STAT)
         title.append(" ")
-        title.append(f"-{mutation.diff.deleted or 0}", style="red")
+        title.append(f"-{mutation.diff.deleted or 0}", style=DIFF_DELETE_STAT)
         title.append(")")
     elif preview.group == "mutation" and preview.detail:
         title.append(f" {preview.detail}", style="bold")
@@ -887,7 +926,7 @@ def render_tool_preview(
     if preview.kind == "task":
         body.extend(_wrap_card_line(Text(f"  {preview.detail}", style="dim"), console, width))
         if block.output:
-            body.extend(_wrap_card_line(Text("  └ result", style="dim"), console, width))
+            body.extend(_wrap_card_line(_tree_branch("result"), console, width))
     if preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
     elif preview.lines:
@@ -968,7 +1007,7 @@ def _command_card(
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:
-        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(_tree_branch("output"), console, width))
     body.extend(_output_tail(lines, console, width, expanded=expanded, limit=limits.tail_lines))
 
     if preview.truncated:
@@ -982,11 +1021,23 @@ def _command_card(
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
+def _file_branch_row(content: str) -> Text | None:
+    """Multi-file `└ path (+n -m)` using the shared tree branch style."""
+    match = re.match(r"^└ (.+?)(?: \(\+(\d+) -(\d+)\))?$", content)
+    if match is None:
+        return None
+    text = _tree_branch(match.group(1), indent="", label_style="")
+    if match.group(2) is not None:
+        text.append(" (")
+        text.append(f"+{match.group(2)}", style=DIFF_ADD_STAT)
+        text.append(" ")
+        text.append(f"-{match.group(3)}", style=DIFF_DELETE_STAT)
+        text.append(")")
+    return text
+
+
 def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
     body: list[Any] = []
-    if preview.label:
-        body.append(Text(f"  {preview.label}", style="green"))
-        body.append(Text(""))
     console = Console(width=max(20, width))
     for line in preview.lines:
         if not line.text:
@@ -994,7 +1045,11 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
         elif line.style in {"add", "delete"}:
             body.extend(_diff_row(f"  {line.text}", line.style, width))
         else:
-            text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
+            header = _file_branch_row(line.text)
+            text = (
+                Text.assemble(("  ", ""), header) if header is not None
+                else Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
+            )
             body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
     return body
 
@@ -1014,7 +1069,7 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     else:
         lines = [line.text for line in preview.lines]
     if lines:
-        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(_tree_branch("output"), console, width))
         for line in lines:
             body.extend(_wrap_card_line(Text(f"    {line}", style="dim"), console, width, indent=4))
     return Group(*body)

@@ -213,12 +213,22 @@ def _select_changed_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimit
     return selected
 
 
-def _format_changed_text(line: str) -> str:
-    prefix, content = line[:1], line[1:]
-    return f"{prefix} {content}" if content else prefix
+def format_numbered_change(number: int, unified_line: str, *, indent: str = "") -> str:
+    """Render `  12- content`: marker glued to the line number, space before body."""
+    prefix, content = unified_line[:1], unified_line[1:]
+    if prefix not in "+-":
+        return f"{indent}{number:>4} {unified_line}"
+    body = f"{prefix} {content}" if content else prefix
+    return f"{indent}{number:>4}{body}"
 
 
-def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> tuple[PreviewLine, ...]:
+def _edit_display_lines(
+    changed: list[_ChangedLine],
+    *,
+    limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    indent: str = "",
+    with_hidden_footer: bool = True,
+) -> tuple[tuple[PreviewLine, ...], int]:
     """Compact edit body: changed lines only, ⋮ at skipped spans, hidden count.
 
     A ⋮ marks a snippet-number jump or hunk boundary after number-then-/+
@@ -226,22 +236,21 @@ def _edit_display_lines(changed: list[_ChangedLine], *, limits: UiDisplayLimits 
     """
     selected = _select_changed_lines(changed, limits=limits)
     if not selected:
-        return ()
-    display: list[PreviewLine] = [PreviewLine("", "plain")]
+        return (), len(changed)
+    display: list[PreviewLine] = []
     previous: _ChangedLine | None = None
     for line in selected:
         if previous is not None and (line.hunk != previous.hunk or line.number > previous.number + 1):
-            display.append(PreviewLine("  ⋮", "dim"))
+            display.append(PreviewLine(f"{indent}  ⋮", "dim"))
         display.append(PreviewLine(
-            f"{line.number:>4} {_format_changed_text(line.text)}",
+            format_numbered_change(line.number, line.text, indent=indent),
             "add" if line.kind == "add" else "delete",
         ))
         previous = line
     hidden = len(changed) - len(selected)
-    if hidden > 0:
-        display.append(PreviewLine("", "plain"))
+    if with_hidden_footer and hidden > 0:
         display.append(PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim"))
-    return tuple(display)
+    return tuple(display), hidden
 
 
 def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
@@ -263,6 +272,7 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
         return DiffPreview(
             path=_mutation_path(name, args),
             added=len(content_lines),
+            deleted=0,
             lines=tuple(PreviewLine(line, "add") for line in content_lines),
             full_diff=raw,
         )
@@ -303,17 +313,23 @@ def build_diff_preview(name: str, args: dict[str, Any]) -> DiffPreview | None:
     return None
 
 
-def _write_compact_lines(diff: DiffPreview | None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> tuple[PreviewLine, ...]:
+def _write_compact_lines(
+    diff: DiffPreview | None,
+    *,
+    limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    indent: str = "",
+    with_hidden_footer: bool = True,
+) -> tuple[tuple[PreviewLine, ...], int]:
     if diff is None:
-        return ()
+        return (), 0
     lines = [
-        PreviewLine(f"{number:>4} {line.text}", line.style)
+        PreviewLine(format_numbered_change(number, line.text, indent=indent), line.style)
         for number, line in enumerate(diff.lines[:limits.head_lines], 1)
     ]
     hidden = len(diff.lines) - len(lines)
-    if hidden:
+    if with_hidden_footer and hidden:
         lines.append(PreviewLine(f"… {hidden} lines hidden · {REVIEW_HINT}", "dim"))
-    return tuple(lines)
+    return tuple(lines), hidden
 
 
 def normalize_file_mutation(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> FileMutationPreview | None:
@@ -322,20 +338,22 @@ def normalize_file_mutation(block: ToolBlock, *, limits: UiDisplayLimits = DEFAU
         return None
     if block.name == "edit":
         diff = build_diff_preview(block.name, block.arguments)
+        lines, _ = (
+            _edit_display_lines(_changed_lines(diff.full_diff), limits=limits)
+            if diff else ((), 0)
+        )
         return FileMutationPreview(
             path=diff.path if diff else _operand(block.arguments),
-            operation="modify", diff=diff,
-            compact_lines=_edit_display_lines(_changed_lines(diff.full_diff), limits=limits) if diff else (),
+            operation="modify", diff=diff, compact_lines=lines,
         )
     if block.name == "write":
         operation = block.artifact.get("operation") if isinstance(block.artifact, dict) else None
         if operation not in {"create", "overwrite"}:
             return None
-        diff = build_diff_preview(block.name, block.arguments) if operation == "overwrite" else None
+        diff = build_diff_preview(block.name, block.arguments)
+        lines, _ = _write_compact_lines(diff, limits=limits) if diff else ((), 0)
         return FileMutationPreview(
-            path=_operand(block.arguments), operation=operation, diff=diff,
-            compact_lines=_write_compact_lines(diff, limits=limits) if operation == "overwrite" else (),
-            label=added_line_label(diff.added or 0) if operation == "overwrite" and diff else "",
+            path=_operand(block.arguments), operation=operation, diff=diff, compact_lines=lines,
         )
     if block.name == "delete":
         return FileMutationPreview(path=_operand(block.arguments), operation="delete")
@@ -353,72 +371,146 @@ def build_review_mutation(name: str, args: dict[str, Any]) -> FileMutationPrevie
     return FileMutationPreview(path=diff.path, operation=operation, diff=diff)
 
 
+def _mutation_count_detail(diff: DiffPreview | None, operation: FileMutationOperation) -> str:
+    if diff is None:
+        return ""
+    added, deleted = diff.added or 0, diff.deleted or 0
+    if operation == "create" and added == 0 and deleted == 0:
+        return ""
+    if operation in {"create", "modify", "overwrite"}:
+        return f"(+{added} -{deleted})"
+    return ""
+
+
 def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
     verb = {"create": "Created", "modify": "Edited", "overwrite": "Wrote", "delete": "Deleted"}[mutation.operation]
-    detail = ""
-    if mutation.operation == "modify" and mutation.diff:
-        detail = f"(+{mutation.diff.added or 0} -{mutation.diff.deleted or 0})"
+    multi = len(mutation.paths) > 1
+    target = f"{len(mutation.paths)} files" if multi else mutation.path
     return ToolPreview(
-        kind="file_mutation", verb=verb, target=mutation.path, detail=detail,
-        label=mutation.label, lines=mutation.compact_lines,
+        kind="file_mutation", verb=verb, target=target,
+        detail=_mutation_count_detail(mutation.diff, mutation.operation),
+        lines=mutation.compact_lines,
         group="mutation", action="review", file_mutation=mutation,
     )
+
+
+def _same_path_modify_rows(
+    mutations: list[FileMutationPreview],
+    *,
+    limits: UiDisplayLimits,
+    indent: str = "",
+    with_hidden_footer: bool = True,
+) -> tuple[list[PreviewLine], int, int, int]:
+    """Merge consecutive edits to one path: Edit N headers + shared head_lines budget."""
+    source: list[tuple[int, PreviewLine]] = []
+    for index, mutation in enumerate(mutations):
+        if mutation.diff and mutation.diff.full_diff:
+            for changed in _changed_lines(mutation.diff.full_diff):
+                source.append((index, PreviewLine(
+                    format_numbered_change(changed.number, changed.text, indent=indent),
+                    "add" if changed.kind == "add" else "delete",
+                )))
+            continue
+        for line in mutation.compact_lines:
+            if line.style in {"add", "delete"}:
+                source.append((index, PreviewLine(f"{indent}{line.text.lstrip()}", line.style)))
+    selected = list(enumerate(source[:limits.head_lines]))
+    if len(source) > limits.head_lines:
+        kinds = {line.style for _, line in source}
+        shown = {line.style for _, (_, line) in selected}
+        if limits.head_lines >= 2 and len(kinds) == 2 and len(shown) == 1:
+            replacement = next((order, item) for order, item in enumerate(source) if item[1].style not in shown)
+            selected[-1] = replacement
+            selected.sort(key=lambda item: item[0])
+    rows: list[PreviewLine] = []
+    previous_order = previous_edit = None
+    for order, (edit_index, line) in selected:
+        if len(mutations) > 1 and edit_index != previous_edit:
+            rows.append(PreviewLine(f"{indent}Edit {edit_index + 1} · snippet line numbers", "dim"))
+        elif previous_order is not None and order != previous_order + 1:
+            rows.append(PreviewLine(f"{indent}  ⋮", "dim"))
+        rows.append(line)
+        previous_order, previous_edit = order, edit_index
+    added = sum(mutation.diff.added or 0 for mutation in mutations if mutation.diff)
+    deleted = sum(mutation.diff.deleted or 0 for mutation in mutations if mutation.diff)
+    hidden = max(0, len(source) - len(selected))
+    if with_hidden_footer and hidden:
+        rows.append(PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim"))
+    return rows, added, deleted, hidden
+
+
+def _path_write_rows(
+    mutation: FileMutationPreview,
+    *,
+    limits: UiDisplayLimits,
+    indent: str = "  ",
+) -> tuple[list[PreviewLine], int, int, int]:
+    added = mutation.diff.added or 0 if mutation.diff else 0
+    deleted = mutation.diff.deleted or 0 if mutation.diff else 0
+    lines, hidden = _write_compact_lines(
+        mutation.diff, limits=limits, indent=indent, with_hidden_footer=False,
+    )
+    return list(lines), added, deleted, hidden
 
 
 def aggregate_file_mutations(
     mutations: list[FileMutationPreview], *, expanded: bool = False, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
 ) -> FileMutationPreview:
     """Select compact rows for a consecutive semantic mutation group."""
+    del expanded  # Multi-file cards always list every path in the consecutive group.
     first = mutations[0]
-    if first.operation == "create":
-        paths = tuple(dict.fromkeys(mutation.path for mutation in mutations))
-        hidden = 0 if expanded else max(0, len(paths) - limits.create_preview_items)
-        rows: list[PreviewLine] = []
-        if hidden:
-            rows.append(PreviewLine(f"  ├ … {hidden} more", "dim"))
-        shown = paths if expanded else paths[-limits.create_preview_items:]
-        for index, path in enumerate(shown):
-            branch = "└" if index == len(shown) - 1 else "├"
-            rows.append(PreviewLine(f"  {branch} {path}"))
-        if not expanded:
-            rows.append(PreviewLine(f"  {EXPAND_HINT}", "dim"))
+    if first.operation not in {"create", "modify", "overwrite"}:
+        raise ValueError("Only create, modify, and overwrite mutations can be grouped")
+
+    ordered_paths: list[str] = []
+    by_path: dict[str, list[FileMutationPreview]] = {}
+    for mutation in mutations:
+        if mutation.path not in by_path:
+            ordered_paths.append(mutation.path)
+            by_path[mutation.path] = []
+        by_path[mutation.path].append(mutation)
+    paths = tuple(ordered_paths)
+
+    if len(paths) == 1:
+        path_mutations = by_path[paths[0]]
+        if first.operation == "modify":
+            rows, added, deleted, _ = _same_path_modify_rows(path_mutations, limits=limits)
+            return FileMutationPreview(
+                path=paths[0], operation="modify",
+                diff=DiffPreview(path=paths[0], added=added, deleted=deleted),
+                compact_lines=tuple(rows), paths=paths,
+            )
+        latest = path_mutations[-1]
         return FileMutationPreview(
-            path=first.path, operation="create", compact_lines=tuple(rows), paths=paths,
+            path=latest.path, operation=latest.operation, diff=latest.diff,
+            compact_lines=latest.compact_lines, paths=paths,
         )
-    if first.operation != "modify":
-        raise ValueError("Only create and modify mutations can be grouped")
-    changes = [
-        (index, line)
-        for index, mutation in enumerate(mutations)
-        for line in mutation.compact_lines
-        if line.style in {"add", "delete"}
-    ]
-    selected = list(enumerate(changes[:limits.head_lines]))
-    if len(changes) > limits.head_lines:
-        kinds = {line.style for _, line in changes}
-        shown = {line.style for _, (_, line) in selected}
-        if limits.head_lines >= 2 and len(kinds) == 2 and len(shown) == 1:
-            replacement = next((order, item) for order, item in enumerate(changes) if item[1].style not in shown)
-            selected[-1] = replacement
-            selected.sort(key=lambda item: item[0])
-    rows = [PreviewLine("")]
-    previous_order = previous_edit = None
-    for order, (edit_index, line) in selected:
-        if edit_index != previous_edit:
-            rows.append(PreviewLine(f"Edit {edit_index + 1} · snippet line numbers", "dim"))
-        elif previous_order is not None and order != previous_order + 1:
-            rows.append(PreviewLine("  ⋮", "dim"))
-        rows.append(line)
-        previous_order, previous_edit = order, edit_index
-    added = sum(mutation.diff.added or 0 for mutation in mutations if mutation.diff)
-    deleted = sum(mutation.diff.deleted or 0 for mutation in mutations if mutation.diff)
-    hidden = added + deleted - len(selected)
-    if hidden:
-        rows.extend((PreviewLine(""), PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim")))
+
+    rows: list[PreviewLine] = []
+    total_added = total_deleted = total_hidden = 0
+    for path in paths:
+        path_mutations = by_path[path]
+        if first.operation == "modify":
+            file_rows, added, deleted, hidden = _same_path_modify_rows(
+                path_mutations, limits=limits, indent="  ", with_hidden_footer=False,
+            )
+        else:
+            file_rows, added, deleted, hidden = _path_write_rows(path_mutations[-1], limits=limits)
+        total_added += added
+        total_deleted += deleted
+        total_hidden += hidden
+        count = _mutation_count_detail(
+            DiffPreview(path=path, added=added, deleted=deleted), first.operation,
+        )
+        suffix = f" {count}" if count else ""
+        rows.append(PreviewLine(f"└ {path}{suffix}"))
+        rows.extend(file_rows)
+    if total_hidden:
+        rows.append(PreviewLine(f"… {total_hidden} changed lines hidden · {REVIEW_HINT}", "dim"))
     return FileMutationPreview(
-        path=first.path, operation="modify",
-        diff=DiffPreview(path=first.path, added=added, deleted=deleted),
-        compact_lines=tuple(rows), paths=tuple(mutation.path for mutation in mutations),
+        path=first.path, operation=first.operation,
+        diff=DiffPreview(path=first.path, added=total_added, deleted=total_deleted),
+        compact_lines=tuple(rows), paths=paths,
     )
 
 
@@ -469,10 +561,11 @@ def build_write_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_U
             kind="write", verb="write", target=_operand(block.arguments),
             group="mutation",
         )
+    lines, _ = _write_compact_lines(diff, limits=limits)
     return ToolPreview(
         kind="write", verb="write", target=diff.path,
-        label=added_line_label(diff.added or 0),
-        lines=_write_compact_lines(diff, limits=limits), group="mutation", action="review",
+        detail=_mutation_count_detail(diff, "overwrite"),
+        lines=lines, group="mutation", action="review",
     )
 
 
@@ -487,14 +580,13 @@ def build_edit_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI
             kind="edit", verb=verb, target=_operand(block.arguments),
             group="mutation",
         )
-    if block.status == "completed" and diff.added is not None and diff.deleted is not None:
+    lines, _ = _edit_display_lines(_changed_lines(diff.full_diff), limits=limits)
+    detail = ""
+    if diff.added is not None and diff.deleted is not None:
         detail = f"(+{diff.added} -{diff.deleted})"
-    else:
-        detail = ""
     return ToolPreview(
         kind="edit", verb=verb, target=diff.path, detail=detail,
-        lines=_edit_display_lines(_changed_lines(diff.full_diff), limits=limits),
-        group="mutation", action="review",
+        lines=lines, group="mutation", action="review",
     )
 
 

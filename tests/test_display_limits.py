@@ -145,12 +145,11 @@ def test_file_preview_and_create_list_limits() -> None:
     edit_two = replace(edit, tool_call_id="edit-two")
     grouped = plain(render_transcript(CliState(blocks=[edit, edit_two]), 100, limits=configured))
     assert "10 changed lines hidden" in grouped
-    creates = [ToolBlock(str(i), "write", {"file_path": f"file{i}"}, artifact={"operation": "create"}, status="completed") for i in range(5)]
+    creates = [ToolBlock(str(i), "write", {"file_path": f"file{i}", "content": "x"}, artifact={"operation": "create"}, status="completed") for i in range(5)]
     state = CliState(blocks=creates)
     text = plain(render_transcript(state, 100, limits=configured))
-    assert "3 more" in text and "file2" not in text and "file3" in text and "file4" in text
-    state.tools_expanded = True
-    assert "file0" in plain(render_transcript(state, 100, limits=configured))
+    assert "Created 5 files (+5 -0)" in text
+    assert all(f"└ file{i} (+1 -0)" in text for i in range(5))
 
 
 def test_exploration_and_failure_summary_limits() -> None:

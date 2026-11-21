@@ -352,7 +352,7 @@ ui:
 | `tail_lines` | `3` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
-| `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
+| `create_preview_items` | `5` | 保留字段；多文件 `Created N files` 现列出连续组内全部路径，每文件 diff 行数由 `head_lines` 控制 |
 | `editor_max_lines` | `5` | 输入框最多显示 5 行，可配置更小值；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
 

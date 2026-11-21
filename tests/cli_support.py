@@ -22,7 +22,7 @@ _ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def without_diff_number(text: str) -> str:
-    return re.sub(r"^\s*\d+ (?=[+-])", "", text)
+    return re.sub(r"^\s*\d+(?=[+-])", "", text)
 
 
 def plain(rendered: str) -> str:
