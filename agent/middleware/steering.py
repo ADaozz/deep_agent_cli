@@ -35,7 +35,12 @@ class SteeringMiddleware(AgentMiddleware):
         return self._consume(state)
 
     def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:  # noqa: ANN401
-        response = handler(request)
+        return self._apply_steering(handler(request))
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return self._apply_steering(await handler(request))
+
+    def _apply_steering(self, response: Any) -> Any:
         text = self._controller.pop_steering()
         if text is None:
             return response

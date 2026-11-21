@@ -30,7 +30,7 @@ deep-agent --version
 | `/resume` | 列出有内容的会话并选择；`/resume <id前缀>` 直接切换 |
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
-| `/permission ask\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
+| `/permission ask\|auto\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
 | `/mcp` | 查看 MCP 全局开关和宿主服务。`/mcp enable` 打开并自动连接；`/mcp disable` 关闭连接和工具，但保留配置与 OAuth 缓存。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。关闭期间只能查询和 `/mcp enable`。工具审批统一由 `/permission` 控制；服务在宿主运行，不受 Bubblewrap 限制 |
 | `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
@@ -132,7 +132,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 主 Agent 空闲时按 Esc 只取消后台任务，被取消的任务不会唤醒主 Agent。新建或切换会话会取消后台任务并丢弃其结果。
 
 `deep-agent resume` 通过 `tool_call_id` 恢复原任务描述和结果；不读取 JSONL、不额外调用模型。子 Agent 内部思考、Token、文件工具、execute 和内部日志仍不转发到主界面。
-子任务使用沙箱 `allow`，没有审批和主动提问入口，也不装载 MCP 或再次委派。
+Auto 子任务使用相同的风险分类，需要人工确认时返回父任务处理。其余模式的子任务使用沙箱 `allow`。子任务没有审批和主动提问入口，也不装载 MCP 或再次委派。
 Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务）；退出沿用既有 Ctrl+C、Ctrl+D 和 `/exit` 规则。
 
 主模型切换只影响下一次派生使用的模型 Profile；示例配置 `subagents.reasoning_effort: default` 使用子模型原生默认强度，不向 API 发送强度参数，
@@ -202,7 +202,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 
 终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / DISK、Git、Services、Tool Health 工具调用热力图和聊天。DISK 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，显示分支与状态。Services 无服务时显示 `0 running`，有服务时显示名称、PID 和监听端口，`ns:` 标记沙箱内 PID。聊天区占据剩余高度，输入框固定在底部。可用鼠标左键拖选侧栏文字，松开时复制到剪贴板。
 
-按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。热力图按每 3 次完成调用分组，展示最近 60 次中的活跃度及失败位置。聊天问题最多 4,000 字。聊天气泡与主转录区共用 Rich Markdown → ANSI 渲染路径，列表、加粗等按 Markdown 显示。模型回复按原文展示（去掉控制字符后，普通回复最长 1600 字、主动观察最多 400 字），不再做句数或汉字过滤。对话侧可只读检查当前主会话：`inspect_current_session` 提供 `recent_tools` / `tool_detail` / `recent_messages`，与统计类 `session_evidence` 配合排查失败。日常采集、异常检测和每轮复盘在本地完成；异常或主动提问才会调用独立的 `deepseek/deepseek-flash`。模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，其次读取配置目录中的 `companion.key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
+按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。热力图按每 3 次完成调用分组，展示最近 60 次中的活跃度及失败位置。聊天问题最多 4,000 字。聊天气泡与主转录区共用 Rich Markdown → ANSI 渲染路径，列表、加粗等按 Markdown 显示。模型回复按原文展示（去掉控制字符后，普通回复最长 1600 字、主动观察最多 400 字），不再做句数或汉字过滤。对话侧可只读检查当前主会话：`inspect_current_session` 提供 `recent_tools` / `tool_detail` / `recent_messages`，与统计类 `session_evidence` 配合排查失败。日常采集、异常检测和每轮复盘在本地完成；异常或主动提问才会调用独立的 `deepseek/deepseek-flash`。Lain Worker 使用启动时由主进程传入的 `llm.models.deepseek.api_key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
 
 ### `/status details` 性能统计口径
 

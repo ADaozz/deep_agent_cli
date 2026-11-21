@@ -31,3 +31,6 @@ class AttachmentMaterializationMiddleware(AgentMiddleware):
             return handler(request)
         messages = materialize_attachment_refs(request.messages, store)
         return handler(request.override(messages=messages)) if messages is not request.messages else handler(request)
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return await self.wrap_model_call(request, handler)

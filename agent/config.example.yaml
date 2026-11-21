@@ -115,6 +115,7 @@ llm:
     # --- DeepSeek 官方：Chat Completions API ---
     # https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
     deepseek:
+      # DeepSeek 模型、网页搜索和抓取、Lain 与 Auto 审批共用此来源级凭据。
       api_key: ${DEEPSEEK_API_KEY}
       base_url: https://api.deepseek.com/v1
       api: chat_completions

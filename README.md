@@ -154,7 +154,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 - **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示并以 Markdown 渲染；聊天历史可用鼠标滚轮翻看。可只读检查当前会话的工具明细与近期消息。
 - **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据说明异常，也可应用户要求复盘。
 
-Lain 的模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，也可保存在 `~/.deep-agent/companion.key`。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
+Lain 使用 `llm.models.deepseek.api_key`，与 DeepSeek 模型、网页工具和 Auto 审批共用凭据。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
 
 ## 架构与安全
 
@@ -175,9 +175,10 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 | 模式 | 审批 | 命令网络 |
 |---|---|---|
 | **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索和抓取、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
+| 沙箱 + `auto` | 自动放行工作区内常规写入及网页工具，DeepSeek Flash 评估命令和删除操作，需要确认时显示审批面板 | 按本次命令的 `network` 参数决定 |
 | 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
-SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权限，即使主 Agent 处于 `ask` 也不弹出子任务审批；子 Agent 不装载 MCP、人工输入或递归委派工具。其默认思考强度使用子模型原生默认，不继承主 Agent 的强度。
+SubAgent 共享已验证的沙箱 Backend 和 Pool，主 Agent 处于 `auto` 时子任务也使用 Auto，需要人工确认的操作返回父任务处理；其他模式下子任务使用 `allow`；子 Agent 不装载 MCP、人工输入或递归委派工具。其默认思考强度使用子模型原生默认，不继承主 Agent 的强度。
 
 只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，根级 `enabled` 是全局开关（默认开启）；用 `/mcp`、`/mcp enable`、`/mcp disable` 或 `mcp_add` / `mcp_remove` 管理。全局关闭时不连接、不启动 stdio、不打开 OAuth，也不把 MCP 工具交给模型；配置和令牌缓存仍保留。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
@@ -17,7 +18,8 @@ class ToolCancelMiddleware(AgentMiddleware):
         super().__init__()
         self._controller = controller
 
-    def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+    @contextmanager
+    def _tool_context(self, request: Any):
         tool_call = getattr(request, "tool_call", None) or {}
         tool_name = str(tool_call.get("name") or getattr(getattr(request, "tool", None), "name", "") or "tool")
         tool_call_id = str(tool_call.get("id") or "")
@@ -29,12 +31,21 @@ class ToolCancelMiddleware(AgentMiddleware):
                 ctx.register_callback(cancel)
         try:
             if ctx.cancelled:
-                return ToolMessage(
+                yield ToolMessage(
                     content="Cancelled by user.",
                     tool_call_id=tool_call_id or tool_name,
                     name=tool_name,
                     status="error",
                 )
-            return handler(request)
+            else:
+                yield None
         finally:
             self._controller.close_tool_context(ctx)
+
+    def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        with self._tool_context(request) as blocked:
+            return blocked if blocked is not None else handler(request)
+
+    async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        with self._tool_context(request) as blocked:
+            return blocked if blocked is not None else await handler(request)

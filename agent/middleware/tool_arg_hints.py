@@ -44,6 +44,9 @@ class ToolArgHintMiddleware(AgentMiddleware):
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
         return _rewrite(request, handler(request))
 
+    async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return _rewrite(request, await handler(request))
+
 
 def _rewrite(request: Any, result: Any) -> Any:
     if not isinstance(result, ToolMessage) or result.status != "error":

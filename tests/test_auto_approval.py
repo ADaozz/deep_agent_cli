@@ -87,7 +87,7 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
         AIMessage(content="", tool_calls=[{"name": "start_task", "id": "delegate", "args": {
             "description": "inspect delegated item", "subagent_type": "general-purpose"}}]),
         AIMessage(content="", tool_calls=[{"name": "execute", "id": "child-call", "args": {"command": "test"}}]),
-        AIMessage(content="parent approval required"), AIMessage(content="done"),
+        AIMessage(content="done"),
     ])
     with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
         runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path, resolved_deepseek_api_key="test"))
@@ -97,6 +97,10 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
         assert backend.calls == []
         assert calls[0]["user_request"] == "original parent request"
         assert calls[0]["current_task"] == "inspect delegated item"
+        messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+        reply = next(m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == "delegate")
+        assert "execute (child-call)" in reply.content
+        assert "需要人工审批" in reply.content
 
 
 def test_mcp_auto_trust_is_explicit_and_persistent():
@@ -173,6 +177,7 @@ def test_independent_classifier(monkeypatch, responses, outcome, count):
         assert request.headers["Authorization"] == "Bearer unified"
         body = json.loads(request.content)
         assert body["model"] == "deepseek-flash"
+        assert body["reasoning_effort"] == ("low" if sent else "none")
         sent.append(body)
         item = responses[len(sent) - 1]
         if item is None:
@@ -282,3 +287,39 @@ def test_external_tools_follow_server_trust_snapshot():
         assert [call["toolCallId"] for call in waiting.pending_tool_calls] == ["mcp__manual__tool"]
         assert runner.reject_tool("mcp__manual__tool").status == "completed"
         assert invoked == ["mcp__trusted__tool"]
+
+
+def test_async_graph_reviews_and_resumes_without_blocking_the_loop(monkeypatch):
+    from agent.bootstrap.factory import create_agent
+    from langgraph.types import Command
+
+    async def scenario():
+        started, release = asyncio.Event(), asyncio.Event()
+        backend = CountingBackend()
+        backend.calls = []
+
+        async def review(*args):
+            started.set()
+            await release.wait()
+            return Decision("ask", "manual")
+
+        monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+        selection = BackendSelection(backend, ExecutionMode.SANDBOXED)
+        with patch("agent.bootstrap.factory.select_backend", return_value=selection):
+            graph = create_agent(settings=Settings(resolved_deepseek_api_key="test"), permission_mode="auto",
+                                 model=scripted_model([
+                                     AIMessage(content="", tool_calls=[{"name": "execute", "id": "call",
+                                                                        "args": {"command": "example"}}]),
+                                     AIMessage(content="done"),
+                                 ])).graph
+        config = {"configurable": {"thread_id": "async-example"}}
+        pending = asyncio.create_task(graph.ainvoke({"messages": [("user", "test")]}, config))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert not pending.done()
+        release.set()
+        assert (await pending)["__interrupt__"]
+        assert not backend.calls
+        await graph.ainvoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+        assert backend.calls == ["example"]
+
+    asyncio.run(scenario())

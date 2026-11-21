@@ -178,7 +178,7 @@ class Companion:
         self.anchor = None
         self.frame = []
         self.changed = asyncio.Event()
-        if os.environ.get("COMPANION_DEEPSEEK_API_KEY") or (config_dir / "companion.key").exists():
+        if "COMPANION_DEEPSEEK_API_KEY" in os.environ or (config_dir / "companion.key").exists():
             import warnings
             warnings.warn("旧 Companion 凭据已停用，请配置 llm.models.deepseek.api_key", UserWarning, stacklevel=2)
 

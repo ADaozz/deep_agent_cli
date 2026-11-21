@@ -14,7 +14,7 @@ CLI 按以下顺序查找主配置：
 - 主配置、`~/.deep-agent/skills/` 和按键配置目录必须位于工作区之外，否则启动报错。因此不能把家目录（或其上层目录）作为工作区启动。
 - 配置中的相对路径相对于配置文件所在目录解析；例外是 `sandbox.workspace: .`，它表示启动时的当前目录。
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
-- 只有 `api_key` 和 `web_tools.api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
+- 模型 `api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；其他供应商引用未设置的变量时报错。DeepSeek 来源级凭据缺失时按下文降级。
 
 ## Lain 侧栏（`companion`）
 
@@ -111,6 +111,8 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
   }
 }
 ```
+
+在私有 `mcp.json` 的某个服务对象中写入 `"auto_approve": true`，表示在 Auto 模式下信任该服务当前及后续新增的全部工具。省略时逐次人工确认。模型发起的 `mcp_add` 无法设置此标志，删除服务后同名重建需重新指定信任。新增和删除服务在 Auto 下始终需人工确认。
 
 MCP HTTP 请求与模型、DeepSeek 网页工具客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_list` / `mcp_add` / `mcp_remove` 修改。`mcp_list` 只读、免审批；`mcp_add` / `mcp_remove` 在 `ask` 下需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。全局关闭时不注入这些管理工具。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
 
@@ -259,14 +261,22 @@ system prompt 按顺序由三部分组成：内置身份说明、`agent.instruct
 
 ## 网页搜索与抓取
 
-设置 `DEEPSEEK_API_KEY` 环境变量，或在私有配置中填写 `web_tools.api_key`。
+在私有配置中设置 DeepSeek 来源级凭据。以下片段可放入已有模型配置。
 
 ```yaml
-web_tools:
-  api_key: ${MY_DEEPSEEK_API_KEY}
+llm:
+  models:
+    deepseek:
+      api_key: ${DEEPSEEK_API_KEY}
+      base_url: https://api.deepseek.com/v1
+      api: chat_completions
+      models:
+        deepseek-flash: {}
 ```
 
-`DEEPSEEK_API_KEY` 优先于配置文件的值。两个工具使用同一个 DeepSeek API Key，凭据配置独立于当前对话模型。没有凭据时，两者均不注册。
+配置加载时解析一次 `llm.models.deepseek.api_key`。可以引用其他环境变量或填写私有配置中的字面值。DeepSeek 主模型、子模型、网页工具、Lain 和 Auto 审批使用同一解析结果，各自创建客户端。若未配置此字段或引用变量未设置，网页工具不注册，Lain 继续本地监控，Auto 退回 Ask。选择 DeepSeek 模型时会提示缺少凭据。其他模型来源使用各自配置。
+
+迁移时将非空的旧 `web_tools.api_key` 或 DeepSeek 模型级密钥移到来源级，并移除旧字段。旧 Lain 环境变量和密钥文件停用，已有文件由用户自行管理。
 
 | 工具 | 参数与结果 |
 | --- | --- |
@@ -314,7 +324,7 @@ web_tools:
 
 `source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
 
-用户可以缩小到单个版本或所需子目录，也可以显式扩大可见范围；挂载调整不改变 `ask` / `allow` 的审批规则。只读挂载禁止写入，仍会暴露目录中的敏感文件。缓存自定义目录、WSLg 源路径和配置合并示例见 [沙箱与权限](sandbox.md#工具目录与环境变量)。
+用户可以缩小到单个版本或所需子目录，也可以显式扩大可见范围；挂载调整不改变 当前权限模式的审批规则。只读挂载禁止写入，仍会暴露目录中的敏感文件。缓存自定义目录、WSLg 源路径和配置合并示例见 [沙箱与权限](sandbox.md#工具目录与环境变量)。
 
 ## 路径（`paths`）
 
@@ -415,7 +425,7 @@ fgo:
 | `DEEP_AGENT_CONFIG` | 主配置文件路径 |
 | `DEEP_AGENT_CONFIG_DIR` | `paths.config_dir` 未设置时的按键与文案目录 |
 | `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径 |
-| `DEEPSEEK_API_KEY` | DeepSeek 网页工具密钥，优先于 `web_tools.api_key` |
+| `DEEPSEEK_API_KEY` | 示例配置中 `llm.models.deepseek.api_key` 引用的环境变量，仅在 YAML 引用时读取 |
 
 
 ## 百炼官方来源
@@ -478,7 +488,7 @@ subagents:
 直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
 此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
 当前原生 `start_task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
-当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
+主 Agent 使用 Auto 时，子任务也使用 Auto 分类。需要人工确认的子任务操作会被阻止并反馈给父任务。其他模式下子任务沿用 `allow`；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，

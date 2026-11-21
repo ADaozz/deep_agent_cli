@@ -14,7 +14,7 @@ from contextvars import Context
 from typing import Any, Callable
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from agent.runtime.auto_approval import delegating_user_request
@@ -236,6 +236,13 @@ class SubAgentRuntime(Runnable):
                  "callbacks": [callback]},
                 stream_mode="values", control=controller.run_control,
             ):
+                # Deliver a host decision to the parent even if the child
+                # model would omit the refusal from its final answer.
+                for message in reversed(final.get("messages", [])):
+                    if not isinstance(message, ToolMessage):
+                        break
+                    if message.artifact == {"auto_approval": "requires_parent_approval"}:
+                        raise RuntimeError(f"{message.name} ({message.tool_call_id}): {message.content}")
                 if final.get("__interrupt__"):
                     raise RuntimeError("Subagents cannot request user interaction")
             if controller.cancel_requested:

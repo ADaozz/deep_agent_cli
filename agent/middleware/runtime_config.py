@@ -16,3 +16,6 @@ class RuntimeConfigGateMiddleware(AgentMiddleware):
         if self._has_pending():
             interrupt({"type": "runtime_config_boundary"})
         return handler(request)
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return await self.wrap_model_call(request, handler)

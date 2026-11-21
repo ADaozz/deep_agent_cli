@@ -86,9 +86,9 @@ flowchart TB
 | `ls`、`read` | Deep Agents 文件系统中间件 | 免审批 |
 | `write`、`edit`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
-| `web_search`、`web_fetch` | 配置 `DEEPSEEK_API_KEY` 或 `web_tools.api_key` 时注册 | 每次审批 |
+| `web_search`、`web_fetch` | 配置 `llm.models.deepseek.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
-| `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
+| `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务继承 Auto 分类，其余模式使用沙箱 `allow` |
 | `read_task_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
 | `start_background_task`、`check_background_task`、`cancel_background_task` | 同上且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
@@ -138,7 +138,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
 恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
 
-子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
+子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，在主任务的 Auto 模式下使用 Auto，其余使用 `allow` 执行文件工具、execute、
 已配置的网页工具和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
 主 Agent 的 `ask` 不会触发子任务审批；不能提供已验证沙箱时明确拒绝委派。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
@@ -150,7 +150,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 操作描述由结构化参数直接生成，不额外调用模型；文件工具仅记录路径，execute 保留有界命令、
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
-摘要只精确替换已知模型和 DeepSeek 网页工具密钥；未知凭据原样保存。
+MCP、子任务日志、会话摘要及 Lain 的精确脱敏均先去重，再按长度降序替换为 `[REDACTED]`。等长密钥保留输入顺序。子任务摘要只精确替换已知模型和 DeepSeek 密钥；未知凭据原样保存。
 主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
@@ -229,7 +229,7 @@ sequenceDiagram
 
 | 概念 | 决定什么 | 实现位置 |
 |---|---|---|
-| `ask` / `allow` | 工具调用前是否审批 | `agent/runtime/permissions.py`、Deep Agents HITL |
+| `ask` / `auto` / `allow` | 工具调用前是否审批 | `agent/runtime/permissions.py`、Deep Agents HITL |
 | `SANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
@@ -280,7 +280,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 1. **权限隔离**：`restricted` 使用受限文件系统视图；`full-access` 在当前用户的操作系统权限内访问真实文件系统。
 2. **环境持久化**：`HOME` 和 `TMP` 落在持久目录上，不跟着 Bubblewrap 进程一起消失。
 3. **环境独立性**：两种模式默认使用不同的 HOME，不要求用户级安装结果互相可用，也不自动复制或迁移。
-4. **工具审批**：`ask` / `allow` 只决定调用前要不要批准，不决定 HOME、工作区或系统目录怎么挂。
+4. **工具审批**：`ask` / `auto` / `allow` 只决定调用前要不要批准，不决定 HOME、工作区或系统目录怎么挂。
 
 `restricted` 的持久 HOME（`~/.deep-agent/sandbox/home`）是沙箱运行数据，不是 Agent 配置或凭据目录。`full-access` 使用宿主机真实家目录。路径和切换时能观察到的行为见 [sandbox.md](sandbox.md#home-隔离与持久化)。
 
@@ -290,7 +290,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 线程环境快照
 
-固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
+固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `auto` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
 
 采集使用与 `execute` 相同的离线挂载做一次只读探测，不经过工具审批，也不扫描软件包、进程、CPU 负载或内存。探测失败的字段为 `unknown`，不中断线程。这里没有新的配置项。
 
