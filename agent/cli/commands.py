@@ -34,7 +34,7 @@ def command_table() -> tuple[Command, ...]:
         Command("attachments", "Attachment maintenance (/attachments cleanup)", _attachments),
         Command(
             "permission",
-            "Tool approval: ask, or allow (auto-approve, network open, HIGH RISK)",
+            "Tool approval: ask, auto (risk-based), or allow (auto-approve, network open, HIGH RISK)",
             _permission,
         ),
         Command(

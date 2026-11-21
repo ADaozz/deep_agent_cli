@@ -9,9 +9,10 @@ from agent.execution.types import ExecutionMode
 
 
 class PermissionMode(StrEnum):
-    """两态工具权限策略。"""
+    """工具权限策略。"""
 
     ASK = "ask"  # 有副作用的工具、每次 execute 和网页工具调用 都暂停等待审批。
+    AUTO = "auto"
     ALLOW = "allow"  # 自动批准所有工具（含宿主 MCP）；沙箱网络开放（仅 SANDBOXED）。
 
 
@@ -66,6 +67,8 @@ def parse_permission_mode(value: str) -> PermissionMode | None:
 
 
 def permission_mode_label(mode: PermissionMode) -> str:
+    if mode is PermissionMode.AUTO:
+        return "auto (risk-based approval; per-command network)"
     if mode is PermissionMode.ALLOW:
         return "allow (auto-approve all tools; sandbox network OPEN — SANDBOXED only, HIGH RISK)"
     return "ask (side-effect tools, execute, web search and host MCP require approval)"

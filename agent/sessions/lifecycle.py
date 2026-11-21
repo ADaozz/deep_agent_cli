@@ -247,7 +247,7 @@ class SessionRuntime:
                 notices.append(f"Saved reasoning effort {effort} is unavailable; using default.")
             effort = "default"
         mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
-        if mode is PermissionMode.ALLOW and not allow_mode_available(execution_mode):
+        if mode in {PermissionMode.ALLOW, PermissionMode.AUTO} and not allow_mode_available(execution_mode):
             mode = PermissionMode.ASK
             notices.append("Saved allow permission is unavailable here; using ask.")
         return RestorePlan(

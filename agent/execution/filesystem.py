@@ -713,6 +713,12 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
                 return True
         return False
 
+    def is_workspace_mutation(self, file_path: object) -> bool:
+        if not isinstance(file_path, str) or not file_path.startswith(self.workspace_root + "/"):
+            return False
+        plan = self._mutation_plan(file_path)
+        return isinstance(plan, tuple) and plan[0] is self.executor
+
     def _mutation_plan(self, file_path: str) -> tuple[BackendProtocol, str] | str:
         """Choose the backend that may write ``file_path``, or an error string.
 

@@ -237,7 +237,7 @@ class CliApplication:
         self.slash_completer = SlashCompleter(
             self.commands,
             model_profiles=self.runner.list_models,
-            permission_modes=lambda: ["ask", "allow"] if self.access_selection._allow_available() else ["ask"],
+            permission_modes=lambda: ["ask"] + (["auto"] if self.runner.auto_available() else []) + (["allow"] if self.access_selection._allow_available() else []),
             sandbox_modes=lambda: ["restricted", "full-access"],
         )
         self.buffer = Buffer(

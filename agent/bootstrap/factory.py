@@ -175,6 +175,7 @@ class PreparedAgent:
     model: BaseChatModel | None = None
     spec: AgentSpec = field(default_factory=AgentSpec)
     interrupt_on: dict[str, Any] = field(default_factory=dict)
+    permission_mode: PermissionMode | None = None
     system_prompt: str = ""
     exposed_tool_names: list[str] = field(default_factory=list)
     filesystem_tools: list[str] = field(default_factory=list)
@@ -215,6 +216,7 @@ def build_agent(
     backend_selection: BackendSelection | None = None,
     mcp: Any | None = None,
     settings: Settings | None = None,
+    approval_journal=None,
 ) -> PreparedAgent:
     sandbox_cfg = replace(spec.sandbox or SandboxConfig(), trust_env=spec.trust_env)
     selected: BackendSelection | None = None
@@ -228,6 +230,9 @@ def build_agent(
         selected = backend_selection if backend_selection is not None and backend_selection.backend is fs_backend else None
         execution_mode = selected.mode if selected is not None else ExecutionMode.CUSTOM
         security_warning = selected.warning if selected is not None else ""
+    if permission is PermissionMode.AUTO and (execution_mode is not ExecutionMode.SANDBOXED or not spec.deepseek_api_key):
+        permission = PermissionMode.ASK
+        security_warning = "Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask."
     if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
     sandbox_pool = sandbox_pool_of(fs_backend)
@@ -279,6 +284,18 @@ def build_agent(
             if permission is PermissionMode.ASK:
                 hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
+    auto_middleware = []
+    if permission is PermissionMode.AUTO:
+        from agent.runtime.auto_approval import ApprovalJournal, AutoApprovalMiddleware
+
+        if approval_journal is None:
+            approval_journal = getattr(saver, "_auto_approval_journal", None)
+        if approval_journal is None:
+            approval_journal = ApprovalJournal(saver)
+            saver._auto_approval_journal = approval_journal
+        auto_middleware.append(AutoApprovalMiddleware(
+            spec=spec, backend=fs_backend, controller=run_controller, journal=approval_journal,
+        ))
     subagents: list[CompiledSubAgent] = []
     manager = None
     if spec.role == "main" and cfg.subagents.enabled:
@@ -366,6 +383,7 @@ def build_agent(
             tools=tools,
             system_prompt=prompt,
             middleware=[
+                *auto_middleware,
                 RuntimeConfigGateMiddleware(run_controller.has_pending_config),
                 PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
                 RecoveryContextMiddleware(),
@@ -391,7 +409,7 @@ def build_agent(
             ],
             skills=skill_sources,
             backend=fs_backend,
-            interrupt_on=hitl or None,
+            interrupt_on=None if auto_middleware else hitl or None,
             checkpointer=saver,
             name="deep-agent-template",
         )
@@ -400,6 +418,7 @@ def build_agent(
             backend=fs_backend,
             model=model,
             spec=spec,
+            permission_mode=permission,
             interrupt_on=hitl,
             system_prompt=prompt,
             model_tool_names=tuple(
@@ -443,6 +462,7 @@ def create_agent(
     run_controller: RunController | None = None,
     mcp: Any | None = None,
     role: str = "main",
+    permission_mode: PermissionMode | str | None = None,
     backend_selection: BackendSelection | None = None,
 ) -> PreparedAgent:
     cfg = settings or Settings()
@@ -462,6 +482,10 @@ def create_agent(
     if role == "subagent":
         interrupt_on = {}
     permission = permission_mode_from_interrupt_on(interrupt_on) if interrupt_on is not None else PermissionMode.ASK
+    if permission_mode is not None:
+        permission = PermissionMode(permission_mode)
+        if interrupt_on is not None and role != "subagent":
+            raise ValueError("Specify permission_mode or interrupt_on")
     effective_interrupt_on = interrupt_on
     if interrupt_on:
         defaults = interrupt_on_for_mode(PermissionMode.ASK) or {}

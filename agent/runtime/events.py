@@ -47,6 +47,7 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
         if isinstance(value, dict):
             for action in value.get("action_requests", []) or []:
                 requested.append({
+                    "tool_call_id": action.get("tool_call_id"),
                     "name": action.get("name"),
                     "args": action.get("args", {}),
                     "description": action.get("description", ""),
@@ -68,7 +69,7 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
         name = str(action["name"])
         ids = tool_call_ids.get(name, [])
         pending.append({
-            "toolCallId": ids.pop(0) if ids else "",
+            "toolCallId": action["tool_call_id"] or (ids.pop(0) if ids else ""),
             "name": name,
             "args": action["args"],
         })

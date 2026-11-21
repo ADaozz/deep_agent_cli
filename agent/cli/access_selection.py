@@ -110,7 +110,7 @@ class AccessSelection:
             await self._apply_permission_mode(mode)
             return
         if self.state.running:
-            self.set_status("Use /permission ask|allow while a run is active")
+            self.set_status("Use /permission ask|auto|allow while a run is active")
             return
         current = self.runner.permission_mode()
         options = [
@@ -126,6 +126,9 @@ class AccessSelection:
                 "label": "allow · auto-approve all tools; sandbox network open (SANDBOXED, HIGH RISK)"
                 + (" · current" if current is PermissionMode.ALLOW else ""),
             })
+        if self.runner.auto_available():
+            options.append({"value": "auto", "label": "auto · risk-based approval, per-command network"
+                            + (" · current" if current is PermissionMode.AUTO else "")})
         if len(options) == 1:
             self.state.add_system(
                 "Permission mode is locked to ask because ALLOW requires SANDBOXED execution.",
@@ -144,7 +147,7 @@ class AccessSelection:
                 "options": options,
             }],
         )
-        self.dialogs.current.option_index = 0 if current is PermissionMode.ASK else 1
+        self.dialogs.current.option_index = next(i for i, option in enumerate(options) if option["value"] == current.value)
         self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
@@ -220,6 +223,10 @@ class AccessSelection:
         return allow_mode_available(self.runner.prepared.execution_mode)
 
     async def _apply_permission_mode(self, mode: PermissionMode) -> None:
+        if mode is PermissionMode.AUTO and not self.runner.auto_available():
+            self._request_permission_mode(PermissionMode.ASK)
+            self.set_status("Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+            return
         if mode is PermissionMode.ALLOW and not self._allow_available():
             self.state.add_system(
                 allow_mode_unavailable_reason(self.runner.prepared.execution_mode),

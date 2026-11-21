@@ -223,7 +223,7 @@ class AgentRunner:
         )
         self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
         self._custom_interrupt_on = None
-        if prepared is not None and prepared.interrupt_on:
+        if prepared is not None and prepared.interrupt_on and prepared.permission_mode is not PermissionMode.AUTO:
             from agent.mcp.names import is_managed_mcp_name
 
             native_interrupt = {
@@ -232,7 +232,7 @@ class AgentRunner:
             if native_interrupt and native_interrupt != (interrupt_on_for_mode(PermissionMode.ASK) or {}):
                 self._custom_interrupt_on = native_interrupt
         if prepared is not None:
-            inferred = permission_mode_from_interrupt_on(prepared.interrupt_on)
+            inferred = prepared.permission_mode or permission_mode_from_interrupt_on(prepared.interrupt_on)
             if inferred is PermissionMode.ALLOW and not allow_mode_available(prepared.execution_mode):
                 raise ValueError(allow_mode_unavailable_reason(prepared.execution_mode))
             self.configuration.permission_mode = inferred
@@ -377,11 +377,16 @@ class AgentRunner:
             self._save_pending_config()
         return profile
 
+    def auto_available(self) -> bool:
+        return allow_mode_available(self.prepared.execution_mode) and bool(self._spec.deepseek_api_key)
+
     def request_permission_change(self, mode: PermissionMode | str) -> PermissionMode:
         if self._closed:
             raise RuntimeError("Runner is closed")
         self._require_active_session()
         with self.configuration.lock:
+            if mode == PermissionMode.AUTO and not self.auto_available():
+                mode = PermissionMode.ASK
             mode = self.configuration.request_permission(mode, self.prepared.execution_mode)
             self._save_pending_config()
         return mode
@@ -447,6 +452,9 @@ class AgentRunner:
             if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
                 failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
                 mode = None
+            if mode is PermissionMode.AUTO and not self.auto_available():
+                failures.append("Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+                mode = PermissionMode.ASK
             previous = self.prepared, self._chat_model
             applied_mcp = False
             try:
@@ -942,7 +950,7 @@ class AgentRunner:
         elif plan.permission_mode is not self.configuration.permission_mode:
             self._rebuild_prepared(permission_mode=plan.permission_mode)
         self.configuration.reasoning_effort = plan.reasoning_effort
-        self.configuration.permission_mode = plan.permission_mode
+        self.configuration.permission_mode = self.prepared.permission_mode or plan.permission_mode
 
     @_exclusive_operation
     def new_session(self, *, title: str = "") -> SessionInfo:
