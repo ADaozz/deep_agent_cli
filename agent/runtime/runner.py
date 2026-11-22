@@ -282,7 +282,7 @@ class AgentRunner:
                 self.configuration.pending_model_id = saved.pending_model_id
                 self.configuration.pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
         try:
-            self._sync_approval_guard()
+            self._ensure_approval_guard(self.thread_id)
         except Exception:
             self._runtime.release()
             raise
@@ -650,6 +650,7 @@ class AgentRunner:
         *,
         model: BaseChatModel | None = None,
         permission_mode: PermissionMode | None = None,
+        thread_id: str | None = ...,
     ) -> None:
         mode = permission_mode or self.configuration.permission_mode
         chat = model if model is not None else self._chat_model
@@ -661,26 +662,27 @@ class AgentRunner:
                 attachment_store=self.attachment_store,
                 timeout=self.settings.request_timeout,
             )
+        if thread_id is ...:
+            thread_id = self._runtime.thread_id if self._runtime is not None else None
         self.prepared = build_agent(
             self._spec, chat, mode, self._checkpointer,
             self.control, self._pause_condition,
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
             backend_selection=self.prepared.backend_selection,
             mcp=self.mcp, settings=self.settings,
-            thread_id=self._runtime.thread_id if self._runtime is not None else None,
+            thread_id=thread_id,
         )
         self._chat_model = chat
 
-    def _sync_approval_guard(self) -> None:
-        """Rebuild when the bound thread needs a different Ask replay guard than the current graph has."""
+    def _ensure_approval_guard(self, thread_id: str | None) -> None:
+        """Rebuild when Ask needs a different Auto replay guard for ``thread_id`` than the current graph has."""
         from agent.runtime.auto_approval import ApprovalJournal
 
-        if self.prepared.permission_mode is not PermissionMode.ASK or self._runtime is None:
+        if self.prepared.permission_mode is not PermissionMode.ASK:
             return
-        thread = self._runtime.thread_id
-        needed = bool(thread) and ApprovalJournal.has_thread(self._checkpointer, thread)
+        needed = bool(thread_id) and ApprovalJournal.has_thread(self._checkpointer, thread_id)
         if needed != self.prepared.approval_guard:
-            self._rebuild_prepared()
+            self._rebuild_prepared(thread_id=thread_id)
 
     @property
     def sandbox_pool(self) -> SandboxPool | None:
@@ -880,7 +882,7 @@ class AgentRunner:
             snapshot = self.load_session(info.id)
             if snapshot is None:
                 raise KeyError(f"Unknown session: {info.id}")
-            self._apply_restore_plan(plan)
+            self._apply_restore_plan(plan, thread_id=info.id)
             has_checkpoint = self._runtime.thread_has_checkpoint(info.id)
             recovery = self._runtime.recovery_context(
                 info,
@@ -892,6 +894,8 @@ class AgentRunner:
                 info.id, model_id=self.configuration.current_model_id,
                 permission_mode=self.configuration.permission_mode.value, reasoning_effort=self.configuration.reasoning_effort,
             )
+            # Guard rebuild is fallible; keep it before adopt so failure rolls back.
+            self._ensure_approval_guard(info.id)
         except Exception:
             old_model, old_id, old_mode, old_pending_model, old_pending_mode, old_effort, old_pending_effort = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
@@ -910,7 +914,6 @@ class AgentRunner:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
             self._runtime.bind(snapshot.info.id)
-        self._sync_approval_guard()
         self.configuration.pending_reasoning_effort = info.pending_reasoning_effort
         self._context_usage_invalidated = False
         self.configuration.pending_model_id = info.pending_model_id
@@ -944,7 +947,9 @@ class AgentRunner:
             backend.apply_sandbox_mode(self._configured_sandbox_mode)
         self.configuration.sandbox_mode = self._configured_sandbox_mode
 
-    def _apply_restore_plan(self, plan: RestorePlan) -> None:
+    def _apply_restore_plan(self, plan: RestorePlan, *, thread_id: str | None = ...) -> None:
+        if thread_id is ...:
+            thread_id = self._runtime.thread_id if self._runtime is not None else None
         if self.settings is not None and plan.model_id and (
             plan.model_id != self.configuration.current_model_id or plan.reasoning_effort != self.configuration.reasoning_effort
         ):
@@ -957,10 +962,11 @@ class AgentRunner:
                     timeout=self.settings.request_timeout,
                 ),
                 permission_mode=plan.permission_mode,
+                thread_id=thread_id,
             )
             self.configuration.current_model_id = profile.id
         elif plan.permission_mode is not self.configuration.permission_mode:
-            self._rebuild_prepared(permission_mode=plan.permission_mode)
+            self._rebuild_prepared(permission_mode=plan.permission_mode, thread_id=thread_id)
         self.configuration.reasoning_effort = plan.reasoning_effort
         self.configuration.permission_mode = self.prepared.permission_mode or plan.permission_mode
 
@@ -977,13 +983,13 @@ class AgentRunner:
         self.configuration.pending_model_id = None
         self.configuration.pending_permission_mode = None
         self.configuration.pending_sandbox_mode = None
-        info = self._runtime.create_new(
+        # New sessions have no Auto history; drop any Ask replay guard before the lease commit.
+        self._ensure_approval_guard(None)
+        return self._runtime.create_new(
             title=title, model_id=self.configuration.current_model_id,
             permission_mode=self.configuration.permission_mode.value,
             reasoning_effort=self.configuration.reasoning_effort,
         )
-        self._sync_approval_guard()
-        return info
 
     def close(self) -> None:
         """Forbid new operations, drain an active run, then drop the lease.

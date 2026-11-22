@@ -255,8 +255,61 @@ def test_ask_mounts_replay_guard_only_for_the_thread_with_auto_history(tmp_path,
             assert runner.permission_mode() == "ask" and runner.prepared.approval_guard
             runner.new_session()
             assert runner.permission_mode() == "ask" and not runner.prepared.approval_guard
+            second = runner.thread_id
             runner.switch_session(first)
             assert runner.permission_mode() == "ask" and runner.prepared.approval_guard
+            runner.switch_session(second)
+            assert runner.permission_mode() == "ask" and not runner.prepared.approval_guard
+            runner.switch_session(first)
+            assert runner.permission_mode() == "ask" and runner.prepared.approval_guard
+        finally:
+            runner.close()
+            store.close()
+
+
+def test_switch_guard_rebuild_failure_keeps_old_session(tmp_path, monkeypatch):
+    from agent.sessions.store import SessionStore
+
+    async def review(key, trust_env, evidence, cancelled):
+        return Decision("allow", "authorized")
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    backend = CountingBackend()
+    backend.calls = []
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
+        store = SessionStore(tmp_path / "guard-rollback.sqlite")
+        runner = AgentRunner(session_store=store, settings=Settings(resolved_deepseek_api_key="key"), model=scripted_model([
+            AIMessage(content="", tool_calls=[{"name": "execute", "id": "c", "args": {"command": "c", "network": True}}]),
+            AIMessage(content="done"),
+            AIMessage(content="still here"),
+        ]))
+        try:
+            runner.set_permission_mode("auto")
+            assert runner.invoke("run c").status == "completed"
+            first = runner.thread_id
+            runner.set_permission_mode("ask")
+            assert runner.apply_pending_config_if_idle()
+            runner.new_session()
+            assert not runner.prepared.approval_guard
+            old = runner.thread_id
+            real = runner._rebuild_prepared
+
+            def fail_when_mounting_guard(*, thread_id=..., **kwargs):
+                if thread_id == first:
+                    raise RuntimeError("guard rebuild failed")
+                return real(thread_id=thread_id, **kwargs)
+
+            monkeypatch.setattr(runner, "_rebuild_prepared", fail_when_mounting_guard)
+            with pytest.raises(RuntimeError, match="guard rebuild failed"):
+                runner.switch_session(first)
+            assert runner.thread_id == old
+            assert runner._runtime.lease is not None
+            assert runner._runtime.lease.thread_id == old
+            assert not runner.prepared.approval_guard
+            freed = store.try_acquire_session(first)
+            assert freed is not None
+            freed.release()
+            assert runner.invoke("still on the new session").status == "completed"
         finally:
             runner.close()
             store.close()
@@ -268,6 +321,31 @@ def test_thread_prefix_does_not_match_a_longer_thread_id():
     journal.record(f"a:b:{'0' * 64}", Decision("allow", "authorized"), "policy")
     assert ApprovalJournal.has_thread(saver, "a:b")
     assert not ApprovalJournal.has_thread(saver, "a")
+
+
+def test_create_agent_mounts_ask_guard_when_thread_id_has_auto_history(tmp_path):
+    from agent.bootstrap.factory import create_agent
+
+    path = str(tmp_path / "create-agent-guard.sqlite")
+    thread = "thread-with-auto"
+    with SqliteSaver.from_conn_string(path) as saver:
+        journal = ApprovalJournal(saver)
+        journal.record(f"{thread}:{'a' * 64}", Decision("allow", "authorized"), "policy")
+        with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(CountingBackend(), ExecutionMode.SANDBOXED)):
+            guarded = create_agent(
+                model=scripted_model([AIMessage(content="done")]),
+                checkpointer=saver,
+                permission_mode="ask",
+                thread_id=thread,
+                settings=Settings(resolved_deepseek_api_key="key"),
+            )
+            bare = create_agent(
+                model=scripted_model([AIMessage(content="done")]),
+                checkpointer=saver,
+                permission_mode="ask",
+                settings=Settings(resolved_deepseek_api_key="key"),
+            )
+        assert guarded.approval_guard and not bare.approval_guard
 
 
 @pytest.mark.parametrize("change", ["sandbox", "mount"])

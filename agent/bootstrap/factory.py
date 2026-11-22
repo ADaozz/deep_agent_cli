@@ -481,6 +481,7 @@ def create_agent(
     role: str = "main",
     permission_mode: PermissionMode | str | None = None,
     backend_selection: BackendSelection | None = None,
+    thread_id: str | None = None,
 ) -> PreparedAgent:
     cfg = settings or Settings()
     if role not in {"main", "subagent"}:
@@ -516,6 +517,7 @@ def create_agent(
         interrupt_on_override=effective_interrupt_on,
         mcp=mcp if role == "main" else None,
         backend_selection=backend_selection,
+        thread_id=thread_id,
     )
 
 

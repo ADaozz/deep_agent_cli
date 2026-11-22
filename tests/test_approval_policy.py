@@ -196,10 +196,13 @@ def test_evidence_replaces_known_secrets_before_truncating():
     payload = json.loads(text)
     # A cut through the secret would leave a prefix that exact matching cannot find later.
     assert secret[:4] not in text
+    assert "[RED[truncated" not in text
     for clipped, filler, limit in ((payload["action"]["args"]["command"], "x", 8000),
                                    (payload["user_messages"][0], "u", 2000),
                                    (payload["tool_calls"][0]["args"]["command"], "h", 400)):
-        assert clipped == filler * (limit - 4) + "[RED[truncated 6 chars]"
+        # Marker starts at limit-4; the cut backs up so [REDACTED] is not split.
+        assert clipped == filler * (limit - 4) + "[truncated 10 chars]"
+        assert "[REDACTED]" not in clipped
 
 
 def test_known_secret_redaction_is_exact_only():

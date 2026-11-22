@@ -406,7 +406,7 @@ def test_switch_restore_failure_rolls_back_model_and_keeps_old_session(
     target = holder.thread_id
     old_thread = waiter.thread_id
 
-    def broken_apply(plan: object) -> None:
+    def broken_apply(plan: object, **kwargs: object) -> None:
         raise RuntimeError("rebuild failed")
 
     monkeypatch.setattr(waiter, "_apply_restore_plan", broken_apply)

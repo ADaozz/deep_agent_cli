@@ -43,6 +43,7 @@ runner.close()
 
 与 CLI 使用同一套 `settings.subagents` 配置，在 `auto` 或 `allow` 权限下提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
 `create_agent` 和 `AgentRunner` 默认使用 `ask`，此时不提供委派；需要委派时向 `create_agent` 传入 `permission_mode="auto"` 或 `"allow"`，或调用 `runner.set_permission_mode(...)`。
+若只用 `create_agent` 恢复曾用过 Auto 的 Ask 会话，须传入同一 `thread_id`（及该会话的 Checkpointer），才会安装 Auto 重放防护；省略时按普通 Ask 构建。`AgentRunner` 会在绑定会话后自动对齐。
 只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
 

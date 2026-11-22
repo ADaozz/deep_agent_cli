@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from agent.redaction import replace_known_secrets
+from agent.redaction import REDACTED, replace_known_secrets
 from agent.subagents.notifications import NOTIFICATION_KEY
 
 _EVIDENCE_LIMIT = 32000
@@ -30,10 +30,20 @@ def _clip(value: Any, limit: int, secrets: tuple[str, ...]) -> Any:
     """Replace known secrets, then shorten long strings and leave a marker the reviewer can see.
 
     Replacement comes first so a cut never leaves part of a secret that exact matching would miss.
+    A truncation point that would split ``[REDACTED]`` is moved before that marker.
     """
     if isinstance(value, str):
         value = replace_known_secrets(value, secrets)
-        return value if len(value) <= limit else f"{value[:limit]}[truncated {len(value) - limit} chars]"
+        if len(value) <= limit:
+            return value
+        cut = limit
+        # Search a window that can see a marker starting just before the cut.
+        start = value.rfind(REDACTED, max(0, cut - len(REDACTED) + 1), cut + len(REDACTED))
+        if start != -1 and start < cut < start + len(REDACTED):
+            cut = start
+        if cut <= 0:
+            return f"[truncated {len(value)} chars]"
+        return f"{value[:cut]}[truncated {len(value) - cut} chars]"
     if isinstance(value, dict):
         return {_clip(str(key), limit, secrets): _clip(item, limit, secrets) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
