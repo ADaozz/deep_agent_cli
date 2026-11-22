@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from agent.redaction import replace_known_secrets
 from agent.subagents.notifications import NOTIFICATION_KEY
 
 _EVIDENCE_LIMIT = 32000
@@ -25,14 +26,18 @@ def user_texts(messages: list[BaseMessage]) -> list[str]:
     ]
 
 
-def _clip(value: Any, limit: int) -> Any:
-    """Shorten long strings anywhere in a JSON value and leave a marker the reviewer can see."""
+def _clip(value: Any, limit: int, secrets: tuple[str, ...]) -> Any:
+    """Replace known secrets, then shorten long strings and leave a marker the reviewer can see.
+
+    Replacement comes first so a cut never leaves part of a secret that exact matching would miss.
+    """
     if isinstance(value, str):
+        value = replace_known_secrets(value, secrets)
         return value if len(value) <= limit else f"{value[:limit]}[truncated {len(value) - limit} chars]"
     if isinstance(value, dict):
-        return {str(key): _clip(item, limit) for key, item in value.items()}
+        return {_clip(str(key), limit, secrets): _clip(item, limit, secrets) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_clip(item, limit) for item in value]
+        return [_clip(item, limit, secrets) for item in value]
     return value
 
 
@@ -42,6 +47,7 @@ def build_evidence(
     environment: dict[str, Any] | None,
     *,
     parent_request: str | None = None,
+    secrets: Iterable[str] = (),
 ) -> str | None:
     """Serialize what the reviewer may see, or None when there is nothing to judge authorization against.
 
@@ -56,24 +62,25 @@ def build_evidence(
     texts = user_texts(messages)
     if not texts:
         return None
+    secrets = tuple(secrets)
     payload: dict[str, Any] = {"user_messages": texts[-_USER_MESSAGES:]}
     if parent_request is not None:
         if not parent_request.strip():
             return None
         payload = {"user_messages": [parent_request.strip()], "delegated_task": texts[-1]}
     history = [
-        {"name": item["name"], "args": _clip(item.get("args") or {}, _HISTORY_TEXT_LIMIT)}
+        {"name": item["name"], "args": _clip(item.get("args") or {}, _HISTORY_TEXT_LIMIT, secrets)}
         for message in messages if isinstance(message, AIMessage)
         for item in message.tool_calls or [] if item.get("id") != call.get("id")
     ][-_HISTORY_CALLS:]
     payload = {
-        **_clip(payload, _USER_TEXT_LIMIT),
+        **_clip(payload, _USER_TEXT_LIMIT, secrets),
         "tool_calls": history,
-        "action": {"tool": call["name"], "args": _clip(call.get("args") or {}, _ACTION_TEXT_LIMIT)},
+        "action": {"tool": call["name"], "args": _clip(call.get("args") or {}, _ACTION_TEXT_LIMIT, secrets)},
         "environment": environment,
     }
     while True:
-        text = json.dumps(payload, ensure_ascii=False, default=str)
+        text = replace_known_secrets(json.dumps(payload, ensure_ascii=False, default=str), secrets)
         if len(text) <= _EVIDENCE_LIMIT:
             return text
         if not history:

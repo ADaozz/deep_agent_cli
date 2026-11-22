@@ -31,7 +31,9 @@ async def classify(api_key, trust_env, evidence, cancelled):
                 raise ModelStreamCancelled("Auto approval cancelled")
             await asyncio.wait({task}, timeout=0.1)
         return task.result()
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+    except ModelStreamCancelled:
+        raise
+    except Exception:
         return MANUAL
     finally:
         task.cancel()

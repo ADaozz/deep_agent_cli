@@ -16,7 +16,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.config import get_config
 
 from agent.models.stream_lifecycle import ModelStreamCancelled
-from agent.redaction import known_secrets, replace_known_secrets
+from agent.redaction import known_secrets
 from agent.runtime.approval.classify import classify
 from agent.runtime.approval.evidence import build_evidence, user_texts
 from agent.runtime.approval.fingerprint import build_policy
@@ -64,13 +64,24 @@ async def _classify_batch(evidence_by_id, api_key, trust_env, cancelled):
 class ApprovalJournal:
     """Use the session saver's connection and transaction lock, or a private memory DB."""
     @staticmethod
-    def exists(saver):
-        if isinstance(saver, SqliteSaver):
-            with saver.lock:
-                return saver.conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_approval'"
-                ).fetchone() is not None
-        return hasattr(saver, "_auto_approval_journal")
+    def has_thread(saver, thread):
+        """Whether this thread ever recorded an Auto decision, so Ask must guard its replays."""
+        journal = getattr(saver, "_auto_approval_journal", None)
+        if journal is not None:
+            conn, lock = journal.conn, journal.lock
+        elif isinstance(saver, SqliteSaver):
+            conn, lock = saver.conn, saver.lock
+        else:
+            return False
+        prefix = f"{thread}:"
+        with lock:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_approval'").fetchone() is None:
+                return False
+            # The fixed hash length keeps a thread named "a" from matching keys of thread "a:b".
+            return conn.execute(
+                "SELECT 1 FROM auto_approval WHERE call_key >= ? AND call_key < ? AND length(call_key) = ? LIMIT 1",
+                (prefix, f"{thread};", len(prefix) + 64),
+            ).fetchone() is not None
 
     def __init__(self, saver):
         if isinstance(saver, SqliteSaver):
@@ -134,7 +145,7 @@ class ApprovalJournal:
 
 def _call_key(thread, role, message, call):
     fields = [thread, role, message.id, call["id"], call["name"], call["args"]]
-    return sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return f"{thread}:{sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()}"
 
 
 class _BatchReview(HumanInTheLoopMiddleware):
@@ -189,10 +200,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         parent = None
         if self.spec.role == "subagent":
             parent = getattr(self.controller, "approval_user_request", None) or ""
-        raw = build_evidence(state["messages"], call, environment, parent_request=parent)
-        if raw is None:
-            return None
-        return replace_known_secrets(raw, known_secrets(
+        return build_evidence(state["messages"], call, environment, parent_request=parent, secrets=known_secrets(
             getattr(self.spec, "settings", None), self.spec.deepseek_api_key, self._sandbox_config(),
             min_length=_MIN_SECRET_LEN,
         ))

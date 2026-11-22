@@ -193,6 +193,8 @@ class PreparedAgent:
     model_tool_names: tuple[str, ...] = ()
     subagent_manager: Any = None
     owns_model_clients: bool = False
+    # Ask mounted the Auto replay guard for the thread it was built for.
+    approval_guard: bool = False
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
@@ -218,6 +220,7 @@ def build_agent(
     mcp: Any | None = None,
     settings: Settings | None = None,
     approval_journal=None,
+    thread_id: str | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = replace(spec.sandbox or SandboxConfig(), trust_env=spec.trust_env)
     selected: BackendSelection | None = None
@@ -290,8 +293,9 @@ def build_agent(
     # An interrupted Auto batch can be reopened after its key or sandbox became
     # unavailable. Preserve the original human decision indices and block its
     # pending automatic grants; subsequent turns follow the regular Ask rules.
-    if permission is PermissionMode.AUTO or (permission is PermissionMode.ASK and ApprovalJournal.exists(saver)):
-
+    # Only the thread that recorded Auto decisions needs this guard under Ask.
+    approval_guard = permission is PermissionMode.ASK and bool(thread_id) and ApprovalJournal.has_thread(saver, thread_id)
+    if permission is PermissionMode.AUTO or approval_guard:
         if approval_journal is None:
             approval_journal = getattr(saver, "_auto_approval_journal", None)
         if approval_journal is None:
@@ -448,6 +452,7 @@ def build_agent(
             sandbox_pool=sandbox_pool,
             skill_sources=tuple(skill_sources or ()),
             subagent_manager=manager,
+            approval_guard=approval_guard,
         )
 
         if mcp is not None and mcp_revision is not None:

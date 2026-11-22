@@ -230,6 +230,46 @@ def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
             store.close()
 
 
+def test_ask_mounts_replay_guard_only_for_the_thread_with_auto_history(tmp_path, monkeypatch):
+    from agent.sessions.store import SessionStore
+
+    async def review(key, trust_env, evidence, cancelled):
+        return Decision("allow", "authorized")
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    backend = CountingBackend()
+    backend.calls = []
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
+        store = SessionStore(tmp_path / "session.sqlite")
+        runner = AgentRunner(session_store=store, settings=Settings(resolved_deepseek_api_key="key"), model=scripted_model([
+            AIMessage(content="", tool_calls=[{"name": "execute", "id": "c", "args": {"command": "c", "network": True}}]),
+            AIMessage(content="done"),
+        ]))
+        try:
+            assert not runner.prepared.approval_guard
+            runner.set_permission_mode("auto")
+            assert runner.invoke("run c").status == "completed"
+            first = runner.thread_id
+            runner.set_permission_mode("ask")
+            assert runner.apply_pending_config_if_idle()
+            assert runner.permission_mode() == "ask" and runner.prepared.approval_guard
+            runner.new_session()
+            assert runner.permission_mode() == "ask" and not runner.prepared.approval_guard
+            runner.switch_session(first)
+            assert runner.permission_mode() == "ask" and runner.prepared.approval_guard
+        finally:
+            runner.close()
+            store.close()
+
+
+def test_thread_prefix_does_not_match_a_longer_thread_id():
+    journal = ApprovalJournal(object())
+    saver = type("Saver", (), {"_auto_approval_journal": journal})()
+    journal.record(f"a:b:{'0' * 64}", Decision("allow", "authorized"), "policy")
+    assert ApprovalJournal.has_thread(saver, "a:b")
+    assert not ApprovalJournal.has_thread(saver, "a")
+
+
 @pytest.mark.parametrize("change", ["sandbox", "mount"])
 def test_restart_blocks_stale_grants_and_reviews_new_calls(tmp_path, monkeypatch, change):
     from agent.sessions.store import SessionStore
@@ -378,6 +418,18 @@ def test_independent_classifier(monkeypatch, response, outcome):
     assert asyncio.run(classify("unified", False, "example", lambda: False)).decision == outcome
     # One request per call: an uncertain verdict is not re-asked.
     assert len(sent) == 1
+
+
+def test_unexpected_classifier_error_goes_to_human(monkeypatch):
+    import httpx
+    from agent.runtime.auto_approval import classify
+
+    def respond(request):
+        raise RuntimeError("unexpected")
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
+    assert asyncio.run(classify("unified", False, "example", lambda: False)).decision == "ask"
 
 
 def test_cancelled_classifier_request_is_closed(monkeypatch):

@@ -187,6 +187,21 @@ def test_evidence_marks_truncation_and_drops_oldest_calls_to_fit():
     assert build_evidence([HumanMessage(content="go")], wide, ENVIRONMENT) is None
 
 
+def test_evidence_replaces_known_secrets_before_truncating():
+    secret = "sk-live-super-secret-value-123456"
+    call = {"name": "execute", "id": "1", "args": {"command": "x" * 7996 + secret, "network": True}}
+    messages = [HumanMessage(content="u" * 1996 + secret), AIMessage(content="", tool_calls=[
+        {"name": "execute", "id": "0", "args": {"command": "h" * 396 + secret}}])]
+    text = build_evidence(messages, call, ENVIRONMENT, secrets=[secret])
+    payload = json.loads(text)
+    # A cut through the secret would leave a prefix that exact matching cannot find later.
+    assert secret[:4] not in text
+    for clipped, filler, limit in ((payload["action"]["args"]["command"], "x", 8000),
+                                   (payload["user_messages"][0], "u", 2000),
+                                   (payload["tool_calls"][0]["args"]["command"], "h", 400)):
+        assert clipped == filler * (limit - 4) + "[RED[truncated 6 chars]"
+
+
 def test_known_secret_redaction_is_exact_only():
     secret = "sk-live-super-secret-value-123456"
     text = json.dumps({"query": f"Authorization: Bearer {secret}", "token": secret})

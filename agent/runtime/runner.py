@@ -281,6 +281,11 @@ class AgentRunner:
                 self.configuration.pending_reasoning_effort = saved.pending_reasoning_effort
                 self.configuration.pending_model_id = saved.pending_model_id
                 self.configuration.pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
+        try:
+            self._sync_approval_guard()
+        except Exception:
+            self._runtime.release()
+            raise
         self.control.set_pending_config_check(self._has_pending_runtime_config)
 
         self.state_path = (
@@ -662,8 +667,20 @@ class AgentRunner:
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
             backend_selection=self.prepared.backend_selection,
             mcp=self.mcp, settings=self.settings,
+            thread_id=self._runtime.thread_id if self._runtime is not None else None,
         )
         self._chat_model = chat
+
+    def _sync_approval_guard(self) -> None:
+        """Rebuild when the bound thread needs a different Ask replay guard than the current graph has."""
+        from agent.runtime.auto_approval import ApprovalJournal
+
+        if self.prepared.permission_mode is not PermissionMode.ASK or self._runtime is None:
+            return
+        thread = self._runtime.thread_id
+        needed = bool(thread) and ApprovalJournal.has_thread(self._checkpointer, thread)
+        if needed != self.prepared.approval_guard:
+            self._rebuild_prepared()
 
     @property
     def sandbox_pool(self) -> SandboxPool | None:
@@ -893,6 +910,7 @@ class AgentRunner:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
             self._runtime.bind(snapshot.info.id)
+        self._sync_approval_guard()
         self.configuration.pending_reasoning_effort = info.pending_reasoning_effort
         self._context_usage_invalidated = False
         self.configuration.pending_model_id = info.pending_model_id
@@ -959,11 +977,13 @@ class AgentRunner:
         self.configuration.pending_model_id = None
         self.configuration.pending_permission_mode = None
         self.configuration.pending_sandbox_mode = None
-        return self._runtime.create_new(
+        info = self._runtime.create_new(
             title=title, model_id=self.configuration.current_model_id,
             permission_mode=self.configuration.permission_mode.value,
             reasoning_effort=self.configuration.reasoning_effort,
         )
+        self._sync_approval_guard()
+        return info
 
     def close(self) -> None:
         """Forbid new operations, drain an active run, then drop the lease.
