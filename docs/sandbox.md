@@ -208,7 +208,7 @@ CUSTOM backend 保留调用方自己的规则。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。
 
-Auto 审批分静态策略与 Flash 风险评估。静态策略对明确低风险操作直接放行，对明确敏感外发直接拒绝或转人工；其余进入审查。审查证据包含可信用户授权、相关对话（工具输出视为不可信）、准确工具参数、沙箱与挂载策略，发送前会脱敏已知密钥与明显凭据模式。分类器输出 `risk_level`、`user_authorization`、`decision`、`reason`；Python 再按风险政策校验，禁止 `critical` 自动放行，以及 `high` 且授权不足时的自动放行。首次请求使用 `reasoning_effort: none`，模型自身初判为 ask 时使用 `low` 复核一次。请求格式见 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。每批最多同时分类 4 个调用，排队和复核共用 18 秒预算。到期时保留已完成的决定，排队中或未返回的调用转人工。无效返回、证据不足或脱敏失败也转人工。子任务需要人工确认时由父任务决定是否重新发起。
+Auto 审批分静态策略与 Flash 风险评估。静态策略对明确低风险操作直接放行，对明确敏感外发直接拒绝或转人工；其余进入审查。审查证据包含可信用户授权、相关对话（工具输出视为不可信）、准确工具参数、沙箱与挂载策略，发送前会脱敏已知密钥与明显凭据模式。分类器输出 `risk_level`、`user_authorization`、`scope`（`bounded` / `unbounded` / `unknown`）、`decision`、`reason`；Python 再按风险政策校验：`critical` 一律拒绝；`high` 仅在授权充足且 `scope=bounded` 时才可自动放行，`scope=unknown` 转人工，`scope=unbounded` 拒绝；并校正 `decision` 与 `reason` 自相矛盾的输出。模型给出的 `bounded` 不是安全证明，路径与挂载仍由后端校验。首次请求使用 `reasoning_effort: none`，模型自身初判为 ask 时使用 `low` 复核一次。请求格式见 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。每批最多同时分类 4 个调用，排队和复核共用 18 秒预算。到期时保留已完成的决定，排队中或未返回的调用转人工。无效返回、证据不足或脱敏失败也转人工。子任务需要人工确认时由父任务决定是否重新发起。
 
 使用 Session SQLite 时，Auto 持久化调用摘要、决定、有限原因、执行状态和审批环境指纹（v2）。恢复待审批批次时保留原提示和调用顺序。工具执行前会核对沙箱模式、工作区、挂载权限、受保护路径、网络策略、`env_allowlist`、`env_set`（仅本地哈希）和 `trust_env`。环境变化、旧记录缺少新版本指纹、或审批已执行/结果未知时，会阻止旧调用并要求重新发起。无持久会话时记录仅在内存中有效。
 

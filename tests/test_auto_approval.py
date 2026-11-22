@@ -294,12 +294,18 @@ def test_batch_cancellation_closes_siblings(monkeypatch):
 
 
 @pytest.mark.parametrize(("responses", "outcome", "count"), [
-    ([{"risk_level": "low", "user_authorization": "high", "decision": "allow", "reason": "authorized"}], "allow", 1),
-    ([{"risk_level": "medium", "user_authorization": "medium", "decision": "ask", "reason": "uncertain"},
-      {"risk_level": "high", "user_authorization": "low", "decision": "deny", "reason": "scope"}], "deny", 2),
-    ([{"risk_level": "low", "user_authorization": "high", "decision": "allow", "reason": "uncertain"}], "ask", 1),
-    ([{"risk_level": "critical", "user_authorization": "high", "decision": "allow", "reason": "authorized"}], "deny", 1),
-    ([{"risk_level": "high", "user_authorization": "low", "decision": "allow", "reason": "authorized"}], "ask", 1),
+    ([{"risk_level": "low", "user_authorization": "high", "scope": "bounded",
+       "decision": "allow", "reason": "authorized"}], "allow", 1),
+    ([{"risk_level": "medium", "user_authorization": "medium", "scope": "unknown",
+       "decision": "ask", "reason": "uncertain"},
+      {"risk_level": "high", "user_authorization": "low", "scope": "unbounded",
+       "decision": "deny", "reason": "scope"}], "deny", 2),
+    ([{"risk_level": "low", "user_authorization": "high", "scope": "bounded",
+       "decision": "allow", "reason": "uncertain"}], "ask", 1),
+    ([{"risk_level": "critical", "user_authorization": "high", "scope": "bounded",
+       "decision": "allow", "reason": "authorized"}], "deny", 1),
+    ([{"risk_level": "high", "user_authorization": "low", "scope": "bounded",
+       "decision": "allow", "reason": "authorized"}], "ask", 1),
     ([{}], "ask", 1),
     ([None], "ask", 1),
 ])
