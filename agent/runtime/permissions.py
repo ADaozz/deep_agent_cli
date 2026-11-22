@@ -24,10 +24,18 @@ class PermissionMode(StrEnum):
 
 # 审批口径由工具目录派生：Ask 的 interrupt_on 和 Auto 的静态规则共用。
 # 显式审批形状（approve/reject）与文件变更的布尔闸门保持既有 Deep Agents 约定。
-HOST_DECISION_SHAPE: dict[str, list[str]] = {"allowed_decisions": ["approve", "reject"]}
+
+
+def host_decision_rule() -> dict[str, list[str]]:
+    """每次返回独立的 approve/reject 规则字典（含新的 allowed_decisions 列表）。"""
+    return {"allowed_decisions": ["approve", "reject"]}
+
+
+# 兼容旧名：仅作只读样例；可变审批规则请用 host_decision_rule()。
+HOST_DECISION_SHAPE: dict[str, list[str]] = host_decision_rule()
 
 ASK_INTERRUPT_ON: dict[str, Any] = {
-    **{name: dict(HOST_DECISION_SHAPE) for name in (EXECUTE_TOOL, *WEB_TOOLS)},
+    **{name: host_decision_rule() for name in (EXECUTE_TOOL, *WEB_TOOLS)},
     **{name: True for name in FILE_MUTATION_TOOLS},
 }
 
@@ -137,7 +145,11 @@ def interrupt_on_for_mode(mode: PermissionMode) -> dict[str, Any] | None:
     """
     if mode is PermissionMode.ALLOW:
         return {}
-    return dict(ASK_INTERRUPT_ON)
+    # 深拷贝：布尔闸门可浅拷贝；带 allowed_decisions 的条目各自新建列表。
+    return {
+        name: (host_decision_rule() if isinstance(rule, dict) else rule)
+        for name, rule in ASK_INTERRUPT_ON.items()
+    }
 
 
 def permission_mode_from_interrupt_on(interrupt_on: dict[str, Any] | None) -> PermissionMode:
@@ -189,6 +201,7 @@ __all__ = [
     "WEB_TOOLS",
     "allow_mode_available",
     "allow_mode_unavailable_reason",
+    "host_decision_rule",
     "interrupt_on_for_mode",
     "parse_permission_mode",
     "permission_available",

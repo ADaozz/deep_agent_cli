@@ -21,12 +21,14 @@ from agent.execution.network import network_requested
 from agent.execution.network import get_execute_network
 from agent.tools.execute import build_execute_tool
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+from agent.mcp.names import host_interrupt_on
 from agent.runtime.permissions import (
     ASK_INTERRUPT_ON,
     AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
+    host_decision_rule,
     interrupt_on_for_mode,
     parse_permission_mode,
     permission_available,
@@ -37,10 +39,12 @@ from agent.runtime.permissions import (
 )
 from agent.tools.catalog import (
     FILE_MUTATION_TOOLS,
+    FILESYSTEM_TOOL_NAMES,
     NATIVE_TOOL_NAMES,
     SIDE_EFFECT_TOOLS,
     WEB_TOOLS,
 )
+from agent.bootstrap.factory import DEFAULT_FS_TOOLS
 from agent.runtime.runner import AgentRunner
 from agent.runtime.contracts import RunEvent
 from agent.execution.backend import BackendSelection, select_backend
@@ -104,6 +108,29 @@ def test_tool_catalog_drives_ask_interrupt_and_native_reserved() -> None:
     assert "read" not in SIDE_EFFECT_TOOLS
     assert "request_human_input" in NATIVE_TOOL_NAMES
     assert "compact_conversation" in NATIVE_TOOL_NAMES
+    assert DEFAULT_FS_TOOLS == list(FILESYSTEM_TOOL_NAMES)
+    assert FILESYSTEM_TOOL_NAMES == ("ls", "read", "write", "edit", "delete")
+
+
+def test_host_decision_rules_do_not_share_mutable_lists() -> None:
+    left = host_decision_rule()
+    right = host_decision_rule()
+    assert left == right and left is not right
+    assert left["allowed_decisions"] is not right["allowed_decisions"]
+    left["allowed_decisions"].append("edit_without_approval")
+    assert right["allowed_decisions"] == ["approve", "reject"]
+    assert ASK_INTERRUPT_ON["execute"]["allowed_decisions"] == ["approve", "reject"]
+
+    ask = interrupt_on_for_mode(PermissionMode.ASK)
+    assert ask is not None
+    ask["execute"]["allowed_decisions"].clear()
+    assert ASK_INTERRUPT_ON["execute"]["allowed_decisions"] == ["approve", "reject"]
+
+    mcp = host_interrupt_on(["mcp__demo__echo"])
+    mcp["mcp_add"]["allowed_decisions"].append("extra")
+    other = host_interrupt_on(["mcp__demo__echo"])
+    assert other["mcp_add"]["allowed_decisions"] == ["approve", "reject"]
+    assert other["mcp__demo__echo"]["allowed_decisions"] is not mcp["mcp__demo__echo"]["allowed_decisions"]
 
 
 def test_network_requested_truthy() -> None:

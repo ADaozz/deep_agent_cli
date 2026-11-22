@@ -1,7 +1,18 @@
-"""Diagnostic and source display limits on top of exact known-secret replacement.
+"""Companion 诊断/源码展示限制 + 已知密钥精确替换。
 
-Does not guess free-floating JWT / sk- / Bearer tokens. Field-name based
-assignment and URL query redaction remain as companion display limits.
+分层约定（已确认保留）：
+
+1. 精确替换：``replace_known_secrets`` —— 唯一的“密钥识别”入口。
+2. 展示限制（不是通用密钥猜测）：下列规则只服务 Companion 只读展示，
+   避免把路径、URL 凭据段、字段赋值和 PEM 块原样送进侧栏/诊断：
+   - PEM / private key 块遮盖与源码拒绝
+   - ``Authorization: Bearer|Basic …`` 整段遮盖（请求头形态）
+   - 字段名形如 api_key/token/password 的赋值与 ``--token`` 选项
+   - URL 的 userinfo、敏感 query 名、含已知密钥的 path 段
+   - 诊断文本中的绝对路径（技术词如 ci/cd 除外）
+3. 明确不做：对自由文本中的 JWT / ``sk-`` / ``gh_`` / AKIA 等形态做猜测遮盖。
+
+新输出占位符统一为 ``[REDACTED]``；读取侧仍可通过 ``LEGACY_HIDDEN`` 兼容旧数据。
 """
 
 from __future__ import annotations

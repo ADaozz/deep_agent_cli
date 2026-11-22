@@ -67,11 +67,15 @@ class Settings:
     companion: CompanionConfig = field(default_factory=CompanionConfig)
 
     def effective_compaction_fraction(self, model_fraction: float | None = None) -> float:
-        """配置门槛与模型默认 fraction 的有效值（不超过默认上限）。"""
-        capped = min(DEFAULT_COMPACTION_THRESHOLD, float(self.compaction_threshold))
+        """工厂与手动压缩共用的有效 fraction：min(模型默认, 配置门槛)。
+
+        ``DEFAULT_COMPACTION_THRESHOLD`` 只是 Settings 缺省值，不是硬顶。
+        配置可高于 0.85（校验允许 ``<= 1``）；此时以配置与模型默认的较小值为准。
+        """
+        configured = float(self.compaction_threshold)
         if model_fraction is None:
-            return capped
-        return min(float(model_fraction), capped)
+            return configured
+        return min(float(model_fraction), configured)
 
     def __post_init__(self) -> None:
         if (isinstance(self.compaction_threshold, bool)

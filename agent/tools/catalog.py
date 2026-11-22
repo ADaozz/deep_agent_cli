@@ -28,8 +28,9 @@ EXPLORATION_TOOLS = frozenset({
 # Ask / Auto 静态规则关心的副作用工具（审批策略口径）。
 SIDE_EFFECT_TOOLS = frozenset({EXECUTE_TOOL}) | WEB_TOOLS | FILE_MUTATION_TOOLS
 
-# 文件系统中间件对外暴露的本地名（含只读与变更）。
-FILESYSTEM_TOOLS = frozenset({"ls", "read", "write", "edit", "delete"})
+# 文件系统中间件对外暴露的本地名（有序；新增工具只改这一处）。
+FILESYSTEM_TOOL_NAMES: tuple[str, ...] = ("ls", "read", "write", "edit", "delete")
+FILESYSTEM_TOOLS = frozenset(FILESYSTEM_TOOL_NAMES)
 
 # 模型可见但通常不走 Ask 闸门的内部/会话工具。
 INTERNAL_TOOLS = frozenset({

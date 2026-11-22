@@ -24,6 +24,17 @@ def test_compaction_threshold_defaults_and_loads() -> None:
     assert Settings.from_mapping({"agent": {"compaction_threshold": 0.6}}).compaction_threshold == 0.6
 
 
+def test_effective_compaction_fraction_does_not_hard_cap_at_default() -> None:
+    """配置可高于默认 0.85；有效值是 min(模型默认, 配置)，不是固定 0.85 顶。"""
+    high = Settings.from_mapping({"agent": {"compaction_threshold": 0.95}})
+    low = Settings.from_mapping({"agent": {"compaction_threshold": 0.6}})
+    assert high.effective_compaction_fraction() == 0.95
+    assert high.effective_compaction_fraction(0.9) == 0.9
+    assert high.effective_compaction_fraction(0.99) == 0.95
+    assert low.effective_compaction_fraction(0.9) == 0.6
+    assert low.effective_compaction_fraction(0.5) == 0.5
+
+
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)

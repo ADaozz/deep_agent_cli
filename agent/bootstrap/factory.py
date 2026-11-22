@@ -48,7 +48,7 @@ from agent.runtime.permissions import (
     permission_mode_from_interrupt_on,
     permission_unavailable_reason,
 )
-from agent.tools.catalog import FILE_MUTATION_TOOLS, FILESYSTEM_TOOLS
+from agent.tools.catalog import FILE_MUTATION_TOOLS, FILESYSTEM_TOOL_NAMES
 from agent.execution.backend import BackendSelection, sandbox_pool_of, select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.types import ExecutionMode, SKILLS_ROOT
@@ -62,7 +62,7 @@ from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
 
 
-DEFAULT_FS_TOOLS = [name for name in ("ls", "read", "write", "edit", "delete") if name in FILESYSTEM_TOOLS]
+DEFAULT_FS_TOOLS = list(FILESYSTEM_TOOL_NAMES)
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
