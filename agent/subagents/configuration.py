@@ -12,7 +12,6 @@ class SubAgentConfig:
     max_concurrent: int = 2
     model: str | None = None
     reasoning_effort: str | None = "default"
-    permission: str = "allow"
     # Also offer background delegation next to the synchronous task tool.
     background: bool = True
 
@@ -30,8 +29,6 @@ class SubAgentConfig:
             raise ValueError("subagents.background must be a boolean")
         if type(self.max_concurrent) is not int or self.max_concurrent < 1:
             raise ValueError("subagents.max_concurrent must be a positive integer")
-        if self.permission != "allow":
-            raise ValueError("subagents.permission must be allow")
         for name in ("model", "reasoning_effort"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value.strip()):

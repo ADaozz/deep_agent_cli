@@ -29,9 +29,7 @@ def _entry(task: BackgroundTask, *, with_result: bool) -> dict[str, Any]:
     return entry
 
 
-def build_background_task_tools(
-    runtime_: SubAgentRuntime, manager: SubAgentManager, *, unavailable: str = "",
-) -> list[Any]:
+def build_background_task_tools(runtime_: SubAgentRuntime, manager: SubAgentManager) -> list[Any]:
     @tool(START_TOOL)
     def start_background_task(runtime: ToolRuntime, description: str) -> str:
         """Start an isolated general-purpose subagent in the background and return immediately.
@@ -50,8 +48,6 @@ def build_background_task_tools(
             return "Subagent failed: parent session ID unavailable"
         if not description.strip():
             return "Subagent failed: description is empty"
-        if unavailable:
-            return f"Subagent failed: {unavailable}"
         try:
             started = runtime_.start_background(description, parent, str(runtime.tool_call_id or ""))
         except Exception as exc:  # noqa: BLE001

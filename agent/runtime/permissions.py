@@ -16,13 +16,14 @@ class PermissionMode(StrEnum):
     ALLOW = "allow"  # 自动批准所有工具（含宿主 MCP）；沙箱网络开放（仅 SANDBOXED）。
 
 
+# 审批口径的唯一来源：Ask 的 interrupt_on 和 Auto 的静态规则都由这三组派生。
+EXECUTE_TOOL = "execute"
+WEB_TOOLS = ("web_search", "web_fetch")
+FILE_MUTATION_TOOLS = ("write", "edit", "delete")
+
 ASK_INTERRUPT_ON: dict[str, Any] = {
-    "execute": {"allowed_decisions": ["approve", "reject"]},
-    "web_search": {"allowed_decisions": ["approve", "reject"]},
-    "web_fetch": {"allowed_decisions": ["approve", "reject"]},
-    "write": True,
-    "edit": True,
-    "delete": True,
+    **{name: {"allowed_decisions": ["approve", "reject"]} for name in (EXECUTE_TOOL, *WEB_TOOLS)},
+    **{name: True for name in FILE_MUTATION_TOOLS},
 }
 
 PERMISSION_ALLOW_WARNING = (

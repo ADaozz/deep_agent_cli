@@ -46,9 +46,8 @@ def test_auto_and_manual_compaction_share_configured_trigger(monkeypatch, config
 def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
-    assert prepared.exposed_tool_names == [
-        "read_task_log", "start_background_task", "check_background_task", "cancel_background_task",
-    ]
+    # Ask offers no delegation; tasks from another mode can still be read, checked, and cancelled.
+    assert prepared.exposed_tool_names == ["read_task_log", "check_background_task", "cancel_background_task"]
     assert prepared.interrupt_on == ASK_INTERRUPT_ON
     assert prepared.system_prompt
     names = graph_tool_names(prepared.graph)
@@ -59,11 +58,11 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert {"start_task", "read_task_log", "start_background_task",
-            "check_background_task", "cancel_background_task"} <= names
+    assert {"read_task_log", "check_background_task", "cancel_background_task"} <= names
+    assert not {"start_task", "start_background_task"} & names
     assert {"read", "write", "edit"} <= names
     assert not {"task", "read_subagent_log", "read_file", "write_file", "edit_file"} & names
-    assert len(names) == 12
+    assert len(names) == 10
 
 
 def test_manual_compaction_rejects_early_usage_without_changing_checkpoint() -> None:

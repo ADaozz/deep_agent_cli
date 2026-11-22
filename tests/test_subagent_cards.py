@@ -227,6 +227,7 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
         events.append(event)
         state.apply(event)
     runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path), on_event=emit)
+    runner.set_permission_mode('allow')
     try:
         result = runner.invoke('Inspect independent tasks')
         assert result.status == 'completed'

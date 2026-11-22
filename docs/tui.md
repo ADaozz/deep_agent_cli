@@ -132,7 +132,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 主 Agent 空闲时按 Esc 只取消后台任务，被取消的任务不会唤醒主 Agent。新建或切换会话会取消后台任务并丢弃其结果。
 
 `deep-agent resume` 通过 `tool_call_id` 恢复原任务描述和结果；不读取 JSONL、不额外调用模型。子 Agent 内部思考、Token、文件工具、execute 和内部日志仍不转发到主界面。
-Auto 子任务使用相同的风险分类，需要人工确认时返回父任务处理。其余模式的子任务使用沙箱 `allow`。子任务没有审批和主动提问入口，也不装载 MCP 或再次委派。
+子任务的权限跟随主 Agent：Auto 子任务使用相同的 Auto 审批，需要人工确认时返回父任务处理；`allow` 下子任务使用沙箱 `allow`。子任务没有审批和主动提问入口，因此 `ask` 下主 Agent 不能派生新的子任务，已在运行的后台任务仍可查看和取消。子任务也不装载 MCP 或再次委派。
 Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务）；退出沿用既有 Ctrl+C、Ctrl+D 和 `/exit` 规则。
 
 主模型切换只影响下一次派生使用的模型 Profile；示例配置 `subagents.reasoning_effort: default` 使用子模型原生默认强度，不向 API 发送强度参数，

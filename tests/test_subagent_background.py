@@ -87,10 +87,12 @@ class Harness:
         model = parent if not isinstance(parent, list) else scripted_model(parent)
         if extra_tools:
             self.runner = AgentRunner(
-                prepared=create_agent(model=model, settings=self.cfg, skills=[], extra_tools=extra_tools),
+                prepared=create_agent(model=model, settings=self.cfg, skills=[], extra_tools=extra_tools,
+                                      permission_mode='allow'),
                 settings=self.cfg, on_event=self.emit)
         else:
             self.runner = AgentRunner(model=model, settings=self.cfg, on_event=self.emit, session_store=store)
+            self.runner.set_permission_mode('allow')
         self.manager = self.runner.prepared.subagent_manager
 
     def emit(self, event):
@@ -323,19 +325,23 @@ def test_close_stops_running_background_tasks(tmp_path, monkeypatch):
 def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='subagents.background'):
         SubAgentConfig(background='yes')
+    import agent.bootstrap.factory as factory
+    monkeypatch.setattr(factory, 'select_backend',
+                        lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path)
     model = scripted_model([AIMessage(content='done')])
-    enabled = create_agent(model=model, backend=StateBackend(), skills=[], settings=cfg)
-    assert BACKGROUND <= graph_tool_names(enabled.graph)
-    for subagents in (SubAgentConfig(background=False), SubAgentConfig(enabled=False)):
-        prepared = create_agent(model=model, backend=StateBackend(), skills=[],
-                                settings=replace(cfg, subagents=subagents))
-        assert not BACKGROUND & graph_tool_names(prepared.graph)
-    assert 'start_task' in graph_tool_names(create_agent(
-        model=model, backend=StateBackend(), skills=[],
-        settings=replace(cfg, subagents=SubAgentConfig(background=False))).graph)
 
-    import agent.bootstrap.factory as factory
+    def names(subagents=SubAgentConfig(), mode='allow'):
+        return graph_tool_names(create_agent(model=model, skills=[], permission_mode=mode,
+                                             settings=replace(cfg, subagents=subagents)).graph)
+
+    assert BACKGROUND <= names()
+    for subagents in (SubAgentConfig(background=False), SubAgentConfig(enabled=False)):
+        assert not BACKGROUND & names(subagents)
+    assert 'start_task' in names(SubAgentConfig(background=False))
+    # Ask cannot start a task but can still check and cancel ones that are already running.
+    assert BACKGROUND & names(mode='ask') == BACKGROUND - {'start_background_task'}
+
     children = []
     original = factory.build_agent
 
@@ -357,15 +363,17 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         harness.close()
 
 
-def test_unverified_backend_refuses_before_starting(tmp_path):
+def test_unverified_backend_cannot_start_background_tasks(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     model = scripted_model([AIMessage(content='', tool_calls=[start_call()]), AIMessage(content='refused')])
+    # An unverified backend can only run in ask, and ask does not delegate.
     runner = AgentRunner(prepared=create_agent(model=model, backend=StateBackend(), skills=[], settings=cfg))
     try:
+        assert runner.permission_mode() == 'ask'
         assert runner.invoke('go').output == 'refused'
         messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
-        content = next(m.content for m in messages if isinstance(m, ToolMessage))
-        assert content.startswith('Subagent failed:') and 'verified SANDBOXED' in content
+        reply = next(m for m in messages if isinstance(m, ToolMessage))
+        assert reply.status == 'error' and 'not a valid tool' in reply.content
         assert runner.background_task_count() == 0
     finally:
         runner.close()

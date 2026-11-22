@@ -129,7 +129,7 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             child_models.append(child)
             return child
         monkeypatch.setattr(factory, 'build_chat_model', build_child)
-        runner = AgentRunner(prepared=create_agent(model=parent_model, settings=cfg, skills=[]), settings=cfg)
+        runner = AgentRunner(prepared=create_agent(model=parent_model, settings=cfg, skills=[], permission_mode='allow'), settings=cfg)
         harness = Harness(runner).start(runner.invoke, 'parent private history')
         try:
             child_connection = server.wait_for_connection(1)
@@ -189,6 +189,7 @@ def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, 
         AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
             'description': 'start_task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported failure')])
     runner = AgentRunner(model=parent, settings=cfg)
+    runner.set_permission_mode('allow')
     try:
         assert runner.invoke('go').output == 'reported failure'
         assert len(created) == 1

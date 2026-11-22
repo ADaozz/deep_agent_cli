@@ -31,8 +31,7 @@ subagents:
   # default 不向 API 发送推理强度参数，不继承主 Agent 的 high/low 等强度。
   # 可显式填写目标模型支持的 low/high 等强度；暂不支持 auto。
   reasoning_effort: default
-  # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 start_task 明确失败。
-  permission: allow
+  # 子任务使用主 Agent 的权限模式（auto 或 allow）；ask 下不提供委派。
   # 是否同时提供后台委派工具（start/check/cancel_background_task）。
   # 后台子任务运行期间主 Agent 继续工作，完成后自动通知；与 start_task 共用 max_concurrent。
   background: true

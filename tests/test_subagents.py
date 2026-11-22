@@ -14,6 +14,8 @@ from agent.execution.types import ExecutionMode
 from agent.sessions.transcript import messages_to_transcript
 from tests.conftest import graph_tool_names, scripted_model
 
+START_TOOLS = {'start_task', 'start_background_task'}
+
 
 def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monkeypatch):
     import agent.bootstrap.factory as factory
@@ -50,7 +52,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         AIMessage(content='public parent answer'),
     ])
     events, deltas = [], []
-    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg, mcp=mcp),
+    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg, mcp=mcp, permission_mode='allow'),
                          settings=cfg, on_event=events.append,
                          on_delta=lambda kind, text: deltas.append(text))
     try:
@@ -102,7 +104,7 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
         AIMessage(content='parent answer'),
     ])
     events = []
-    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg),
+    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg, permission_mode='allow'),
                          settings=cfg, on_event=events.append)
     try:
         result = runner.invoke('delegate a listing')
@@ -113,7 +115,7 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
         runner.close()
 
 
-def test_disabled_task_and_custom_backend_refusal(tmp_path):
+def test_disabled_task_and_unverified_backend_offer_no_delegation(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     prepared = create_agent(model=scripted_model([AIMessage(content='done')]), backend=StateBackend(),
                             skills=[], settings=replace(cfg, subagents=SubAgentConfig(enabled=False)))
@@ -123,12 +125,50 @@ def test_disabled_task_and_custom_backend_refusal(tmp_path):
             'description': 'do work', 'subagent_type': 'general-purpose'}, 'id': 'd'}]),
         AIMessage(content='reported refusal'),
     ])
+    # An unverified backend can only run in ask, and ask does not delegate.
     runner = AgentRunner(prepared=create_agent(model=model, backend=StateBackend(), skills=[], settings=cfg))
     try:
+        assert runner.permission_mode() == 'ask'
+        assert not START_TOOLS & graph_tool_names(runner.prepared.graph)
         assert runner.invoke('go').status == 'completed'
         messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
-        assert 'verified SANDBOXED' in next(m.content for m in messages if isinstance(m, ToolMessage))
+        reply = next(m for m in messages if isinstance(m, ToolMessage))
+        assert reply.status == 'error' and 'not a valid tool' in reply.content
         assert runner.prepared.subagent_manager.active_count == 0
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize(('mode', 'delegates'), [('ask', False), ('auto', True), ('allow', True)])
+def test_delegation_and_child_permission_follow_the_parent_mode(tmp_path, monkeypatch, mode, delegates):
+    import agent.bootstrap.factory as factory
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
+    children = []
+    original = factory.build_agent
+
+    def capture(spec, *args, **kwargs):
+        prepared = original(spec, *args, **kwargs)
+        if spec.role == 'subagent':
+            children.append(prepared)
+        return prepared
+
+    monkeypatch.setattr(factory, 'build_agent', capture)
+    cfg = Settings(config_dir=tmp_path, resolved_deepseek_api_key='unit-key')
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
+            'description': 'do work', 'subagent_type': 'general-purpose'}}]),
+        AIMessage(content='child final'),
+        AIMessage(content='parent final'),
+    ])
+    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg, permission_mode=mode), settings=cfg)
+    try:
+        assert runner.permission_mode() == mode
+        names = graph_tool_names(runner.prepared.graph)
+        assert (START_TOOLS <= names) if delegates else not (START_TOOLS & names)
+        # Tasks started before a switch to ask can still be inspected and stopped.
+        assert {'read_task_log', 'check_background_task', 'cancel_background_task'} <= names
+        assert runner.invoke('go').status == 'completed'
+        assert [child.permission_mode for child in children] == ([mode] if delegates else [])
     finally:
         runner.close()
 
@@ -170,6 +210,7 @@ def test_real_sandbox_native_concurrency_and_command_cancel(tmp_path):
     cfg.sandbox.workspace.mkdir()
     try:
         runner = AgentRunner(model=ParallelModel(), settings=cfg)
+        runner.set_permission_mode('allow')
     except SandboxUnavailableError as exc:
         pytest.skip(str(exc))
     try:
@@ -238,6 +279,7 @@ def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeyp
     monkeypatch.setattr(factory, 'build_agent', capture)
     monkeypatch.setattr('agent.runtime.runner.build_chat_model', lambda *args, **kwargs: second)
     runner = AgentRunner(model=first, settings=cfg)
+    runner.set_permission_mode('allow')
     try:
         manager = runner.prepared.subagent_manager
         assert runner.invoke('first').output == 'parent-first'
@@ -266,6 +308,7 @@ def test_subagent_model_and_effort_override(tmp_path, monkeypatch):
         return child
     monkeypatch.setattr(factory, 'build_chat_model', build)
     runner = AgentRunner(model=parent, settings=cfg)
+    runner.set_permission_mode('allow')
     try:
         assert runner.invoke('go').output == 'parent'
         assert calls == [('other', 'low')]
@@ -291,6 +334,8 @@ def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     cfg = Settings(config_dir=tmp_path)
     runner = AgentRunner(model=scripted_model([AIMessage(content='private result'), AIMessage(content='public answer')]), settings=cfg)
+    runner.set_permission_mode('allow')
+    assert runner.apply_pending_config_if_idle()
     try:
         messages = [HumanMessage(content='old parent input'), AIMessage(content='', tool_calls=[{
             'name': 'start_task', 'id': 'restored-task', 'args': {
@@ -345,6 +390,7 @@ def test_child_request_effort_is_independent_of_parent(
         monkeypatch.setattr(factory, 'build_chat_model', build)
         monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
         runner = AgentRunner(model=parent, settings=cfg)
+        runner.set_permission_mode('allow')
         try:
             assert runner.invoke('delegate').output == 'parent answer'
             messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
@@ -383,6 +429,7 @@ def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monk
             'description': 'custom task', 'subagent_type': 'general-purpose'}}]),
         AIMessage(content='custom child'), AIMessage(content='custom parent')])
     runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path))
+    runner.set_permission_mode('allow')
     try:
         assert runner.invoke('go').output == 'custom parent'
     finally:
@@ -400,6 +447,7 @@ def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, mo
             'description': 'custom task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported')])
     monkeypatch.setattr(factory, 'build_chat_model', lambda *args, **kwargs: pytest.fail('unexpected profile fallback'))
     runner = AgentRunner(model=model, settings=cfg)
+    runner.set_permission_mode('allow')
     try:
         assert runner.invoke('go').output == 'reported'
         messages = runner.prepared.graph.get_state(runner._thread_config()).values['messages']
@@ -423,6 +471,7 @@ def test_log_redacts_only_configured_model_and_deepseek_keys(tmp_path, monkeypat
             'description': description, 'subagent_type': 'general-purpose'}}]),
         AIMessage(content='child result'), AIMessage(content='parent result')])
     runner = AgentRunner(model=parent, settings=cfg)
+    runner.set_permission_mode('allow')
     try:
         assert runner.invoke('go').output == 'parent result'
         log = next((tmp_path / 'subagents').rglob('*.jsonl')).read_text()

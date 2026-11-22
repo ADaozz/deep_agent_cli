@@ -41,14 +41,15 @@ runner.close()
 
 ## SubAgent 委派
 
-与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
+与 CLI 使用同一套 `settings.subagents` 配置，在 `auto` 或 `allow` 权限下提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
+`create_agent` 和 `AgentRunner` 默认使用 `ask`，此时不提供委派；需要委派时向 `create_agent` 传入 `permission_mode="auto"` 或 `"allow"`，或调用 `runner.set_permission_mode(...)`。
 只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
 
 子任务复用工厂图和已验证的 Backend/Pool，不创建新的 Runner；默认并发 2，超限立即返回错误。
 `AgentRunner` 的单操作限制仍然有效，不能通过并发调用同一 Runner 的 `invoke()` 派生任务。
-子任务使用独立上下文和 `allow`，不装载 MCP、调用方的 `extra_tools`、人工输入或递归委派工具；
-显式注入的 `CUSTOM` Backend 无已验证沙箱身份时，委派会被拒绝。主任务取消及 Runner 关闭会传播到关联子任务。
+子任务使用独立上下文和主任务的权限模式，不装载 MCP、调用方的 `extra_tools`、人工输入或递归委派工具；
+显式注入的 `CUSTOM` Backend 没有已验证沙箱身份，只能使用 `ask`，因此也没有委派。主任务取消及 Runner 关闭会传播到关联子任务。
 
 默认模型 Profile 继承主模型，思考强度 `default/null` 使用子模型原生默认；独立客户端在任务结束后关闭。
 直接注入的自定义 `BaseChatModel` 保留原对象，强度覆盖需显式指定子模型 Profile。

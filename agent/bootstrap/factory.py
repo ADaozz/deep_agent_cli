@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig
+from agent.redaction import known_secrets
 from agent.runtime.control import RunController
 from agent.execution.environment import EnvironmentContextMiddleware
 from agent.models.client import ProtocolChatOpenAI, build_chat_model
@@ -281,7 +282,7 @@ def build_agent(
         mcp_revision, mcp_tools = mcp.snapshot()
         include_mcp = bool(mcp.snapshot_includes_mcp(mcp_revision))
         if include_mcp:
-            if permission is PermissionMode.ASK:
+            if permission is not PermissionMode.ALLOW:
                 hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
     auto_middleware = []
@@ -296,10 +297,13 @@ def build_agent(
         if approval_journal is None:
             approval_journal = ApprovalJournal(saver)
             saver._auto_approval_journal = approval_journal
+        ask_only = permission is PermissionMode.ASK
         auto_middleware.append(AutoApprovalMiddleware(
             spec=spec, backend=fs_backend, controller=run_controller, journal=approval_journal,
-            trusted=mcp.snapshot_trusted_tools(mcp_revision) if include_mcp and permission is PermissionMode.AUTO else (),
-            ask_rules=hitl if permission is PermissionMode.ASK else None,
+            trusted=mcp.snapshot_trusted_tools(mcp_revision) if include_mcp and not ask_only else (),
+            # Auto never gates less than Ask does, whatever override the caller passed.
+            gated=hitl if ask_only else {**(interrupt_on_for_mode(PermissionMode.ASK) or {}), **hitl},
+            ask_only=ask_only,
         ))
     subagents: list[CompiledSubAgent] = []
     manager = None
@@ -307,7 +311,7 @@ def build_agent(
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
         from agent.subagents.runtime import SubAgentRuntime
-        from agent.subagents.notifications import BACKGROUND_TOOLS
+        from agent.subagents.notifications import BACKGROUND_TOOLS, START_TOOL
         from agent.tools.background_tasks import build_background_task_tools
         from agent.tools.subagent_logs import build_subagent_log_tool
         # Rebuilds occur at a safe boundary; keep lifetime accounting on the
@@ -318,12 +322,12 @@ def build_agent(
             run_controller.subagent_manager = manager
         manager.max_concurrent = cfg.subagents.max_concurrent
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-        store = SubAgentLogStore(root, tuple(p.api_key for p in cfg.llm_profiles) + (spec.deepseek_api_key or "",))
+        store = SubAgentLogStore(root, known_secrets(cfg, spec.deepseek_api_key))
         tools.append(build_subagent_log_tool(store))
 
         def prepare_child(controller: RunController) -> PreparedAgent:
-            if execution_mode is not ExecutionMode.SANDBOXED:
-                raise ValueError("Subagents require a verified SANDBOXED backend for allow permission")
+            if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:
+                raise ValueError("Subagents require a verified SANDBOXED backend and auto or allow permission")
             effort = cfg.subagents.reasoning_effort
             effort = None if effort in (None, "default") else effort
             if cfg.subagents.model is not None or isinstance(model, ProtocolChatOpenAI):
@@ -348,8 +352,8 @@ def build_agent(
                                    | {"start_task", "request_human_input", "read_task_log"}),
             )
             try:
-                child_permission = PermissionMode.AUTO if permission is PermissionMode.AUTO else PermissionMode.ALLOW
-                child = build_agent(child_spec, child_model, child_permission, None, controller, lambda: False,
+                # The child runs under the parent's permission mode; it never gains more than the parent has.
+                child = build_agent(child_spec, child_model, permission, None, controller, lambda: False,
                                     backend_selection=selected, settings=cfg, approval_journal=approval_journal)
             except BaseException:
                 if child_model is not model:
@@ -362,25 +366,27 @@ def build_agent(
         runtime = SubAgentRuntime(manager, store, prepare_child,
                                   cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
                                   cfg.subagents.reasoning_effort or "default")
+        # A child cannot ask the user, so Ask offers no way to delegate. Tasks started
+        # before a switch to Ask keep running and can still be checked, cancelled, and read.
+        # Auto and Allow only exist on a verified sandbox, so delegation never reaches the host.
+        can_delegate = permission is not PermissionMode.ASK
         if cfg.subagents.background:
-            tools.extend(build_background_task_tools(
-                runtime, manager,
-                unavailable="" if execution_mode is ExecutionMode.SANDBOXED
-                else "Subagents require a verified SANDBOXED backend for allow permission",
-            ))
-        subagents.append({
-            "name": "general-purpose",
-            "description": (
-                "Only delegate when the problem can be decomposed into independent "
-                "subproblems that do not interfere with one another. "
-                "Complete an isolated coding or research task. "
-                "Only the final result is returned. "
-                "No MCP, user interaction, or recursive delegation. "
-                "Maximum concurrent tasks is configured by the host."
-            ),
-            "runnable": runtime,
-            "mode": "isolated",
-        })
+            tools.extend(tool for tool in build_background_task_tools(runtime, manager)
+                         if can_delegate or tool.name != START_TOOL)
+        if can_delegate:
+            subagents.append({
+                "name": "general-purpose",
+                "description": (
+                    "Only delegate when the problem can be decomposed into independent "
+                    "subproblems that do not interfere with one another. "
+                    "Complete an isolated coding or research task. "
+                    "Only the final result is returned. "
+                    "No MCP, user interaction, or recursive delegation. "
+                    "Maximum concurrent tasks is configured by the host."
+                ),
+                "runnable": runtime,
+                "mode": "isolated",
+            })
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(

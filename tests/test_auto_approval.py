@@ -15,6 +15,7 @@ from agent.execution.backend import BackendSelection
 from agent.execution.policy import BindMount, SandboxConfig
 from agent.execution.types import ExecutionMode
 from agent.runtime.auto_approval import ApprovalJournal, Decision
+from agent.runtime.permissions import ASK_INTERRUPT_ON
 from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
@@ -34,7 +35,7 @@ def test_auto_mixed_batch_reuses_decisions_and_matches_ids(monkeypatch):
     deny_finished = asyncio.Event()
 
     async def review(key, trust_env, evidence, cancelled):
-        name = json.loads(evidence)["arguments"]["command"]
+        name = json.loads(evidence)["action"]["args"]["command"]
         if name == "deny":
             deny_finished.set()
         else:
@@ -45,7 +46,7 @@ def test_auto_mixed_batch_reuses_decisions_and_matches_ids(monkeypatch):
     monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
     model = scripted_model([
         AIMessage(content="", tool_calls=[
-            {"name": "execute", "id": "id-" + command, "args": {"command": command}}
+            {"name": "execute", "id": "id-" + command, "args": {"command": command, "network": True}}
             for command in ("allow", "ask", "deny")
         ]),
         AIMessage(content="done"),
@@ -78,16 +79,67 @@ def test_auto_journal_persists_decision_and_execution_claim(tmp_path):
         assert "重复执行" in restored.claim("digest", "pending", "policy")
 
 
-def test_legacy_approval_without_fingerprint_cannot_be_claimed(tmp_path):
-    path = str(tmp_path / "legacy.sqlite")
-    with sqlite3.connect(path) as conn:
-        conn.execute("""CREATE TABLE auto_approval (call_key TEXT PRIMARY KEY, decision TEXT NOT NULL,
-                        reason TEXT NOT NULL, execution TEXT NOT NULL DEFAULT 'pending')""")
-        conn.execute("INSERT INTO auto_approval VALUES('old', 'allow', 'authorized', 'pending')")
-    with SqliteSaver.from_conn_string(path) as saver:
-        journal = ApprovalJournal(saver)
-        assert journal.lookup("old").decision == "allow"
-        assert "审批环境已变化" in journal.claim("old", "pending", "current")
+@pytest.mark.parametrize(("mode", "reviewed"), [("restricted", []), ("full-access", ["local"])])
+def test_offline_command_skips_review_only_in_restricted_sandbox(tmp_path, monkeypatch, mode, reviewed):
+    reviews = []
+
+    async def review(key, trust_env, evidence, cancelled):
+        reviews.append(json.loads(evidence)["action"]["args"]["command"])
+        return Decision("allow", "reviewed")
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    backend = CountingBackend()
+    backend.calls = []
+    settings = Settings(resolved_deepseek_api_key="test", sandbox=SandboxConfig(workspace=tmp_path, mode=mode))
+    model = scripted_model([
+        AIMessage(content="", tool_calls=[{"name": "execute", "id": "local", "args": {"command": "local"}}]),
+        AIMessage(content="done"),
+    ])
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(model=model, settings=settings)
+        runner.set_permission_mode("auto")
+        assert runner.invoke("run the local check").status == "completed"
+        assert backend.calls == ["local"]
+        assert reviews == reviewed
+
+
+def test_blocked_call_returns_reason_and_third_block_in_a_row_goes_to_human(monkeypatch):
+    async def review(key, trust_env, evidence, cancelled):
+        return Decision("deny", "操作超出用户授权范围。")
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    backend = CountingBackend()
+    backend.calls = []
+    model = scripted_model([
+        *(AIMessage(content="", tool_calls=[{"name": "execute", "id": name,
+                                            "args": {"command": name, "network": True}}])
+          for name in ("first", "second", "third")),
+        AIMessage(content="done"),
+    ])
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(model=model, settings=Settings(resolved_deepseek_api_key="test"))
+        runner.set_permission_mode("auto")
+        pending = runner.invoke("publish the report")
+        assert [call["toolCallId"] for call in pending.pending_tool_calls] == ["third"]
+        assert backend.calls == []
+        messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
+        blocked = {m.tool_call_id: m.content for m in messages if isinstance(m, ToolMessage) and m.status == "error"}
+        assert set(blocked) == {"first", "second"}
+        assert all("操作超出用户授权范围。" in text and "不要改写命令绕过" in text for text in blocked.values())
+        assert runner.approve_tool("third").status == "completed"
+        assert backend.calls == ["third"]
+
+
+def test_block_counters_reset_on_allow_and_after_reaching_a_limit():
+    journal = ApprovalJournal(object())
+    allow, deny, ask = (Decision(kind, "reason") for kind in ("allow", "deny", "ask"))
+    assert [journal.count_review("a", d) for d in (deny, deny, ask, allow, deny, deny, deny)] == [False] * 6 + [True]
+    # Threads are counted separately, and reaching a limit starts both counts over.
+    assert [journal.count_review("b", d) for d in (deny, deny)] == [False, False]
+    assert [journal.count_review("a", d) for d in (deny, deny, deny)] == [False, False, True]
+    # Blocks that never come three in a row still reach the per-session limit.
+    pattern = [deny, deny, allow] * 9 + [deny, deny]
+    assert [journal.count_review("c", d) for d in pattern] == [False] * 28 + [True]
 
 
 def test_auto_missing_key_falls_back_to_ask():
@@ -108,17 +160,17 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
     model = scripted_model([
         AIMessage(content="", tool_calls=[{"name": "start_task", "id": "delegate", "args": {
             "description": "inspect delegated item", "subagent_type": "general-purpose"}}]),
-        AIMessage(content="", tool_calls=[{"name": "execute", "id": "child-call", "args": {"command": "test"}}]),
+        AIMessage(content="", tool_calls=[{"name": "execute", "id": "child-call",
+                                          "args": {"command": "test", "network": True}}]),
         AIMessage(content="done"),
     ])
     with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
         runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path, resolved_deepseek_api_key="test"))
         runner.set_permission_mode("auto")
-        assert runner.invoke("original parent request").status == "waiting_confirmation"
-        assert runner.approve_tool("delegate").status == "completed"
+        assert runner.invoke("original parent request").status == "completed"
         assert backend.calls == []
-        assert calls[0]["user_request"] == "original parent request"
-        assert calls[0]["current_task"] == "inspect delegated item"
+        assert calls[0]["user_messages"] == ["original parent request"]
+        assert calls[0]["delegated_task"] == "inspect delegated item"
         messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
         reply = next(m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == "delegate")
         assert "execute (child-call)" in reply.content
@@ -143,7 +195,7 @@ def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
     calls = []
 
     async def review(key, trust_env, evidence, cancelled):
-        action = json.loads(evidence)["arguments"]["command"]
+        action = json.loads(evidence)["action"]["args"]["command"]
         calls.append(action)
         return Decision(action, action)
 
@@ -155,7 +207,7 @@ def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
     with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
         store = SessionStore(db)
         runner = AgentRunner(session_store=store, settings=settings, model=scripted_model([
-            AIMessage(content="", tool_calls=[{"name": "execute", "id": x, "args": {"command": x}}
+            AIMessage(content="", tool_calls=[{"name": "execute", "id": x, "args": {"command": x, "network": True}}
                                               for x in ("allow", "ask", "deny")]),
         ]))
         thread = runner.thread_id
@@ -193,13 +245,13 @@ def test_restart_blocks_stale_grants_and_reviews_new_calls(tmp_path, monkeypatch
 
     async def review(key, trust_env, evidence, cancelled):
         data = json.loads(evidence)
-        command = data["arguments"]["command"]
-        reviews.append((command, data["sandbox"], data["read_write_mounts"]))
+        command = data["action"]["args"]["command"]
+        reviews.append((command, data["environment"]["sandbox"], data["environment"]["read_write_mounts"]))
         return Decision("ask" if command == "confirm" else "allow", "reviewed")
 
     def batch(*commands):
         return AIMessage(content="", tool_calls=[
-            {"id": cmd, "name": "execute", "args": {"command": cmd}} for cmd in commands
+            {"id": cmd, "name": "execute", "args": {"command": cmd, "network": True}} for cmd in commands
         ])
 
     monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
@@ -293,23 +345,16 @@ def test_batch_cancellation_closes_siblings(monkeypatch):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(("responses", "outcome", "count"), [
-    ([{"risk_level": "low", "user_authorization": "high", "scope": "bounded",
-       "decision": "allow", "reason": "authorized"}], "allow", 1),
-    ([{"risk_level": "medium", "user_authorization": "medium", "scope": "unknown",
-       "decision": "ask", "reason": "uncertain"},
-      {"risk_level": "high", "user_authorization": "low", "scope": "unbounded",
-       "decision": "deny", "reason": "scope"}], "deny", 2),
-    ([{"risk_level": "low", "user_authorization": "high", "scope": "bounded",
-       "decision": "allow", "reason": "uncertain"}], "ask", 1),
-    ([{"risk_level": "critical", "user_authorization": "high", "scope": "bounded",
-       "decision": "allow", "reason": "authorized"}], "deny", 1),
-    ([{"risk_level": "high", "user_authorization": "low", "scope": "bounded",
-       "decision": "allow", "reason": "authorized"}], "ask", 1),
-    ([{}], "ask", 1),
-    ([None], "ask", 1),
+@pytest.mark.parametrize(("response", "outcome"), [
+    ({"decision": "allow", "reason": "authorized"}, "allow"),
+    ({"decision": "block", "reason": "exfiltration"}, "deny"),
+    ({"decision": "allow", "reason": "uncertain"}, "ask"),
+    ({"decision": "ask", "reason": "uncertain"}, "ask"),
+    ({}, "ask"),
+    ("not json", "ask"),
+    (None, "ask"),
 ])
-def test_independent_classifier(monkeypatch, responses, outcome, count):
+def test_independent_classifier(monkeypatch, response, outcome):
     import httpx
     from agent.runtime.auto_approval import classify
 
@@ -321,16 +366,18 @@ def test_independent_classifier(monkeypatch, responses, outcome, count):
         assert request.headers["Authorization"] == "Bearer unified"
         body = json.loads(request.content)
         assert body["model"] == "deepseek-flash"
-        assert body["reasoning_effort"] == ("low" if sent else "none")
+        assert body["reasoning_effort"] == "none"
+        assert body["messages"][1] == {"role": "user", "content": "example"}
         sent.append(body)
-        item = responses[len(sent) - 1]
-        if item is None:
+        if response is None:
             return httpx.Response(503)
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(item)}}]})
+        content = response if isinstance(response, str) else json.dumps(response)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
     assert asyncio.run(classify("unified", False, "example", lambda: False)).decision == outcome
-    assert len(sent) == count
+    # One request per call: an uncertain verdict is not re-asked.
+    assert len(sent) == 1
 
 
 def test_cancelled_classifier_request_is_closed(monkeypatch):
@@ -433,7 +480,7 @@ def test_external_tools_follow_server_trust_snapshot():
         assert invoked == ["mcp__trusted__tool"]
 
 
-def test_web_search_with_known_secret_is_denied_without_flash(monkeypatch):
+def test_web_search_with_known_secret_is_statically_allowed(monkeypatch):
     reviews = []
 
     async def review(*args):
@@ -441,27 +488,76 @@ def test_web_search_with_known_secret_is_denied_without_flash(monkeypatch):
         return Decision("allow", "reviewed")
 
     monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
-    secret = "unit-key-value-for-web-deny"
+    secret = "unit-key-value-for-web-allow"
     settings = Settings(resolved_deepseek_api_key=secret)
     model = scripted_model([
-        AIMessage(content="", tool_calls=[{"name": "web_search", "id": "bad", "args": {
+        AIMessage(content="", tool_calls=[{"name": "web_search", "id": "ok", "args": {
             "query": f"debug token={secret}"}}]),
         AIMessage(content="done"),
     ])
     with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(StateBackend(), ExecutionMode.SANDBOXED)):
         runner = AgentRunner(model=model, settings=settings)
         runner.set_permission_mode("auto")
-        assert runner.invoke("search secret").status == "completed"
-        messages = runner.prepared.graph.get_state(runner._thread_config()).values["messages"]
-        assert any(isinstance(m, ToolMessage) and m.tool_call_id == "bad" and m.status == "error" for m in messages)
+        assert runner.invoke("search JWT Bearer docs").status == "completed"
         assert reviews == []
+
+
+def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_path):
+    from langchain_core.messages import HumanMessage
+
+    from agent.bootstrap.factory import AgentSpec
+    from agent.execution.layout import sandbox_environment
+    from agent.models.profile import ModelProfile
+    from agent.runtime.auto_approval import AutoApprovalMiddleware
+
+    monkeypatch.setenv("APP_TOKEN", "allowlisted-token-value")
+    profile_key = "profile-api-key-value-xyz"
+    deepseek_key = "deepseek-api-key-value-xyz"
+    env_set_secret = "env-set-secret-value"
+    sandbox = SandboxConfig(
+        workspace=tmp_path,
+        env_set={"APP_SECRET": env_set_secret},
+        env_allowlist=("APP_TOKEN", "PATH"),
+    )
+    settings = Settings(
+        resolved_deepseek_api_key=deepseek_key,
+        llm_profiles=(ModelProfile("local/mock", "mock", api_key=profile_key),),
+        llm_default="local/mock",
+        sandbox=sandbox,
+    )
+    with SqliteSaver.from_conn_string(str(tmp_path / "journal.sqlite")) as saver:
+        middleware = AutoApprovalMiddleware(
+            spec=AgentSpec(settings=settings, deepseek_api_key=deepseek_key, sandbox=sandbox),
+            backend=object(),
+            controller=object(),
+            journal=ApprovalJournal(saver),
+            gated=ASK_INTERRUPT_ON,
+        )
+        state = {"messages": [HumanMessage(content="run unit tests")]}
+        call = {"name": "execute", "id": "1", "args": {
+            "command": (
+                f"echo {profile_key} {deepseek_key} {env_set_secret} "
+                f"allowlisted-token-value eyJ.test.jwt {sandbox_environment(sandbox)['PATH']}"
+            ),
+        }}
+        environment, _ = middleware._policy()
+        text = middleware.evidence(state, call, environment)
+        assert text is not None
+        assert profile_key not in text
+        assert deepseek_key not in text
+        assert env_set_secret not in text
+        assert "allowlisted-token-value" not in text
+        assert "eyJ.test.jwt" in text
+        assert text.count("[REDACTED]") == 4
+        # Allowlisted host basics such as PATH are not credentials and stay readable.
+        assert sandbox_environment(sandbox)["PATH"] in text
 
 
 def test_env_set_change_blocks_stale_auto_grant(tmp_path, monkeypatch):
     from agent.sessions.store import SessionStore
 
     async def review(key, trust_env, evidence, cancelled):
-        command = json.loads(evidence)["arguments"]["command"]
+        command = json.loads(evidence)["action"]["args"]["command"]
         return Decision("ask" if command == "confirm" else "allow", "reviewed")
 
     monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
@@ -476,8 +572,8 @@ def test_env_set_change_blocks_stale_auto_grant(tmp_path, monkeypatch):
         store = SessionStore(db)
         runner = AgentRunner(session_store=store, settings=settings, model=scripted_model([
             AIMessage(content="", tool_calls=[
-                {"id": "old", "name": "execute", "args": {"command": "old"}},
-                {"id": "confirm", "name": "execute", "args": {"command": "confirm"}},
+                {"id": "old", "name": "execute", "args": {"command": "old", "network": True}},
+                {"id": "confirm", "name": "execute", "args": {"command": "confirm", "network": True}},
             ]),
         ]))
         try:
@@ -492,7 +588,8 @@ def test_env_set_change_blocks_stale_auto_grant(tmp_path, monkeypatch):
         restored = AgentRunner(
             session_store=store, thread_id=thread, settings=replace(settings, sandbox=changed),
             model=scripted_model([
-                AIMessage(content="", tool_calls=[{"id": "new", "name": "execute", "args": {"command": "new"}}]),
+                AIMessage(content="", tool_calls=[{"id": "new", "name": "execute",
+                                                  "args": {"command": "new", "network": True}}]),
                 AIMessage(content="done"),
             ]),
         )
@@ -528,7 +625,7 @@ def test_async_graph_reviews_and_resumes_without_blocking_the_loop(monkeypatch):
             graph = create_agent(settings=Settings(resolved_deepseek_api_key="test"), permission_mode="auto",
                                  model=scripted_model([
                                      AIMessage(content="", tool_calls=[{"name": "execute", "id": "call",
-                                                                        "args": {"command": "example"}}]),
+                                                                        "args": {"command": "example", "network": True}}]),
                                      AIMessage(content="done"),
                                  ])).graph
         config = {"configurable": {"thread_id": "async-example"}}

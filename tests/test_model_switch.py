@@ -848,6 +848,7 @@ def test_subagent_effort_stays_independent_after_main_model_switch(api, child_ef
         monkeypatch.setattr(factory, 'build_chat_model', build_child)
         monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
         runner = AgentRunner(model=first_model, settings=cfg)
+        runner.set_permission_mode('allow')
         try:
             assert runner.invoke('first').output == 'first parent'
             runner.request_model_change('beta', reasoning_effort='low')

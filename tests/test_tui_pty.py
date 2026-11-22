@@ -654,6 +654,7 @@ def _subagent_stream_probe():
     from agent.bootstrap.config import SandboxConfig
     settings = replace(settings, sandbox=SandboxConfig(workspace=workspace), config_dir=workspace.parent/'private')
     runner = AgentRunner(settings=settings, session_store=store, thread_id='pty-cancel')
+    runner.set_permission_mode('allow')
 """.strip(),
     ).replace(
         "from agent.cli.app import CliApplication",

@@ -928,9 +928,11 @@ def test_subagents_defaults_and_validation():
                    subagents=SubAgentConfig(model=profile.id, reasoning_effort='low'))
     assert cfg.subagents.model == profile.id
     for values in ({'enabled': 'true'}, {'max_concurrent': 0}, {'max_concurrent': True},
-                   {'permission': 'ask'}, {'model': ''}, {'reasoning_effort': False}):
+                   {'model': ''}, {'reasoning_effort': False}):
         with pytest.raises(ValueError):
             SubAgentConfig(**values)
+    with pytest.raises(ValueError, match='Unknown subagents settings: permission'):
+        SubAgentConfig.from_mapping({'permission': 'allow'})
     with pytest.raises(ValueError, match='Unknown subagents.model'):
         replace(cfg, subagents=SubAgentConfig(model='unknown'))
     with pytest.raises(ValueError, match='Unsupported subagents.reasoning_effort'):

@@ -88,9 +88,10 @@ flowchart TB
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
 | `web_search`、`web_fetch` | 配置 `llm.models.deepseek.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
-| `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务继承 Auto 分类，其余模式使用沙箱 `allow` |
-| `read_task_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
-| `start_background_task`、`check_background_task`、`cancel_background_task` | 同上且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
+| `start_task` | 主 Agent、`subagents.enabled: true` 且权限为 `auto` 或 `allow` | 同步等待子任务；子任务使用主 Agent 的权限模式 |
+| `read_task_log` | 主 Agent 且 `subagents.enabled: true` | 查询当前父会话的日志索引或有界日志页 |
+| `start_background_task` | 与 `start_task` 相同，且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
+| `check_background_task`、`cancel_background_task` | 主 Agent、`subagents.enabled: true` 且 `subagents.background: true` | 查看或取消后台任务，`ask` 下同样可用 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -138,9 +139,10 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
 恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
 
-子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，在主任务的 Auto 模式下使用 Auto，其余使用 `allow` 执行文件工具、execute、
+子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以主任务的权限模式（`auto` 或 `allow`）执行文件工具、execute、
 已配置的网页工具和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
-主 Agent 的 `ask` 不会触发子任务审批；不能提供已验证沙箱时明确拒绝委派。
+子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task` 和 `start_background_task`；
+`auto` 和 `allow` 本身要求已验证沙箱，委派不会落到宿主上。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
 显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
 
@@ -178,7 +180,7 @@ TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示�
 | `MCPMiddleware` | `mcp.json` 根级 `enabled` 为 true 且 Manager 无配置错误时注入管理工具和已连接服务的工具；全局关闭时不进入中间件列表 |
 | `HiddenToolsMiddleware` | 按 `tools.hidden` 从模型请求中过滤工具，不改变审批规则 |
 
-工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先做静态策略与 Flash 风险评估，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
+工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先按由 Ask 规则派生的静态规则判断，再把剩余调用交给 Flash 审查授权；被拦截的调用把原因返回给 Agent，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
 
 ## 运行与中断
 

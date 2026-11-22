@@ -31,6 +31,7 @@ from agent.sessions.images import (
 )
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig, SandboxMode
+from agent.redaction import known_secrets
 from agent.models.profile import InputKind, ModelProfile
 from agent.runtime.control import RunController
 from agent.runtime.configuration import RuntimeConfiguration
@@ -744,14 +745,7 @@ class AgentRunner:
         return [item.text for item in self.control.take_unapplied()]
 
     def summary_secrets(self) -> tuple[str, ...]:
-        settings = self.settings or self._spec.settings
-        if settings is None:
-            key = self._spec.deepseek_api_key
-            return (key,) if key else ()
-        return tuple(value for value in (
-            *(profile.api_key for profile in settings.llm_profiles),
-            settings.resolved_deepseek_api_key, self._spec.deepseek_api_key,
-        ) if value)
+        return known_secrets(self.settings or self._spec.settings, self._spec.deepseek_api_key)
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         assert self._runtime is not None

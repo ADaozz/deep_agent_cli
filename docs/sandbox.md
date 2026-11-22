@@ -32,9 +32,17 @@
 子任务共享已验证的 Backend 和 SandboxPool；`isolated` 隔离消息历史，不创建独立工作区，
 也不自动防止多个任务修改同一文件。主 Agent 应顺序处理存在依赖或写入冲突的步骤。
 
-Auto 子任务沿用 Auto，按命令的网络参数运行，需要人工决定时将拒绝原因返回父任务。其余模式的子任务使用 `allow` 的有网实例。
+子任务的权限跟随主 Agent：
+
+| 主 Agent | 子任务 |
+|---|---|
+| `ask` | 不提供 `start_task` 和 `start_background_task`。子任务没有审批入口，无法逐项向你确认 |
+| `auto` | Auto，按命令的网络参数运行；需要人工决定时将拒绝原因返回父任务 |
+| `allow` | `allow` 的有网实例 |
+
+切换到 `ask` 之前启动的后台任务继续按启动时的权限运行，仍可用 `check_background_task`、`cancel_background_task` 和 `read_task_log` 查看或取消。
 文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具、人工输入或递归委派工具。
-没有经过验证的 `SANDBOXED` 身份时明确拒绝委派，不退化到宿主免审批执行。
+`auto` 和 `allow` 只在经过验证的 `SANDBOXED` 身份下可用，因此委派不会退化到宿主免审批执行。
 
 父任务取消会终止关联子任务的模型流和命令，单个任务结束不会关闭共享 Pool。
 子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 DeepSeek 网页工具密钥 做精确替换，
@@ -199,7 +207,7 @@ CUSTOM backend 保留调用方自己的规则。
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
 | `ask`（默认） | `execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
-| `auto` | 只读查询、无敏感载荷的公开网页查询、以及工作区内普通源码 write/edit 放行。`execute`、`delete`、区外写入、敏感路径写入由独立 DeepSeek Flash 按风险与授权评估。含密钥的网页请求不直接放行。未信任的 MCP、服务增删和其他未知副作用工具需人工确认 | `SANDBOXED` 且已配置 DeepSeek 来源级凭据 |
+| `auto` | Ask 不拦的工具、`web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute` 直接放行。联网或 `full-access` 下的 `execute`、工作区外的文件变更由独立的 DeepSeek Flash 判断是否在用户授权范围内。未信任的 MCP 工具、`mcp_add` / `mcp_remove` 和自定义工具需人工确认 | `SANDBOXED` 且已配置 DeepSeek 来源级凭据 |
 | `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
 - `/permission ask|auto|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
@@ -208,11 +216,25 @@ CUSTOM backend 保留调用方自己的规则。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。
 
-Auto 审批分静态策略与 Flash 风险评估。静态策略对明确低风险操作直接放行，对明确敏感外发直接拒绝或转人工；其余进入审查。审查证据包含可信用户授权、相关对话（工具输出视为不可信）、准确工具参数、沙箱与挂载策略，发送前会脱敏已知密钥与明显凭据模式。分类器输出 `risk_level`、`user_authorization`、`scope`（`bounded` / `unbounded` / `unknown`）、`decision`、`reason`；Python 再按风险政策校验：`critical` 一律拒绝；`high` 仅在授权充足且 `scope=bounded` 时才可自动放行，`scope=unknown` 转人工，`scope=unbounded` 拒绝；并校正 `decision` 与 `reason` 自相矛盾的输出。模型给出的 `bounded` 不是安全证明，路径与挂载仍由后端校验。首次请求使用 `reasoning_effort: none`，模型自身初判为 ask 时使用 `low` 复核一次。请求格式见 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。每批最多同时分类 4 个调用，排队和复核共用 18 秒预算。到期时保留已完成的决定，排队中或未返回的调用转人工。无效返回、证据不足或脱敏失败也转人工。子任务需要人工确认时由父任务决定是否重新发起。
+### Auto 审批
 
-使用 Session SQLite 时，Auto 持久化调用摘要、决定、有限原因、执行状态和审批环境指纹（v2）。恢复待审批批次时保留原提示和调用顺序。工具执行前会核对沙箱模式、工作区、挂载权限、受保护路径、网络策略、`env_allowlist`、`env_set`（仅本地哈希）和 `trust_env`。环境变化、旧记录缺少新版本指纹、或审批已执行/结果未知时，会阻止旧调用并要求重新发起。无持久会话时记录仅在内存中有效。
+Auto 按三层判断，前一层给出结论就不再往下走。
 
-旧版本按会话、Agent 角色、消息 ID、工具调用 ID、工具名和参数复用审批决定，分类器给出的放行结果未绑定审批时的权限环境。例如，同批次中一个调用在 `restricted` 下自动放行，另一个等待人工确认。如果重启后以 `full-access` 恢复并继续使用 Auto，确认后一个调用时，前一个调用也可能沿用旧决定，在更宽的文件系统权限下执行。指纹 v2 还会因环境变量授权变化使旧放行失效。
+1. **沿用 Ask 的规则。** Ask 不需要确认的工具，Auto 也不拦。自定义工具、未信任的宿主 MCP 工具和 `mcp_add` / `mcp_remove` 在沙箱之外生效，始终人工确认。
+2. **沙箱已经限定范围的操作直接放行。** 包括 `web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute`。这类命令没有网络，能写到的只有工作区、读写挂载和沙箱自己的 `/tmp`、`/home`。额外的读写挂载也在这个范围内，不希望被自动改写的目录不要以读写方式挂载。
+3. **其余调用交给 Flash。** 即联网的 `execute`、`full-access` 下的 `execute`，以及工作区外的文件变更。
+
+Flash 是独立的审批员，判断待审调用是否在用户授权范围内。它看到的只有用户消息、此前的工具调用（名称和参数）、待审调用，以及工作区、沙箱模式、网络策略和读写挂载。主 Agent 的文字和工具输出不发送，避免 Agent 的自我解释或工具结果里的注入内容影响判断。子任务中，用户消息是父任务收到的用户请求；委派说明单独列出，不构成授权。发送前对 Settings 与 Sandbox 中已配置的凭据值做精确替换（`[REDACTED]`），不按 JWT / Cookie / Token 等文本特征猜测。过长的参数会截断并标记；证据仍超过上限时转人工。
+
+判断依据是操作的实际效果和用户授权，不是命令里出现的关键词。拦截的是未授权的数据外发、用户未要求的不可逆破坏、对共享或生产环境的修改、持久削弱安全边界，以及出自不可信内容的指令。按依赖清单安装依赖、读取项目 `.env` 调用对应服务、构建和测试、向已有远程非强制推送功能分支等常规开发操作属于放行例外。
+
+Flash 只输出 `allow` 或 `block` 和一个固定的原因代码，每个调用只请求一次（`reasoning_effort: none`）。请求格式见 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。每批最多同时审查 4 个调用，共用 18 秒；到期时保留已完成的决定，未返回的调用转人工。请求失败或输出不符合约定也转人工。
+
+被拦截的调用不执行，原因作为工具错误返回给 Agent，由它换一种方式继续或向用户说明。同一会话里 Flash 连续拦截 3 次或累计拦截 20 次时，这一次改为人工确认，两个计数随之清零。计数只在内存中，重启后重新开始。子任务需要人工确认时把原因返回父任务，由父任务决定是否重新发起。
+
+Auto 减少的是确认次数，不是安全边界：Flash 可能判断错误，`web_fetch` 的 URL 和不联网命令写入 `/tmp` 的内容也不经审查。联网命令送审时会带上此前的工具调用，用来识别先收集、后外发的组合。真正的边界仍是沙箱模式、挂载和网络参数。
+
+使用 Session SQLite 时，Auto 持久化调用摘要、决定、固定原因、执行状态和审批环境指纹。恢复待审批批次时保留原提示和调用顺序。工具执行前会核对沙箱模式、工作区、挂载、受保护路径、网络策略、`env_allowlist`、`env_set`（仅本地哈希）和 `trust_env`；依赖 MCP 信任、文件路径或沙箱模式的直接放行还会重新判定一次。环境变化，或审批已执行、结果未知时，会阻止旧调用并要求重新发起。无持久会话时记录仅在内存中有效。
 
 ## 命令输出与日志
 

@@ -457,6 +457,7 @@ bailian:
 ## SubAgent 委派
 
 默认启用 Deep Agents 原生同步 `start_task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
+委派只在主 Agent 的权限模式为 `auto` 或 `allow` 时可用；`ask` 下不提供 `start_task` 和 `start_background_task`。
 只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
 或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
@@ -472,7 +473,6 @@ subagents:
   model: null
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
-  permission: allow
   # 同时提供 start/check/cancel_background_task；false 时只保留同步 start_task。
   background: true
 ```
@@ -488,7 +488,9 @@ subagents:
 直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
 此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
 当前原生 `start_task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
-主 Agent 使用 Auto 时，子任务也使用 Auto 分类。需要人工确认的子任务操作会被阻止并反馈给父任务。其他模式下子任务沿用 `allow`；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
+子任务的权限跟随主 Agent。主 Agent 使用 Auto 时，子任务也使用 Auto 分类，需要人工确认的子任务操作会被阻止并反馈给父任务；主 Agent 使用 `allow` 时子任务使用 `allow`。
+子任务没有审批入口，因此 `ask` 下不提供委派工具；切换到 `ask` 之前启动的后台任务继续运行，仍可查看、取消和读取日志。
+`auto` 和 `allow` 都要求经过验证的 `SANDBOXED` 后端，委派不会在宿主上免审批执行。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，
@@ -507,7 +509,7 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 | `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
 
 后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用 `max_concurrent`；
-没有已验证的 `SANDBOXED` 后端时启动直接失败。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
+`ask` 下只保留 `check_background_task` 和 `cancel_background_task`。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
 主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
 新建或切换会话、退出程序会取消后台任务并丢弃未送达的结果；未完成的任务恢复后显示为中断。

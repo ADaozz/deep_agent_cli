@@ -11,31 +11,32 @@ import sqlite3
 from threading import Lock
 
 from langchain.agents.middleware import HumanInTheLoopMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.config import get_config
 
 from agent.models.stream_lifecycle import ModelStreamCancelled
+from agent.redaction import known_secrets, replace_known_secrets
 from agent.runtime.approval.classify import classify
-from agent.runtime.approval.evidence import build_review_evidence, dumps_evidence
+from agent.runtime.approval.evidence import build_evidence, user_texts
 from agent.runtime.approval.fingerprint import build_policy
-from agent.runtime.approval.inspector import ReviewInspector
-from agent.runtime.approval.policy import MANUAL, REASONS
-from agent.runtime.approval.redact import redact_for_classifier
-from agent.runtime.approval.rules import static_rule
-from agent.runtime.approval.stats import approval_stats
+from agent.runtime.approval.policy import MANUAL
+from agent.runtime.approval.rules import REVOCABLE, static_rule
 from agent.runtime.approval.types import Decision
-from agent.subagents.notifications import NOTIFICATION_KEY
 
-# Back-compat aliases used by tests and callers.
-_REASONS = REASONS
-_MANUAL = MANUAL
+# Shorter values would blank out unrelated review text when replaced.
+_MIN_SECRET_LEN = 8
 _BATCH_TIMEOUT = 18
 _MAX_CONCURRENT_REVIEWS = 4
+# Repeated blocks mean the agent and the reviewer disagree; the block that reaches a limit goes to the human.
+_MAX_CONSECUTIVE_BLOCKS = 3
+_MAX_SESSION_BLOCKS = 20
 
 delegating_user_request = ContextVar("delegating_user_request", default="")
 _STALE = "审批环境已变化，请在当前权限下重新发起。"
 _REPLAY = "此调用已处理或执行结果未知，已阻止重复执行。"
+_REVOKED = "放行条件已改变（工具信任、文件路径或沙箱模式），请重新发起调用。"
+_BLOCKED_HINT = "不要改写命令绕过此拦截；请换一种方式完成任务，或向用户说明需要其明确授权。"
 
 
 async def _classify_batch(evidence_by_id, api_key, trust_env, cancelled):
@@ -53,7 +54,7 @@ async def _classify_batch(evidence_by_id, api_key, trust_env, cancelled):
         done, _ = await asyncio.wait(tasks.values(), timeout=_BATCH_TIMEOUT, return_when=asyncio.FIRST_EXCEPTION)
         if cancelled():
             raise ModelStreamCancelled("Auto approval cancelled")
-        return {call_id: task.result() if task in done else _MANUAL for call_id, task in tasks.items()}
+        return {call_id: task.result() if task in done else MANUAL for call_id, task in tasks.items()}
     finally:
         for task in tasks.values():
             task.cancel()
@@ -77,15 +78,13 @@ class ApprovalJournal:
         else:
             self.conn = sqlite3.connect(":memory:", check_same_thread=False)
             self.lock = Lock()
+        self._blocks: dict[str, tuple[int, int]] = {}
         with self.lock, self.conn:
             if not self.conn.in_transaction:
                 self.conn.execute("BEGIN IMMEDIATE")
             self.conn.execute("""CREATE TABLE IF NOT EXISTS auto_approval (
                 call_key TEXT PRIMARY KEY, decision TEXT NOT NULL, reason TEXT NOT NULL,
                 execution TEXT NOT NULL DEFAULT 'pending', policy_fingerprint TEXT)""")
-            columns = self.conn.execute("PRAGMA table_info(auto_approval)").fetchall()
-            if not any(row[1] == "policy_fingerprint" for row in columns):
-                self.conn.execute("ALTER TABLE auto_approval ADD COLUMN policy_fingerprint TEXT")
 
     def lookup(self, key):
         with self.lock:
@@ -99,6 +98,18 @@ class ApprovalJournal:
                 (key, result.decision, result.reason, fingerprint),
             )
         return self.lookup(key)
+
+    def count_review(self, thread, decision):
+        """Track classifier blocks per thread, in memory only. True when this block reached a limit."""
+        with self.lock:
+            streak, total = self._blocks.get(thread, (0, 0))
+            if decision.decision == "allow":
+                streak = 0
+            elif decision.decision == "deny":
+                streak, total = streak + 1, total + 1
+            reached = streak >= _MAX_CONSECUTIVE_BLOCKS or total >= _MAX_SESSION_BLOCKS
+            self._blocks[thread] = (0, 0) if reached else (streak, total)
+            return reached
 
     def transition(self, key, before, after):
         with self.lock, self.conn:
@@ -117,7 +128,6 @@ class ApprovalJournal:
                 return None
             row = self.conn.execute("SELECT execution FROM auto_approval WHERE call_key=?", (key,)).fetchone()
             if row and row[0] == before:
-                approval_stats.record_stale()
                 return _STALE
             return _REPLAY
 
@@ -140,9 +150,11 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
     def name(self):
         return "HumanInTheLoopMiddleware"
 
-    def __init__(self, *, spec, backend, controller, journal, trusted=(), ask_rules=None):
-        super().__init__(interrupt_on=ask_rules or {})
-        self.ask_only = ask_rules is not None
+    def __init__(self, *, spec, backend, controller, journal, gated, trusted=(), ask_only=False):
+        """``gated`` is the Ask-mode ``interrupt_on``. ``ask_only`` applies it as is and only guards replays."""
+        super().__init__(interrupt_on=gated if ask_only else {})
+        self.gated = frozenset(gated)
+        self.ask_only = ask_only
         self.spec = spec
         self.backend = backend
         self.controller = controller
@@ -150,20 +162,17 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         self.trusted = frozenset(trusted)
         self.custom = {tool.name for tool in spec.tools}
 
-    def _secrets(self) -> tuple[str, ...]:
-        key = getattr(self.spec, "deepseek_api_key", None) or ""
-        return tuple(secret for secret in (key,) if secret)
-
     def _sandbox_config(self):
         return getattr(getattr(self.backend, "executor", None), "config", None) or self.spec.sandbox
 
     def rule(self, call):
         return static_rule(
             call,
+            gated=self.gated,
             backend=self.backend,
+            sandbox_mode=getattr(self._sandbox_config(), "mode", None),
             trusted=self.trusted,
             custom=self.custom,
-            secrets=self._secrets(),
         )
 
     def _policy(self):
@@ -175,38 +184,18 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             trust_env=bool(getattr(self.spec, "trust_env", False)),
         )
 
-    def _inspector(self) -> ReviewInspector:
-        config = self._sandbox_config()
-        workspace = getattr(config, "workspace", None) if config else None
-        protected = tuple(getattr(config, "protected_files", ()) or ()) if config else ()
-        return ReviewInspector(workspace=workspace, protected=protected)
-
-    def evidence(self, state, call, context):
-        user = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)
-                     and NOTIFICATION_KEY not in m.additional_kwargs), None)
-        if user is None or not user.text.strip():
-            return None
-        if context is None:
-            return None
-        current = user.text
-        original = current
+    def evidence(self, state, call, environment):
+        """Review input with configured credentials replaced, or None when the call cannot be judged."""
+        parent = None
         if self.spec.role == "subagent":
-            original = getattr(self.controller, "approval_user_request", "")
-            if not original:
-                return None
-        inspection = self._inspector().inspect_call(call)
-        built = build_review_evidence(
-            state=state,
-            call=call,
-            context=context,
-            original_user_task=original,
-            current_user_task=current,
-            inspection=inspection,
-        )
-        raw = dumps_evidence(built)
+            parent = getattr(self.controller, "approval_user_request", None) or ""
+        raw = build_evidence(state["messages"], call, environment, parent_request=parent)
         if raw is None:
             return None
-        return redact_for_classifier(raw, self._secrets())
+        return replace_known_secrets(raw, known_secrets(
+            getattr(self.spec, "settings", None), self.spec.deepseek_api_key, self._sandbox_config(),
+            min_length=_MIN_SECRET_LEN,
+        ))
 
     async def aafter_model(self, state, runtime):
         message = state["messages"][-1]
@@ -217,7 +206,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             self.journal.lookup(_call_key(thread, self.spec.role, message, call)) for call in message.tool_calls
         ):
             return super().after_model(state, runtime)
-        context, fingerprint = self._policy()
+        environment, fingerprint = self._policy()
         decisions = {}
         keys = {}
         new_decisions = {}
@@ -231,22 +220,23 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             if cached is not None:
                 decisions[call_id] = cached
                 continue
-            decision = _MANUAL if self.ask_only else self.rule(call)
+            decision = MANUAL if self.ask_only else self.rule(call)
             if decision is None:
-                evidence = self.evidence(state, call, context)
+                evidence = self.evidence(state, call, environment)
                 if evidence:
                     remote[call_id] = evidence
                     continue
-                decision = _MANUAL
-            else:
-                approval_stats.record_static(decision.decision)
+                decision = MANUAL
             new_decisions[call_id] = decision
-        if remote:
-            new_decisions.update(await _classify_batch(
-                remote, self.spec.deepseek_api_key, self.spec.trust_env, lambda: self.controller.cancel_requested,
-            ))
+        reviewed = await _classify_batch(
+            remote, self.spec.deepseek_api_key, self.spec.trust_env, lambda: self.controller.cancel_requested,
+        ) if remote else {}
         if self.controller.cancel_requested:
             raise ModelStreamCancelled("Auto approval cancelled")
+        for call_id, decision in reviewed.items():
+            if self.journal.count_review(thread, decision):
+                decision = Decision("ask", decision.reason)
+            new_decisions[call_id] = decision
         for call_id, decision in new_decisions.items():
             decisions[call_id] = self.journal.record(keys[call_id], decision, fingerprint)
         if self.spec.role == "subagent":
@@ -286,7 +276,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         elif decision is None:
             reason = "缺少审批记录，操作已阻止。"
         elif decision.decision == "deny":
-            reason = decision.reason
+            reason = f"{decision.reason}{_BLOCKED_HINT}"
         elif decision.decision == "ask" and self.spec.role == "subagent":
             return None, ToolMessage(
                 content=f"此操作需要人工审批，请由父 Agent 重新发起。{decision.reason}",
@@ -295,8 +285,8 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             )
         elif self.ask_only and decision.decision == "allow":
             reason = "已退回 Ask；请在当前权限模式下重新发起操作。"
-        elif decision.reason in {"受信任的 MCP 服务。", "授权工作区内的写入。"} and self.rule(call) != decision:
-            reason = "工具信任或文件路径已改变，请重新发起调用。"
+        elif decision in REVOCABLE and self.rule(call) != decision:
+            reason = _REVOKED
         else:
             interactive = call["name"] == "request_human_input" and call["name"] not in self.custom
             before = "approved" if decision.decision == "ask" else "pending"
@@ -311,9 +301,8 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         if request.tool_call["name"] not in {"start_task", "start_background_task"}:
             yield
             return
-        user = next((m for m in reversed(request.state["messages"]) if isinstance(m, HumanMessage)
-                     and NOTIFICATION_KEY not in m.additional_kwargs), None)
-        token = delegating_user_request.set(user.text if user else "")
+        texts = user_texts(request.state["messages"])
+        token = delegating_user_request.set(texts[-1] if texts else "")
         try:
             yield
         finally:
