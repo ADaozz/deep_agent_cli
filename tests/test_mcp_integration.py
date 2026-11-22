@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.factory import create_agent
 from agent.mcp.manager import MCPManager
-from agent.runtime.permissions import ASK_INTERRUPT_ON, PermissionMode
+from agent.runtime.permissions import ask_interrupt_on, PermissionMode
 from agent.runtime.runner import AgentRunner
 from agent.execution.backend import BackendSelection
 from agent.execution.types import ExecutionMode
@@ -319,7 +319,7 @@ def test_no_manager_matches_the_current_native_tool_set() -> None:
     runner = AgentRunner(model=scripted_model([AIMessage(content="done")]), backend=StateBackend())
     try:
         names = graph_tool_names(runner.prepared.graph)
-        assert runner.prepared.interrupt_on == ASK_INTERRUPT_ON
+        assert runner.prepared.interrupt_on == ask_interrupt_on()
         assert not any(name.startswith("mcp") for name in names)
         assert "mcp_add" not in runner.prepared.exposed_tool_names
         assert not any(getattr(tool, "name", "").startswith("mcp") for tool in runner._spec.tools)

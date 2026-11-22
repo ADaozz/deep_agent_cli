@@ -14,7 +14,7 @@ from agent.runtime.approval.evidence import build_evidence
 from agent.runtime.approval.fingerprint import build_policy
 from agent.runtime.approval.policy import BLOCK_REASONS, INSTRUCTIONS, REASONS, parse_verdict
 from agent.runtime.approval.rules import REVOCABLE, static_rule
-from agent.runtime.permissions import ASK_INTERRUPT_ON
+from agent.runtime.permissions import ask_interrupt_on
 from agent.subagents.notifications import notification_message
 
 ENVIRONMENT = {"workspace": "/work", "sandbox": "restricted", "network_policy": "per-command",
@@ -56,7 +56,9 @@ def _backend():
     return backend
 
 
-def _rule(name, args=None, *, mode="restricted", gated=ASK_INTERRUPT_ON, **kwargs):
+def _rule(name, args=None, *, mode="restricted", gated=None, **kwargs):
+    if gated is None:
+        gated = ask_interrupt_on()
     return static_rule({"name": name, "args": args or {}}, gated=gated, backend=_backend(),
                        sandbox_mode=mode, **kwargs)
 
@@ -68,7 +70,7 @@ def test_static_rules_follow_the_ask_gate():
     for name in ("web_search", "web_fetch"):
         assert _rule(name, {"query": "JWT Bearer api_key Cookie"}).decision == "allow"
     # Host tools that Ask gates and nobody trusted stay with the human.
-    mcp_gate = {**ASK_INTERRUPT_ON, "mcp__unknown__tool": True, "mcp_add": True}
+    mcp_gate = {**ask_interrupt_on(), "mcp__unknown__tool": True, "mcp_add": True}
     assert _rule("mcp__unknown__tool", gated=mcp_gate).decision == "ask"
     assert _rule("mcp_add", gated=mcp_gate).decision == "ask"
     assert _rule("mcp__unknown__tool", gated=mcp_gate, trusted={"mcp__unknown__tool"}).decision == "allow"
@@ -84,7 +86,7 @@ def test_static_rules_allow_workspace_mutations_only(name):
     assert _rule(name, {"file_path": "/work/src/a.py"}, mode="full-access").decision == "allow"
     assert _rule(name, {"file_path": "/outside/.env"}) is None
     assert _rule(name, {}) is None
-    assert static_rule({"name": name, "args": {"file_path": "/work/a"}}, gated=ASK_INTERRUPT_ON,
+    assert static_rule({"name": name, "args": {"file_path": "/work/a"}}, gated=ask_interrupt_on(),
                        backend=object(), sandbox_mode="restricted") is None
 
 
@@ -117,7 +119,7 @@ def test_network_requested_matches_the_execute_tool_parser():
 def test_revocable_grants_are_the_state_dependent_static_allows():
     assert _rule("write", {"file_path": "/work/a"}) in REVOCABLE
     assert _rule("execute", {"command": "ls"}) in REVOCABLE
-    gate = {**ASK_INTERRUPT_ON, "mcp__s__t": True}
+    gate = {**ask_interrupt_on(), "mcp__s__t": True}
     assert _rule("mcp__s__t", gated=gate, trusted={"mcp__s__t"}) in REVOCABLE
     assert _rule("read") not in REVOCABLE
     assert parse_verdict({"decision": "allow", "reason": "authorized"}) not in REVOCABLE

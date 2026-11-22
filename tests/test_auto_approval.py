@@ -15,7 +15,7 @@ from agent.execution.backend import BackendSelection
 from agent.execution.policy import BindMount, SandboxConfig
 from agent.execution.types import ExecutionMode
 from agent.runtime.auto_approval import ApprovalJournal, Decision
-from agent.runtime.permissions import ASK_INTERRUPT_ON
+from agent.runtime.permissions import ask_interrupt_on
 from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
 
@@ -661,7 +661,7 @@ def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_
             backend=object(),
             controller=object(),
             journal=ApprovalJournal(saver),
-            gated=ASK_INTERRUPT_ON,
+            gated=ask_interrupt_on(),
         )
         state = {"messages": [HumanMessage(content="run unit tests")]}
         call = {"name": "execute", "id": "1", "args": {

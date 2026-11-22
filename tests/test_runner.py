@@ -8,7 +8,7 @@ from agent.bootstrap.factory import create_agent
 from agent.bootstrap.config import Settings
 from tests.host_command import HostCommandBackend
 from agent.tools.examples import build_example_tools
-from agent.runtime.permissions import ASK_INTERRUPT_ON
+from agent.runtime.permissions import ask_interrupt_on
 from agent.runtime.runner import AgentRunner, _tool_decisions, classify_interrupt, is_valid_hitl_interrupt
 from agent.runtime.contracts import InterruptKind, UnknownInterruptError
 from tests.conftest import graph_tool_names, scripted_model
@@ -48,7 +48,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     # Ask offers no delegation; tasks from another mode can still be read, checked, and cancelled.
     assert prepared.exposed_tool_names == ["read_task_log", "check_background_task", "cancel_background_task"]
-    assert prepared.interrupt_on == ASK_INTERRUPT_ON
+    assert prepared.interrupt_on == ask_interrupt_on()
     assert prepared.system_prompt
     names = graph_tool_names(prepared.graph)
     assert "handoff_to_human" not in names

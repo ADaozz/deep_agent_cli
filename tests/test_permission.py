@@ -23,7 +23,7 @@ from agent.tools.execute import build_execute_tool
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from agent.mcp.names import host_interrupt_on
 from agent.runtime.permissions import (
-    ASK_INTERRUPT_ON,
+    ask_interrupt_on,
     AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
@@ -103,7 +103,7 @@ def test_tool_catalog_drives_ask_interrupt_and_native_reserved() -> None:
     assert SIDE_EFFECT_TOOLS <= NATIVE_TOOL_NAMES
     assert FILE_MUTATION_TOOLS | WEB_TOOLS | {"execute"} == SIDE_EFFECT_TOOLS
     for name in SIDE_EFFECT_TOOLS:
-        assert name in ASK_INTERRUPT_ON
+        assert name in ask_interrupt_on()
     assert "read" in NATIVE_TOOL_NAMES
     assert "read" not in SIDE_EFFECT_TOOLS
     assert "request_human_input" in NATIVE_TOOL_NAMES
@@ -119,12 +119,14 @@ def test_host_decision_rules_do_not_share_mutable_lists() -> None:
     assert left["allowed_decisions"] is not right["allowed_decisions"]
     left["allowed_decisions"].append("edit_without_approval")
     assert right["allowed_decisions"] == ["approve", "reject"]
-    assert ASK_INTERRUPT_ON["execute"]["allowed_decisions"] == ["approve", "reject"]
 
-    ask = interrupt_on_for_mode(PermissionMode.ASK)
-    assert ask is not None
-    ask["execute"]["allowed_decisions"].clear()
-    assert ASK_INTERRUPT_ON["execute"]["allowed_decisions"] == ["approve", "reject"]
+    first = ask_interrupt_on()
+    second = ask_interrupt_on()
+    assert first == second and first is not second
+    assert first["execute"]["allowed_decisions"] is not second["execute"]["allowed_decisions"]
+    first["execute"]["allowed_decisions"].clear()
+    assert ask_interrupt_on()["execute"]["allowed_decisions"] == ["approve", "reject"]
+    assert interrupt_on_for_mode(PermissionMode.ASK) == ask_interrupt_on()
 
     mcp = host_interrupt_on(["mcp__demo__echo"])
     mcp["mcp_add"]["allowed_decisions"].append("extra")
@@ -183,7 +185,7 @@ def test_runner_defaults_to_ask() -> None:
         thread_id="perm-default",
     )
     assert runner.permission_mode() is PermissionMode.ASK
-    assert runner.prepared.interrupt_on == ASK_INTERRUPT_ON
+    assert runner.prepared.interrupt_on == ask_interrupt_on()
     assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
 
 
@@ -196,7 +198,7 @@ def test_custom_interrupt_mapping_is_applied() -> None:
         interrupt_on={"lookup_docs": True},
     )
     runner = AgentRunner(prepared=prepared)
-    assert prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+    assert prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
     waiting = runner.invoke("look up")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "lookup_docs"
@@ -211,12 +213,12 @@ def test_custom_approval_survives_permission_round_trip() -> None:
         runner = AgentRunner(prepared=prepared)
         runner.set_permission_mode("allow")
         assert runner.pending_permission_mode() is PermissionMode.ALLOW
-        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+        assert runner.prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
         assert runner.invoke("x").status == "completed"
         assert runner.prepared.interrupt_on == {}
         runner.set_permission_mode("ask")
         assert runner.invoke("y").status == "completed"
-        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+        assert runner.prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
 
 
 def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() -> None:

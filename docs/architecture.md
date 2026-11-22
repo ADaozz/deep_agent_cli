@@ -152,7 +152,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 操作描述由结构化参数直接生成，不额外调用模型；文件工具仅记录路径，execute 保留有界命令、
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
-MCP、子任务日志、会话摘要及 Lain 的精确脱敏均先去重，再按长度降序替换为 `[REDACTED]`。等长密钥保留输入顺序。子任务摘要只精确替换已知模型和 DeepSeek 密钥；未知凭据原样保存。
+已知密钥精确替换集中在 `agent/redaction.py`：先去重，再按长度降序替换为 `[REDACTED]`（等长密钥保留输入顺序）。Auto 证据、MCP、子任务日志与审批卡走这一路径，不对自由文本中的 JWT / `sk-` 等形态做猜测。会话标题另有路径/URL 合法性过滤（`sessions/summary.py`）。Lain Companion 在精确替换之外保留诊断展示限制（字段名赋值、URL userinfo/敏感 query、绝对路径、PEM），见 [companion-phase2.md](companion-phase2.md)。历史数据中的 `[已隐藏]` 在读取与校验时仍兼容。
 主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
@@ -180,7 +180,7 @@ TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示�
 | `MCPMiddleware` | `mcp.json` 根级 `enabled` 为 true 且 Manager 无配置错误时注入管理工具和已连接服务的工具；全局关闭时不进入中间件列表 |
 | `HiddenToolsMiddleware` | 按 `tools.hidden` 从模型请求中过滤工具，不改变审批规则 |
 
-工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先按由 Ask 规则派生的静态规则判断，再把剩余调用交给 Flash 审查授权；被拦截的调用把原因返回给 Agent，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
+工具名称与基础分类的唯一来源是 `agent/tools/catalog.py`（副作用集合、文件系统有序名、MCP 保留名等）；Ask 的 `interrupt_on` 由 `ask_interrupt_on()` / `host_decision_rule()` 每次新建，避免共享可变 `allowed_decisions`。工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先按由 Ask 规则派生的静态规则判断，再把剩余调用交给 Flash 审查授权；被拦截的调用把原因返回给 Agent，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。权限可用性、降级文案与 CLI 展示元数据集中在 `permissions.py`。
 
 ## 运行与中断
 
@@ -231,7 +231,7 @@ sequenceDiagram
 
 | 概念 | 决定什么 | 实现位置 |
 |---|---|---|
-| `ask` / `auto` / `allow` | 工具调用前是否审批 | `agent/runtime/permissions.py`、Deep Agents HITL |
+| `ask` / `auto` / `allow` | 工具调用前是否审批 | `agent/tools/catalog.py`（工具分类）、`agent/runtime/permissions.py`（可用性与 interrupt_on）、Deep Agents HITL |
 | `SANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
@@ -344,7 +344,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 ## 上下文压缩
 
-自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `agent.compaction_threshold` 与 0.85 的较小值触发，通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85。示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
+自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `min(模型默认 fraction, agent.compaction_threshold)` 触发（见 `Settings.effective_compaction_fraction`），通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85；示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
 
 `/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
@@ -399,7 +399,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 源码入口
 
-- 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)。
+- 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)、[tools/catalog.py](../agent/tools/catalog.py)。
 - 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
 - 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
 - Companion 侧栏：[companion/](../agent/companion/)、[cli 挂载与 RunEvent 转发](../agent/cli/app.py)。

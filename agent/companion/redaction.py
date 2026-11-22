@@ -12,7 +12,7 @@
    - 诊断文本中的绝对路径（技术词如 ci/cd 除外）
 3. 明确不做：对自由文本中的 JWT / ``sk-`` / ``gh_`` / AKIA 等形态做猜测遮盖。
 
-新输出占位符统一为 ``[REDACTED]``；读取侧仍可通过 ``LEGACY_HIDDEN`` 兼容旧数据。
+新输出占位符统一为 ``[REDACTED]``；读取侧仍可通过 ``agent.redaction.LEGACY_HIDDEN`` 兼容旧数据。
 """
 
 from __future__ import annotations
@@ -56,9 +56,6 @@ _ABSOLUTE_PATH = r"""(?<![\w])(?:[A-Za-z]:[\\/]|\\\\|~/|/)[^\s<>"'，。；]+"""
 _DIAGNOSTIC_LOCATION = re.compile(rf"(?P<url>{_URL})|(?P<path>{_ABSOLUTE_PATH})", re.I)
 _SOURCE_URL = re.compile(_URL, re.I)
 _TECH_PATHS = re.compile(r"\b(?:ci/cd|tcp/ip|http/[23])\b", re.I)
-
-# Backward-compatible alias; new output uses REDACTED.
-HIDDEN = REDACTED
 
 
 def _redact_url(value: str, secrets: tuple[str, ...]) -> str:

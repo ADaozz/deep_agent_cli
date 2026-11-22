@@ -31,13 +31,12 @@ def host_decision_rule() -> dict[str, list[str]]:
     return {"allowed_decisions": ["approve", "reject"]}
 
 
-# 兼容旧名：仅作只读样例；可变审批规则请用 host_decision_rule()。
-HOST_DECISION_SHAPE: dict[str, list[str]] = host_decision_rule()
-
-ASK_INTERRUPT_ON: dict[str, Any] = {
-    **{name: host_decision_rule() for name in (EXECUTE_TOOL, *WEB_TOOLS)},
-    **{name: True for name in FILE_MUTATION_TOOLS},
-}
+def ask_interrupt_on() -> dict[str, Any]:
+    """Ask 模式 interrupt_on：每次新建，避免共享可变 allowed_decisions。"""
+    return {
+        **{name: host_decision_rule() for name in (EXECUTE_TOOL, *WEB_TOOLS)},
+        **{name: True for name in FILE_MUTATION_TOOLS},
+    }
 
 PERMISSION_ALLOW_WARNING = (
     "HIGH RISK. Auto-approves every tool, including writes, deletes, and host MCP. "
@@ -145,11 +144,7 @@ def interrupt_on_for_mode(mode: PermissionMode) -> dict[str, Any] | None:
     """
     if mode is PermissionMode.ALLOW:
         return {}
-    # 深拷贝：布尔闸门可浅拷贝；带 allowed_decisions 的条目各自新建列表。
-    return {
-        name: (host_decision_rule() if isinstance(rule, dict) else rule)
-        for name, rule in ASK_INTERRUPT_ON.items()
-    }
+    return ask_interrupt_on()
 
 
 def permission_mode_from_interrupt_on(interrupt_on: dict[str, Any] | None) -> PermissionMode:
@@ -185,22 +180,17 @@ def permission_completion_description(mode: str) -> str:
     return PERMISSION_MODE_DISPLAY[parsed].completion
 
 
-# 供审批规则与测试从 permissions 再导出工具集合（权威定义在 tools.catalog）。
 __all__ = [
-    "ASK_INTERRUPT_ON",
     "AUTO_FALLBACK_REASON",
-    "EXECUTE_TOOL",
-    "FILE_MUTATION_TOOLS",
-    "HOST_DECISION_SHAPE",
     "PERMISSION_ALLOW_WARNING",
     "PERMISSION_MODE_DISPLAY",
     "PermissionMode",
     "PermissionModeDisplay",
     "SAVED_ALLOW_FALLBACK_NOTICE",
     "SAVED_AUTO_FALLBACK_NOTICE",
-    "WEB_TOOLS",
     "allow_mode_available",
     "allow_mode_unavailable_reason",
+    "ask_interrupt_on",
     "host_decision_rule",
     "interrupt_on_for_mode",
     "parse_permission_mode",

@@ -206,7 +206,7 @@ CUSTOM backend 保留调用方自己的规则。
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
+| `ask`（默认） | 副作用工具（`agent/tools/catalog.py` 的 `SIDE_EFFECT_TOOLS`：`execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`）、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
 | `auto` | Ask 不拦的工具、`web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute` 直接放行。联网或 `full-access` 下的 `execute`、工作区外的文件变更由独立的 DeepSeek Flash 判断是否在用户授权范围内。未信任的 MCP 工具、`mcp_add` / `mcp_remove` 和自定义工具需人工确认 | `SANDBOXED` 且已配置 DeepSeek 来源级凭据 |
 | `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 

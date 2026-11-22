@@ -99,8 +99,6 @@ from agent.tools.human_interaction import validate_human_input_values
 # Token-level reasoning/assistant deltas use LangChain callbacks (ChatOpenAI streaming=True).
 
 
-HUMAN_TOOLS = frozenset({"request_human_input"})
-
 # Maximum time close() waits for an active operation to drain. Timing out never
 # releases the session lease early: close() raises, keeps the lease, and can be
 # retried once the run finally drained.
