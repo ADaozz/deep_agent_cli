@@ -178,7 +178,7 @@ TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示�
 | `MCPMiddleware` | `mcp.json` 根级 `enabled` 为 true 且 Manager 无配置错误时注入管理工具和已连接服务的工具；全局关闭时不进入中间件列表 |
 | `HiddenToolsMiddleware` | 按 `tools.hidden` 从模型请求中过滤工具，不改变审批规则 |
 
-工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
+工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先做静态策略与 Flash 风险评估，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
 
 ## 运行与中断
 
