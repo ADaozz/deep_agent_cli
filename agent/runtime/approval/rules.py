@@ -8,7 +8,7 @@ from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.network import network_requested
 from agent.runtime.approval.policy import ALLOW, MANUAL
 from agent.runtime.approval.types import Decision
-from agent.runtime.permissions import EXECUTE_TOOL, FILE_MUTATION_TOOLS, WEB_TOOLS
+from agent.tools.catalog import EXECUTE_TOOL, FILE_MUTATION_TOOLS, WEB_TOOLS
 
 ALLOW_TRUSTED_MCP = Decision("allow", "受信任的 MCP 服务。")
 ALLOW_WORKSPACE = Decision("allow", "工作区内的文件变更。")

@@ -8,11 +8,13 @@ from typing import Any
 from agent.cli.interactions import InteractionController
 from agent.execution.policy import parse_sandbox_mode
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
     allow_mode_unavailable_reason,
     parse_permission_mode,
+    permission_mode_option_label,
 )
 from agent.runtime.contracts import InterruptKind, RunEvent, UnknownInterruptError
 
@@ -118,19 +120,25 @@ class AccessSelection:
         options = [
             {
                 "value": PermissionMode.ASK.value,
-                "label": "ask · require approval for every execute and side-effect tool"
-                + (" · current" if current is PermissionMode.ASK else ""),
+                "label": permission_mode_option_label(
+                    PermissionMode.ASK, current=current is PermissionMode.ASK,
+                ),
             },
         ]
         if self._allow_available():
             options.append({
                 "value": PermissionMode.ALLOW.value,
-                "label": "allow · auto-approve all tools; sandbox network open (SANDBOXED, HIGH RISK)"
-                + (" · current" if current is PermissionMode.ALLOW else ""),
+                "label": permission_mode_option_label(
+                    PermissionMode.ALLOW, current=current is PermissionMode.ALLOW,
+                ),
             })
         if self.runner.auto_available():
-            options.append({"value": "auto", "label": "auto · risk-based approval, per-command network"
-                            + (" · current" if current is PermissionMode.AUTO else "")})
+            options.append({
+                "value": PermissionMode.AUTO.value,
+                "label": permission_mode_option_label(
+                    PermissionMode.AUTO, current=current is PermissionMode.AUTO,
+                ),
+            })
         if len(options) == 1:
             self.state.add_system(
                 "Permission mode is locked to ask because ALLOW requires SANDBOXED execution.",
@@ -227,7 +235,7 @@ class AccessSelection:
     async def _apply_permission_mode(self, mode: PermissionMode) -> None:
         if mode is PermissionMode.AUTO and not self.runner.auto_available():
             self._request_permission_mode(PermissionMode.ASK)
-            self.set_status("Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+            self.set_status(AUTO_FALLBACK_REASON)
             return
         if mode is PermissionMode.ALLOW and not self._allow_available():
             self.state.add_system(

@@ -33,13 +33,11 @@ from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import MCPAuthError, MCPServerConfig
 from agent.mcp.content import preserve_generic_resources
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
+from agent.tools.catalog import NATIVE_TOOL_NAMES
 
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
-_RESERVED = MANAGEMENT_TOOLS | {
-    "ls", "read", "write", "edit", "delete", "execute",
-    "web_search", "web_fetch", "request_human_input", "compact_conversation",
-}
+_RESERVED = MANAGEMENT_TOOLS | NATIVE_TOOL_NAMES
 
 
 class LoadedServer:

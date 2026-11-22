@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.tools.catalog import FILE_MUTATION_TOOLS
 
 
 LS_DESCRIPTION = (
@@ -68,7 +69,7 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
             return request
         call = {**request.tool_call, "name": _NATIVE_FILE_NAMES.get(name, name)}
         state = request.state
-        if name in {"write", "edit", "delete"} and isinstance(state, Mapping):
+        if name in FILE_MUTATION_TOOLS and isinstance(state, Mapping):
             messages = list(state.get("messages", ()))
             for index in range(len(messages) - 1, -1, -1):
                 message = messages[index]

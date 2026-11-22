@@ -46,6 +46,19 @@ def test_arguments_use_the_same_substring_matching():
     assert candidates(completer, "/model qwn") == []
 
 
+def test_permission_completion_includes_auto_without_keyerror():
+    """App 在 Auto 可用时会提供 auto；补全描述必须覆盖三值模式。"""
+    completer = SlashCompleter(
+        command_table(),
+        permission_modes=lambda: ["ask", "auto", "allow"],
+    )
+    items = list(completer.get_completions(Document("/permission "), None))
+    assert [item.text for item in items] == ["ask", "auto", "allow"]
+    by_name = {item.text: item.display_meta for item in items}
+    assert "risk-based" in str(by_name["auto"]).lower()
+    assert "high risk" in str(by_name["allow"]).lower()
+
+
 def test_backspace_recovers_candidates_and_clears_accepted_suppression():
     """实际按键验证无匹配、确认补全、连续退格和重新输入的完整流程。"""
     async def wait_until(predicate):

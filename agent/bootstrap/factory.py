@@ -41,11 +41,14 @@ from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PermissionMode,
     allow_mode_unavailable_reason,
     interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
+    permission_unavailable_reason,
 )
+from agent.tools.catalog import FILE_MUTATION_TOOLS, FILESYSTEM_TOOLS
 from agent.execution.backend import BackendSelection, sandbox_pool_of, select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.types import ExecutionMode, SKILLS_ROOT
@@ -59,7 +62,7 @@ from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
 
 
-DEFAULT_FS_TOOLS = ["ls", "read", "write", "edit", "delete"]
+DEFAULT_FS_TOOLS = [name for name in ("ls", "read", "write", "edit", "delete") if name in FILESYSTEM_TOOLS]
 
 DEFAULT_SYSTEM_PROMPT = (
     "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
@@ -126,7 +129,9 @@ class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
             if not isinstance(message, AIMessage):
                 continue
             calls = [
-                self._truncate_tool_call(call) if call["name"] in {"write", "edit"} else call
+                self._truncate_tool_call(call)
+                if call["name"] in FILE_MUTATION_TOOLS and call["name"] != "delete"
+                else call
                 for call in message.tool_calls
             ]
             if calls != message.tool_calls:
@@ -234,9 +239,14 @@ def build_agent(
         selected = backend_selection if backend_selection is not None and backend_selection.backend is fs_backend else None
         execution_mode = selected.mode if selected is not None else ExecutionMode.CUSTOM
         security_warning = selected.warning if selected is not None else ""
-    if permission is PermissionMode.AUTO and (execution_mode is not ExecutionMode.SANDBOXED or not spec.deepseek_api_key):
+    auto_block = permission_unavailable_reason(
+        PermissionMode.AUTO,
+        execution_mode=execution_mode,
+        has_deepseek_key=bool(spec.deepseek_api_key),
+    )
+    if permission is PermissionMode.AUTO and auto_block is not None:
         permission = PermissionMode.ASK
-        security_warning = "Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask."
+        security_warning = AUTO_FALLBACK_REASON
     if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
     sandbox_pool = sandbox_pool_of(fs_backend)
@@ -266,7 +276,7 @@ def build_agent(
     trigger = summary_defaults["trigger"]
     keep = summary_defaults["keep"]
     if trigger[0] == "fraction":
-        trigger = ("fraction", min(trigger[1], cfg.compaction_threshold))
+        trigger = ("fraction", cfg.effective_compaction_fraction(trigger[1]))
         if keep[0] == "fraction" and keep[1] >= trigger[1]:
             keep = ("fraction", trigger[1] / 2)
     summarization = WorkspaceSummarizationMiddleware(

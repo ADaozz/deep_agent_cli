@@ -23,13 +23,23 @@ from agent.tools.execute import build_execute_tool
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from agent.runtime.permissions import (
     ASK_INTERRUPT_ON,
+    AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
     interrupt_on_for_mode,
     parse_permission_mode,
+    permission_available,
+    permission_completion_description,
     permission_mode_label,
     permission_mode_from_interrupt_on,
+    permission_unavailable_reason,
+)
+from agent.tools.catalog import (
+    FILE_MUTATION_TOOLS,
+    NATIVE_TOOL_NAMES,
+    SIDE_EFFECT_TOOLS,
+    WEB_TOOLS,
 )
 from agent.runtime.runner import AgentRunner
 from agent.runtime.contracts import RunEvent
@@ -66,6 +76,34 @@ def test_mcp_approval_rules_are_part_of_the_global_permission_mode() -> None:
 def test_allow_only_for_sandboxed() -> None:
     assert allow_mode_available(ExecutionMode.SANDBOXED)
     assert not allow_mode_available(ExecutionMode.CUSTOM)
+
+
+def test_permission_availability_is_shared() -> None:
+    assert permission_available(
+        PermissionMode.ASK, execution_mode=ExecutionMode.CUSTOM, has_deepseek_key=False,
+    )
+    assert permission_unavailable_reason(
+        PermissionMode.ALLOW, execution_mode=ExecutionMode.CUSTOM, has_deepseek_key=True,
+    )
+    assert permission_unavailable_reason(
+        PermissionMode.AUTO, execution_mode=ExecutionMode.SANDBOXED, has_deepseek_key=False,
+    ) == AUTO_FALLBACK_REASON
+    assert permission_available(
+        PermissionMode.AUTO, execution_mode=ExecutionMode.SANDBOXED, has_deepseek_key=True,
+    )
+    assert permission_completion_description("auto")
+    assert permission_completion_description("unknown-mode") == "Permission mode"
+
+
+def test_tool_catalog_drives_ask_interrupt_and_native_reserved() -> None:
+    assert SIDE_EFFECT_TOOLS <= NATIVE_TOOL_NAMES
+    assert FILE_MUTATION_TOOLS | WEB_TOOLS | {"execute"} == SIDE_EFFECT_TOOLS
+    for name in SIDE_EFFECT_TOOLS:
+        assert name in ASK_INTERRUPT_ON
+    assert "read" in NATIVE_TOOL_NAMES
+    assert "read" not in SIDE_EFFECT_TOOLS
+    assert "request_human_input" in NATIVE_TOOL_NAMES
+    assert "compact_conversation" in NATIVE_TOOL_NAMES
 
 
 def test_network_requested_truthy() -> None:
@@ -616,14 +654,22 @@ def test_approval_execute_network_summary(network, label) -> None:
 
 
 def test_approval_multiple_tools_truncation_and_redaction() -> None:
-    ui = InteractionController.approval([
-        {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
-        {"toolCallId": "b", "name": "execute", "args": {"command": "curl -H 'Authorization: Bearer private-value' site"}},
-        {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
-    ])
+    ui = InteractionController.approval(
+        [
+            {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
+            {
+                "toolCallId": "b",
+                "name": "execute",
+                "args": {"command": "curl -H 'Authorization: Bearer private-value' site"},
+            },
+            {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
+        ],
+        secrets=("private-value",),
+    )
     assert ui.tool_call_ids == ["a", "b", "c"]
     assert "truncated" in ui.question and "Ctrl+O" in ui.question
     assert "private-value" not in ui.question
+    assert "[REDACTED]" in ui.question
     assert "private-file-content" not in ui.question
     assert "Tool: write" in ui.question
     assert ui.option_index == 0
@@ -718,14 +764,17 @@ def test_approval_file_tool_shows_only_target(tool, key) -> None:
 
 
 def test_approval_file_targets_bound_and_redact_summary() -> None:
-    ui = InteractionController.approval([
-        {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
-        {"name": "edit", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
-        {"name": "delete", "args": {"file_path": "/workspace/api_key=private-value"}},
-        {"name": "delete", "args": {}},
-    ])
+    ui = InteractionController.approval(
+        [
+            {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
+            {"name": "edit", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
+            {"name": "delete", "args": {"file_path": "/workspace/token=private-value"}},
+            {"name": "delete", "args": {}},
+        ],
+        secrets=("private-value",),
+    )
     assert "truncated; Ctrl+O" in ui.question
     assert "\x1b" not in ui.question
     assert "private-value" not in ui.question
-    assert "[redacted: target may contain credentials]" in ui.question
+    assert "[REDACTED]" in ui.question
     assert "Target: <not supplied>" in ui.question

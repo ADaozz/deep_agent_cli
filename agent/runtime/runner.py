@@ -76,11 +76,13 @@ from agent.runtime.contracts import (
     TurnTiming,
 )
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PermissionMode,
     allow_mode_available,
     allow_mode_unavailable_reason,
     interrupt_on_for_mode,
     parse_permission_mode,
+    permission_available,
     permission_mode_from_interrupt_on,
 )
 from agent.sessions.store import SessionStore, workspace_state_path
@@ -384,7 +386,11 @@ class AgentRunner:
         return profile
 
     def auto_available(self) -> bool:
-        return allow_mode_available(self.prepared.execution_mode) and bool(self._spec.deepseek_api_key)
+        return permission_available(
+            PermissionMode.AUTO,
+            execution_mode=self.prepared.execution_mode,
+            has_deepseek_key=bool(self._spec.deepseek_api_key),
+        )
 
     def request_permission_change(self, mode: PermissionMode | str) -> PermissionMode:
         if self._closed:
@@ -459,7 +465,7 @@ class AgentRunner:
                 failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
                 mode = None
             if mode is PermissionMode.AUTO and not self.auto_available():
-                failures.append("Auto requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+                failures.append(AUTO_FALLBACK_REASON)
                 mode = PermissionMode.ASK
             previous = self.prepared, self._chat_model
             applied_mcp = False

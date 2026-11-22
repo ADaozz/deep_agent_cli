@@ -23,7 +23,11 @@ PURE_MODULES = (
     "runtime/contracts.py", "runtime/configuration.py", "runtime/permissions.py",
     "sessions/contracts.py", "sessions/images.py", "sessions/recovery.py", "sessions/ports.py",
     "sessions/snapshots.py", "sessions/summary.py", "mcp/contracts.py", "subagents/configuration.py",
+    "tools/catalog.py",
 )
+
+# 纯常量目录：权限规则可引用，但不允许依赖其它 tools 实现。
+_ALLOWED_TOOLS_IMPORTS = frozenset({"agent.tools.catalog"})
 
 
 @pytest.mark.parametrize("module", PURE_MODULES)
@@ -38,6 +42,8 @@ def test_domain_rules_do_not_import_infrastructure(module):
         modules = ([node.module or ""] if isinstance(node, ast.ImportFrom)
                    else [v.name for v in node.names] if isinstance(node, ast.Import) else [])
         for dependency in modules:
+            if dependency in _ALLOWED_TOOLS_IMPORTS or dependency.startswith("agent.tools.catalog."):
+                continue
             assert not dependency.startswith(forbidden), (source, dependency)
             assert dependency not in forbidden_modules, (source, dependency)
 

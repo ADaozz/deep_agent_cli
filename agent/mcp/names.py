@@ -7,17 +7,26 @@ import hashlib
 import re
 
 
+from agent.runtime.permissions import HOST_DECISION_SHAPE
+
 MCP_ADD = "mcp_add"
 MCP_LIST = "mcp_list"
 MCP_REMOVE = "mcp_remove"
 MANAGEMENT_TOOLS = frozenset({MCP_ADD, MCP_LIST, MCP_REMOVE})
 EXTERNAL_PREFIX = "mcp__"
 
-HOST_APPROVAL: dict[str, list[str]] = {"allowed_decisions": ["approve", "reject"]}
+# 独立副本，避免可变嵌套被调用方就地修改后污染 Ask 规则。
+HOST_APPROVAL: dict[str, list[str]] = dict(HOST_DECISION_SHAPE)
+
+_SERVER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,32}$")
+
+
+def valid_server_name(value: str) -> bool:
+    return isinstance(value, str) and _SERVER_NAME.fullmatch(value) is not None
 
 
 def external_tool_name(server: str, remote: str) -> str:
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,32}", server):
+    if not valid_server_name(server):
         raise ValueError("invalid MCP server name")
     if not isinstance(remote, str) or not remote:
         raise ValueError("remote tool name must be a non-empty string")

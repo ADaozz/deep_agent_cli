@@ -15,7 +15,13 @@ from uuid import uuid4
 
 from agent.models.catalog import ModelCatalog
 from agent.sessions.recovery import RecoveryContext
-from agent.runtime.permissions import PermissionMode, allow_mode_available, parse_permission_mode
+from agent.runtime.permissions import (
+    SAVED_ALLOW_FALLBACK_NOTICE,
+    SAVED_AUTO_FALLBACK_NOTICE,
+    PermissionMode,
+    allow_mode_available,
+    parse_permission_mode,
+)
 from agent.sessions.ports import SessionRepository, SessionLease
 from agent.sessions.contracts import SessionInfo, StopReason
 from agent.sessions.locks import InProcessSessionLockManager, SessionLockBusyError
@@ -249,10 +255,10 @@ class SessionRuntime:
         mode = parse_permission_mode(info.permission_mode or "ask") or PermissionMode.ASK
         if mode is PermissionMode.AUTO and not auto_available:
             mode = PermissionMode.ASK
-            notices.append("Saved auto permission requires SANDBOXED execution and llm.models.deepseek.api_key; using ask.")
+            notices.append(SAVED_AUTO_FALLBACK_NOTICE)
         if mode is PermissionMode.ALLOW and not allow_mode_available(execution_mode):
             mode = PermissionMode.ASK
-            notices.append("Saved allow permission is unavailable here; using ask.")
+            notices.append(SAVED_ALLOW_FALLBACK_NOTICE)
         return RestorePlan(
             model_id=profile.id if profile is not None else "",
             permission_mode=mode,

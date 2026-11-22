@@ -76,13 +76,18 @@ def test_only_empty_new_sessions_become_eligible_and_attempt_once():
 
 @pytest.mark.parametrize("unsafe", [
     "/home/neo/private/config.yaml", r"C:\Users\neo\config.env", "src/private/config.py",
-    "https://user:password@example.test/private", "api_key=secret-value", "sk-personal-abc123",
-    "密钥：private-value", "Bearer private-token", "password=\"two word secret\"",
-    r"src\private\config.py", "OPENAI_API_KEY=private-value",
+    "https://user:password@example.test/private", r"src\private\config.py",
 ])
-def test_redaction_removes_paths_and_credentials(unsafe):
+def test_redaction_removes_paths_and_urls(unsafe):
     assert unsafe not in redact_summary_input(f"修复问题 {unsafe}")
     assert validate_summary(TITLE + " " + unsafe) is None
+
+
+def test_summary_redacts_known_secrets_without_guessing_unknown_tokens():
+    assert "configured-secret" not in redact_summary_input("fix configured-secret", ("configured-secret",))
+    # Unknown JWT / Bearer shapes are title text, not guessed credentials.
+    jwtish = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature"
+    assert redact_summary_input(jwtish) == jwtish
 
 
 @pytest.mark.parametrize("invalid", ["", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,

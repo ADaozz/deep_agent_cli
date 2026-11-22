@@ -15,6 +15,9 @@ import tempfile
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from agent.execution.layout import valid_env_name
+from agent.mcp.names import valid_server_name
+
 
 class MCPConfigError(ValueError):
     """The MCP catalog is missing a required field or has an illegal value."""
@@ -24,8 +27,6 @@ class MCPAuthError(MCPConfigError):
     """A server needs credentials that are missing or were not accepted."""
 
 
-_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,32}$")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_FIELD = re.compile(r"(?i)token|secret|password|authorization|api_key|apikey")
 _URL_SECRET = re.compile(r"(?i)(token|access_token|api_key|key|password)=")
 
@@ -101,7 +102,7 @@ class MCPFile:
 def parse_server(name: str, raw: Any) -> MCPServerConfig:
     if not isinstance(raw, dict):
         raise MCPConfigError(f"MCP server {name} must be an object")
-    if not _NAME.fullmatch(name):
+    if not valid_server_name(name):
         raise MCPConfigError(
             "MCP server name must start with a letter and contain only letters, digits, '_' or '-'"
         )
@@ -299,7 +300,7 @@ def _auth(name: str, value: Any) -> MCPAuth | None:
     kind = value.get("type")
     if kind == "bearer":
         token_env = value.get("token_env")
-        if not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env):
+        if not isinstance(token_env, str) or not valid_env_name(token_env):
             raise MCPConfigError(f"MCP server {name} token_env must be an environment variable name")
         return MCPAuth(type="bearer", token_env=token_env)
     if kind == "oauth":
@@ -333,6 +334,6 @@ def _args(name: str, value: Any) -> tuple[str, ...]:
 def _env_names(name: str, value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or not all(isinstance(item, str) and _ENV_NAME.fullmatch(item) for item in value):
+    if not isinstance(value, list) or not all(isinstance(item, str) and valid_env_name(item) for item in value):
         raise MCPConfigError(f"MCP server {name} env_passthrough must be a list of environment variable names")
     return tuple(value)

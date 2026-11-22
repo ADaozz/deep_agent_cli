@@ -33,21 +33,23 @@ def test_recent_tools_merges_checkpoint_and_timeline():
 
 
 def test_tool_detail_redacts_secrets_and_returns_excerpt():
+    secret = "sk-personal-abc123"
     blocks = [
         TranscriptBlock(
             kind="tool",
             tool_call_id="call-1",
             name="execute",
-            arguments={"command": "echo sk-personal-abc123"},
-            content="secret sk-personal-abc123 leaked",
+            arguments={"command": f"echo {secret}"},
+            content=f"secret {secret} leaked",
             status="completed",
         ),
     ]
     payload = inspect_session_payload(
-        blocks, None, secrets=(), view="tool_detail", tool_call_id="call-1",
+        blocks, None, secrets=(secret,), view="tool_detail", tool_call_id="call-1",
     )
     assert payload["tool"] == "execute"
     assert "sk-personal" not in json.dumps(payload, ensure_ascii=False)
+    assert "[REDACTED]" in json.dumps(payload, ensure_ascii=False)
     assert payload["result"]["status"] == "success"
 
 
@@ -235,7 +237,7 @@ def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
     )
     clean = redact_diagnostic_text(text, ("opaque-known",))
     assert endpoint in clean and "opaque-" not in clean and "user:" not in clean
-    assert "https://api.example.test/v1/[已隐藏]?limit=10" in clean
+    assert "https://api.example.test/v1/[REDACTED]?limit=10" in clean
     assert redact_diagnostic_text(clean) == clean
     assert endpoint not in redact_summary_input(endpoint)
     left = call_arguments({"command": "curl https://a:first@api.example.test/v1"}, ())

@@ -25,6 +25,7 @@ from agent.models.profile import (
 
 
 _DEFAULT_CONFIG_NAME = "config.yaml"
+DEFAULT_COMPACTION_THRESHOLD = 0.85
 
 
 class ConfigError(ValueError):
@@ -61,8 +62,16 @@ class Settings:
     resolved_deepseek_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    compaction_threshold: float = 0.85
+    # Deep Agents 手动压缩门槛与模型默认 fraction 的上限共用此默认值。
+    compaction_threshold: float = DEFAULT_COMPACTION_THRESHOLD
     companion: CompanionConfig = field(default_factory=CompanionConfig)
+
+    def effective_compaction_fraction(self, model_fraction: float | None = None) -> float:
+        """配置门槛与模型默认 fraction 的有效值（不超过默认上限）。"""
+        capped = min(DEFAULT_COMPACTION_THRESHOLD, float(self.compaction_threshold))
+        if model_fraction is None:
+            return capped
+        return min(float(model_fraction), capped)
 
     def __post_init__(self) -> None:
         if (isinstance(self.compaction_threshold, bool)
@@ -201,7 +210,7 @@ class Settings:
             config_dir=_optional_path(paths.get("config_dir"), base_dir=root),
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
-            compaction_threshold=agent.get("compaction_threshold", 0.85),
+            compaction_threshold=agent.get("compaction_threshold", DEFAULT_COMPACTION_THRESHOLD),
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
             companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),

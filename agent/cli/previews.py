@@ -23,6 +23,8 @@ from agent.cli.highlighting import code_renderer
 from agent.subagents.notifications import START_TOOL
 from agent.execution.mutations import FileMutationOperation
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
+from agent.tools.catalog import is_mutation_tool as catalog_is_mutation_tool
+from agent.tools.catalog import tool_preview_group
 
 
 PreviewStyle = Literal["plain", "dim", "add", "delete", "error", "url"]
@@ -746,27 +748,13 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "request_human_input": build_human_input_preview,
 }
 
-_TOOL_GROUPS: dict[str, PreviewGroup] = {
-    "ls": "explore",
-    "read": "explore",
-    "grep": "explore",
-    "glob": "explore",
-    "write": "mutation",
-    "edit": "mutation",
-    "delete": "mutation",
-    "execute": "command",
-    "web_search": "web",
-    "web_fetch": "web",
-}
-
-
 def tool_group(name: str) -> PreviewGroup:
     """Classification lookup for cheap structural passes (no Rich involved)."""
-    return _TOOL_GROUPS.get(name, "other")
+    return tool_preview_group(name)  # type: ignore[return-value]
 
 
 def is_mutation_tool(name: str) -> bool:
-    return tool_group(name) == "mutation"
+    return catalog_is_mutation_tool(name)
 
 
 def _failure_summary(output: str) -> str:

@@ -194,7 +194,10 @@ class InteractionFlow:
                 self.drafts.pasted = PastedContentDraft()
                 self.drafts.skill = SkillDraft()
                 self.buffer.reset()
-            self.dialogs.current = InteractionController.approval(list(interrupt.pending_tools))
+            self.dialogs.current = InteractionController.approval(
+                list(interrupt.pending_tools),
+                secrets=self.runner.summary_secrets(),
+            )
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:
             self.dialogs.current = InteractionController.human(interrupt.payload)

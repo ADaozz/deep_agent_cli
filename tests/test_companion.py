@@ -761,8 +761,7 @@ def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     source.write_text("import client\napi_key = 'private-value'\nprint('fixture-sensitive-value')\nclient.connect()")
     result = repo.read(source.name)
     assert "example.py:4 client.connect()" in result
-    assert result.count("[已隐藏]") == 1
-    assert result.count("[REDACTED]") == 1
+    assert result.count("[REDACTED]") == 2
     assert "private-value" not in result and "fixture-sensitive-value" not in result
     assert "example.py:4" in repo.search("client.connect()")
     assert repo.search("private-value").startswith("No match")
