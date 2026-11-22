@@ -13,3 +13,6 @@ config.yml
 *.sqlite3-journal
 dist/
 build/
+
+# Local Lain braille animation preview (not shipped)
+assets/lain-sprites/braille-preview.html
