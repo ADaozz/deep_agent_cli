@@ -1,4 +1,7 @@
 import asyncio
+from dataclasses import replace
+import json
+import sqlite3
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +12,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent.bootstrap.config import Settings
 from agent.execution.backend import BackendSelection
+from agent.execution.policy import BindMount, SandboxConfig
 from agent.execution.types import ExecutionMode
 from agent.runtime.auto_approval import ApprovalJournal, Decision
 from agent.runtime.runner import AgentRunner
@@ -27,10 +31,14 @@ def test_auto_mixed_batch_reuses_decisions_and_matches_ids(monkeypatch):
     backend = CountingBackend()
     backend.calls = []
     reviews = []
+    deny_finished = asyncio.Event()
 
     async def review(key, trust_env, evidence, cancelled):
-        import json
         name = json.loads(evidence)["arguments"]["command"]
+        if name == "deny":
+            deny_finished.set()
+        else:
+            await asyncio.wait_for(deny_finished.wait(), timeout=2)
         reviews.append(name)
         return Decision(name, "reviewed")
 
@@ -50,7 +58,8 @@ def test_auto_mixed_batch_reuses_decisions_and_matches_ids(monkeypatch):
         assert backend.calls == []
         assert runner.approve_tool("id-ask").status == "completed"
         assert sorted(backend.calls) == ["allow", "ask"]
-        assert reviews == ["allow", "ask", "deny"]
+        assert reviews[0] == "deny"
+        assert sorted(reviews) == ["allow", "ask", "deny"]
         messages = runner.prepared.graph.get_state({"configurable": {"thread_id": runner.thread_id}}).values["messages"]
         assert any(isinstance(m, ToolMessage) and m.tool_call_id == "id-deny" and m.status == "error" for m in messages)
 
@@ -59,12 +68,26 @@ def test_auto_journal_persists_decision_and_execution_claim(tmp_path):
     path = str(tmp_path / "session.sqlite")
     with SqliteSaver.from_conn_string(path) as saver:
         journal = ApprovalJournal(saver)
-        journal.record("digest", Decision("allow", "authorized"))
-        assert journal.transition("digest", "pending", "started")
+        journal.record("digest", Decision("allow", "authorized"), "policy")
+        assert journal.claim("digest", "pending", "policy") is None
     with SqliteSaver.from_conn_string(path) as saver:
         restored = ApprovalJournal(saver)
         assert restored.lookup("digest").decision == "allow"
-        assert not restored.transition("digest", "pending", "started")
+        assert "重复执行" in restored.claim("digest", "pending", "different")
+        assert restored.transition("digest", "started", "finished")
+        assert "重复执行" in restored.claim("digest", "pending", "policy")
+
+
+def test_legacy_approval_without_fingerprint_cannot_be_claimed(tmp_path):
+    path = str(tmp_path / "legacy.sqlite")
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE auto_approval (call_key TEXT PRIMARY KEY, decision TEXT NOT NULL,
+                        reason TEXT NOT NULL, execution TEXT NOT NULL DEFAULT 'pending')""")
+        conn.execute("INSERT INTO auto_approval VALUES('old', 'allow', 'authorized', 'pending')")
+    with SqliteSaver.from_conn_string(path) as saver:
+        journal = ApprovalJournal(saver)
+        assert journal.lookup("old").decision == "allow"
+        assert "审批环境已变化" in journal.claim("old", "pending", "current")
 
 
 def test_auto_missing_key_falls_back_to_ask():
@@ -76,7 +99,6 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
     calls = []
 
     async def review(key, trust_env, evidence, cancelled):
-        import json
         calls.append(json.loads(evidence))
         return Decision("ask", "review")
 
@@ -116,7 +138,6 @@ def test_mcp_auto_trust_is_explicit_and_persistent():
 
 @pytest.mark.parametrize("keep_key", [True, False])
 def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
-    import json
     from agent.sessions.store import SessionStore
 
     calls = []
@@ -157,6 +178,121 @@ def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
             store.close()
 
 
+@pytest.mark.parametrize("change", ["sandbox", "mount"])
+def test_restart_blocks_stale_grants_and_reviews_new_calls(tmp_path, monkeypatch, change):
+    from agent.sessions.store import SessionStore
+
+    mount = BindMount(source=tmp_path, destination="/shared")
+    policy = SandboxConfig(workspace=tmp_path, extra_read_only_mounts=(mount,))
+    changed = (replace(policy, mode="full-access") if change == "sandbox" else
+               replace(policy, extra_read_only_mounts=(), extra_read_write_mounts=(mount,)))
+    settings = Settings(resolved_deepseek_api_key="key", sandbox=policy)
+    backend = CountingBackend()
+    backend.calls = []
+    reviews = []
+
+    async def review(key, trust_env, evidence, cancelled):
+        data = json.loads(evidence)
+        command = data["arguments"]["command"]
+        reviews.append((command, data["sandbox"], data["read_write_mounts"]))
+        return Decision("ask" if command == "confirm" else "allow", "reviewed")
+
+    def batch(*commands):
+        return AIMessage(content="", tool_calls=[
+            {"id": cmd, "name": "execute", "args": {"command": cmd}} for cmd in commands
+        ])
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    selection = BackendSelection(backend, ExecutionMode.SANDBOXED)
+    with patch("agent.bootstrap.factory.select_backend", return_value=selection):
+        db = tmp_path / "session.sqlite"
+        store = SessionStore(db)
+        runner = AgentRunner(session_store=store, settings=settings, model=scripted_model([batch("old", "confirm")]))
+        try:
+            thread = runner.thread_id
+            runner.set_permission_mode("auto")
+            pending = runner.invoke("review operations")
+            assert [item["toolCallId"] for item in pending.pending_tool_calls] == ["confirm"]
+        finally:
+            runner.close()
+            store.close()
+
+        store = SessionStore(db)
+        restored = AgentRunner(session_store=store, thread_id=thread, settings=replace(settings, sandbox=changed),
+                               model=scripted_model([batch("new"), AIMessage(content="done")]))
+        try:
+            assert restored.approve_tool("confirm").status == "completed"
+            messages = restored.prepared.graph.get_state(restored._thread_config()).values["messages"]
+            blocked = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)
+                       and m.status == "error" and "审批环境已变化" in m.content}
+            assert blocked == {"old", "confirm"}
+            assert backend.calls == ["new"]
+            assert reviews == [("old", "restricted", []), ("confirm", "restricted", []),
+                               ("new", changed.mode, ["/shared"] if change == "mount" else [])]
+        finally:
+            restored.close()
+            store.close()
+
+
+def test_batch_deadline_preserves_results_and_cleans_up(monkeypatch):
+    from agent.runtime import auto_approval
+
+    async def scenario():
+        active = set()
+        started = []
+        full = asyncio.Event()
+
+        async def review(key, trust_env, evidence, cancelled):
+            active.add(evidence)
+            started.append(evidence)
+            assert len(active) <= 4
+            if len(active) == 4:
+                full.set()
+            try:
+                await full.wait()
+                if evidence == "2":
+                    return Decision("deny", "reviewed")
+                await asyncio.Future()
+            finally:
+                active.remove(evidence)
+
+        monkeypatch.setattr(auto_approval, "classify", review)
+        monkeypatch.setattr(auto_approval, "_BATCH_TIMEOUT", 0.1)
+        evidence = {str(i): str(i) for i in range(8)}
+        decisions = await auto_approval._classify_batch(evidence, "key", False, lambda: False)
+        assert [d.decision for d in decisions.values()] == ["ask", "ask", "deny"] + ["ask"] * 5
+        assert started == list(evidence)[:5]
+        assert not active
+
+    asyncio.run(scenario())
+
+
+def test_batch_cancellation_closes_siblings(monkeypatch):
+    from agent.models.stream_lifecycle import ModelStreamCancelled
+    from agent.runtime import auto_approval
+
+    async def scenario():
+        active = set()
+        cancelled = asyncio.Event()
+
+        async def review(key, trust_env, evidence, is_cancelled):
+            active.add(evidence)
+            try:
+                if len(active) == 4:
+                    cancelled.set()
+                    raise ModelStreamCancelled("cancelled")
+                await asyncio.Future()
+            finally:
+                active.remove(evidence)
+
+        monkeypatch.setattr(auto_approval, "classify", review)
+        with pytest.raises(ModelStreamCancelled):
+            await auto_approval._classify_batch({i: i for i in range(8)}, "key", False, cancelled.is_set)
+        assert not active
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(("responses", "outcome", "count"), [
     ([{"decision": "allow", "reason": "authorized"}], "allow", 1),
     ([{"decision": "ask", "reason": "uncertain"}, {"decision": "deny", "reason": "scope"}], "deny", 2),
@@ -166,7 +302,6 @@ def test_pending_auto_batch_survives_restart(tmp_path, monkeypatch, keep_key):
 ])
 def test_independent_classifier(monkeypatch, responses, outcome, count):
     import httpx
-    import json
     from agent.runtime.auto_approval import classify
 
     sent = []
