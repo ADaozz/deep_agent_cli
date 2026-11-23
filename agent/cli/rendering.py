@@ -1093,12 +1093,12 @@ def _subagent_result(
         rows.extend(_wrap_tree_line(assembled, console, width, text_at=text_at, spine=spine))
     if expanded or len(rows) <= limit:
         return rows
-    hidden = len(rows) - limit
+    # Collapsed means the hint only. The tail used to stay visible under it.
     notice = Text.assemble(
         Text(spine, style=TREE_BRANCH_STYLE) if spine else Text(""),
-        Text(f"{gap}… {hidden} output lines hidden · {TASK_EXPAND_HINT}", style="dim"),
+        Text(f"{gap}… {len(rows)} output lines hidden · {TASK_EXPAND_HINT}", style="dim"),
     )
-    return [*_wrap_tree_line(notice, console, width, text_at=text_at, spine=spine), *rows[-limit:]]
+    return _wrap_tree_line(notice, console, width, text_at=text_at, spine=spine)
 
 
 def _subagent_tree(

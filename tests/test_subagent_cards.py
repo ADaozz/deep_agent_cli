@@ -153,8 +153,8 @@ def test_long_result_folds_tail_and_control_o_expands_full_text():
         app.state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='d', content=output))
         limits = UiDisplayLimits(tail_lines=3)
         collapsed = plain(render_transcript(app.state, 100, limits=limits))
-        assert 'Ctrl+A to expand' in collapsed and 'line 0' not in collapsed
-        assert 'line 39' in collapsed and app.state.blocks[0].output == output
+        assert 'Ctrl+A to expand' in collapsed and 'line 0' not in collapsed and 'line 39' not in collapsed
+        assert '40 output lines hidden' in collapsed and app.state.blocks[0].output == output
         assert '└ result' not in collapsed
         binding = next(b for b in app.bindings.bindings if b.keys == ('c-a',))
         binding.handler(None)
@@ -325,6 +325,27 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     assert '汇总完成' in done and '— failed' not in done
     assert '└ result' not in done
     assert 'SubAgent · RunController 取消传播' in done
+
+
+def test_collapsed_child_result_is_only_the_expand_hint():
+    state = CliState()
+    start(state, 'card-a', '执行与取消链路')
+    _task_update(state)
+    sentence = (
+        '（计80字：隔离指将特定人员、物品或区域与其他对象分开，以阻断风险传播。'
+        '常见于传染病防控、危险品管理与故障设备处置。要点是边界清晰、标识明确、专人负责，并定期检查。）'
+    )
+    _task_update(
+        state, run_id='a1', parent_run_id='a', depth=2, description='资料',
+        tool_call_id='inner-1', status='completed', result=sentence,
+    )
+    collapsed = plain(render_transcript(state, 48, limits=UiDisplayLimits(tail_lines=3)))
+    assert 'output lines hidden' in collapsed and 'Ctrl+A' in collapsed
+    assert '计80字' not in collapsed and '边界清晰' not in collapsed
+    state.tasks_expanded = True
+    expanded = plain(render_transcript(state, 48, limits=UiDisplayLimits(tail_lines=3)))
+    assert '计80字' in expanded and '边界清晰' in expanded
+    assert 'output lines hidden' not in expanded
 
 
 def test_failed_child_shows_its_reason_on_its_own_row():
