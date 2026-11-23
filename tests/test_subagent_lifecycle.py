@@ -526,6 +526,46 @@ def test_subagent_error_messages_redact_known_secrets(tmp_path):
     root.end_run()
 
 
+def test_task_metrics_measure_streamed_reasoning_and_ignore_hidden_reasoning(monkeypatch):
+    """Full reasoning chunks count toward TPS; a usage tail is not answer text."""
+    from langchain_core.messages import AIMessageChunk
+
+    from agent.subagents.runtime import TaskMetrics
+
+    now = [0.0]
+    monkeypatch.setattr("agent.subagents.runtime.monotonic", lambda: now[0])
+    measured = TaskMetrics()
+    measured.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
+    for timestamp, reasoning, answer in [(1, "think", ""), (31, " more", "begin"), (41, "", " end")]:
+        now[0] = timestamp
+        measured.on_llm_new_token(answer, chunk=AIMessageChunk(
+            content=answer, additional_kwargs={"reasoning_content": reasoning},
+        ))
+    now[0] = 100
+    measured.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 12, "output_tokens": 3000, "total_tokens": 3012,
+        "output_token_details": {"reasoning": 2000},
+    }))
+    measured.on_llm_end(None)
+    assert measured.input_tokens == 12 and measured.output_tokens == 3000
+    assert measured.tps == 75
+    assert measured._message is None and measured._reasoning == "" and measured._visible == ""
+
+    hidden = TaskMetrics()
+    hidden.on_llm_start({})
+    now[0] = 10
+    hidden.on_llm_new_token("answer", chunk=AIMessageChunk(content="answer"))
+    now[0] = 20
+    hidden.on_llm_new_token(" more", chunk=AIMessageChunk(content=" more"))
+    now[0] = 30
+    hidden.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 4, "output_tokens": 30, "total_tokens": 34,
+        "output_token_details": {"reasoning": 20},
+    }))
+    hidden.on_llm_end(None)
+    assert hidden.output_tokens == 30 and hidden.tps is None
+
+
 def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
     """Depth-2 progress names its parent run and does not copy the child answer."""
     import json

@@ -14,7 +14,7 @@ from contextvars import Context
 from typing import Any, Callable
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from agent.runtime.auto_approval import delegating_user_request
@@ -22,7 +22,7 @@ from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import get_cancel_context, set_output_emitter
 from agent.runtime.metrics import GenerationTiming
 from agent.models.stream_lifecycle import set_stream_owner
-from agent.models.messages import visible_text
+from agent.models.messages import _chunk_message, _split_think, reasoning_text, visible_text
 from agent.sessions.transcript import classify_tool_result
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import BackgroundTask, SubAgentManager
@@ -74,18 +74,24 @@ class TaskMetrics(BaseCallbackHandler):
         self.output_tokens = 0
         self._rates: list[float] = []
         self._timing: GenerationTiming | None = None
+        self._summary_runs: set[Any] = set()
+        self._message: AIMessageChunk | None = None
+        self._raw_text = ""
+        self._visible = ""
+        self._reasoning = ""
         self.saw_llm = False
         self._on_update = on_update
 
     def on_chat_model_start(self, serialized: dict, messages: list, **kwargs: Any) -> None:
         self.on_llm_start(serialized, [], **kwargs)
 
-    def on_llm_start(self, serialized: dict, prompts: list, **kwargs: Any) -> None:
+    def on_llm_start(self, serialized: dict, prompts: list | None = None, **kwargs: Any) -> None:
         invocation = kwargs.get("invocation_params") or {}
         metadata = kwargs.get("metadata") or {}
         if (metadata or {}).get("lc_source") == "summarization":
-            self._timing = None
+            self._summary_runs.add(kwargs.get("run_id"))
             return
+        self._reset_stream()
         self._timing = GenerationTiming(
             monotonic(),
             str(invocation.get("model") or metadata.get("ls_model_name") or "unknown"),
@@ -93,24 +99,93 @@ class TaskMetrics(BaseCallbackHandler):
         )
 
     def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
-        if self._timing is not None:
-            self._timing.mark(monotonic(), reasoning=False, answer=True)
+        if kwargs.get("run_id") in self._summary_runs or self._timing is None:
+            return
+        message = _chunk_message(chunk)
+        if isinstance(message, AIMessageChunk):
+            self._message = message if self._message is None else self._message + message
+            visible = visible_text(self._message)
+            reasoning = reasoning_text(self._message)
+        else:
+            self._raw_text += token or ""
+            visible, reasoning = _split_think(self._raw_text)
+        chunks = getattr(message, "tool_call_chunks", None) or []
+        tool_output = isinstance(message, AIMessageChunk) and any(
+            isinstance(item, dict) and (item.get("args") or item.get("name")) for item in chunks
+        )
+        if (
+            reasoning
+            and reasoning != self._reasoning
+            and isinstance(message, AIMessageChunk)
+            and self._message is not None
+        ):
+            self._note_summarized_reasoning(message)
+        # Empty usage tails and other chunks with no new text are not answer output.
+        self._timing.mark(
+            monotonic(),
+            reasoning=bool(reasoning) and reasoning != self._reasoning,
+            answer=(bool(visible) and visible != self._visible) or tool_output,
+        )
+        self._reasoning = reasoning
+        self._visible = visible
+
+    def _note_summarized_reasoning(self, message: AIMessageChunk) -> None:
+        """Match StreamDeltaCallback: a summary is not the reasoning generation span."""
+        assert self._message is not None and self._timing is not None
+        kind = message.response_metadata.get("deep_agent_reasoning_kind") or {}
+        if not kind:
+            from agent.models.client import _STREAM_STATUS
+            status = _STREAM_STATUS.get()
+            if status is not None and status.reasoning_kind is not None:
+                kind = {status.reasoning_kind: True}
+        summary = any(isinstance(block, dict) and block.get("summary") for block in (
+            message.content if isinstance(message.content, list) else []
+        ))
+        extra = self._message.additional_kwargs
+        uses_summary = (
+            isinstance(extra.get("reasoning_summary"), str)
+            and bool(extra["reasoning_summary"])
+            and not any(
+                isinstance(extra.get(key), str) and extra[key]
+                for key in ("reasoning_content", "reasoning", "thinking")
+            )
+        )
+        if uses_summary or kind.get("summary") or (summary and not kind.get("full")):
+            self._timing.summarized_reasoning = True
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        if self._finish_summary(kwargs.get("run_id")):
+            return
         timing = self._timing
+        usage = self._message.usage_metadata if self._message is not None else None
         self._timing = None
+        self._reset_stream()
         if timing is None:
             return
-        usage: Any = None
         generations = getattr(response, "generations", None) or []
-        if generations and generations[0]:
+        if not isinstance(usage, dict) and generations and generations[0]:
             message = getattr(generations[0][0], "message", None)
             usage = getattr(message, "usage_metadata", None)
         snapshot = timing.snapshot(usage if isinstance(usage, dict) else None)
         self._add(snapshot.get("input_tokens"), snapshot.get("output_tokens"), snapshot.get("tps"))
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        if self._finish_summary(kwargs.get("run_id")):
+            return
         self._timing = None
+        self._reset_stream()
+
+    def _finish_summary(self, run_id: Any) -> bool:
+        if run_id not in self._summary_runs:
+            return False
+        self._summary_runs.remove(run_id)
+        return True
+
+    def _reset_stream(self) -> None:
+        self._message = None
+        self._raw_text = ""
+        self._visible = ""
+        self._reasoning = ""
 
     def add_messages(self, messages: list) -> None:
         """Fallback when the graph never invoked the model callback."""
