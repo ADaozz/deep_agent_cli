@@ -13,11 +13,21 @@ from agent.subagents.notifications import START_TOOL, parse_notification
 
 
 def subagent_result_status(content: str, *, is_error: bool = False) -> str:
-    """Interpret the runtime's failure envelope, never text inside a child answer."""
+    """Interpret the runtime's failure envelope, never text inside a child answer.
+
+    A delivered answer is prefixed with ``[subagent ``. Phrases inside that
+    answer, including ``cancelled by user``, are the subject of the work.
+    ``is_error`` only applies when the tool result itself is not that answer:
+    a generic flag computed from body text must not turn a finished review red.
+    """
     text = content.lstrip().lower()
+    if text.startswith("[subagent "):
+        return "completed"
     if text.startswith(("subagent cancelled:", "subagent cancelled (")):
         return "cancelled"
-    if is_error or text.startswith(("subagent failed:", "subagent failed (")):
+    if text.startswith(("subagent failed:", "subagent failed (")):
+        return "error"
+    if is_error:
         return "error"
     return "completed"
 
@@ -51,6 +61,10 @@ def classify_tool_result(
             or (isinstance(exit_code, int) and exit_code != 0)
         ):
             return "failed"
+        return "success"
+    # A finished child answer often quotes the cancellation path it reviewed.
+    # That phrase is not this tool's own cancel envelope.
+    if text.lstrip().startswith("[subagent "):
         return "success"
     if termination == "cancelled" or "cancelled by user" in text:
         return "cancelled"

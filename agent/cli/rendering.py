@@ -26,7 +26,9 @@ from rich.theme import Theme
 from agent.cli.previews import (
     CommandExecutionPreview,
     EXPAND_HINT,
+    TASK_EXPAND_HINT,
     ToolPreview,
+    hidden_output_notice,
     added_line_label,
     aggregate_file_mutations,
     build_review_mutation,
@@ -41,7 +43,8 @@ from agent.cli.highlighting import (
     code_renderer,
     parse_numbered_change,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.cli.state import CliState, MessageBlock, SubtaskView, ToolBlock, TurnSummaryBlock
+from agent.subagents.notifications import START_TOOL
 from agent.cli.skills import skill_message_display
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
 from agent.version import package_version
@@ -219,7 +222,8 @@ def transcript_units(
         units, _ends = _units_from(blocks, 0, state, timezone, width, limits)
         return [TranscriptUnit("header", (), lambda: Group(*_header())), *units]
     settings = (
-        width, timezone.key, limits, state.thinking_collapsed, state.messages_expanded, state.tools_expanded,
+        width, timezone.key, limits, state.thinking_collapsed, state.messages_expanded,
+        state.tools_expanded, state.tasks_expanded,
     )
     kept = 0
     if memo.settings == settings:
@@ -312,7 +316,10 @@ def _next_unit(
             group.append(candidate)
         if len(group) > 1:
             return _modify_group_unit(group, width, limits=limits, after_user=after_user), index + len(group)
-    return _tool_unit(block, state.tools_expanded, width, limits=limits, after_user=after_user), index + 1
+    return _tool_unit(
+        block, state.tools_expanded, width, limits=limits, after_user=after_user,
+        tasks_expanded=state.tasks_expanded,
+    ), index + 1
 
 
 def _message_unit(
@@ -330,12 +337,15 @@ def _message_unit(
 
 
 def _tool_unit(
-    block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, tasks_expanded: bool = False,
 ) -> TranscriptUnit:
     return TranscriptUnit(
-        key=("tool", id(block), expanded),
-        fingerprint=(block.revision, expanded, _live_tick(block), limits, after_user),
-        build=lambda: _tool(block, expanded, width, limits=limits, after_user=after_user),
+        key=("tool", id(block), expanded, tasks_expanded),
+        fingerprint=(block.revision, expanded, tasks_expanded, _live_tick(block), limits, after_user),
+        build=lambda: _tool(
+            block, expanded, width, limits=limits, after_user=after_user, tasks_expanded=tasks_expanded,
+        ),
         owner=block,
     )
 
@@ -435,8 +445,8 @@ class TranscriptRenderer:
     def __init__(self, timezone: ZoneInfo | None = None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, show_header: bool = True) -> None:
         self._show_header = show_header
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
-        self._units: dict[bool, TranscriptUnitMemo] = {}
-        self._documents: dict[bool, tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
+        self._units: dict[tuple[bool, bool], TranscriptUnitMemo] = {}
+        self._documents: dict[tuple[bool, bool], tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
         self._width = 0
         self._timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
         self._limits = limits
@@ -445,7 +455,7 @@ class TranscriptRenderer:
         if width != self._width:
             self.clear()
             self._width = width
-        mode = state.tools_expanded
+        mode = (state.tools_expanded, state.tasks_expanded)
         memo = self._units.setdefault(mode, TranscriptUnitMemo())
         units = transcript_units(state, self._timezone, width, limits=self._limits, memo=memo)
         if not self._show_header:
@@ -922,7 +932,8 @@ def _explore_group(
 
 
 def _tool(
-    block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, tasks_expanded: bool = False,
 ) -> Any:
     if block.name.startswith("mcp__"):
         from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
@@ -933,61 +944,69 @@ def _tool(
             Text("Arguments:\n" + mcp_arguments_preview(block.arguments, expanded=expanded)),
         ]
         if block.output and block.status != "waiting":
-            output = mcp_display_text(block.output).splitlines()
-            limit = len(output) if expanded else limits.tail_lines
-            if len(output) > limit:
-                output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
-            body.append(Text("\n".join(output), style="dim"))
+            console = Console(width=max(20, width))
+            body.extend(_output_tail(
+                mcp_display_text(block.output).splitlines(), console, width,
+                expanded=expanded, limit=limits.tail_lines, indent=0, earlier=False,
+            ))
         return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
     return render_tool_preview(
-        block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits, after_user=after_user,
+        block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits,
+        after_user=after_user, tasks_expanded=tasks_expanded,
     )
 
 
 def render_tool_preview(
     block: ToolBlock, preview: ToolPreview, *, expanded: bool, width: int = 80,
     limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    tasks_expanded: bool = False,
 ) -> Any:
     """Generic tool card: status, spinner, colors, folding — no tool semantics."""
     if preview.command_execution is not None:
         return _command_card(block.output, preview.command_execution, expanded, width, limits=limits, after_user=after_user)
     if preview.kind == "failure":
         return _failure_card(block, preview, expanded, width, after_user=after_user)
-    symbol, color = _tool_status_marker(block.status, block.is_error)
-    suffix = (
-        " — waiting for input" if block.status == "waiting"
-        else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
-        else " — cancelled" if block.status == "cancelled"
-        else " — failed" if preview.kind == "task" and block.is_error
-        else ""
-    )
-    verb = preview.verb
-    if block.status == "running":
-        verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
-    summary = f"{verb} {preview.target}".strip()
-    if preview.kind == "task":
-        summary = f"{'Running SubAgent' if block.status == 'running' else 'SubAgent'} · {preview.target}"
-    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
-    mutation = preview.file_mutation
-    counts = preview.detail if preview.detail.startswith("(+") and preview.detail.endswith(")") else ""
-    if mutation is not None and mutation.diff is not None and counts:
-        title.append(" (")
-        title.append(f"+{mutation.diff.added or 0}", style=DIFF_ADD_STAT)
-        title.append(" ")
-        title.append(f"-{mutation.diff.deleted or 0}", style=DIFF_DELETE_STAT)
-        title.append(")")
-    elif preview.group == "mutation" and preview.detail:
-        title.append(f" {preview.detail}", style="bold")
-    title.append(suffix, style="dim")
     console = Console(width=max(20, width))
+    if preview.kind == "task":
+        # Same title a nested row uses. Depth only adds the tree prefix.
+        title = _subagent_title(
+            block.status, preview.target, is_error=block.is_error,
+            background=block.name == START_TOOL,
+        )
+    else:
+        symbol, color = _tool_status_marker(block.status, block.is_error)
+        suffix = _tool_status_suffix(block.status)
+        verb = preview.verb
+        if block.status == "running":
+            verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
+        summary = f"{verb} {preview.target}".strip()
+        title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
+        mutation = preview.file_mutation
+        counts = preview.detail if preview.detail.startswith("(+") and preview.detail.endswith(")") else ""
+        if mutation is not None and mutation.diff is not None and counts:
+            title.append(" (")
+            title.append(f"+{mutation.diff.added or 0}", style=DIFF_ADD_STAT)
+            title.append(" ")
+            title.append(f"-{mutation.diff.deleted or 0}", style=DIFF_DELETE_STAT)
+            title.append(")")
+        elif preview.group == "mutation" and preview.detail:
+            title.append(f" {preview.detail}", style="bold")
+        title.append(suffix, style="dim")
     # Same wrap/indent as execute and failure cards: first visual row keeps the
     # status marker; wrapped rows indent under the title text.
     body: list[Any] = list(_wrap_card_line(title, console, width))
     if preview.kind == "task":
-        body.extend(_wrap_card_line(Text(f"  {preview.detail}", style="dim"), console, width))
-        if block.output:
-            body.extend(_wrap_card_line(_tree_branch("result"), console, width))
-    if preview.group == "mutation":
+        output = block.output.strip()
+        if output:
+            body.extend(_subagent_result(
+                output, console, width, expanded=tasks_expanded, limit=limits.tail_lines,
+                error=block.is_error, text_at=2, spine="",
+            ))
+        body.extend(_subagent_tree(
+            block.subtasks, console=console, width=width,
+            expanded=tasks_expanded, limit=limits.tail_lines,
+        ))
+    elif preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
     elif preview.lines:
         style = "dim" if not block.is_error else "red"
@@ -1012,6 +1031,75 @@ def render_tool_preview(
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
+def _subagent_title(status: str, description: str, *, is_error: bool = False, background: bool = False) -> Text:
+    """The one SubAgent title. Every depth uses it; only the tree prefix changes."""
+    failed = status not in {"cancelled", "interrupted", "waiting"} and (
+        is_error or status in {"failed", "error"}
+    )
+    symbol, color = _tool_status_marker("error" if failed else status, failed)
+    label = "Running SubAgent" if status == "running" else "SubAgent"
+    summary = f"{label} · {description or 'Delegated task'}"
+    if background:
+        summary += " · background"
+    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
+    title.append(_tool_status_suffix(status, failed=failed), style="dim")
+    return title
+
+
+def _subagent_result(
+    text: str, console: Console, width: int, *, expanded: bool, limit: int,
+    error: bool, text_at: int, spine: str,
+) -> list[Text]:
+    """Fold one task's own result the way other tool output folds, under its title."""
+    style = "red" if error else "dim"
+    gap = " " * max(0, text_at - len(spine))
+    rows: list[Text] = []
+    for line in text.splitlines() or [""]:
+        assembled = Text.assemble(
+            Text(spine, style=TREE_BRANCH_STYLE) if spine else Text(""),
+            Text(f"{gap}{line}", style=style),
+        )
+        rows.extend(_wrap_card_line(assembled, console, width, indent=text_at, spine=spine))
+    hidden = max(0, len(rows) - limit)
+    notice = Text.assemble(
+        Text(spine, style=TREE_BRANCH_STYLE) if spine else Text(""),
+        Text(f"{gap}{hidden_output_notice(hidden, hint=TASK_EXPAND_HINT)}", style="dim"),
+    )
+    return _fold_output_rows(
+        rows, _wrap_card_line(notice, console, width, indent=text_at, spine=spine),
+        expanded=expanded, limit=limit,
+    )
+
+
+def _subagent_tree(
+    nodes: Sequence[SubtaskView], *, console: Console, width: int, expanded: bool, limit: int, pad: str = "",
+) -> list[Text]:
+    """Nest the same SubAgent title and result. `pad` is only the ancestor spine."""
+    lines: list[Text] = []
+    last = len(nodes) - 1
+    for index, node in enumerate(nodes):
+        last_sibling = index == last
+        branch = f"  {pad}{'└─' if last_sibling else '├─'} "
+        # Under ├─ the bar continues through this row's result. └─ does not.
+        spine = "" if last_sibling else f"  {pad}│"
+        failed = node.status in {"failed", "error"}
+        title = Text.assemble((branch, TREE_BRANCH_STYLE), _subagent_title(node.status, node.description, is_error=failed))
+        text_at = len(branch) + 2
+        lines.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
+        body = (node.result or node.reason).strip()
+        if body:
+            lines.extend(_subagent_result(
+                body, console, width, expanded=expanded, limit=limit,
+                error=failed, text_at=text_at, spine=spine,
+            ))
+        if node.children:
+            child_pad = pad + ("   " if last_sibling else "│  ")
+            lines.extend(_subagent_tree(
+                node.children, console=console, width=width, expanded=expanded, limit=limit, pad=child_pad,
+            ))
+    return lines
+
+
 def _command_card(
     output: str, preview: CommandExecutionPreview, expanded: bool, width: int, *,
     limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
@@ -1023,11 +1111,7 @@ def _command_card(
         "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
         "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
     }[status]
-    suffix = (
-        " — waiting for input" if status == "waiting"
-        else " — interrupted (completion unconfirmed)" if status == "interrupted"
-        else ""
-    )
+    suffix = _tool_status_suffix(status, cancelled=False)
     marker_status = {
         "running": "running", "waiting": "waiting", "succeeded": "completed",
     }.get(status, "error")
@@ -1193,32 +1277,61 @@ def _output_tail(
             row for line in lines
             for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
         ]
+    return _fold_output_rows(
+        rows,
+        _wrap_card_line(
+            Text(f"{' ' * indent}{hidden_output_notice(len(rows) - limit, earlier=earlier)}", style=style),
+            console, width, indent=indent,
+        ),
+        expanded=expanded, limit=limit,
+    )
+
+
+def _fold_output_rows(rows: list[Text], notice: list[Text], *, expanded: bool, limit: int) -> list[Text]:
+    """Hint, then the last `limit` wrapped rows. Short and expanded text is unchanged."""
     if expanded or len(rows) <= limit:
         return rows
-    hidden = len(rows) - limit
-    notice = f"… {hidden} {'earlier ' if earlier else ''}output lines hidden · {EXPAND_HINT}"
-    return [
-        *_wrap_card_line(Text(f"{' ' * indent}{notice}", style=style), console, width, indent=indent),
-        *rows[-limit:],
-    ]
+    return [*notice, *rows[-limit:]]
 
 
-def _wrap_card_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:
+def _wrap_card_line(
+    line: Text, console: Console, width: int, *, indent: int = 2, spine: str = "",
+) -> list[Text]:
     """Keep the first prefix and indent continuations within the terminal margin.
 
-    Shared by every tool card so titles, commands, and body lines wrap alike.
+    Every card and nested row uses this. `spine` keeps `│` in the branch column
+    on continuations; without it, continuations indent under the title text.
     """
     available = max(1, width - 2)
-    indent = min(indent, available - 1)
+    indent = min(max(0, indent), available - 1)
     prefix, content = line[:indent], line[indent:]
-    wrapped = list(content.wrap(console, available - indent, overflow="fold"))
-    return [
-        Text.assemble(prefix if index == 0 else Text(" " * indent, style=line.style), part)
-        for index, part in enumerate(wrapped)
-    ]
+    wrapped = list(content.wrap(console, max(1, available - indent), overflow="fold")) or [Text("")]
+    gap = " " * max(0, indent - len(spine))
+    rows: list[Text] = []
+    for index, part in enumerate(wrapped):
+        if index == 0:
+            rows.append(Text.assemble(prefix, part))
+        elif spine:
+            rows.append(Text.assemble(Text(spine, style=TREE_BRANCH_STYLE), Text(gap), part))
+        else:
+            rows.append(Text.assemble(Text(" " * indent, style=line.style), part))
+    return rows
 
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _tool_status_suffix(status: str, *, failed: bool = False, cancelled: bool = True) -> str:
+    """Status words after a tool or SubAgent title."""
+    if status == "waiting":
+        return " — waiting for input"
+    if status == "interrupted":
+        return " — interrupted (completion unconfirmed)"
+    if cancelled and status == "cancelled":
+        return " — cancelled"
+    if failed:
+        return " — failed"
+    return ""
 
 
 def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
@@ -1237,8 +1350,14 @@ def _spinner_tick() -> int:
     return int(time.monotonic() * 10) % len(_SPINNER_FRAMES)
 
 
+def spinner_frame(now: float | None = None) -> str:
+    """The braille frame shared by tool cards and the status line."""
+    tick = _spinner_tick() if now is None else int(now * 10) % len(_SPINNER_FRAMES)
+    return _SPINNER_FRAMES[tick]
+
+
 def _spinner() -> str:
-    return _SPINNER_FRAMES[_spinner_tick()]
+    return spinner_frame()
 
 
 def _format_bytes(size: int) -> str:

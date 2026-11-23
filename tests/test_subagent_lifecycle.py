@@ -524,3 +524,124 @@ def test_subagent_error_messages_redact_known_secrets(tmp_path):
     assert secret not in text
     assert "$llm.models.deepseek.api_key" in text
     root.end_run()
+
+
+def test_task_metrics_measure_streamed_reasoning_and_ignore_hidden_reasoning(monkeypatch):
+    """Full reasoning chunks count toward TPS; a usage tail is not answer text."""
+    from langchain_core.messages import AIMessageChunk
+
+    from agent.subagents.runtime import TaskMetrics
+
+    now = [0.0]
+    monkeypatch.setattr("agent.subagents.runtime.monotonic", lambda: now[0])
+    measured = TaskMetrics()
+    measured.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
+    for timestamp, reasoning, answer in [(1, "think", ""), (31, " more", "begin"), (41, "", " end")]:
+        now[0] = timestamp
+        measured.on_llm_new_token(answer, chunk=AIMessageChunk(
+            content=answer, additional_kwargs={"reasoning_content": reasoning},
+        ))
+    now[0] = 100
+    measured.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 12, "output_tokens": 3000, "total_tokens": 3012,
+        "output_token_details": {"reasoning": 2000},
+    }))
+    measured.on_llm_end(None)
+    assert measured.input_tokens == 12 and measured.output_tokens == 3000
+    assert measured.tps == 75
+    assert measured._message is None and measured._reasoning == "" and measured._visible == ""
+
+    hidden = TaskMetrics()
+    hidden.on_llm_start({})
+    now[0] = 10
+    hidden.on_llm_new_token("answer", chunk=AIMessageChunk(content="answer"))
+    now[0] = 20
+    hidden.on_llm_new_token(" more", chunk=AIMessageChunk(content=" more"))
+    now[0] = 30
+    hidden.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
+        "input_tokens": 4, "output_tokens": 30, "total_tokens": 34,
+        "output_token_details": {"reasoning": 20},
+    }))
+    hidden.on_llm_end(None)
+    assert hidden.output_tokens == 30 and hidden.tps is None
+
+
+def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
+    """Depth-2 progress names its parent run. Only the finished update carries the answer."""
+    from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
+
+    events = []
+    root = RunController(on_control_event=lambda kind, payload: events.append((kind, dict(payload))))
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+    store = SubAgentLogStore(tmp_path)
+
+    def child_prepare(controller):
+        class Graph:
+            def stream(self, graph_input, config, **kwargs):
+                yield {"messages": [AIMessage(
+                    content="private depth-2 review of cancelled by user",
+                    usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                )]}
+        return SimpleNamespace(graph=Graph())
+
+    child_runtime = SubAgentRuntime(manager, store, child_prepare, "fake", child_depth=2)
+
+    def parent_prepare(controller):
+        child_runtime.owner_controller = controller
+
+        class Graph:
+            def stream(self, graph_input, config, **kwargs):
+                context = ToolCancelContext("start_task", "call-a1", threading.Event())
+                set_cancel_context(context)
+                try:
+                    nested = child_runtime.invoke(
+                        {"messages": [HumanMessage(content="审查取消传播")]},
+                        {"configurable": {"thread_id": config["configurable"]["thread_id"]}},
+                    )
+                finally:
+                    clear_cancel_context()
+                yield {"messages": [AIMessage(
+                    content="parent summary " + nested["messages"][0].content,
+                    usage_metadata={"input_tokens": 11, "output_tokens": 5, "total_tokens": 16},
+                )]}
+        return SimpleNamespace(graph=Graph())
+
+    runtime = SubAgentRuntime(manager, store, parent_prepare, "fake", child_depth=1, owner_controller=root)
+    launch = ToolCancelContext("start_task", "call-a", threading.Event())
+    set_cancel_context(launch)
+    try:
+        result = runtime.invoke(
+            {"messages": [HumanMessage(content="执行与取消链路")]},
+            {"configurable": {"thread_id": "root-session"}},
+        )
+    finally:
+        clear_cancel_context()
+    assert "private depth-2 review" in result["messages"][0].content
+    updates = [payload for kind, payload in events if kind == "subagent_update"]
+    by_depth = {}
+    for payload in updates:
+        by_depth.setdefault(payload["depth"], []).append(payload)
+    parent_rows = by_depth[1]
+    child_rows = by_depth[2]
+    assert parent_rows[0]["status"] == "running"
+    assert parent_rows[0]["tool_call_id"] == "call-a"
+    assert parent_rows[0]["parent_run_id"] == "root-session"
+    assert parent_rows[0]["description"] == "执行与取消链路"
+    assert parent_rows[-1]["status"] == "completed"
+    assert parent_rows[-1]["input_tokens"] == 11 and parent_rows[-1]["output_tokens"] == 5
+    assert child_rows[0]["status"] == "running"
+    assert child_rows[0]["tool_call_id"] == "call-a1"
+    assert child_rows[0]["parent_run_id"] == parent_rows[0]["run_id"]
+    assert child_rows[0]["description"] == "审查取消传播"
+    assert child_rows[-1]["status"] == "completed"
+    assert child_rows[-1]["input_tokens"] == 3 and child_rows[-1]["output_tokens"] == 2
+    # Terminal status is published before the slot is only closing.
+    assert child_rows[-1]["status"] == "completed"
+    running = [payload for payload in updates if payload["status"] == "running"]
+    assert all("result" not in payload for payload in running)
+    assert child_rows[-1]["result"] == "private depth-2 review of cancelled by user"
+    assert parent_rows[-1]["result"].startswith("parent summary ")
+    assert "private depth-2 review" in parent_rows[-1]["result"]
+    assert manager.active_count == 0
+    root.end_run()

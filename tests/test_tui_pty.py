@@ -742,7 +742,7 @@ def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
             )
             assert sample['status_line'].endswith('1 subagent')
             assert sample['rendered'].count('Running SubAgent') == 1
-            assert '└ result' in sample['rendered']
+            assert '└ result' not in sample['rendered']
             state = tui.wait(lambda state: not state['running'] and 'Parent completed both fixes' in state['rendered'], timeout=10)
             assert state['subagents'] == 0 and state['live_streams'] == 0
             assert 'subagent' not in state['status_line']

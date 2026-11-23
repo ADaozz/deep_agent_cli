@@ -35,11 +35,17 @@ CommandExecutionStatus = Literal[
     "spawn_error", "interrupted", "waiting",
 ]
 
-# Hint vocabulary selected by ToolPreview.action: review -> Ctrl+R,
-# expand -> Ctrl+O. Shared by builders and the renderer so no branch
-# hand-writes its own wording.
+# Hint vocabulary. Review is Ctrl+R, tool output is Ctrl+O, a SubAgent
+# result is Ctrl+A. Builders and the renderer share these sentences.
 EXPAND_HINT = "Ctrl+O to expand"
 REVIEW_HINT = "Ctrl+R to review"
+TASK_EXPAND_HINT = "Ctrl+A to expand"
+
+
+def hidden_output_notice(hidden: int, *, hint: str = EXPAND_HINT, earlier: bool = False) -> str:
+    """The one fold sentence. Callers decide whether the tail stays under it."""
+    when = "earlier " if earlier else ""
+    return f"… {hidden} {when}output lines hidden · {hint}"
 
 @dataclass(frozen=True)
 class PreviewLine:
@@ -778,7 +784,7 @@ def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLi
         shown = content[-limit:] if group == "command" else content[:limit]
         hidden = len(content) - len(shown)
     if hidden > 0:
-        shown.append(f"… {hidden} output lines hidden · {EXPAND_HINT}")
+        shown.append(hidden_output_notice(hidden))
     return shown
 
 
