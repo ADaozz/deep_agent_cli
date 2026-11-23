@@ -10,16 +10,18 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.cli.highlighting import code_renderer
-from agent.redaction import replace_known_secrets, sanitize_display_text
+from agent.redaction import SecretRef, replace_known_secrets, sanitize_display_text
 from agent.tools.catalog import FILE_MUTATION_TOOLS, WEB_TOOLS
 from agent.tools.human_interaction import ensure_other_option
+
+_Secrets = tuple[SecretRef, ...] | tuple[str, ...]
 
 
 def _approval_summary(
     value: Any,
     kind: str = "command",
     *,
-    secrets: tuple[str, ...] = (),
+    secrets: _Secrets = (),
 ) -> str:
     del kind  # Kind remains for call-site clarity; display no longer guesses credentials.
     command = str(value or "<not supplied>")
@@ -28,7 +30,7 @@ def _approval_summary(
     return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
 
 
-def _mcp_approval_summary(text: str, *, secrets: tuple[str, ...] = ()) -> str:
+def _mcp_approval_summary(text: str, *, secrets: _Secrets = ()) -> str:
     text = replace_known_secrets(mcp_display_text(text), secrets)
     text = " ".join(sanitize_display_text(text, keep_newlines=False).split())
     return text if len(text) <= 180 else text[:180] + "…"

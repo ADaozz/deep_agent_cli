@@ -74,24 +74,37 @@ def test_only_empty_new_sessions_become_eligible_and_attempt_once():
     assert policy.begin("new", "later task", "b", has_content=False, has_summary=False) is None
 
 
-@pytest.mark.parametrize("unsafe", [
+@pytest.mark.parametrize("kept", [
     "/home/neo/private/config.yaml", r"C:\Users\neo\config.env", "src/private/config.py",
     "https://user:password@example.test/private", r"src\private\config.py",
 ])
-def test_redaction_removes_paths_and_urls(unsafe):
-    assert unsafe not in redact_summary_input(f"修复问题 {unsafe}")
-    assert validate_summary(TITLE + " " + unsafe) is None
+def test_summary_keeps_paths_and_urls_without_regex_cover(kept):
+    assert kept in redact_summary_input(f"修复问题 {kept}")
+    title = f"修复 {kept}"[:80]
+    if "\n" not in title and len(title) <= 80:
+        assert validate_summary(title) == title
+
+
+def test_public_urls_are_kept_for_summary_context():
+    url = "https://www.reactbits.dev/c/micro"
+    assert url in redact_summary_input(f"用{url}组件库重绘一下前端")
+    assert validate_summary(f"用 {url} 重绘前端") == f"用 {url} 重绘前端"
 
 
 def test_summary_redacts_known_secrets_without_guessing_unknown_tokens():
-    assert "configured-secret" not in redact_summary_input("fix configured-secret", ("configured-secret",))
+    from agent.redaction import SecretRef
+
+    refs = (SecretRef("llm.models.openai.models.mock.api_key", "configured-secret"),)
+    assert "configured-secret" not in redact_summary_input("fix configured-secret", refs)
+    assert "$llm.models.openai.models.mock.api_key" in redact_summary_input("fix configured-secret", refs)
     # Unknown JWT / Bearer shapes are title text, not guessed credentials.
     jwtish = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature"
     assert redact_summary_input(jwtish) == jwtish
 
 
 @pytest.mark.parametrize("invalid", ["", "关于" + TITLE, TITLE + "\n解释", "```" + TITLE,
-                                       TITLE + " /private/key", TITLE + "\x1b[0m", "# " + TITLE, "1. " + TITLE])
+                                       TITLE + "\x1b[0m", "# " + TITLE, "1. " + TITLE,
+                                       "处理已脱敏请求"])
 def test_invalid_titles_are_not_saved(invalid):
     assert validate_summary(invalid) is None
 
@@ -103,14 +116,25 @@ def test_short_titles_are_accepted_without_han_count_floor():
 def test_fallback_query_summary_truncates_to_ten_chars():
     assert fallback_query_summary("从github上clone https://github.com/ADaozz/deep_agent_cli 仓库") == "从github上cl"
     assert fallback_query_summary("短问") == "短问"
-    assert fallback_query_summary("https://example.test/only") is None
+    assert fallback_query_summary("https://example.test/only") == "https://ex"
+
+
+def test_url_heavy_request_keeps_public_url_and_rejects_redaction_paraphrase():
+    request = "用https://www.reactbits.dev/c/micro组件库重绘一下前端"
+    assert redact_summary_input(request) == request
+    assert fallback_query_summary(request) == "用https://w"
+    assert validate_summary("处理已脱敏请求") is None
+    assert validate_summary("重绘前端组件") == "重绘前端组件"
 
 
 def test_titles_keep_technical_names_and_filter_known_secrets():
+    from agent.redaction import SecretRef
+
     title = "修复 React 应用登录流程中的状态同步异常"
+    refs = (SecretRef("llm.api_key", "configured-secret"),)
     assert validate_summary(title) == title
-    assert validate_summary(TITLE + " configured-secret", ("configured-secret",)) is None
-    assert "configured-secret" not in redact_summary_input("key: configured-secret", ("configured-secret",))
+    assert validate_summary(TITLE + " configured-secret", refs) is None
+    assert "configured-secret" not in redact_summary_input("key: configured-secret", refs)
 
 
 @pytest.mark.parametrize("api", ["responses", "chat_completions"])
@@ -146,7 +170,9 @@ def test_title_generator_uses_isolated_nonstreaming_protocol_request(api, monkey
     assert asyncio.run(generate_session_summary(request, profile)) == TITLE
     assert len(requests) == 1
     payload = json.dumps(requests[0], ensure_ascii=False)
-    assert "configured-secret" not in payload and "/private/config.py" not in payload
+    assert "configured-secret" not in payload
+    assert "/private/config.py" in payload  # paths stay; only known secrets are named-replaced
+    assert "$llm.api_key" in payload or "$llm.models" in payload
     assert not requests[0].get("stream") and "tools" not in requests[0]
     assert all(model.http_client.is_closed and model.http_async_client.is_closed for model in models)
 
@@ -178,7 +204,10 @@ def test_first_message_emits_one_bound_summary_request_before_model_call(api, tm
         assert event_types.index("session_summary_requested") < event_types.index("turn_completed")
         assert summaries[0].thread_id == runner.thread_id
         assert summaries[0].model_id == profile.id
-        assert "/private" not in summaries[0].user_request and "configured-secret" not in summaries[0].user_request
+        # Bound request keeps paths and replaces known secrets with $name before the title call.
+        assert "/private" in summaries[0].user_request
+        assert "configured-secret" not in summaries[0].user_request
+        assert "$llm.api_key" in summaries[0].user_request
         assert "已修复登录异常" not in repr(summaries[0])
         runner.invoke("继续优化", on_event=events.append)
         assert len([e for e in events if e.type == "session_summary_requested"]) == 1
@@ -244,7 +273,7 @@ def test_background_summary_stays_bound_across_session_switch_and_persists(tmp_p
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("result", [None, "标题：" + TITLE, TITLE + " /private/path"])
+@pytest.mark.parametrize("result", [None, "标题：" + TITLE, "处理已脱敏请求"])
 def test_bad_background_result_falls_back_without_affecting_run(tmp_path, result):
     async def scenario():
         store, runner, app = make_app(tmp_path)

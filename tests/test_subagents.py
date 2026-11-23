@@ -477,6 +477,7 @@ def test_log_redacts_only_configured_model_and_deepseek_keys(tmp_path, monkeypat
         log = next((tmp_path / 'subagents').rglob('*.jsonl')).read_text()
         assert all(key not in log for key in ('known-main-key', 'known-unused-key', 'known-deepseek-key'))
         assert 'password=unknown-output-key' in log
-        assert '[REDACTED]' in log
+        assert '$llm.api_key' in log or '$llm.models' in log
+        assert '$llm.models.deepseek.api_key' in log
     finally:
         runner.close()

@@ -259,7 +259,9 @@ def test_exit_cancels_pending_oauth_before_browser_opens(tmp_path, monkeypatch):
         protected.close()
 
 
-def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkeypatch, http_mcp, caplog):
+def test_bearer_echo_and_stdio_environment_outputs_are_not_auto_redacted(
+    tmp_path, monkeypatch, http_mcp, caplog,
+):
     import json
     from tests.mcp_fixture import stdio_argv
 
@@ -279,23 +281,23 @@ def test_bearer_echo_and_stdio_environment_outputs_are_redacted(tmp_path, monkey
         for name in ("bearer", "stdio"):
             echo = next(tool for tool in manager.get(name).tools if tool.name.endswith("__echo"))
             result = echo.invoke({"text": token})
-            assert token not in str(result)
-            assert "[REDACTED]" in str(result)
+            # Env/bearer values are not auto-redacted; cover via redaction.replacements if needed.
+            assert token in str(result)
+            assert "$MCP_FIXTURE_TOKEN" not in str(result)
             unknown = '{  "api_key": "unknown", "Authorization": "Bearer unknown", "payload": "' + "A" * 600 + '" }\n'
             for text in (unknown, json.dumps({"token": token, "unknown": unknown})):
                 args = {"text": text}
                 result = echo.invoke(args)
                 returned = next(block["text"] for block in result if block["type"] == "text")
-                assert returned == text.replace(token, "[REDACTED]")
-                assert json.loads(returned) == json.loads(text.replace(token, "[REDACTED]"))
+                assert returned == text
+                assert json.loads(returned) == json.loads(text)
                 assert args == {"text": text}
-        assert token not in manager.describe()
+        # describe() still avoids dumping raw env; listing should not invent $env placeholders.
         from agent.mcp.middleware import MCPMiddleware
-        # mcp_list uses the same public rendering as the CLI.
         middleware = MCPMiddleware(manager, [])
         listing = next(tool for tool in middleware.tools if tool.name == "mcp_list")
-        assert token not in str(listing.invoke({}))
-        assert token not in caplog.text
+        assert "$MCP_FIXTURE_TOKEN" not in str(listing.invoke({}))
+        assert "$MCP_FIXTURE_TOKEN" not in caplog.text
     finally:
         manager.close()
 

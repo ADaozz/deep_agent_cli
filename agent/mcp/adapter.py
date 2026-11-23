@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.redaction import replace_known_secrets
+from agent.redaction import SecretRef, replace_known_secrets
 
 
 from contextlib import contextmanager
@@ -47,7 +47,7 @@ class LoadedServer:
         self.warnings = warnings
 
 
-def redact(text: str, secrets: list[str]) -> str:
+def redact(text: str, secrets: list[SecretRef] | list[str]) -> str:
     return replace_known_secrets(text, secrets)
 
 
@@ -65,7 +65,7 @@ def open_server(
     cancel_event: threading.Event | None = None,
 ) -> LoadedServer:
     """Connect on the bridge loop and return synchronous LangChain tools."""
-    secrets: list[str] = []
+    secrets: list[SecretRef] = []
     try:
         transport = build_transport(
             server, secrets, oauth_callback_timeout=oauth_callback_timeout,
@@ -99,7 +99,7 @@ def _looks_like_auth(message: str) -> bool:
 
 def build_transport(
     server: MCPServerConfig,
-    secrets: list[str],
+    secrets: list[SecretRef],
     *,
     oauth_callback_timeout: float,
     trust_env: bool = False,
@@ -117,7 +117,7 @@ def build_transport(
             token = os.environ.get(token_env, "")
             if not token:
                 raise MCPAuthError(f"Environment variable {token_env} is not set")
-            secrets.append(token)
+            # Bearer / env values are not auto-redacted; use config redaction.replacements.
             auth = BearerAuth(token)
         elif server.auth is not None and server.auth.type == "oauth":
             from agent.mcp.oauth_storage import oauth_token_storage
@@ -144,7 +144,6 @@ def build_transport(
     if missing:
         raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
     env = {name: os.environ[name] for name in server.env_passthrough}
-    secrets.extend(env.values())
     from agent.models.http import apply_http_environment
 
     env = apply_http_environment(env, os.environ, trust_env=trust_env)
@@ -171,7 +170,7 @@ async def _load(
     transport: Any,
     bridge: SyncAsyncBridge,
     call_timeout: float,
-    secrets: list[str],
+    secrets: list[SecretRef],
 ) -> LoadedServer:
     from agent.mcp.oauth import ManagedOAuth
 
@@ -225,7 +224,7 @@ def _bridge_tool(
     timeout: float,
     server: str,
     remote_name: str,
-    secrets: list[str],
+    secrets: list[SecretRef],
     client: Any = None,
     call_lock: asyncio.Lock | None = None,
 ) -> BaseTool:
@@ -311,7 +310,7 @@ def _bridge_tool(
     )
 
 
-def _redact_value(value: Any, secrets: list[str]) -> Any:
+def _redact_value(value: Any, secrets: list[SecretRef] | list[str]) -> Any:
     if isinstance(value, str):
         return redact(value, secrets)
     if isinstance(value, list):

@@ -33,7 +33,10 @@ def test_recent_tools_merges_checkpoint_and_timeline():
 
 
 def test_tool_detail_redacts_secrets_and_returns_excerpt():
+    from agent.redaction import SecretRef
+
     secret = "sk-personal-abc123"
+    refs = (SecretRef("llm.api_key", secret),)
     blocks = [
         TranscriptBlock(
             kind="tool",
@@ -45,11 +48,12 @@ def test_tool_detail_redacts_secrets_and_returns_excerpt():
         ),
     ]
     payload = inspect_session_payload(
-        blocks, None, secrets=(secret,), view="tool_detail", tool_call_id="call-1",
+        blocks, None, secrets=refs, view="tool_detail", tool_call_id="call-1",
     )
     assert payload["tool"] == "execute"
-    assert "sk-personal" not in json.dumps(payload, ensure_ascii=False)
-    assert "[REDACTED]" in json.dumps(payload, ensure_ascii=False)
+    dumped = json.dumps(payload, ensure_ascii=False)
+    assert "sk-personal" not in dumped
+    assert "$llm.api_key" in dumped
     assert payload["result"]["status"] == "success"
 
 
@@ -179,19 +183,26 @@ def test_independent_runs_are_distinct_even_if_the_model_reuses_message_ids():
     assert [row["run_id"] for row in inspect_session_payload([], timeline)["tools"]] == ["one", "two"]
 
 
-def test_redaction_preserves_diagnostic_paths_but_hides_credentials():
+def test_redaction_only_replaces_named_known_secrets():
     from agent.companion.session_inspector import call_arguments, call_result
+    from agent.redaction import SecretRef
 
+    refs = (SecretRef("CLI_TOKEN", "opaque-cli-secret"),)
     details = call_arguments({
         "command": "pytest tests/test_example.py --api-key opaque-cli-secret",
         "params": {"authorization": "opaque-object-secret"},
-    }, ())
+    }, refs)
     details = call_result(details, "Authorization: Bearer opaque-output-secret\n"
                           "tests/test_example.py:4: failed\n"
-                          "-----BEGIN PRIVATE KEY-----\nopaque-private-key", {}, ())
+                          "-----BEGIN PRIVATE KEY-----\nopaque-private-key", {}, refs)
     assert "tests/test_example.py" in details.arguments["command"]
-    assert "tests/test_example.py:4" in details.output_excerpt
-    assert "opaque-" not in json.dumps(details.arguments) + details.output_excerpt
+    assert "$CLI_TOKEN" in details.arguments["command"]
+    assert "opaque-cli-secret" not in details.arguments["command"]
+    dumped = json.dumps(details.arguments, ensure_ascii=False)
+    # Unknown literals and PEM are no longer regex-covered by companion redaction.
+    assert "opaque-object-secret" in dumped
+    assert "opaque-output-secret" in details.output_excerpt
+    assert "PRIVATE KEY" in details.output_excerpt
 
 
 def test_waiting_and_cancelled_checkpoint_statuses_are_preserved():
@@ -225,9 +236,10 @@ def test_live_result_overrides_stale_checkpoint_running_status():
     assert inspect_session_payload(blocks, timeline)["tools"][0]["status"] == "success"
 
 
-def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
+def test_diagnostics_keep_urls_and_replace_only_named_secrets():
     from agent.companion.session_inspector import call_arguments
     from agent.companion.redaction import redact_diagnostic_text
+    from agent.redaction import SecretRef
     from agent.sessions.summary import redact_summary_input
 
     endpoint = "https://api.example.test:9443/v1/items?limit=20"
@@ -235,15 +247,19 @@ def test_diagnostics_preserve_safe_urls_and_remove_url_credentials():
         endpoint + " https://user:opaque-password@api.example.test/v1/"
         "%6Fpaque-known?limit=10&accessToken=opaque-token&X-Amz-Signature=opaque-signature#opaque-fragment"
     )
-    clean = redact_diagnostic_text(text, ("opaque-known",))
-    assert endpoint in clean and "opaque-" not in clean and "user:" not in clean
-    assert "https://api.example.test/v1/[REDACTED]?limit=10" in clean
-    assert redact_diagnostic_text(clean) == clean
-    assert endpoint not in redact_summary_input(endpoint)
+    refs = (SecretRef("KNOWN", "opaque-known"),)
+    clean = redact_diagnostic_text(text, refs)
+    assert endpoint in clean
+    # Exact replace does not decode URL escapes; encoded path keeps %6Fpaque-known.
+    assert "%6Fpaque-known" in clean
+    assert "$KNOWN" not in clean  # value is only present URL-encoded
+    # URL userinfo / sensitive query are not regex-covered anymore.
+    assert "user:opaque-password" in clean
+    assert redact_diagnostic_text(clean, refs) == clean
+    assert endpoint in redact_summary_input(endpoint)
     left = call_arguments({"command": "curl https://a:first@api.example.test/v1"}, ())
     right = call_arguments({"command": "curl https://a:second@api.example.test/v1"}, ())
-    assert left.arguments == right.arguments
-    assert not left.matches_arguments(right)
+    assert left.arguments != right.arguments
 
 
 def test_failure_excerpt_keeps_context_and_tail_and_command_has_priority():

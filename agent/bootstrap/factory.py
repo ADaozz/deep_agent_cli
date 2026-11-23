@@ -25,7 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig
-from agent.redaction import known_secrets
+from agent.redaction import known_secret_refs
 from agent.runtime.control import RunController
 from agent.execution.environment import EnvironmentContextMiddleware
 from agent.models.client import ProtocolChatOpenAI, build_chat_model
@@ -336,7 +336,7 @@ def build_agent(
             run_controller.subagent_manager = manager
         manager.max_concurrent = cfg.subagents.max_concurrent
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-        store = SubAgentLogStore(root, known_secrets(cfg, spec.deepseek_api_key))
+        store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
         tools.append(build_subagent_log_tool(store))
 
         def prepare_child(controller: RunController) -> PreparedAgent:

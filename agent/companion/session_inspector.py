@@ -20,7 +20,6 @@ OUTPUT_EXCERPT = 1400
 EXCERPT_SCAN = 16384
 CALL_CACHE_LIMIT = 128
 _TERMINAL = {"success", "failed", "cancelled"}
-_SECRET_FIELD = re.compile(r"api.?key|token|secret|password|authorization|credential", re.I)
 _ERROR_LINE = re.compile(
     r"(?im)^.*(?:traceback|assertionerror|permission denied|no module named|command not found|"
     r"(?:^|\s)(?:error|fatal|failed):|(?:^|\s)FAILED |^E\s+assert|exit code: [1-9]).*$"
@@ -76,11 +75,7 @@ def _arguments(value, secrets):
                 name, clipped = _excerpt(key, secrets, 64)
                 truncated |= clipped
                 budget -= len(name)
-                if _SECRET_FIELD.search(key[:128]):
-                    result[name] = "[已隐藏]"
-                    redacted = True
-                else:
-                    result[name] = visit(child, depth + 1, key)
+                result[name] = visit(child, depth + 1, key)
             return result
         if isinstance(item, (list, tuple)):
             result = []
@@ -133,7 +128,6 @@ class CallDetails:
             bool(self.arguments) and not (self.arguments_truncated or other.arguments_truncated)
             and not (self.arguments_redacted or other.arguments_redacted)
             and self.arguments == other.arguments
-            and "[已隐藏]" not in json.dumps(self.arguments, ensure_ascii=False)
         )
 
 

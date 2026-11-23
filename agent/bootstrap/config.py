@@ -65,6 +65,8 @@ class Settings:
     # Deep Agents 手动压缩门槛与模型默认 fraction 的上限共用此默认值。
     compaction_threshold: float = DEFAULT_COMPACTION_THRESHOLD
     companion: CompanionConfig = field(default_factory=CompanionConfig)
+    # Exact literal → display name pairs from config ``redaction.replacements``.
+    redaction_replacements: tuple[tuple[str, str], ...] = ()
 
     def effective_compaction_fraction(self, model_fraction: float | None = None) -> float:
         """工厂与手动压缩共用的有效 fraction：min(模型默认, 配置门槛)。
@@ -220,6 +222,7 @@ class Settings:
             companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),
             resolved_deepseek_api_key=next((p.api_key or None for p in profiles if p.source == "deepseek"), None),
             request_timeout=request_timeout,
+            redaction_replacements=_redaction_replacements_from_mapping(_section(raw, "redaction")),
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -391,6 +394,28 @@ def _as_str_dict(value: Any, *, field_name: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field_name} must be a mapping, got {value!r}")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _redaction_replacements_from_mapping(data: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Parse ``redaction.replacements`` as ordered (literal, display_name) pairs."""
+    unknown = set(data) - {"replacements"}
+    if unknown:
+        raise ValueError(f"redaction has unsupported fields: {', '.join(sorted(unknown))}")
+    raw = data.get("replacements")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError("redaction.replacements must be a mapping of literal to display name")
+    pairs: list[tuple[str, str]] = []
+    for key, value in raw.items():
+        literal = str(key).strip() if key is not None else ""
+        name = str(value).strip() if value is not None else ""
+        if not literal or not name:
+            raise ValueError(
+                "redaction.replacements entries must have non-empty literal keys and display names"
+            )
+        pairs.append((literal, name))
+    return tuple(pairs)
 
 
 def _mount_modes(value: Any, *, field_name: str) -> tuple[SandboxMode, ...] | None:

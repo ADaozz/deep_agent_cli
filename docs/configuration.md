@@ -333,6 +333,25 @@ llm:
 | `state_path` | `null` | 会话数据库路径。默认 `~/.deep-agent/sessions/<工作区路径哈希>.sqlite3`，每个工作区一个文件。设置后所有工作区共用这一个文件 |
 | `config_dir` | `null` | `keybindings.json` 和 `working_messages.yaml` 所在目录，默认 `~/.deep-agent` |
 
+## 脱敏（`redaction`）
+
+展示侧（审批卡、Auto 证据、会话标题、MCP 工具输出、Companion 诊断等）会对**已知字面量**做精确替换：
+
+1. 配置里解析出的模型 `api_key` → `$llm.models.…` 路径名（如 `$llm.models.deepseek.api_key`）。
+2. 可选字典 `redaction.replacements`：字面值 → 自定义展示名（不必带 `$`）。
+
+```yaml
+redaction:
+  replacements:
+    "sk-XXXX": "密钥"
+```
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `replacements` | `{}` | 精确匹配的字面量 → 展示名；键与值均须非空。类型错误时启动失败 |
+
+沙箱 `env_set` / `env_allowlist`、MCP bearer / `env_passthrough` 的环境变量值**不会**自动加入替换表。需要遮盖时，把对应字面量写进 `replacements`。不对自由文本中的 JWT / `sk-` 等形态做正则猜测遮盖；Auto 送 Flash 前另有只读 `suspects` 扫描，不改原文。
+
 ## 界面（`ui`）
 
 修改后重启 CLI 生效。内容折叠统一使用 `head_lines` 和 `tail_lines`，均为正整数，默认保留开头 4 行或末尾 3 行。需要开头预览的命令正文、写入、差异和普通失败摘要使用 `head_lines`；思考和工具输出、命令失败输出使用 `tail_lines`。命令正文、思考、命令输出和普通工具的原始输出按终端折行后的显示行计数，标题和隐藏提示另计；其他内容按逻辑行计数。展开工具输出后不再受折叠行数限制。带 `_items` 的字段按条目计数。

@@ -3,11 +3,12 @@ from uuid import uuid4
 
 import pytest
 
+from agent.redaction import SecretRef
 from agent.subagents.log_store import MAX_EVENT_BYTES, MAX_PAGE_BYTES, SubAgentLogStore
 
 
 def test_log_restart_paging_ownership_and_redaction(tmp_path):
-    store = SubAgentLogStore(tmp_path, ('configured-secret-value',))
+    store = SubAgentLogStore(tmp_path, (SecretRef("CFG", "configured-secret-value"),))
     run = uuid4().hex
     for index in range(5):
         store.append('parent-a', run, 'tool', output=f'configured-secret-value token=supersecret {index}')
@@ -18,6 +19,7 @@ def test_log_restart_paging_ownership_and_redaction(tmp_path):
     assert page['next_offset'] == 3
     raw = json.dumps(page)
     assert 'configured-secret-value' not in raw
+    assert '$CFG' in raw
     assert 'token=supersecret' in raw
     assert restarted.read('parent-b')['runs'] == []
     assert 'error' in restarted.read('parent-b', run)
@@ -48,7 +50,11 @@ def test_only_known_strings_are_redacted_in_nested_and_serialized_values(tmp_pat
     from langchain_core.messages import AIMessage
     known = 'model-key"with\\quotes'
     deepseek = 'known-deepseek-key'
-    store = SubAgentLogStore(tmp_path, (known, deepseek, 'xy', ''))
+    store = SubAgentLogStore(tmp_path, (
+        SecretRef("MODEL_KEY", known),
+        SecretRef("DEEPSEEK", deepseek),
+        SecretRef("SHORT", "xy"),
+    ))
     run = uuid4().hex
     payload = {
         'password': 'unknown123', 'token': 'unknown123', 'api_key': 'unknown123',
@@ -64,25 +70,30 @@ def test_only_known_strings_are_redacted_in_nested_and_serialized_values(tmp_pat
     assert record['input']['password'] == 'unknown123'
     assert record['input']['token'] == 'unknown123'
     assert record['input']['api_key'] == 'unknown123'
-    assert record['input']['nested'] == [{'value': '[REDACTED]'}, ['[REDACTED]', 'ordinary log']]
+    assert record['input']['nested'] == [{'value': '$MODEL_KEY'}, ['$DEEPSEEK', 'ordinary log']]
     assert json.loads(record['input']['serialized']) == {
-        'password': 'correct horse battery staple', 'token': '[REDACTED]'}
-    assert record['input']['message']['content'] == '[REDACTED]'
-    assert record['input']['short_known_secret'] == '[REDACTED]'
+        'password': 'correct horse battery staple', 'token': '$DEEPSEEK'}
+    assert record['input']['message']['content'] == '$MODEL_KEY'
+    assert record['input']['short_known_secret'] == '$SHORT'
     assert record['output'] == 'password=unknown123 token=unknown123 bearer unknown123'
     assert known not in raw and deepseek not in raw
     assert store.read('parent', run)['records'] == [record]
 
 
 def test_known_strings_stay_redacted_when_event_is_truncated(tmp_path):
-    store = SubAgentLogStore(tmp_path, ('known-model-key', 'known-deepseek-key'))
+    store = SubAgentLogStore(tmp_path, (
+        SecretRef("MODEL_KEY", "known-model-key"),
+        SecretRef("DEEPSEEK", "known-deepseek-key"),
+    ))
     run = uuid4().hex
     store.append('parent', run, 'known-model-key', model='known-model-key', status='known-deepseek-key',
                  output='known-model-key ' * MAX_EVENT_BYTES)
     raw = next(tmp_path.rglob('*.jsonl')).read_text()
     assert 'known-model-key' not in raw and 'known-deepseek-key' not in raw
     record = json.loads(raw)
-    assert record['truncated'] and record['model'] == record['status'] == record['event'] == '[REDACTED]'
+    assert record['truncated']
+    assert record['event'] == record['model'] == '$MODEL_KEY'
+    assert record['status'] == '$DEEPSEEK'
 
 
 
@@ -249,11 +260,11 @@ def test_known_keys_are_replaced_before_summary_limits(tmp_path):
             yield {'messages': [AIMessage(content=answer)]}
     parent = RunController()
     parent.begin_run()
-    store = SubAgentLogStore(tmp_path, (key,))
+    store = SubAgentLogStore(tmp_path, (SecretRef("KNOWN", key),))
     runtime = SubAgentRuntime(SubAgentManager(parent), store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model')
     result = runtime.invoke({'messages': [HumanMessage(content=description)]},
                             {'configurable': {'thread_id': 'parent'}})
     assert result['messages'][0].content.endswith(answer)
     raw = next(tmp_path.rglob('*.jsonl')).read_text()
-    assert 'KNOWN' not in raw
-    assert '[REDACTED]' in raw
+    assert key not in raw
+    assert '$KNOWN' in raw

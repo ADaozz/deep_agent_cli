@@ -206,3 +206,10 @@ paths:
   state_path: null
   # 快捷键配置目录；null 表示使用 ~/.deep-agent。
   config_dir: null
+
+# 脱敏：配置文件中的模型 api_key 会自动替换为 $llm.models.… 路径名。
+# 额外字面量用 replacements 精确替换为自定义名称（不必带 $）；沙箱/MCP 环境变量不自动脱敏。
+redaction:
+  replacements: {}
+  # replacements:
+  #   "sk-XXXX": "密钥"

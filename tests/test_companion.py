@@ -743,8 +743,9 @@ print(json.dumps(dict(**identity, message='这次是命令找不到。', status=
 
 def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     from agent.companion.repository import Repository
+    from agent.redaction import SecretRef
 
-    repo = Repository(tmp_path, secrets=("fixture-sensitive-value",))
+    repo = Repository(tmp_path, secrets=(SecretRef("FIXTURE", "fixture-sensitive-value"),))
     for name in ("auth.py", "tokenizer.py", "config.py", "authorization.py", "password_policy.py"):
         (tmp_path / name).write_text("token = generate_token()\npassword = request.headers.get('Password')\n")
         result = repo.read(name)
@@ -761,10 +762,11 @@ def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     source.write_text("import client\napi_key = 'private-value'\nprint('fixture-sensitive-value')\nclient.connect()")
     result = repo.read(source.name)
     assert "example.py:4 client.connect()" in result
-    assert result.count("[REDACTED]") == 2
-    assert "private-value" not in result and "fixture-sensitive-value" not in result
+    assert "$FIXTURE" in result
+    assert "fixture-sensitive-value" not in result
+    # Unknown assignment literals are not regex-covered.
+    assert "private-value" in result
     assert "example.py:4" in repo.search("client.connect()")
-    assert repo.search("private-value").startswith("No match")
     (tmp_path / "pem_parser.py").write_text('HEADER = "-----BEGIN PRIVATE KEY-----"\nparse_header(HEADER)')
     assert "pem_parser.py:2 parse_header(HEADER)" in repo.read("pem_parser.py")
 
@@ -870,7 +872,8 @@ def test_inspector_live_completion_cache_and_session_boundary(tmp_path):
         detail = dict(view="tool_detail", tool_call_id="a")
         result = await query(**detail)
         assert result["arguments"]["command"] == "pytest -q"
-        assert "opaque-private-value" not in json.dumps(result)
+        # Unknown argument values are not regex-covered; only configured secrets become $name.
+        assert result["arguments"]["api_key"] == "opaque-private-value"
         assert result["result"]["error_category"] == "assertion"
         assert result["result"]["output_excerpt"] == "AssertionError: failed"
         checkpoint.append(TranscriptBlock(kind="tool", tool_call_id="a", name="execute",

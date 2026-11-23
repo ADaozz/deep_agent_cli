@@ -125,18 +125,18 @@ class AccessSelection:
                 ),
             },
         ]
-        if self._allow_available():
-            options.append({
-                "value": PermissionMode.ALLOW.value,
-                "label": permission_mode_option_label(
-                    PermissionMode.ALLOW, current=current is PermissionMode.ALLOW,
-                ),
-            })
         if self.runner.auto_available():
             options.append({
                 "value": PermissionMode.AUTO.value,
                 "label": permission_mode_option_label(
                     PermissionMode.AUTO, current=current is PermissionMode.AUTO,
+                ),
+            })
+        if self._allow_available():
+            options.append({
+                "value": PermissionMode.ALLOW.value,
+                "label": permission_mode_option_label(
+                    PermissionMode.ALLOW, current=current is PermissionMode.ALLOW,
                 ),
             })
         if len(options) == 1:

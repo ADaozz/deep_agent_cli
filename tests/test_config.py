@@ -35,6 +35,19 @@ def test_effective_compaction_fraction_does_not_hard_cap_at_default() -> None:
     assert low.effective_compaction_fraction(0.5) == 0.5
 
 
+def test_redaction_replacements_load_and_reject_invalid() -> None:
+    assert Settings.from_mapping({}).redaction_replacements == ()
+    assert Settings.from_mapping({"redaction": {}}).redaction_replacements == ()
+    loaded = Settings.from_mapping({"redaction": {"replacements": {"sk-XXXX": "密钥"}}})
+    assert loaded.redaction_replacements == (("sk-XXXX", "密钥"),)
+    with pytest.raises(ValueError, match="redaction.replacements"):
+        Settings.from_mapping({"redaction": {"replacements": []}})
+    with pytest.raises(ValueError, match="non-empty"):
+        Settings.from_mapping({"redaction": {"replacements": {"": "密钥"}}})
+    with pytest.raises(ValueError, match="unsupported"):
+        Settings.from_mapping({"redaction": {"unknown": True}})
+
+
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)

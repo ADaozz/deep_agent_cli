@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.redaction import replace_known_secrets
+from agent.redaction import SecretRef, replace_known_secrets
 
 
 from datetime import datetime, timezone
@@ -21,9 +21,9 @@ MAX_PAGE_BYTES = 64_000
 
 
 class SubAgentLogStore:
-    def __init__(self, root: Path, secrets: tuple[str, ...] = ()) -> None:
+    def __init__(self, root: Path, secrets: tuple[SecretRef, ...] | tuple[str, ...] = ()) -> None:
         self.root = root
-        self.secrets = tuple(value for value in secrets if value)
+        self.secrets = tuple(item for item in secrets if item)
         self._lock = threading.Lock()
 
     def _directory(self, parent: str) -> Path:

@@ -118,7 +118,19 @@ class Companion:
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
         self.api_key = api_key
-        self.secrets = tuple(filter(None, (*secrets, api_key)))
+        from agent.redaction import SecretRef, secret_values
+
+        refs: list[SecretRef] = []
+        for item in secrets:
+            if isinstance(item, SecretRef):
+                if item.value:
+                    refs.append(item)
+            elif item:
+                refs.append(SecretRef(name="secret", value=str(item)))
+        if api_key:
+            refs.append(SecretRef(name="llm.models.deepseek.api_key", value=str(api_key)))
+        self.secrets = tuple(refs)
+        self._secret_values = secret_values(self.secrets)
         self.repository = Repository(self.workspace, self.protected, self.secrets)
         self.inspect_session = inspect_session
         self.worker_ready = False

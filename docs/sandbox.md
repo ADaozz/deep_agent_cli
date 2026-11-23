@@ -45,7 +45,7 @@
 `auto` 和 `allow` 只在经过验证的 `SANDBOXED` 身份下可用，因此委派不会退化到宿主免审批执行。
 
 父任务取消会终止关联子任务的模型流和命令，单个任务结束不会关闭共享 Pool。
-子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 DeepSeek 网页工具密钥 做精确替换，
+子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 DeepSeek 网页工具密钥做命名精确替换（`$名称`），
 未知凭据原样保存。配置和日志访问边界见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ## 文件系统模式
@@ -121,7 +121,7 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。代理与 CA 变量由主配置顶层 [`trust_env`](configuration.md#全局网络环境trust_env) 统一控制：`true` 时自动继承，`false` 时移除，包括显式配置的同名变量。其余变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。代理与 CA 变量由主配置顶层 [`trust_env`](configuration.md#全局网络环境trust_env) 统一控制：`true` 时自动继承，`false` 时移除，包括显式配置的同名变量。其余变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。`env_set` / `env_allowlist` 中的值**不会**自动进入展示侧脱敏；需要遮盖时写入主配置 [`redaction.replacements`](configuration.md#脱敏redaction)。
 - 不限制 CPU、内存、磁盘或进程数。
 
 ## 工具目录与环境变量
@@ -224,7 +224,7 @@ Auto 按三层判断，前一层给出结论就不再往下走。
 2. **沙箱已经限定范围的操作直接放行。** 包括 `web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute`。这类命令没有网络，能写到的只有工作区、读写挂载和沙箱自己的 `/tmp`、`/home`。额外的读写挂载也在这个范围内，不希望被自动改写的目录不要以读写方式挂载。
 3. **其余调用交给 Flash。** 即联网的 `execute`、`full-access` 下的 `execute`，以及工作区外的文件变更。
 
-Flash 是独立的审批员，判断待审调用是否在用户授权范围内。它看到的只有用户消息、此前的工具调用（名称和参数）、待审调用，以及工作区、沙箱模式、网络策略和读写挂载。主 Agent 的文字和工具输出不发送，避免 Agent 的自我解释或工具结果里的注入内容影响判断。子任务中，用户消息是父任务收到的用户请求；委派说明单独列出，不构成授权。发送前对 Settings 与 Sandbox 中已配置的凭据值做精确替换（`[REDACTED]`），不按 JWT / Cookie / Token 等文本特征猜测。替换先于截断，截断边界不会留下半截密钥。过长的参数会截断并标记；证据仍超过上限时转人工。
+Flash 是独立的审批员，判断待审调用是否在用户授权范围内。它看到的只有用户消息、此前的工具调用（名称和参数）、待审调用，以及工作区、沙箱模式、网络策略和读写挂载。主 Agent 的文字和工具输出不发送，避免 Agent 的自我解释或工具结果里的注入内容影响判断。子任务中，用户消息是父任务收到的用户请求；委派说明单独列出，不构成授权。发送前对 Settings 与 Sandbox 中已配置的凭据值做命名精确替换（`$名称`），并可附带只读 `suspects` 启发式标注；不得仅因字样命中而拦截。替换先于截断，截断边界不会切断 `$名称`。过长的参数会截断并标记；证据仍超过上限时转人工。
 
 判断依据是操作的实际效果和用户授权，不是命令里出现的关键词。拦截的是未授权的数据外发、用户未要求的不可逆破坏、对共享或生产环境的修改、持久削弱安全边界，以及出自不可信内容的指令。按依赖清单安装依赖、读取项目 `.env` 调用对应服务、构建和测试、向已有远程非强制推送功能分支等常规开发操作属于放行例外。
 

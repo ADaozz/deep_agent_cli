@@ -16,7 +16,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.config import get_config
 
 from agent.models.stream_lifecycle import ModelStreamCancelled
-from agent.redaction import known_secrets
+from agent.redaction import known_secret_refs
 from agent.runtime.approval.classify import classify
 from agent.runtime.approval.evidence import build_evidence, user_texts
 from agent.runtime.approval.fingerprint import build_policy
@@ -200,8 +200,8 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         parent = None
         if self.spec.role == "subagent":
             parent = getattr(self.controller, "approval_user_request", None) or ""
-        return build_evidence(state["messages"], call, environment, parent_request=parent, secrets=known_secrets(
-            getattr(self.spec, "settings", None), self.spec.deepseek_api_key, self._sandbox_config(),
+        return build_evidence(state["messages"], call, environment, parent_request=parent, secrets=known_secret_refs(
+            getattr(self.spec, "settings", None), self.spec.deepseek_api_key,
             min_length=_MIN_SECRET_LEN,
         ))
 

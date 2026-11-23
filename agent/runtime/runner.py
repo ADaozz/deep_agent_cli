@@ -31,7 +31,7 @@ from agent.sessions.images import (
 )
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig, SandboxMode
-from agent.redaction import known_secrets
+from agent.redaction import SecretRef, known_secret_refs
 from agent.models.profile import InputKind, ModelProfile
 from agent.runtime.control import RunController
 from agent.runtime.configuration import RuntimeConfiguration
@@ -767,8 +767,8 @@ class AgentRunner:
     def take_unapplied_messages(self) -> list[str]:
         return [item.text for item in self.control.take_unapplied()]
 
-    def summary_secrets(self) -> tuple[str, ...]:
-        return known_secrets(self.settings or self._spec.settings, self._spec.deepseek_api_key)
+    def summary_secrets(self) -> tuple[SecretRef, ...]:
+        return known_secret_refs(self.settings or self._spec.settings, self._spec.deepseek_api_key)
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         assert self._runtime is not None

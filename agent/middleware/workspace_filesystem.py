@@ -30,7 +30,49 @@ READ_FILE_DESCRIPTION = (
     "- 编辑文件前必须先读取。"
 )
 
-TOOL_DESCRIPTIONS = {"ls": LS_DESCRIPTION, "read": READ_FILE_DESCRIPTION}
+_SAME_PATH_SERIAL = (
+    "同一路径的 write / edit / delete 必须串行："
+    "同一轮回复中不要对同一 file_path 发出多次变更；"
+    "先完成一次并看到结果，再改同一文件。"
+)
+_MULTI_PATH_PARALLEL = (
+    "可以对多个不同路径并发：同一轮回复中可并行调用多个 write / edit / delete，"
+    "只要各自的 file_path 互不相同。"
+)
+
+WRITE_FILE_DESCRIPTION = (
+    "写入文件。file_path 必须是绝对路径；文件不存在则创建，已存在则整文件替换。\n"
+    "- 打算新建或整文件覆盖时用本工具；不必先 read。\n"
+    "- 修改已有文件时优先用 edit，而不是 write 整文件重写。\n"
+    f"- {_SAME_PATH_SERIAL}\n"
+    f"- {_MULTI_PATH_PARALLEL}"
+)
+
+EDIT_FILE_DESCRIPTION = (
+    "对文件做精确字符串替换。file_path 必须是绝对路径。\n"
+    "- 编辑前必须先 read。\n"
+    "- old_string / new_string 必须保留 read 结果中的原始缩进，不要包含 read 的 `@@ ... @@` 状态头。\n"
+    "- 优先编辑已有文件，而不是新建。\n"
+    "- 除非用户明确要求，不要使用 emoji。\n"
+    f"- {_SAME_PATH_SERIAL}\n"
+    f"- {_MULTI_PATH_PARALLEL}"
+)
+
+DELETE_FILE_DESCRIPTION = (
+    "删除文件或目录。file_path 必须是绝对路径。\n"
+    "- 删除目录会递归移除其下全部内容；优先一次删除整个目录，而不是逐个删文件。\n"
+    "- 不可撤销，只删除确认不再需要的路径。\n"
+    f"- {_SAME_PATH_SERIAL}\n"
+    f"- {_MULTI_PATH_PARALLEL}"
+)
+
+TOOL_DESCRIPTIONS = {
+    "ls": LS_DESCRIPTION,
+    "read": READ_FILE_DESCRIPTION,
+    "write": WRITE_FILE_DESCRIPTION,
+    "edit": EDIT_FILE_DESCRIPTION,
+    "delete": DELETE_FILE_DESCRIPTION,
+}
 
 _NATIVE_FILE_NAMES = {"read": "read_file", "write": "write_file", "edit": "edit_file"}
 _FILE_TOOL_NAMES = {native: name for name, native in _NATIVE_FILE_NAMES.items()}

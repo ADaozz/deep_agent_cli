@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+import re
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from agent.redaction import REDACTED, replace_known_secrets
+from agent.redaction import SecretRef, replace_known_secrets
+from agent.runtime.approval.suspects import scan_suspects
 from agent.subagents.notifications import NOTIFICATION_KEY
 
 _EVIDENCE_LIMIT = 32000
@@ -15,6 +18,9 @@ _USER_TEXT_LIMIT = 2000
 _HISTORY_CALLS = 20
 _HISTORY_TEXT_LIMIT = 400
 _ACTION_TEXT_LIMIT = 8000
+_PLACEHOLDER = re.compile(r"\$[A-Za-z_][\w.]*")
+
+Secrets = Iterable[SecretRef] | Mapping[str, str]
 
 
 def user_texts(messages: list[BaseMessage]) -> list[str]:
@@ -26,21 +32,24 @@ def user_texts(messages: list[BaseMessage]) -> list[str]:
     ]
 
 
-def _clip(value: Any, limit: int, secrets: tuple[str, ...]) -> Any:
-    """Replace known secrets, then shorten long strings and leave a marker the reviewer can see.
+def _avoid_split_placeholder(value: str, cut: int) -> int:
+    for match in _PLACEHOLDER.finditer(value):
+        if match.start() < cut < match.end():
+            return match.start()
+    return cut
+
+
+def _clip(value: Any, limit: int, secrets: Secrets) -> Any:
+    """Replace known secrets with ``$name``, then shorten long strings.
 
     Replacement comes first so a cut never leaves part of a secret that exact matching would miss.
-    A truncation point that would split ``[REDACTED]`` is moved before that marker.
+    A truncation point that would split a ``$name`` placeholder is moved before that marker.
     """
     if isinstance(value, str):
         value = replace_known_secrets(value, secrets)
         if len(value) <= limit:
             return value
-        cut = limit
-        # Search a window that can see a marker starting just before the cut.
-        start = value.rfind(REDACTED, max(0, cut - len(REDACTED) + 1), cut + len(REDACTED))
-        if start != -1 and start < cut < start + len(REDACTED):
-            cut = start
+        cut = _avoid_split_placeholder(value, limit)
         if cut <= 0:
             return f"[truncated {len(value)} chars]"
         return f"{value[:cut]}[truncated {len(value) - cut} chars]"
@@ -57,7 +66,7 @@ def build_evidence(
     environment: dict[str, Any] | None,
     *,
     parent_request: str | None = None,
-    secrets: Iterable[str] = (),
+    secrets: Secrets = (),
 ) -> str | None:
     """Serialize what the reviewer may see, or None when there is nothing to judge authorization against.
 
@@ -72,7 +81,6 @@ def build_evidence(
     texts = user_texts(messages)
     if not texts:
         return None
-    secrets = tuple(secrets)
     payload: dict[str, Any] = {"user_messages": texts[-_USER_MESSAGES:]}
     if parent_request is not None:
         if not parent_request.strip():
@@ -91,8 +99,13 @@ def build_evidence(
     }
     while True:
         text = replace_known_secrets(json.dumps(payload, ensure_ascii=False, default=str), secrets)
+        suspects = scan_suspects(text)
+        if suspects:
+            annotated = {**payload, "suspects": suspects}
+            text = replace_known_secrets(json.dumps(annotated, ensure_ascii=False, default=str), secrets)
         if len(text) <= _EVIDENCE_LIMIT:
             return text
         if not history:
             return None
         del history[0]
+        payload["tool_calls"] = history

@@ -190,55 +190,62 @@ def test_evidence_marks_truncation_and_drops_oldest_calls_to_fit():
 
 
 def test_evidence_replaces_known_secrets_before_truncating():
+    from agent.redaction import SecretRef
+
     secret = "sk-live-super-secret-value-123456"
+    refs = (SecretRef("test.key", secret),)
+    placeholder = "$test.key"
     call = {"name": "execute", "id": "1", "args": {"command": "x" * 7996 + secret, "network": True}}
     messages = [HumanMessage(content="u" * 1996 + secret), AIMessage(content="", tool_calls=[
         {"name": "execute", "id": "0", "args": {"command": "h" * 396 + secret}}])]
-    text = build_evidence(messages, call, ENVIRONMENT, secrets=[secret])
+    text = build_evidence(messages, call, ENVIRONMENT, secrets=refs)
     payload = json.loads(text)
     # A cut through the secret would leave a prefix that exact matching cannot find later.
     assert secret[:4] not in text
-    assert "[RED[truncated" not in text
-    for clipped, filler, limit in ((payload["action"]["args"]["command"], "x", 8000),
-                                   (payload["user_messages"][0], "u", 2000),
-                                   (payload["tool_calls"][0]["args"]["command"], "h", 400)):
-        # Marker starts at limit-4; the cut backs up so [REDACTED] is not split.
-        assert clipped == filler * (limit - 4) + "[truncated 10 chars]"
-        assert "[REDACTED]" not in clipped
+    assert secret not in text
+    for clipped, filler, kept in ((payload["action"]["args"]["command"], "x", 7996),
+                                  (payload["user_messages"][0], "u", 1996),
+                                  (payload["tool_calls"][0]["args"]["command"], "h", 396)):
+        # Placeholder starts at the cut; truncation backs up so ``$test.key`` is not split.
+        assert clipped == filler * kept + f"[truncated {len(placeholder)} chars]"
+        assert secret not in clipped
 
 
 def test_known_secret_redaction_is_exact_only():
+    from agent.redaction import SecretRef
+
     secret = "sk-live-super-secret-value-123456"
     text = json.dumps({"query": f"Authorization: Bearer {secret}", "token": secret})
-    cleaned = replace_known_secrets(text, [secret])
+    cleaned = replace_known_secrets(text, (SecretRef("llm.models.deepseek.api_key", secret),))
     assert secret not in cleaned
-    assert "[REDACTED]" in cleaned
+    assert "$llm.models.deepseek.api_key" in cleaned
     # Unknown JWT-shaped text is left alone when not in the known-secret list.
     jwtish = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature"
-    assert replace_known_secrets(jwtish, []) == jwtish
+    assert replace_known_secrets(jwtish, ()) == jwtish
 
 
-def test_known_secrets_collects_settings_and_sandbox_values(monkeypatch, tmp_path):
+def test_known_secrets_collects_settings_and_replacements(tmp_path):
     from agent.bootstrap.config import Settings
     from agent.models.profile import ModelProfile
 
-    monkeypatch.setenv("APP_TOKEN", "allowlisted-token-value")
     settings = Settings(
         resolved_deepseek_api_key="deepseek-key",
         llm_profiles=(ModelProfile("local/mock", "mock", api_key=" profile-key\n"),
                       ModelProfile("local/same", "mock", api_key="deepseek-key")),
         llm_default="local/mock",
+        redaction_replacements=(("sk-custom-literal", "密钥"),),
     )
     sandbox = SandboxConfig(workspace=tmp_path, env_set={"APP_SECRET": "env-set-secret", "FLAG": "1"},
                             env_allowlist=("APP_TOKEN", "PATH", "MISSING"))
     assert known_secrets(None) == ()
     assert known_secrets(None, "deepseek-key") == ("deepseek-key",)
-    assert known_secrets(settings, "deepseek-key") == ("profile-key", "deepseek-key")
+    assert known_secrets(settings, "deepseek-key") == ("profile-key", "deepseek-key", "sk-custom-literal")
+    # sandbox is ignored; replacements still apply
     assert known_secrets(settings, "deepseek-key", sandbox) == (
-        "profile-key", "deepseek-key", "env-set-secret", "1", "allowlisted-token-value",
+        "profile-key", "deepseek-key", "sk-custom-literal",
     )
     assert known_secrets(settings, "deepseek-key", sandbox, min_length=8) == (
-        "profile-key", "deepseek-key", "env-set-secret", "allowlisted-token-value",
+        "profile-key", "deepseek-key", "sk-custom-literal",
     )
 
 

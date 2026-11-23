@@ -683,6 +683,8 @@ def test_approval_execute_network_summary(network, label) -> None:
 
 
 def test_approval_multiple_tools_truncation_and_redaction() -> None:
+    from agent.redaction import SecretRef
+
     ui = InteractionController.approval(
         [
             {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
@@ -693,12 +695,12 @@ def test_approval_multiple_tools_truncation_and_redaction() -> None:
             },
             {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
         ],
-        secrets=("private-value",),
+        secrets=(SecretRef("SECRET", "private-value"),),
     )
     assert ui.tool_call_ids == ["a", "b", "c"]
     assert "truncated" in ui.question and "Ctrl+O" in ui.question
     assert "private-value" not in ui.question
-    assert "[REDACTED]" in ui.question
+    assert "$SECRET" in ui.question
     assert "private-file-content" not in ui.question
     assert "Tool: write" in ui.question
     assert ui.option_index == 0
@@ -793,6 +795,8 @@ def test_approval_file_tool_shows_only_target(tool, key) -> None:
 
 
 def test_approval_file_targets_bound_and_redact_summary() -> None:
+    from agent.redaction import SecretRef
+
     ui = InteractionController.approval(
         [
             {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
@@ -800,10 +804,10 @@ def test_approval_file_targets_bound_and_redact_summary() -> None:
             {"name": "delete", "args": {"file_path": "/workspace/token=private-value"}},
             {"name": "delete", "args": {}},
         ],
-        secrets=("private-value",),
+        secrets=(SecretRef("SECRET", "private-value"),),
     )
     assert "truncated; Ctrl+O" in ui.question
     assert "\x1b" not in ui.question
     assert "private-value" not in ui.question
-    assert "[REDACTED]" in ui.question
+    assert "$SECRET" in ui.question
     assert "Target: <not supplied>" in ui.question

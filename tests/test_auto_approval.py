@@ -632,7 +632,7 @@ def test_web_search_with_known_secret_is_statically_allowed(monkeypatch):
         assert reviews == []
 
 
-def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_path):
+def test_flash_evidence_redacts_config_keys_and_replacements(monkeypatch, tmp_path):
     from langchain_core.messages import HumanMessage
 
     from agent.bootstrap.factory import AgentSpec
@@ -644,6 +644,7 @@ def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_
     profile_key = "profile-api-key-value-xyz"
     deepseek_key = "deepseek-api-key-value-xyz"
     env_set_secret = "env-set-secret-value"
+    custom_literal = "sk-custom-literal-xyz"
     sandbox = SandboxConfig(
         workspace=tmp_path,
         env_set={"APP_SECRET": env_set_secret},
@@ -654,6 +655,7 @@ def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_
         llm_profiles=(ModelProfile("local/mock", "mock", api_key=profile_key),),
         llm_default="local/mock",
         sandbox=sandbox,
+        redaction_replacements=((custom_literal, "密钥"),),
     )
     with SqliteSaver.from_conn_string(str(tmp_path / "journal.sqlite")) as saver:
         middleware = AutoApprovalMiddleware(
@@ -666,7 +668,7 @@ def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_
         state = {"messages": [HumanMessage(content="run unit tests")]}
         call = {"name": "execute", "id": "1", "args": {
             "command": (
-                f"echo {profile_key} {deepseek_key} {env_set_secret} "
+                f"echo {profile_key} {deepseek_key} {env_set_secret} {custom_literal} "
                 f"allowlisted-token-value eyJ.test.jwt {sandbox_environment(sandbox)['PATH']}"
             ),
         }}
@@ -675,11 +677,15 @@ def test_flash_evidence_redacts_configured_and_sandbox_secrets(monkeypatch, tmp_
         assert text is not None
         assert profile_key not in text
         assert deepseek_key not in text
-        assert env_set_secret not in text
-        assert "allowlisted-token-value" not in text
+        assert custom_literal not in text
+        # Sandbox / allowlisted env values are no longer auto-redacted.
+        assert env_set_secret in text
+        assert "allowlisted-token-value" in text
         assert "eyJ.test.jwt" in text
-        assert text.count("[REDACTED]") == 4
-        # Allowlisted host basics such as PATH are not credentials and stay readable.
+        assert "$llm.api_key" in text or "$llm.models" in text
+        assert "密钥" in text
+        assert "$APP_SECRET" not in text
+        assert "$APP_TOKEN" not in text
         assert sandbox_environment(sandbox)["PATH"] in text
 
 
