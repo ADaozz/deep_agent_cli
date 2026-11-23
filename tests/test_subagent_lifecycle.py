@@ -567,9 +567,7 @@ def test_task_metrics_measure_streamed_reasoning_and_ignore_hidden_reasoning(mon
 
 
 def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
-    """Depth-2 progress names its parent run and does not copy the child answer."""
-    import json
-
+    """Depth-2 progress names its parent run. Only the finished update carries the answer."""
     from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
 
     events = []
@@ -640,8 +638,10 @@ def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
     assert child_rows[-1]["input_tokens"] == 3 and child_rows[-1]["output_tokens"] == 2
     # Terminal status is published before the slot is only closing.
     assert child_rows[-1]["status"] == "completed"
-    blob = json.dumps(updates, ensure_ascii=False)
-    assert "private depth-2 review" not in blob
-    assert "parent summary" not in blob
+    running = [payload for payload in updates if payload["status"] == "running"]
+    assert all("result" not in payload for payload in running)
+    assert child_rows[-1]["result"] == "private depth-2 review of cancelled by user"
+    assert parent_rows[-1]["result"].startswith("parent summary ")
+    assert "private depth-2 review" in parent_rows[-1]["result"]
     assert manager.active_count == 0
     root.end_run()

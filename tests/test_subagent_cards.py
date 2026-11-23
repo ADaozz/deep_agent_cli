@@ -98,7 +98,8 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     assert first.status == 'completed' and second.status == 'running'
     assert first.output == 'All median tests passed' and second.output == ''
     text = plain(render_transcript(state, 100))
-    assert text.count('Running SubAgent') == 1 and '└ result' in text
+    assert text.count('Running SubAgent') == 1 and 'All median tests passed' in text
+    assert '└ result' not in text
     assert state.subagent_count == 1
     monkeypatch.setattr('agent.cli.rendering._spinner_tick', lambda: 0)
     assert _tool_status_marker('running') == ('⠋', 'green')
@@ -152,12 +153,13 @@ def test_long_result_folds_tail_and_control_o_expands_full_text():
         app.state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='d', content=output))
         limits = UiDisplayLimits(tail_lines=3)
         collapsed = plain(render_transcript(app.state, 100, limits=limits))
-        assert 'Ctrl+O to expand' in collapsed and 'line 0' not in collapsed
+        assert 'Ctrl+A to expand' in collapsed and 'line 0' not in collapsed
         assert 'line 39' in collapsed and app.state.blocks[0].output == output
-        binding = next(b for b in app.bindings.bindings if b.keys == ('c-o',))
+        assert '└ result' not in collapsed
+        binding = next(b for b in app.bindings.bindings if b.keys == ('c-a',))
         binding.handler(None)
         expanded = plain(render_transcript(app.state, 100, limits=limits))
-        assert app.state.tools_expanded
+        assert app.state.tasks_expanded
         assert 'line 0' in expanded and 'line 39' in expanded
         assert 'output lines hidden' not in expanded
     with_painted_app('task-result-expand', scenario, lines=0)
@@ -279,24 +281,28 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     assert '▾' not in text and '▸' not in text
     assert 'Running SubAgent · RunController 取消传播' in text
     assert 'Running SubAgent · 异步调用与资源回收' in text
-    assert '3→1 tok' in text and '8.0 tps' in text
-    child = next(line for line in text.splitlines() if 'RunController 取消传播' in line)
-    stats = next(line for line in text.splitlines() if '3→1 tok' in line)
-    parent = next(line for line in text.splitlines() if '20→8 tok' in line)
+    assert 'general-purpose' not in text and 'tok' not in text and 'tps' not in text
+    child = next(line for line in text.splitlines() if 'RunController 取消传播' in line).rstrip()
+    parent = next(line for line in text.splitlines() if '执行与取消链路' in line).rstrip()
+    # Nested rows reuse the root title; only the tree prefix is added.
+    assert child[child.index('Running SubAgent'):] == 'Running SubAgent · RunController 取消传播'
+    assert parent[parent.index('Running SubAgent'):] == 'Running SubAgent · 执行与取消链路'
     assert '├─' in child and child.index('Running SubAgent') > child.index('├─')
-    assert '├' not in stats and stats.startswith(' ' * child.index('Running SubAgent'))
-    assert parent.startswith('    ') and '├' not in parent
     assert '审批与权限链路' in text and 'RunController 取消传播' in text.split('审批与权限链路')[0]
 
     _task_update(
         state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
         status='completed', elapsed_seconds=0.4, input_tokens=3, output_tokens=1, tps=8,
+        result='取消传播已核对',
     )
     assert state.blocks[0].status == 'running' and state.blocks[1].status == 'running'
     assert state.subagent_count == 3
     text = plain(render_transcript(state, 120))
     assert 'SubAgent · RunController 取消传播' in text and 'Running SubAgent · 异步调用与资源回收' in text
     assert '▾' not in text
+    answer = next(line for line in text.splitlines() if '取消传播已核对' in line)
+    assert '│' in answer and '├' not in answer
+    assert answer.index('取消传播已核对') == text.splitlines()[text.splitlines().index(answer) - 1].index('SubAgent')
 
     _task_update(
         state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
@@ -317,6 +323,7 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     assert other.status == 'running'
     done = plain(render_transcript(state, 120))
     assert '汇总完成' in done and '— failed' not in done
+    assert '└ result' not in done
     assert 'SubAgent · RunController 取消传播' in done
 
 

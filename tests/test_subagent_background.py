@@ -415,13 +415,13 @@ def test_card_stays_running_after_launch_and_run_end_until_finished(finished_fir
         state.apply(RunEvent(type='run_completed'))
         assert card.status == 'running' and state.subagent_count == 1
         text = plain(render_transcript(state, 100))
-        assert 'Running SubAgent · Index the docs' in text and 'general-purpose · background' in text
+        assert 'Running SubAgent · Index the docs · background' in text
         finish(state)
     card = state.blocks[0]
     assert isinstance(card, ToolBlock) and card.status == 'completed' and not card.is_error
     assert card.output.endswith('Indexed 12 files') and state.subagent_count == 0
     text = plain(render_transcript(state, 100))
-    assert 'Running SubAgent' not in text and '└ result' in text and 'Indexed 12 files' in text
+    assert 'Running SubAgent' not in text and '└ result' not in text and 'Indexed 12 files' in text
 
 
 def test_refused_launch_cancelled_task_and_parent_cancel_settle_cards():

@@ -52,6 +52,7 @@ class SubtaskView:
     output_tokens: int = 0
     tps: float | None = None
     reason: str = ""
+    result: str = ""
     children: tuple[SubtaskView, ...] = ()
 
 
@@ -70,6 +71,7 @@ class SubagentNode:
     output_tokens: int = 0
     tps: float | None = None
     reason: str = ""
+    result: str = ""
 
 
 @dataclass
@@ -113,6 +115,8 @@ class CliState:
     status: str = "Ready"
     thinking_collapsed: bool = True
     tools_expanded: bool = False
+    # SubAgent results fold on their own. Ctrl+O still expands other tools.
+    tasks_expanded: bool = False
     messages_expanded: bool = False
     # Held by reference, not index: app-side filtering of `blocks` would
     # otherwise silently redirect stream deltas into an unrelated block.
@@ -467,6 +471,9 @@ class CliState:
         node.output_tokens = count("output_tokens")
         node.tps = tps
         node.reason = str(payload.get("reason") or "") if status in {"failed", "cancelled"} else ""
+        result_text = payload.get("result")
+        if isinstance(result_text, str) and status in {"completed", "failed", "cancelled"}:
+            node.result = result_text
         self._refresh_owner(node)
 
     def _finish_task_card(self, tool: ToolBlock, *, fallback: str = "") -> None:
@@ -530,6 +537,7 @@ class CliState:
                 output_tokens=item.output_tokens,
                 tps=item.tps,
                 reason=item.reason,
+                result=item.result,
                 children=self._views_under(item.run_id),
             )
             for item in children

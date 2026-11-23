@@ -869,6 +869,7 @@ class CliApplication:
             ("Ctrl+P / Alt+P", "Select the next or previous model"),
             ("Alt+Up", "Restore queued input"),
             ("Ctrl+O", "Expand tool output"),
+            ("Ctrl+A", "Expand SubAgent results"),
             ("Ctrl+R", "Review file changes"),
             ("F2", "Reopen a pending interaction"),
             ("Ctrl+T", "Toggle thinking"),

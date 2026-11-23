@@ -13,6 +13,7 @@ DEFAULT_BINDINGS: dict[str, list[str]] = {
     "clear_or_exit": ["c-c"],
     "exit": ["c-d"],
     "tools_expand": ["c-o"],
+    "tasks_expand": ["c-a"],
     "review_diff": ["c-r"],
     "reopen_interaction": ["f2"],
     "thinking_toggle": ["c-t"],

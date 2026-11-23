@@ -31,15 +31,18 @@ def create_bindings(
         def register(handler):  # type: ignore[no-untyped-def]
             registered = False
             for sequence in self.keymap.sequences(action):
+                # Ctrl+A is also beginning-of-line in the editor. Eager wins so
+                # the SubAgent result toggle is the key the user asked for.
+                eager = action == "tasks_expand"
                 try:
-                    bindings.add(*sequence)(handler)
+                    bindings.add(*sequence, eager=eager)(handler)
                     registered = True
                 except (KeyError, ValueError) as exc:
                     self.keymap.warning = f"Invalid keybinding for {action}: {' '.join(sequence)} ({exc})"
             if not registered:
                 for sequence in Keymap().sequences(action):
                     try:
-                        bindings.add(*sequence)(handler)
+                        bindings.add(*sequence, eager=action == "tasks_expand")(handler)
                     except (KeyError, ValueError):
                         continue
             return handler
@@ -215,6 +218,11 @@ def create_bindings(
     def tools_expand(event) -> None:  # type: ignore[no-untyped-def]
         self.state.tools_expanded = not self.state.tools_expanded
         self.set_status(f"Tool output: {'expanded' if self.state.tools_expanded else 'collapsed'}")
+
+    @bind("tasks_expand")
+    def tasks_expand(event) -> None:  # type: ignore[no-untyped-def]
+        self.state.tasks_expanded = not self.state.tasks_expanded
+        self.set_status(f"SubAgent results: {'expanded' if self.state.tasks_expanded else 'collapsed'}")
 
     @bind("review_diff")
     def review_diff(event) -> None:  # type: ignore[no-untyped-def]

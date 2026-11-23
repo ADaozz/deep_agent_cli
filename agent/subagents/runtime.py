@@ -442,9 +442,9 @@ class SubAgentRuntime(Runnable):
             title = title[: TITLE_LIMIT - 1] + "…"
         published = False
 
-        def publish(status: str, *, reason: str = "") -> None:
-            # Host monitor metadata only. The answer, tool logs, and model text
-            # stay in the direct parent's log and are not copied onto this event.
+        def publish(status: str, *, reason: str = "", result: str = "") -> None:
+            # Progress stays metadata. The final answer is attached once, so the
+            # owning card can show it under this task. Tool logs stay in the log.
             payload: dict[str, Any] = {
                 "run_id": run_id,
                 "parent_run_id": parent,
@@ -460,6 +460,8 @@ class SubAgentRuntime(Runnable):
                 payload["tps"] = round(metrics.tps, 1)
             if reason and status in {"failed", "cancelled"}:
                 payload["reason"] = _brief(self.store._redact(reason), REASON_LIMIT)
+            if result and status in {"completed", "failed", "cancelled"}:
+                payload["result"] = self.store._redact(result)
             self.manager.parent._emit("subagent_update", payload)
 
         def write(event: str, **payload: Any) -> None:
@@ -493,6 +495,7 @@ class SubAgentRuntime(Runnable):
         prepared = None
         status, summary, summary_truncated = "failed", "", False
         messages_seen: list = []
+        answer_text = ""
         try:
             # Bail before prepare so a cancel-before-admit does not build model clients.
             if controller.cancel_requested:
@@ -524,6 +527,7 @@ class SubAgentRuntime(Runnable):
                            if isinstance(m, AIMessage) and not m.tool_calls), "")
             if not answer:
                 raise RuntimeError("Subagent did not produce a final answer")
+            answer_text = answer
             status = "completed"
             summary = brief(answer, SUMMARY_LIMIT)
             summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
@@ -532,6 +536,7 @@ class SubAgentRuntime(Runnable):
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
             summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
+            answer_text = summary
             write("error", status=status, reason=summary)
             return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {summary}")]}
         finally:
@@ -546,7 +551,11 @@ class SubAgentRuntime(Runnable):
             # Terminal status is published before the concurrency slot moves to
             # "closing", so a stream that is still shutting down is not shown
             # as a running task.
-            publish(status, reason=summary if status in {"failed", "cancelled"} else "")
+            publish(
+                status,
+                reason=summary if status in {"failed", "cancelled"} else "",
+                result=answer_text,
+            )
             published = False
             write("finish", status=status, summary=summary, summary_truncated=summary_truncated,
                   elapsed_seconds=round(max(0.0, monotonic() - started), 3), tool_count=callback.tool_count)
