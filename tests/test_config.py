@@ -951,7 +951,20 @@ def test_subagents_defaults_and_validation():
     cfg = Settings(llm_profiles=(profile,), llm_default=profile.id,
                    subagents=SubAgentConfig(model=profile.id, reasoning_effort='low'))
     assert cfg.subagents.model == profile.id
+    assert cfg.subagents.max_concurrent == 4
+    assert cfg.subagents.max_total == 10
+    assert cfg.subagents.max_subagent_depth == 2
+    assert SubAgentConfig().may_create_subagent(0) and SubAgentConfig().may_create_subagent(1)
+    assert not SubAgentConfig().may_create_subagent(2)
+    assert not SubAgentConfig(max_subagent_depth=1).may_create_subagent(1)
+    # Host ceilings: per-depth ≤4, total ≤10, depth ≤2.
+    assert SubAgentConfig(max_concurrent=20).max_concurrent == 4
+    assert SubAgentConfig(max_total=99).max_total == 10
+    assert SubAgentConfig(max_subagent_depth=9).max_subagent_depth == 2
+    assert SubAgentConfig(max_concurrent=2, max_total=3, max_subagent_depth=1).max_concurrent == 2
+    assert SubAgentConfig(max_concurrent=2, max_total=3, max_subagent_depth=1).max_total == 3
     for values in ({'enabled': 'true'}, {'max_concurrent': 0}, {'max_concurrent': True},
+                   {'max_total': 0}, {'max_subagent_depth': 0}, {'max_subagent_depth': True},
                    {'model': ''}, {'reasoning_effort': False}):
         with pytest.raises(ValueError):
             SubAgentConfig(**values)

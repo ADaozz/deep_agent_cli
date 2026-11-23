@@ -113,8 +113,9 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
 `mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
-执行前清空父级隐式回调与配置上下文。默认最多同时运行 2 个子任务，第三个立即返回超限错误，
+执行前清空父级隐式回调与配置上下文。每个深度默认最多 4 个同时运行的 SubAgent，全树累计默认最多 10 个（均与用户配置取最小、受宿主硬顶约束），超限立即返回错误；
 完成、失败和取消均释放许可；原生 `start_task` 在任务结束后返回最终结果或简短错误。
+主 Agent depth 为 0；每次 `start_task` 子代 depth = 父 depth + 1。默认与硬顶均为 `max_subagent_depth: 2`（与用户配置取最小）；达到上限后当前 Agent 仍执行任务但不能再委派。嵌套层与根共用同一管理器计数；后台委派仅根可发起。
 
 ### 后台委派
 
@@ -122,7 +123,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 子任务耗时较长且下一步不依赖其结果时用后台委派。没有使用上游 `AsyncSubAgentMiddleware`，
 它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
 
-- 启动：工具取得一个并发许可（与 `start_task` 共用 `max_concurrent`，超限立即返回错误）后启动线程并返回 `run_id`，
+- 启动：工具取得一个并发许可（与 `start_task` 共用每深度 / 全树上限，超限立即返回错误）后启动线程并返回 `run_id`，
   主 Agent 继续推理、调用其他工具或结束本轮回答。执行环境、权限、工具集和 JSONL 日志与同步子任务相同。
 - 回传：子任务完成或失败时，结果进入 `RunController` 的独立通知队列，并发出 `subagent_finished` 事件。
   通知队列不是用户输入队列：不会被回收到输入框，不显示为待发送消息，也不阻止会话切换。
@@ -140,7 +141,7 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以主任务的权限模式（`auto` 或 `allow`）执行文件工具、execute、
-已配置的网页工具和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
+已配置的网页工具和 Skills；不装载 MCP、人工输入或日志查询。在深度上限内可继续同步委派。
 子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task` 和 `start_background_task`；
 `auto` 和 `allow` 本身要求已验证沙箱，委派不会落到宿主上。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，

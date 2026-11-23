@@ -14,7 +14,7 @@ from agent.subagents.runtime import SubAgentRuntime
 def test_atomic_limit_releases_on_success_failure_and_cancel():
     parent = RunController()
     parent.begin_run()
-    manager = SubAgentManager(parent)
+    manager = SubAgentManager(parent, max_concurrent=2, max_total=10)
     started = threading.Barrier(3)
     finish = threading.Event()
 
@@ -28,7 +28,7 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
         futures = [pool.submit(work) for _ in range(2)]
         started.wait(timeout=3)
         assert manager.active_count == 2
-        with pytest.raises(RuntimeError, match='concurrency limit'):
+        with pytest.raises(RuntimeError, match='per-depth concurrency limit'):
             with manager.running():
                 pytest.fail('third task admitted')
         parent.cancel()
@@ -49,7 +49,7 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
 def test_native_runtime_parallel_and_parent_cancel(tmp_path):
     parent = RunController()
     parent.begin_run()
-    manager = SubAgentManager(parent)
+    manager = SubAgentManager(parent, max_concurrent=2, max_total=10)
     barrier = threading.Barrier(3)
     controllers = []
 
@@ -79,6 +79,27 @@ def test_native_runtime_parallel_and_parent_cancel(tmp_path):
     assert manager.active_count == 0
     assert len(controllers) == 2
     assert len(list(tmp_path.rglob('*.jsonl'))) == 2
+
+
+def test_per_depth_and_total_concurrency_limits():
+    parent = RunController()
+    parent.begin_run()
+    manager = SubAgentManager(parent, max_concurrent=2, max_total=3)
+    held = []
+    try:
+        held.append(manager.admit(1))
+        held.append(manager.admit(1))
+        assert manager.active_at_depth(1) == 2
+        with pytest.raises(RuntimeError, match='per-depth concurrency limit'):
+            manager.admit(1)
+        held.append(manager.admit(2))
+        assert manager.active_count == 3
+        with pytest.raises(RuntimeError, match='total concurrency limit'):
+            manager.admit(2)
+    finally:
+        for run_id, _ in held:
+            manager.release(run_id)
+        parent.end_run()
 
 
 def test_child_stream_is_cancelled_and_parent_waits_for_close():
@@ -136,7 +157,9 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             assert child_connection.hanging.wait(5)
             tools = {tool['function']['name'] if 'function' in tool else tool.get('name')
                      for tool in child_connection.body['tools']}
-            assert not {'start_task', 'request_human_input', 'read_task_log'} & tools
+            # Default max_subagent_depth=2 keeps sync start_task on depth-1; host-only tools stay hidden.
+            assert 'start_task' in tools
+            assert not {'request_human_input', 'read_task_log', 'start_background_task'} & tools
             import json
             assert 'parent private history' not in json.dumps(child_connection.body)
             assert runner.prepared.subagent_manager.active_count == 1

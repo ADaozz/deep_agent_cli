@@ -129,11 +129,20 @@ class LogCallback(BaseCallbackHandler):
 
 
 class SubAgentRuntime(Runnable):
-    def __init__(self, manager: SubAgentManager, store: SubAgentLogStore,
-                 prepare: Callable, model_name: str, effort: str = "default") -> None:
+    def __init__(
+        self,
+        manager: SubAgentManager,
+        store: SubAgentLogStore,
+        prepare: Callable,
+        model_name: str,
+        effort: str = "default",
+        *,
+        child_depth: int = 1,
+    ) -> None:
         self.manager, self.store, self.prepare = manager, store, prepare
         self.model_name = model_name
         self.effort = effort
+        self.child_depth = child_depth
 
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         parent = str((config or {}).get("configurable", {}).get("thread_id", ""))
@@ -145,7 +154,7 @@ class SubAgentRuntime(Runnable):
         if not parent:
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
         try:
-            with self.manager.running() as (run_id, controller):
+            with self.manager.running(self.child_depth) as (run_id, controller):
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
@@ -166,7 +175,7 @@ class SubAgentRuntime(Runnable):
 
         Raises when no permit is available; nothing is started in that case.
         """
-        run_id, controller = self.manager.admit()
+        run_id, controller = self.manager.admit(self.child_depth)
         controller.approval_user_request = delegating_user_request.get()
         task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
                               description=description, controller=controller)

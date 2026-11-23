@@ -171,6 +171,8 @@ class AgentSpec:
     hidden_tools: tuple[str, ...] = ()
     trust_env: bool = False
     role: str = "main"
+    # Root = 0; each start_task child is parent depth + 1.
+    depth: int = 0
     settings: Settings | None = field(default=None, repr=False)
 
 
@@ -321,7 +323,8 @@ def build_agent(
         ))
     subagents: list[CompiledSubAgent] = []
     manager = None
-    if spec.role == "main" and cfg.subagents.enabled:
+    # Root depth is 0. An agent may spawn children while depth < max_subagent_depth.
+    if cfg.subagents.may_create_subagent(spec.depth):
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
         from agent.subagents.runtime import SubAgentRuntime
@@ -330,14 +333,23 @@ def build_agent(
         from agent.tools.subagent_logs import build_subagent_log_tool
         # Rebuilds occur at a safe boundary; keep lifetime accounting on the
         # parent controller, which survives model changes and session switches.
+        # Nested agents reuse the root manager (set on the child controller in
+        # prepare_child) so concurrency stays global for the whole tree.
         manager = getattr(run_controller, "subagent_manager", None)
         if manager is None:
-            manager = SubAgentManager(run_controller, cfg.subagents.max_concurrent)
+            manager = SubAgentManager(
+                run_controller,
+                max_concurrent=cfg.subagents.max_concurrent,
+                max_total=cfg.subagents.max_total,
+            )
             run_controller.subagent_manager = manager
         manager.max_concurrent = cfg.subagents.max_concurrent
+        manager.max_total = cfg.subagents.max_total
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
         store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
-        tools.append(build_subagent_log_tool(store))
+        # Log reader stays on the root only; nested agents must not query host logs.
+        if spec.depth == 0:
+            tools.append(build_subagent_log_tool(store))
 
         def prepare_child(controller: RunController) -> PreparedAgent:
             if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:
@@ -359,12 +371,20 @@ def build_agent(
                 if effort is not None:
                     raise ValueError("A custom BaseChatModel requires subagents.model to override reasoning_effort")
                 child_model = model
+            child_depth = spec.depth + 1
+            # Always strip host-only tools. Background tools stay root-only
+            # (notifications target the manager parent). Hide start_task when
+            # the child itself is already at max depth.
+            hide = set(spec.hidden_tools) | BACKGROUND_TOOLS | {"request_human_input", "read_task_log"}
+            if child_depth >= cfg.subagents.max_subagent_depth:
+                hide.add("start_task")
             child_spec = replace(
-                spec, role="subagent", tools=(), backend=fs_backend,
+                spec, role="subagent", depth=child_depth, tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),
-                hidden_tools=tuple(set(spec.hidden_tools) | BACKGROUND_TOOLS
-                                   | {"start_task", "request_human_input", "read_task_log"}),
+                hidden_tools=tuple(hide),
             )
+            # Share the tree's concurrency / cancel manager with the child graph.
+            controller.subagent_manager = manager
             try:
                 # The child runs under the parent's permission mode; it never gains more than the parent has.
                 child = build_agent(child_spec, child_model, permission, None, controller, lambda: False,
@@ -377,17 +397,23 @@ def build_agent(
             child.owns_model_clients = child_model is not model
             return child
 
-        runtime = SubAgentRuntime(manager, store, prepare_child,
-                                  cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
-                                  cfg.subagents.reasoning_effort or "default")
+        runtime = SubAgentRuntime(
+            manager, store, prepare_child,
+            cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
+            cfg.subagents.reasoning_effort or "default",
+            child_depth=spec.depth + 1,
+        )
         # A child cannot ask the user, so Ask offers no way to delegate. Tasks started
         # before a switch to Ask keep running and can still be checked, cancelled, and read.
         # Auto and Allow only exist on a verified sandbox, so delegation never reaches the host.
         can_delegate = permission is not PermissionMode.ASK
-        if cfg.subagents.background:
+        # Background notifications land on the manager's parent controller; only
+        # the root conversation consumes that queue, so nested agents stay sync-only.
+        if cfg.subagents.background and spec.depth == 0:
             tools.extend(tool for tool in build_background_task_tools(runtime, manager)
                          if can_delegate or tool.name != START_TOOL)
         if can_delegate:
+            remaining = cfg.subagents.max_subagent_depth - spec.depth
             subagents.append({
                 "name": "general-purpose",
                 "description": (
@@ -395,8 +421,11 @@ def build_agent(
                     "subproblems that do not interfere with one another. "
                     "Complete an isolated coding or research task. "
                     "Only the final result is returned. "
-                    "No MCP, user interaction, or recursive delegation. "
-                    "Maximum concurrent tasks is configured by the host."
+                    "No MCP or user interaction. "
+                    f"SubAgent nesting remaining from this agent: {remaining} "
+                    f"(max_subagent_depth={cfg.subagents.max_subagent_depth}). "
+                    f"Per-depth concurrency cap {cfg.subagents.max_concurrent}; "
+                    f"tree-wide cap {cfg.subagents.max_total}."
                 ),
                 "runnable": runtime,
                 "mode": "isolated",

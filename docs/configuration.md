@@ -488,7 +488,10 @@ bailian:
 ```yaml
 subagents:
   enabled: true
-  max_concurrent: 2
+  max_concurrent: 4
+  max_total: 10
+  # 允许的 SubAgent 嵌套层数（主 Agent depth=0；其子代为 1、2…）。
+  max_subagent_depth: 2
   model: null
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
@@ -496,7 +499,9 @@ subagents:
   background: true
 ```
 
-`max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
+`max_concurrent` 是**每个深度**的同时执行上限，默认 `4`，与宿主硬顶取最小后最多 `4`。
+`max_total` 是**所有深度累计**的同时存在上限，默认 `10`，与宿主硬顶取最小后最多 `10`。任一上限触达时新委派立即返回错误；任务结束后释放许可。
+`max_subagent_depth` 是允许的 **SubAgent 嵌套层数**，不是 Agent 总层数：主 Agent 为 depth `0`，其创建的 SubAgent 为 `1`，再下一层为 `2`。默认与宿主硬顶均为 `2`（用户配置与硬顶取最小）。创建条件为 `parent_depth < max_subagent_depth`；达到上限的 Agent 仍可执行任务，但不能再 `start_task`。嵌套 SubAgent 只提供同步 `start_task`（后台委派工具仅挂在主 Agent）。
 `model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
 `reasoning_effort` 默认 `default`，省略该项或旧配置 `null` 与它等价：使用子模型原生默认强度，
 不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
@@ -513,7 +518,8 @@ subagents:
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，
-不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
+不装载 MCP、人工输入或 TUI 审批。在 `max_subagent_depth` 允许时可继续同步 `start_task`；
+后台委派工具仅主 Agent 可用。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
 `start_task` 等待任务实际完成后才返回。
 
@@ -527,7 +533,7 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 | `check_background_task(run_id=null)` | 不传参列出当前会话的后台任务；指定 ID 返回状态，已结束时带结果 |
 | `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
 
-后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用 `max_concurrent`；
+后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用每深度 / 全树并发上限；
 `ask` 下只保留 `check_background_task` 和 `cancel_background_task`。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
 主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
@@ -538,7 +544,7 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 `1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，Working 靠左，数量靠右，数量为零时隐藏；输入框内不显示子任务数量。
 每个 `start_task` 和后台任务在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
 
-右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限仍由 `max_concurrent` 控制。
+右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限由每深度 `max_concurrent` 与全树 `max_total` 共同控制。
 
 执行摘要写入配置目录（默认 `~/.deep-agent`）下的
 `subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。

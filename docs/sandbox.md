@@ -41,7 +41,7 @@
 | `allow` | `allow` 的有网实例 |
 
 切换到 `ask` 之前启动的后台任务继续按启动时的权限运行，仍可用 `check_background_task`、`cancel_background_task` 和 `read_task_log` 查看或取消。
-文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具、人工输入或递归委派工具。
+文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具或人工输入；是否可继续委派由 `max_subagent_depth` 决定。
 `auto` 和 `allow` 只在经过验证的 `SANDBOXED` 身份下可用，因此委派不会退化到宿主免审批执行。
 
 父任务取消会终止关联子任务的模型流和命令，单个任务结束不会关闭共享 Pool。

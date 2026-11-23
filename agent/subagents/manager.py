@@ -31,11 +31,20 @@ class BackgroundTask:
 
 
 class SubAgentManager:
-    def __init__(self, parent: RunController, max_concurrent: int = 2) -> None:
+    def __init__(
+        self,
+        parent: RunController,
+        max_concurrent: int = 4,
+        max_total: int = 10,
+    ) -> None:
         self.parent = parent
+        # Per-depth simultaneous cap.
         self.max_concurrent = max_concurrent
+        # Whole-tree simultaneous cap across every depth.
+        self.max_total = max_total
         self._lock = threading.RLock()
         self._active: dict[str, RunController] = {}
+        self._depths: dict[str, int] = {}
         self._retired: list[RunController] = []
         self._tasks: dict[str, BackgroundTask] = {}
 
@@ -44,18 +53,31 @@ class SubAgentManager:
         with self._lock:
             return len(self._active)
 
-    def admit(self) -> tuple[str, RunController]:
-        """Take one concurrency permit. Every admit needs exactly one release."""
+    def active_at_depth(self, depth: int) -> int:
+        with self._lock:
+            return sum(1 for value in self._depths.values() if value == depth)
+
+    def admit(self, depth: int = 1) -> tuple[str, RunController]:
+        """Take one concurrency permit at ``depth``. Every admit needs exactly one release."""
+        if type(depth) is not int or depth < 1:
+            raise ValueError("Subagent depth must be a positive integer")
         with self._lock:
             if self.parent.cancel_requested:
                 raise RuntimeError("Parent run cancelled")
-            if len(self._active) >= self.max_concurrent:
-                raise RuntimeError(f"Subagent concurrency limit ({self.max_concurrent}) reached")
+            if len(self._active) >= self.max_total:
+                raise RuntimeError(f"Subagent total concurrency limit ({self.max_total}) reached")
+            at_depth = sum(1 for value in self._depths.values() if value == depth)
+            if at_depth >= self.max_concurrent:
+                raise RuntimeError(
+                    f"Subagent per-depth concurrency limit ({self.max_concurrent}) "
+                    f"reached at depth {depth}"
+                )
             run_id = uuid4().hex
             child = RunController()
             child.begin_run()
             self.parent.register_child(child)
             self._active[run_id] = child
+            self._depths[run_id] = depth
             self.parent._emit("subagents_changed", {"count": len(self._active)})
         return run_id, child
 
@@ -67,18 +89,20 @@ class SubAgentManager:
         child.cancel()
         child.end_run()
         with self._lock:
-            self._active.pop(run_id)
+            self._active.pop(run_id, None)
+            self._depths.pop(run_id, None)
             self._retired.append(child)
             self.parent._emit("subagents_changed", {"count": len(self._active)})
         # Keep the child attached until its HTTP requests confirm closure.
         if child.wait_model_streams_closed(5.0):
             self.parent.unregister_child(child)
             with self._lock:
-                self._retired.remove(child)
+                if child in self._retired:
+                    self._retired.remove(child)
 
     @contextmanager
-    def running(self):
-        run_id, child = self.admit()
+    def running(self, depth: int = 1):
+        run_id, child = self.admit(depth)
         try:
             yield run_id, child
         finally:

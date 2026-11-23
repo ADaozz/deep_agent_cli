@@ -63,11 +63,14 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         child = child_prepared[0]
         assert child.backend is runner.prepared.backend
         assert child.execution_mode is ExecutionMode.SANDBOXED
-        assert not {'start_task', 'request_human_input', 'read_task_log'} & graph_tool_names(child.graph)
+        # Default max_subagent_depth=2: depth-1 may still start_task; host-only tools stay hidden.
+        assert 'start_task' in graph_tool_names(child.graph)
+        assert not {'request_human_input', 'read_task_log', 'start_background_task'} & graph_tool_names(child.graph)
         assert not any(name.startswith("mcp") for name in graph_tool_names(child.graph))
         assert "mcp__server__tool" in graph_tool_names(runner.prepared.graph)
         assert mcp.snapshots == 1
         assert not child.interrupt_on
+        assert child.spec.depth == 1
         state = runner.prepared.graph.get_state(runner._thread_config()).values
         assert [m.content for m in state['messages'] if isinstance(m, AIMessage)] == ['', 'public parent answer']
         assert len([m for m in state['messages'] if isinstance(m, ToolMessage)]) == 1
@@ -111,6 +114,61 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
         assert result.status == 'completed', result.error
         recorded = [e.result['tool_calls'] for e in events if e.type == 'model_metrics']
         assert recorded == [['start_task'], []]
+    finally:
+        runner.close()
+
+
+def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
+    import agent.bootstrap.factory as factory
+    from agent.bootstrap.factory import AgentSpec, build_agent
+    from agent.runtime.control import RunController
+    from agent.runtime.permissions import PermissionMode
+
+    backend = StateBackend()
+    selected = BackendSelection(backend, ExecutionMode.SANDBOXED)
+    monkeypatch.setattr(factory, 'select_backend', lambda cfg: selected)
+
+    def tools_at(depth: int, max_depth: int) -> set[str]:
+        cfg = Settings(config_dir=tmp_path / f'd{depth}-{max_depth}',
+                       subagents=SubAgentConfig(max_subagent_depth=max_depth))
+        prepared = build_agent(
+            AgentSpec(role='main' if depth == 0 else 'subagent', depth=depth, settings=cfg,
+                      backend=backend, skills=()),
+            scripted_model([AIMessage(content='ok')]), PermissionMode.ALLOW, None, RunController(),
+            lambda: False, backend_selection=selected, settings=cfg,
+        )
+        return graph_tool_names(prepared.graph)
+
+    assert 'start_task' in tools_at(0, 1)
+    assert 'start_task' not in tools_at(1, 1)
+    assert 'start_task' in tools_at(0, 2) and 'start_task' in tools_at(1, 2)
+    assert 'start_task' not in tools_at(2, 2)
+    assert 'start_background_task' in tools_at(0, 2)
+    assert 'start_background_task' not in tools_at(1, 2)
+
+    # Live delegation with max_subagent_depth=1 still yields a leaf child.
+    by_depth: dict[int, object] = {}
+    original = factory.build_agent
+
+    def capture(spec, *args, **kwargs):
+        prepared = original(spec, *args, **kwargs)
+        by_depth[spec.depth] = prepared
+        return prepared
+
+    monkeypatch.setattr(factory, 'build_agent', capture)
+    cfg = Settings(config_dir=tmp_path / 'live', subagents=SubAgentConfig(max_subagent_depth=1))
+    model = scripted_model([
+        AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
+            'description': 'leaf', 'subagent_type': 'general-purpose'}, 'id': 'd'}]),
+        AIMessage(content='child done'),
+        AIMessage(content='parent done'),
+    ])
+    runner = AgentRunner(prepared=create_agent(model=model, skills=[], settings=cfg, permission_mode='allow'),
+                         settings=cfg)
+    try:
+        assert runner.invoke('go').status == 'completed'
+        assert by_depth[1].spec.depth == 1
+        assert 'start_task' not in graph_tool_names(by_depth[1].graph)
     finally:
         runner.close()
 
@@ -206,7 +264,11 @@ def test_real_sandbox_native_concurrency_and_command_cancel(tmp_path):
                         'description': name, 'subagent_type': 'general-purpose'}} for name in names])
             return ChatResult(generations=[ChatGeneration(message=answer)])
 
-    cfg = Settings(sandbox=SandboxConfig(workspace=tmp_path / 'workspace'), config_dir=tmp_path / 'private')
+    cfg = Settings(
+        sandbox=SandboxConfig(workspace=tmp_path / 'workspace'),
+        config_dir=tmp_path / 'private',
+        subagents=SubAgentConfig(max_concurrent=2, max_subagent_depth=1),
+    )
     cfg.sandbox.workspace.mkdir()
     try:
         runner = AgentRunner(model=ParallelModel(), settings=cfg)
