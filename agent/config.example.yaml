@@ -24,9 +24,9 @@ agent:
 # 仅当问题可分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 subagents:
   enabled: true
-  # 每个深度最多同时运行的 SubAgent 数；默认 4，与宿主硬顶取最小。
+  # 每个父 Agent 同时最多几个直接子任务；默认 4，与宿主硬顶取最小。
   max_concurrent: 4
-  # 所有深度累计同时存在的上限；默认 10，与宿主硬顶取最小。
+  # 全树累计同时存在的 SubAgent 上限（不含 Root）；默认 10，与宿主硬顶取最小。
   max_total: 10
   # 允许的 SubAgent 嵌套层数（不是 Agent 总层数）。主 Agent depth=0；
   # 其创建的 SubAgent 为 1，再下一层为 2。默认与宿主上限均为 2。
@@ -40,7 +40,8 @@ subagents:
   reasoning_effort: default
   # 子任务使用主 Agent 的权限模式（auto 或 allow）；ask 下不提供委派。
   # 是否同时提供后台委派工具（start/check/cancel_background_task）。
-  # 后台仅挂在主 Agent；嵌套 SubAgent 只能同步 start_task。与 start_task 共用每深度/全树并发上限。
+  # 后台仅挂在主 Agent；嵌套 SubAgent 只能同步 start_task。与 start_task 共用每父节点/全树并发上限。
+  # read_task_log 仅可见自己创建的直接子任务日志，不可跨层。
   background: true
 
 tools:

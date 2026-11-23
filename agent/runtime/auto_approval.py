@@ -309,8 +309,15 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         if request.tool_call["name"] not in {"start_task", "start_background_task"}:
             yield
             return
-        texts = user_texts(request.state["messages"])
-        token = delegating_user_request.set(texts[-1] if texts else "")
+        # Root harvests the real user turn. Nested agents must forward the Root
+        # authorization already stored on their controller — never replace it
+        # with the model-written task description in this thread.
+        if getattr(self.spec, "role", "main") == "subagent" or getattr(self.spec, "depth", 0) > 0:
+            root_user = (getattr(self.controller, "approval_user_request", None) or "").strip()
+            token = delegating_user_request.set(root_user)
+        else:
+            texts = user_texts(request.state["messages"])
+            token = delegating_user_request.set(texts[-1] if texts else "")
         try:
             yield
         finally:

@@ -7,14 +7,17 @@ from unittest.mock import patch
 import pytest
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent.bootstrap.config import Settings
+from agent.bootstrap.factory import AgentSpec
 from agent.execution.backend import BackendSelection
 from agent.execution.policy import BindMount, SandboxConfig
 from agent.execution.types import ExecutionMode
-from agent.runtime.auto_approval import ApprovalJournal, Decision
+from agent.runtime.auto_approval import ApprovalJournal, AutoApprovalMiddleware, Decision, delegating_user_request
+from agent.runtime.control import RunController
 from agent.runtime.permissions import ask_interrupt_on
 from agent.runtime.runner import AgentRunner
 from tests.conftest import scripted_model
@@ -175,6 +178,62 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
         reply = next(m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == "delegate")
         assert "execute (child-call)" in reply.content
         assert "需要人工审批" in reply.content
+
+
+def test_delegation_context_preserves_root_user_on_nested_agent():
+    controller = RunController()
+    controller.approval_user_request = "real user authorization"
+    middleware = AutoApprovalMiddleware(
+        spec=AgentSpec(role="subagent", depth=1),
+        backend=object(),
+        controller=controller,
+        journal=ApprovalJournal(InMemorySaver()),
+        gated={},
+    )
+    request = type("Req", (), {
+        "tool_call": {"name": "start_task"},
+        "state": {"messages": [HumanMessage(content="expanded model-written task")]},
+    })()
+    with middleware.delegation_context(request):
+        assert delegating_user_request.get() == "real user authorization"
+
+
+def test_depth2_flash_evidence_keeps_root_user_not_mid_task(tmp_path, monkeypatch):
+    """二级 SubAgent 的 user_messages 必须是 Root 用户原文，不能是一级委派描述。"""
+    calls = []
+
+    async def review(key, trust_env, evidence, cancelled):
+        calls.append(json.loads(evidence))
+        return Decision("ask", "review")
+
+    monkeypatch.setattr("agent.runtime.auto_approval.classify", review)
+    from agent.subagents.configuration import SubAgentConfig
+
+    backend = CountingBackend()
+    backend.calls = []
+    model = scripted_model([
+        AIMessage(content="", tool_calls=[{"name": "start_task", "id": "mid", "args": {
+            "description": "expanded scope beyond user request", "subagent_type": "general-purpose"}}]),
+        AIMessage(content="", tool_calls=[{"name": "start_task", "id": "leaf", "args": {
+            "description": "leaf delegated work", "subagent_type": "general-purpose"}}]),
+        AIMessage(content="", tool_calls=[{"name": "execute", "id": "leaf-call",
+                                          "args": {"command": "test", "network": True}}]),
+        AIMessage(content="mid done"),
+        AIMessage(content="root done"),
+    ])
+    settings = Settings(
+        config_dir=tmp_path,
+        resolved_deepseek_api_key="test",
+        subagents=SubAgentConfig(max_subagent_depth=2),
+    )
+    with patch("agent.bootstrap.factory.select_backend", return_value=BackendSelection(backend, ExecutionMode.SANDBOXED)):
+        runner = AgentRunner(model=model, settings=settings)
+        runner.set_permission_mode("auto")
+        assert runner.invoke("only edit local files").status == "completed"
+        assert calls, "expected Flash review on depth-2 execute"
+        assert calls[0]["user_messages"] == ["only edit local files"]
+        assert calls[0]["delegated_task"] == "leaf delegated work"
+        assert "expanded scope" not in calls[0]["user_messages"][0]
 
 
 def test_mcp_auto_trust_is_explicit_and_persistent():

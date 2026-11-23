@@ -63,9 +63,10 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         child = child_prepared[0]
         assert child.backend is runner.prepared.backend
         assert child.execution_mode is ExecutionMode.SANDBOXED
-        # Default max_subagent_depth=2: depth-1 may still start_task; host-only tools stay hidden.
-        assert 'start_task' in graph_tool_names(child.graph)
-        assert not {'request_human_input', 'read_task_log', 'start_background_task'} & graph_tool_names(child.graph)
+        # Default max_subagent_depth=2: depth-1 may start_task and read its own children logs.
+        child_tools = graph_tool_names(child.graph)
+        assert 'start_task' in child_tools and 'read_task_log' in child_tools
+        assert not {'request_human_input', 'start_background_task'} & child_tools
         assert not any(name.startswith("mcp") for name in graph_tool_names(child.graph))
         assert "mcp__server__tool" in graph_tool_names(runner.prepared.graph)
         assert mcp.snapshots == 1
@@ -139,10 +140,11 @@ def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
         )
         return graph_tool_names(prepared.graph)
 
-    assert 'start_task' in tools_at(0, 1)
-    assert 'start_task' not in tools_at(1, 1)
+    assert 'start_task' in tools_at(0, 1) and 'read_task_log' in tools_at(0, 1)
+    assert 'start_task' not in tools_at(1, 1) and 'read_task_log' not in tools_at(1, 1)
     assert 'start_task' in tools_at(0, 2) and 'start_task' in tools_at(1, 2)
-    assert 'start_task' not in tools_at(2, 2)
+    assert 'read_task_log' in tools_at(1, 2)
+    assert 'start_task' not in tools_at(2, 2) and 'read_task_log' not in tools_at(2, 2)
     assert 'start_background_task' in tools_at(0, 2)
     assert 'start_background_task' not in tools_at(1, 2)
 

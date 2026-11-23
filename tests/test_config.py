@@ -957,7 +957,7 @@ def test_subagents_defaults_and_validation():
     assert SubAgentConfig().may_create_subagent(0) and SubAgentConfig().may_create_subagent(1)
     assert not SubAgentConfig().may_create_subagent(2)
     assert not SubAgentConfig(max_subagent_depth=1).may_create_subagent(1)
-    # Host ceilings: per-depth ≤4, total ≤10, depth ≤2.
+    # Host ceilings: per-parent ≤4, total ≤10, depth ≤2.
     assert SubAgentConfig(max_concurrent=20).max_concurrent == 4
     assert SubAgentConfig(max_total=99).max_total == 10
     assert SubAgentConfig(max_subagent_depth=9).max_subagent_depth == 2

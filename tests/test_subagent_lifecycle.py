@@ -19,7 +19,7 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
     finish = threading.Event()
 
     def work():
-        with manager.running() as (_, child):
+        with manager.running('session') as (_, child):
             started.wait(timeout=3)
             finish.wait(3)
             return child.cancel_requested
@@ -28,8 +28,8 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
         futures = [pool.submit(work) for _ in range(2)]
         started.wait(timeout=3)
         assert manager.active_count == 2
-        with pytest.raises(RuntimeError, match='per-depth concurrency limit'):
-            with manager.running():
+        with pytest.raises(RuntimeError, match='per-parent concurrency limit'):
+            with manager.running('session'):
                 pytest.fail('third task admitted')
         parent.cancel()
         finish.set()
@@ -38,10 +38,10 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
     parent.end_run()
     parent.begin_run()
     with pytest.raises(ValueError):
-        with manager.running():
+        with manager.running('session'):
             raise ValueError('failure')
     assert manager.active_count == 0
-    with manager.running():
+    with manager.running('session'):
         assert manager.active_count == 1
     assert manager.active_count == 0
 
@@ -81,25 +81,44 @@ def test_native_runtime_parallel_and_parent_cancel(tmp_path):
     assert len(list(tmp_path.rglob('*.jsonl'))) == 2
 
 
-def test_per_depth_and_total_concurrency_limits():
+def test_per_parent_and_total_concurrency_limits():
     parent = RunController()
     parent.begin_run()
     manager = SubAgentManager(parent, max_concurrent=2, max_total=3)
+    mid = RunController()
+    mid.begin_run()
     held = []
     try:
-        held.append(manager.admit(1))
-        held.append(manager.admit(1))
-        assert manager.active_at_depth(1) == 2
-        with pytest.raises(RuntimeError, match='per-depth concurrency limit'):
-            manager.admit(1)
-        held.append(manager.admit(2))
+        held.append(manager.admit('root', parent))
+        held.append(manager.admit('root', parent))
+        assert manager.active_children('root') == 2
+        with pytest.raises(RuntimeError, match='per-parent concurrency limit'):
+            manager.admit('root', parent)
+        # A different parent may still admit until the tree-wide total is hit.
+        held.append(manager.admit('mid', mid))
         assert manager.active_count == 3
         with pytest.raises(RuntimeError, match='total concurrency limit'):
-            manager.admit(2)
+            manager.admit('other', mid)
     finally:
         for run_id, _ in held:
             manager.release(run_id)
+        mid.end_run()
         parent.end_run()
+
+
+def test_cancel_owner_recurses_to_registered_children():
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+    level1_id, level1 = manager.admit('session', root)
+    level2_id, level2 = manager.admit(level1_id, level1)
+    try:
+        level1.cancel()
+        assert level2.cancel_requested
+    finally:
+        manager.release(level2_id)
+        manager.release(level1_id)
+        root.end_run()
 
 
 def test_child_stream_is_cancelled_and_parent_waits_for_close():
@@ -157,9 +176,9 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             assert child_connection.hanging.wait(5)
             tools = {tool['function']['name'] if 'function' in tool else tool.get('name')
                      for tool in child_connection.body['tools']}
-            # Default max_subagent_depth=2 keeps sync start_task on depth-1; host-only tools stay hidden.
-            assert 'start_task' in tools
-            assert not {'request_human_input', 'read_task_log', 'start_background_task'} & tools
+            # Default max_subagent_depth=2: depth-1 keeps start_task + direct-child log reader.
+            assert 'start_task' in tools and 'read_task_log' in tools
+            assert not {'request_human_input', 'start_background_task'} & tools
             import json
             assert 'parent private history' not in json.dumps(child_connection.body)
             assert runner.prepared.subagent_manager.active_count == 1

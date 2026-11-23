@@ -358,9 +358,10 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         harness.runner.invoke('go')
         harness.gate.set()
         wait_until(lambda: harness.finished())
-        # Nested depth may keep sync start_task; background + host log tools stay root-only.
+        # Nested depth may keep sync start_task and direct-child logs; background stays root-only.
         child_tools = graph_tool_names(children[0].graph)
-        assert not (BACKGROUND | {'read_task_log'}) & child_tools
+        assert not BACKGROUND & child_tools
+        assert 'read_task_log' in child_tools
         assert children[0].spec.depth == 1
     finally:
         harness.close()

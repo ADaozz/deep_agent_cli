@@ -138,11 +138,14 @@ class SubAgentRuntime(Runnable):
         effort: str = "default",
         *,
         child_depth: int = 1,
+        owner_controller: Any | None = None,
     ) -> None:
         self.manager, self.store, self.prepare = manager, store, prepare
         self.model_name = model_name
         self.effort = effort
         self.child_depth = child_depth
+        # Agent that owns this runtime; children register here for cancel propagation.
+        self.owner_controller = owner_controller if owner_controller is not None else manager.parent
 
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         parent = str((config or {}).get("configurable", {}).get("thread_id", ""))
@@ -154,7 +157,7 @@ class SubAgentRuntime(Runnable):
         if not parent:
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
         try:
-            with self.manager.running(self.child_depth) as (run_id, controller):
+            with self.manager.running(parent, self.owner_controller) as (run_id, controller):
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
@@ -175,7 +178,7 @@ class SubAgentRuntime(Runnable):
 
         Raises when no permit is available; nothing is started in that case.
         """
-        run_id, controller = self.manager.admit(self.child_depth)
+        run_id, controller = self.manager.admit(parent, self.owner_controller)
         controller.approval_user_request = delegating_user_request.get()
         task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
                               description=description, controller=controller)

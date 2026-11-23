@@ -38,13 +38,14 @@ class SubAgentManager:
         max_total: int = 10,
     ) -> None:
         self.parent = parent
-        # Per-depth simultaneous cap.
+        # Per-parent simultaneous direct-child cap.
         self.max_concurrent = max_concurrent
-        # Whole-tree simultaneous cap across every depth.
+        # Whole-tree simultaneous cap across every SubAgent (excluding Root).
         self.max_total = max_total
         self._lock = threading.RLock()
         self._active: dict[str, RunController] = {}
-        self._depths: dict[str, int] = {}
+        self._parents: dict[str, str] = {}
+        self._owners: dict[str, RunController] = {}
         self._retired: list[RunController] = []
         self._tasks: dict[str, BackgroundTask] = {}
 
@@ -53,56 +54,67 @@ class SubAgentManager:
         with self._lock:
             return len(self._active)
 
-    def active_at_depth(self, depth: int) -> int:
+    def active_children(self, parent_id: str) -> int:
         with self._lock:
-            return sum(1 for value in self._depths.values() if value == depth)
+            return sum(1 for value in self._parents.values() if value == parent_id)
 
-    def admit(self, depth: int = 1) -> tuple[str, RunController]:
-        """Take one concurrency permit at ``depth``. Every admit needs exactly one release."""
-        if type(depth) is not int or depth < 1:
-            raise ValueError("Subagent depth must be a positive integer")
+    def admit(self, parent_id: str, owner: RunController | None = None) -> tuple[str, RunController]:
+        """Take one concurrency permit under ``parent_id``.
+
+        ``owner`` receives ``register_child`` so cancel propagates down the real
+        agent tree. Quotas stay global on this manager. Every admit needs exactly
+        one release.
+        """
+        if not isinstance(parent_id, str) or not parent_id.strip():
+            raise ValueError("Subagent parent_id must be a non-empty string")
+        owner = owner or self.parent
         with self._lock:
             if self.parent.cancel_requested:
                 raise RuntimeError("Parent run cancelled")
+            if owner.cancel_requested:
+                raise RuntimeError("Owning agent cancelled")
             if len(self._active) >= self.max_total:
                 raise RuntimeError(f"Subagent total concurrency limit ({self.max_total}) reached")
-            at_depth = sum(1 for value in self._depths.values() if value == depth)
-            if at_depth >= self.max_concurrent:
+            at_parent = sum(1 for value in self._parents.values() if value == parent_id)
+            if at_parent >= self.max_concurrent:
                 raise RuntimeError(
-                    f"Subagent per-depth concurrency limit ({self.max_concurrent}) "
-                    f"reached at depth {depth}"
+                    f"Subagent per-parent concurrency limit ({self.max_concurrent}) "
+                    f"reached for parent {parent_id}"
                 )
             run_id = uuid4().hex
             child = RunController()
             child.begin_run()
-            self.parent.register_child(child)
+            owner.register_child(child)
             self._active[run_id] = child
-            self._depths[run_id] = depth
+            self._parents[run_id] = parent_id
+            self._owners[run_id] = owner
             self.parent._emit("subagents_changed", {"count": len(self._active)})
         return run_id, child
 
     def release(self, run_id: str) -> None:
         with self._lock:
             child = self._active.get(run_id)
+            owner = self._owners.get(run_id, self.parent)
         if child is None:
             return
         child.cancel()
         child.end_run()
         with self._lock:
             self._active.pop(run_id, None)
-            self._depths.pop(run_id, None)
+            self._parents.pop(run_id, None)
+            self._owners.pop(run_id, None)
             self._retired.append(child)
             self.parent._emit("subagents_changed", {"count": len(self._active)})
         # Keep the child attached until its HTTP requests confirm closure.
         if child.wait_model_streams_closed(5.0):
-            self.parent.unregister_child(child)
+            owner.unregister_child(child)
             with self._lock:
                 if child in self._retired:
                     self._retired.remove(child)
 
     @contextmanager
-    def running(self, depth: int = 1):
-        run_id, child = self.admit(depth)
+    def running(self, parent_id: str, owner: RunController | None = None):
+        run_id, child = self.admit(parent_id, owner)
         try:
             yield run_id, child
         finally:
