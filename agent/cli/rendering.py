@@ -989,8 +989,9 @@ def render_tool_preview(
             stats = _format_task_stats(block.task_stats)
             if stats:
                 detail = f"{detail} · {stats}"
-        body.extend(_wrap_card_line(Text(f"  {detail}", style="dim"), console, width))
-        body.extend(_task_tree_lines(block.subtasks, expanded=expanded, console=console, width=width))
+        # Past the ├─ column used by nested rows, so the type line is not a branch.
+        body.extend(_wrap_card_line(Text(f"    {detail}", style="dim"), console, width, indent=4))
+        body.extend(_task_tree_lines(block.subtasks, console=console, width=width))
         if block.output:
             body.extend(_wrap_card_line(_tree_branch("result"), console, width))
     if preview.group == "mutation":
@@ -1031,31 +1032,6 @@ def _format_task_stats(stats: TaskStats | SubtaskView) -> str:
     return " · ".join(parts)
 
 
-def _subtask_progress(nodes: Sequence[SubtaskView]) -> tuple[int, int]:
-    done = total = 0
-    for node in nodes:
-        total += 1
-        if node.status != "running":
-            done += 1
-        child_done, child_total = _subtask_progress(node.children)
-        done += child_done
-        total += child_total
-    return done, total
-
-
-def _subtask_running(nodes: Sequence[SubtaskView]) -> bool:
-    return any(node.status == "running" or _subtask_running(node.children) for node in nodes)
-
-
-def _subtask_failures(nodes: Sequence[SubtaskView]) -> int:
-    count = 0
-    for node in nodes:
-        if node.status in {"failed", "error"}:
-            count += 1
-        count += _subtask_failures(node.children)
-    return count
-
-
 def _subtask_marker(status: str) -> tuple[str, str]:
     if status == "running":
         return _spinner(), "green"
@@ -1066,53 +1042,50 @@ def _subtask_marker(status: str) -> tuple[str, str]:
     return "•", "dim"
 
 
-def _subtask_rows(nodes: Sequence[SubtaskView], *, expanded: bool, pad: str = "") -> list[Text]:
-    rows: list[Text] = []
+def _nested_detail(node: SubtaskView) -> str:
+    """Same second line as a root task card: type, then live totals when present."""
+    stats = _format_task_stats(node)
+    return f"general-purpose · {stats}" if stats else "general-purpose"
+
+
+def _subtask_rows(nodes: Sequence[SubtaskView], *, pad: str = "") -> list[tuple[Text, int]]:
+    rows: list[tuple[Text, int]] = []
     last = len(nodes) - 1
     for index, node in enumerate(nodes):
         glyph = "└─" if index == last else "├─"
         symbol, color = _subtask_marker(node.status)
+        label = "Running SubAgent" if node.status == "running" else "SubAgent"
         suffix, suffix_style = "", "dim"
         if node.status in {"failed", "error"}:
             suffix, suffix_style = " — failed", "red"
         elif node.status == "cancelled":
             suffix = " — cancelled"
-        text = Text.assemble(
-            (f"  {pad}{glyph} ", TREE_BRANCH_STYLE),
-            (f"{symbol} ", color),
-            (node.description or "Delegated task", "bold" if node.status == "running" else ""),
+        branch = f"  {pad}{glyph} "
+        marker = f"{symbol} "
+        # Continuations start at the summary text, not in the ├─ / └─ column.
+        indent = len(branch) + len(marker)
+        rows.append((Text.assemble(
+            (branch, TREE_BRANCH_STYLE),
+            (marker, color),
+            (f"{label} · {node.description or 'Delegated task'}", "bold" if node.status == "running" else ""),
             (suffix, suffix_style),
-        )
-        stats = _format_task_stats(node)
-        if stats:
-            text.append(f"  {stats}", style="dim")
+        ), indent))
+        detail_style = "red" if node.status in {"failed", "error"} else "dim"
+        rows.append((Text(f"{' ' * indent}{_nested_detail(node)}", style="dim"), indent))
         if node.reason:
-            text.append(f"  {node.reason}", style="red" if node.status in {"failed", "error"} else "dim")
-        rows.append(text)
-        if node.children and (expanded or _subtask_running(node.children)):
+            rows.append((Text(f"{' ' * indent}{node.reason}", style=detail_style), indent))
+        if node.children:
             child_pad = pad + ("   " if index == last else "│  ")
-            rows.extend(_subtask_rows(node.children, expanded=expanded, pad=child_pad))
+            rows.extend(_subtask_rows(node.children, pad=child_pad))
     return rows
 
 
-def _task_tree_lines(
-    nodes: Sequence[SubtaskView], *, expanded: bool, console: Console, width: int,
-) -> list[Any]:
+def _task_tree_lines(nodes: Sequence[SubtaskView], *, console: Console, width: int) -> list[Any]:
     if not nodes:
         return []
-    done, total = _subtask_progress(nodes)
-    open_tree = expanded or _subtask_running(nodes)
-    mark = "▾" if open_tree else "▸"
-    hint = ""
-    if not open_tree:
-        failed = _subtask_failures(nodes)
-        if failed:
-            hint += f" · {failed} failed"
-        hint += f" · {EXPAND_HINT}"
-    lines: list[Any] = list(_wrap_card_line(Text(f"  {mark} {done}/{total}{hint}", style="dim"), console, width))
-    if open_tree:
-        for row in _subtask_rows(nodes, expanded=expanded):
-            lines.extend(_wrap_card_line(row, console, width))
+    lines: list[Any] = []
+    for row, indent in _subtask_rows(nodes):
+        lines.extend(_wrap_card_line(row, console, width, indent=max(2, indent)))
     return lines
 
 

@@ -276,9 +276,17 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     state.apply(RunEvent(type='subagents_changed', result={'count': 9}))
     assert state.subagent_count == 4
     text = plain(render_transcript(state, 120))
-    assert '▾ 0/2' in text and 'RunController 取消传播' in text and '异步调用与资源回收' in text
+    assert '▾' not in text and '▸' not in text
+    assert 'Running SubAgent · RunController 取消传播' in text
+    assert 'Running SubAgent · 异步调用与资源回收' in text
     assert '3→1 tok' in text and '8.0 tps' in text
-    assert '审批与权限链路' in text and '▾' in text.split('审批与权限链路')[0]
+    child = next(line for line in text.splitlines() if 'RunController 取消传播' in line)
+    stats = next(line for line in text.splitlines() if '3→1 tok' in line)
+    parent = next(line for line in text.splitlines() if '20→8 tok' in line)
+    assert '├─' in child and child.index('Running SubAgent') > child.index('├─')
+    assert '├' not in stats and stats.startswith(' ' * child.index('Running SubAgent'))
+    assert parent.startswith('    ') and '├' not in parent
+    assert '审批与权限链路' in text and 'RunController 取消传播' in text.split('审批与权限链路')[0]
 
     _task_update(
         state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
@@ -287,7 +295,8 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     assert state.blocks[0].status == 'running' and state.blocks[1].status == 'running'
     assert state.subagent_count == 3
     text = plain(render_transcript(state, 120))
-    assert '▾ 1/2' in text and 'RunController 取消传播' in text and '异步调用与资源回收' in text
+    assert 'SubAgent · RunController 取消传播' in text and 'Running SubAgent · 异步调用与资源回收' in text
+    assert '▾' not in text
 
     _task_update(
         state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
@@ -295,14 +304,9 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     )
     assert state.blocks[0].status == 'running'
     assert state.subagent_count == 2
-    collapsed = plain(render_transcript(state, 120))
-    assert '▸ 2/2' in collapsed and 'Ctrl+O to expand' in collapsed
-    assert 'RunController 取消传播' not in collapsed and '异步调用与资源回收' not in collapsed
-
-    state.tools_expanded = True
-    opened = plain(render_transcript(state, 120))
-    assert '▾ 2/2' in opened and 'RunController 取消传播' in opened and '异步调用与资源回收' in opened
-    state.tools_expanded = False
+    settled = plain(render_transcript(state, 120))
+    assert 'SubAgent · RunController 取消传播' in settled and 'SubAgent · 异步调用与资源回收' in settled
+    assert '▾' not in settled and '▸' not in settled
 
     state.apply(RunEvent(
         type='tool_completed', name='start_task', tool_call_id='card-a',
@@ -313,7 +317,7 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     assert other.status == 'running'
     done = plain(render_transcript(state, 120))
     assert '汇总完成' in done and '— failed' not in done
-    assert '▸ 2/2' in done and 'RunController 取消传播' not in done
+    assert 'SubAgent · RunController 取消传播' in done
 
 
 def test_failed_child_shows_its_reason_on_its_own_row():
@@ -331,9 +335,12 @@ def test_failed_child_shows_its_reason_on_its_own_row():
     assert state.blocks[0].status == 'running' and not state.blocks[0].is_error
     assert state.subagent_count == 2
     text = plain(render_transcript(state, 120))
-    assert '▾ 1/2' in text and 'Running SubAgent' in text
-    assert 'Ask / Auto 审批' in text and 'Flash 审批与恢复' in text
+    assert '▾' not in text and 'Running SubAgent · Ask / Auto 审批' in text
+    assert 'SubAgent · Flash 审批与恢复' in text
     assert '— failed' in text and 'model unavailable' in text
+    failed = next(line for line in text.splitlines() if 'Flash 审批与恢复' in line)
+    reason = next(line for line in text.splitlines() if 'model unavailable' in line)
+    assert '├' not in reason and reason.startswith(' ' * failed.index('SubAgent'))
     # A late progress tick must not reopen the failed row or add it back to the count.
     _task_update(
         state, run_id='b2', parent_run_id='b', depth=2, description='Flash 审批与恢复',
@@ -346,8 +353,6 @@ def test_failed_child_shows_its_reason_on_its_own_row():
     )
     assert state.blocks[0].status == 'running'
     assert state.subagent_count == 1
-    folded = plain(render_transcript(state, 120))
-    assert '▸ 2/2' in folded and '1 failed' in folded and 'model unavailable' not in folded
-    state.tools_expanded = True
-    opened = plain(render_transcript(state, 120))
-    assert '▾ 2/2' in opened and '— failed' in opened and 'model unavailable' in opened
+    settled = plain(render_transcript(state, 120))
+    assert '▾' not in settled and '▸' not in settled
+    assert '— failed' in settled and 'model unavailable' in settled
