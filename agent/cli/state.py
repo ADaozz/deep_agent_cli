@@ -30,6 +30,48 @@ class MessageBlock:
     command_title: str | None = None
 
 
+@dataclass(frozen=True)
+class TaskStats:
+    """Host-visible totals for one subagent. Not a log and not model text."""
+
+    elapsed_seconds: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tps: float | None = None
+
+
+@dataclass(frozen=True)
+class SubtaskView:
+    """One nested task row under the card that launched its ancestor."""
+
+    run_id: str
+    description: str
+    status: str
+    elapsed_seconds: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tps: float | None = None
+    reason: str = ""
+    children: tuple[SubtaskView, ...] = ()
+
+
+@dataclass
+class SubagentNode:
+    """Live task-tree entry. Depth-1 nodes bind a root card by tool_call_id."""
+
+    run_id: str
+    parent_run_id: str
+    depth: int
+    description: str
+    status: str = "running"
+    tool_call_id: str = ""
+    elapsed_seconds: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    tps: float | None = None
+    reason: str = ""
+
+
 @dataclass
 class ToolBlock:
     tool_call_id: str
@@ -43,6 +85,9 @@ class ToolBlock:
     is_error: bool = False
     revision: int = 0
     exit_code: int | None = None
+    # Nested tasks under this delegation. Empty when the task has no children.
+    subtasks: tuple[SubtaskView, ...] = ()
+    task_stats: TaskStats | None = None
 
 
 @dataclass(frozen=True)
@@ -79,18 +124,24 @@ class CliState:
     # Separate a never-started conversation from missing model usage.
     # Clearing the visible transcript must not reset this session property.
     context_pristine: bool = True
+    # Live task tree. Root cards stay in `blocks`; deeper tasks hang off them.
+    subagent_nodes: dict[str, SubagentNode] = field(default_factory=dict)
 
     @property
     def subagent_count(self) -> int:
-        """Count the same running task cards rendered in the transcript.
+        """Running task cards plus nested tasks that are actually executing.
 
-        Scheduler admission/cleanup and graph tool results arrive separately;
-        using scheduler counts here can disagree with the visible task states.
+        Scheduler admission counts also include HTTP streams that are only
+        closing. Those slots are not running work, so they do not add to this
+        number. A finished child drops out immediately; its parent card stays
+        running until that parent’s own tool call ends.
         """
-        return sum(
+        cards = sum(
             isinstance(block, ToolBlock) and block.name in {"start_task", START_TOOL} and block.status == "running"
             for block in self.blocks
         )
+        nested = sum(node.depth >= 2 and node.status == "running" for node in self.subagent_nodes.values())
+        return cards + nested
 
     def add_user(
         self,
@@ -134,6 +185,7 @@ class CliState:
         self.active_block = None
         self.pending_user_ids.clear()
         self.usage.clear()
+        self.subagent_nodes.clear()
         if not preserve_model_metrics:
             self.model_metrics_history.clear()
 
@@ -172,6 +224,9 @@ class CliState:
         if event.type == "subagents_changed":
             # Runtime accounting remains available to other event consumers.
             # Presentation counts follow task card transitions instead.
+            return
+        if event.type == "subagent_update" and isinstance(event.result, dict):
+            self._apply_subagent_update(event.result)
             return
         if event.type in {"run_started", "run_completed", "run_failed", "run_cancelled", "interaction_requested"}:
             self.compacting = False
@@ -218,6 +273,12 @@ class CliState:
                 tool.name = event.name or tool.name
                 tool.arguments = event.arguments or tool.arguments
                 tool.status = "running"
+            if tool is not None and tool.name in {"start_task", START_TOOL}:
+                self._paint_task_card(tool)
+            elif event.name in {"start_task", START_TOOL}:
+                created = self._tool_by_id(event.tool_call_id)
+                if created is not None:
+                    self._paint_task_card(created)
             self.active_block = None
         elif event.type == "tool_output_delta":
             tool = self._tool(event.tool_call_id) or self._running_tool()
@@ -245,6 +306,7 @@ class CliState:
                 refused = subagent_result_status(event.content, is_error=event.is_error)
                 if tool.status == "running" and refused != "completed":
                     tool.output, tool.status, tool.is_error = event.content, refused, True
+                    self._finish_task_card(tool)
                 return
             completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
             had_tail_snapshot = (
@@ -267,6 +329,7 @@ class CliState:
                 tool.output = event.content
                 tool.status = subagent_result_status(event.content, is_error=event.is_error)
                 tool.is_error = tool.status in {"error", "cancelled"}
+                self._finish_task_card(tool)
             if event.name == "execute" and completed_artifact is not None:
                 code = completed_artifact.get("exit_code")
                 tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
@@ -277,6 +340,7 @@ class CliState:
                 tool.output = event.content
                 tool.status = subagent_result_status(event.content)
                 tool.is_error = tool.status in {"error", "cancelled"}
+                self._finish_task_card(tool)
         elif event.type == "steering_queued":
             pass  # Pending input is rendered separately until it is applied.
         elif event.type == "steering_applied":
@@ -309,6 +373,8 @@ class CliState:
                 if (isinstance(block, ToolBlock) and block.status in {"running", "waiting"}
                         and block.name != START_TOOL):
                     touch(block).status = "interrupted"
+                    if block.name == "start_task":
+                        self._finish_task_card(block, fallback="cancelled")
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
             self.active_block = None
@@ -329,6 +395,7 @@ class CliState:
                     if block.name in {"start_task", START_TOOL}:
                         block.status = "cancelled"
                         block.is_error = True
+                        self._finish_task_card(block, fallback="cancelled")
                         continue
                     block.status = "error"
                     block.is_error = True
@@ -345,7 +412,145 @@ class CliState:
                     touch(block).status = "error"
                     block.is_error = True
                     block.exit_code = 1
+                    if block.name == "start_task":
+                        self._finish_task_card(block, fallback="failed")
             self.add_system(event.content or "Unknown error", error=True)
+
+    def _apply_subagent_update(self, payload: dict[str, Any]) -> None:
+        run_id = str(payload.get("run_id") or "")
+        if not run_id:
+            return
+        status = str(payload.get("status") or "running")
+        if status not in {"running", "completed", "failed", "cancelled"}:
+            status = "running"
+        node = self.subagent_nodes.get(run_id)
+        # A child can emit a late progress tick while its finish event is applied.
+        # That tick must not reopen a task that has already ended.
+        if node is not None and node.status != "running" and status == "running":
+            return
+        description = " ".join(str(payload.get("description") or "").split())
+        depth = payload.get("depth")
+        depth = depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1
+        elapsed = payload.get("elapsed_seconds")
+        elapsed_seconds = (
+            float(elapsed) if type(elapsed) in {int, float} and not isinstance(elapsed, bool) and elapsed >= 0
+            else None
+        )
+        tps_value = payload.get("tps")
+        tps = (
+            float(tps_value) if type(tps_value) in {int, float} and not isinstance(tps_value, bool) and tps_value >= 0
+            else None
+        )
+
+        def count(key: str) -> int:
+            value = payload.get(key)
+            return value if type(value) is int and not isinstance(value, bool) and value >= 0 else 0
+
+        if node is None:
+            node = SubagentNode(
+                run_id=run_id,
+                parent_run_id=str(payload.get("parent_run_id") or ""),
+                depth=depth,
+                description=description or "Delegated task",
+            )
+            self.subagent_nodes[run_id] = node
+        node.parent_run_id = str(payload.get("parent_run_id") or node.parent_run_id)
+        node.depth = depth
+        if description:
+            node.description = description
+        node.status = status
+        tool_call_id = str(payload.get("tool_call_id") or "")
+        if tool_call_id:
+            node.tool_call_id = tool_call_id
+        node.elapsed_seconds = elapsed_seconds
+        node.input_tokens = count("input_tokens")
+        node.output_tokens = count("output_tokens")
+        node.tps = tps
+        node.reason = str(payload.get("reason") or "") if status in {"failed", "cancelled"} else ""
+        self._refresh_owner(node)
+
+    def _finish_task_card(self, tool: ToolBlock, *, fallback: str = "") -> None:
+        """Stop counting this card's tree once the card itself has left `running`.
+
+        Child rows that already finished keep their own status. Only tasks still
+        marked running adopt the card's terminal status.
+        """
+        node = self._node_for_tool(tool.tool_call_id)
+        if node is None:
+            return
+        terminal = {"error": "failed", "interrupted": "cancelled", "cancelled": "cancelled", "completed": "completed"}.get(
+            tool.status, fallback or "failed",
+        )
+        if tool.status == "running":
+            terminal = fallback or "cancelled"
+        self._close_running(node.run_id, terminal)
+        if node.status == "running":
+            node.status = terminal
+        self._paint_task_card(tool)
+
+    def _close_running(self, run_id: str, status: str) -> None:
+        for node in self.subagent_nodes.values():
+            if node.parent_run_id == run_id and node.status == "running":
+                node.status = status
+                self._close_running(node.run_id, status)
+
+    def _refresh_owner(self, node: SubagentNode) -> None:
+        tool = self._tool_by_id(self._owner_tool_id(node))
+        if tool is not None and tool.name in {"start_task", START_TOOL}:
+            self._paint_task_card(tool)
+
+    def _owner_tool_id(self, node: SubagentNode) -> str:
+        seen = {node.run_id}
+        current = node
+        while current.parent_run_id and current.parent_run_id not in seen:
+            parent = self.subagent_nodes.get(current.parent_run_id)
+            if parent is None:
+                break
+            seen.add(parent.run_id)
+            current = parent
+        return current.tool_call_id
+
+    def _node_for_tool(self, tool_call_id: str) -> SubagentNode | None:
+        if not tool_call_id:
+            return None
+        for node in self.subagent_nodes.values():
+            if node.depth <= 1 and node.tool_call_id == tool_call_id:
+                return node
+        return None
+
+    def _views_under(self, parent_run_id: str) -> tuple[SubtaskView, ...]:
+        children = [item for item in self.subagent_nodes.values() if item.parent_run_id == parent_run_id]
+        return tuple(
+            SubtaskView(
+                run_id=item.run_id,
+                description=item.description or "Delegated task",
+                status=item.status,
+                elapsed_seconds=item.elapsed_seconds,
+                input_tokens=item.input_tokens,
+                output_tokens=item.output_tokens,
+                tps=item.tps,
+                reason=item.reason,
+                children=self._views_under(item.run_id),
+            )
+            for item in children
+        )
+
+    def _paint_task_card(self, tool: ToolBlock) -> None:
+        node = self._node_for_tool(tool.tool_call_id)
+        if node is None:
+            if tool.subtasks or tool.task_stats is not None:
+                tool.subtasks = ()
+                tool.task_stats = None
+                touch(tool)
+            return
+        tool.subtasks = self._views_under(node.run_id)
+        tool.task_stats = TaskStats(
+            elapsed_seconds=node.elapsed_seconds,
+            input_tokens=node.input_tokens,
+            output_tokens=node.output_tokens,
+            tps=node.tps,
+        )
+        touch(tool)
 
     def _assistant_block(self) -> MessageBlock:
         block = self.active_block

@@ -409,6 +409,9 @@ def test_tool_result_classification_ignores_error_topic_bodies() -> None:
     assert classify_tool_result(
         status="error", content="Cancelled by user.", name="write",
     ) == "cancelled"
+    review = "[subagent run_id=abc]\nThe cancel path returns cancelled by user.\nReview complete."
+    assert classify_tool_result(status="success", content=review, name="start_task") == "success"
+    assert not tool_message_is_error(ToolMessage(content=review, tool_call_id="task", name="start_task"))
 
 
 def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path) -> None:

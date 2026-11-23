@@ -524,3 +524,84 @@ def test_subagent_error_messages_redact_known_secrets(tmp_path):
     assert secret not in text
     assert "$llm.models.deepseek.api_key" in text
     root.end_run()
+
+
+def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
+    """Depth-2 progress names its parent run and does not copy the child answer."""
+    import json
+
+    from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
+
+    events = []
+    root = RunController(on_control_event=lambda kind, payload: events.append((kind, dict(payload))))
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+    store = SubAgentLogStore(tmp_path)
+
+    def child_prepare(controller):
+        class Graph:
+            def stream(self, graph_input, config, **kwargs):
+                yield {"messages": [AIMessage(
+                    content="private depth-2 review of cancelled by user",
+                    usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+                )]}
+        return SimpleNamespace(graph=Graph())
+
+    child_runtime = SubAgentRuntime(manager, store, child_prepare, "fake", child_depth=2)
+
+    def parent_prepare(controller):
+        child_runtime.owner_controller = controller
+
+        class Graph:
+            def stream(self, graph_input, config, **kwargs):
+                context = ToolCancelContext("start_task", "call-a1", threading.Event())
+                set_cancel_context(context)
+                try:
+                    nested = child_runtime.invoke(
+                        {"messages": [HumanMessage(content="审查取消传播")]},
+                        {"configurable": {"thread_id": config["configurable"]["thread_id"]}},
+                    )
+                finally:
+                    clear_cancel_context()
+                yield {"messages": [AIMessage(
+                    content="parent summary " + nested["messages"][0].content,
+                    usage_metadata={"input_tokens": 11, "output_tokens": 5, "total_tokens": 16},
+                )]}
+        return SimpleNamespace(graph=Graph())
+
+    runtime = SubAgentRuntime(manager, store, parent_prepare, "fake", child_depth=1, owner_controller=root)
+    launch = ToolCancelContext("start_task", "call-a", threading.Event())
+    set_cancel_context(launch)
+    try:
+        result = runtime.invoke(
+            {"messages": [HumanMessage(content="执行与取消链路")]},
+            {"configurable": {"thread_id": "root-session"}},
+        )
+    finally:
+        clear_cancel_context()
+    assert "private depth-2 review" in result["messages"][0].content
+    updates = [payload for kind, payload in events if kind == "subagent_update"]
+    by_depth = {}
+    for payload in updates:
+        by_depth.setdefault(payload["depth"], []).append(payload)
+    parent_rows = by_depth[1]
+    child_rows = by_depth[2]
+    assert parent_rows[0]["status"] == "running"
+    assert parent_rows[0]["tool_call_id"] == "call-a"
+    assert parent_rows[0]["parent_run_id"] == "root-session"
+    assert parent_rows[0]["description"] == "执行与取消链路"
+    assert parent_rows[-1]["status"] == "completed"
+    assert parent_rows[-1]["input_tokens"] == 11 and parent_rows[-1]["output_tokens"] == 5
+    assert child_rows[0]["status"] == "running"
+    assert child_rows[0]["tool_call_id"] == "call-a1"
+    assert child_rows[0]["parent_run_id"] == parent_rows[0]["run_id"]
+    assert child_rows[0]["description"] == "审查取消传播"
+    assert child_rows[-1]["status"] == "completed"
+    assert child_rows[-1]["input_tokens"] == 3 and child_rows[-1]["output_tokens"] == 2
+    # Terminal status is published before the slot is only closing.
+    assert child_rows[-1]["status"] == "completed"
+    blob = json.dumps(updates, ensure_ascii=False)
+    assert "private depth-2 review" not in blob
+    assert "parent summary" not in blob
+    assert manager.active_count == 0
+    root.end_run()

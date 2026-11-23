@@ -41,7 +41,7 @@ from agent.cli.highlighting import (
     code_renderer,
     parse_numbered_change,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.cli.state import CliState, MessageBlock, SubtaskView, TaskStats, ToolBlock, TurnSummaryBlock
 from agent.cli.skills import skill_message_display
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
 from agent.version import package_version
@@ -984,7 +984,13 @@ def render_tool_preview(
     # status marker; wrapped rows indent under the title text.
     body: list[Any] = list(_wrap_card_line(title, console, width))
     if preview.kind == "task":
-        body.extend(_wrap_card_line(Text(f"  {preview.detail}", style="dim"), console, width))
+        detail = preview.detail
+        if block.task_stats is not None:
+            stats = _format_task_stats(block.task_stats)
+            if stats:
+                detail = f"{detail} · {stats}"
+        body.extend(_wrap_card_line(Text(f"  {detail}", style="dim"), console, width))
+        body.extend(_task_tree_lines(block.subtasks, expanded=expanded, console=console, width=width))
         if block.output:
             body.extend(_wrap_card_line(_tree_branch("result"), console, width))
     if preview.group == "mutation":
@@ -1010,6 +1016,104 @@ def render_tool_preview(
                 language=syntax,
             ))
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
+
+
+def _format_task_stats(stats: TaskStats | SubtaskView) -> str:
+    parts: list[str] = []
+    elapsed = stats.elapsed_seconds
+    if type(elapsed) in {int, float} and not isinstance(elapsed, bool):
+        parts.append(f"{elapsed:g}s")
+    if stats.input_tokens or stats.output_tokens:
+        parts.append(f"{stats.input_tokens}→{stats.output_tokens} tok")
+    tps = stats.tps
+    if type(tps) in {int, float} and not isinstance(tps, bool):
+        parts.append(f"{tps:.0f} tps" if tps >= 10 else f"{tps:.1f} tps")
+    return " · ".join(parts)
+
+
+def _subtask_progress(nodes: Sequence[SubtaskView]) -> tuple[int, int]:
+    done = total = 0
+    for node in nodes:
+        total += 1
+        if node.status != "running":
+            done += 1
+        child_done, child_total = _subtask_progress(node.children)
+        done += child_done
+        total += child_total
+    return done, total
+
+
+def _subtask_running(nodes: Sequence[SubtaskView]) -> bool:
+    return any(node.status == "running" or _subtask_running(node.children) for node in nodes)
+
+
+def _subtask_failures(nodes: Sequence[SubtaskView]) -> int:
+    count = 0
+    for node in nodes:
+        if node.status in {"failed", "error"}:
+            count += 1
+        count += _subtask_failures(node.children)
+    return count
+
+
+def _subtask_marker(status: str) -> tuple[str, str]:
+    if status == "running":
+        return _spinner(), "green"
+    if status == "completed":
+        return "•", "green"
+    if status in {"failed", "error"}:
+        return "•", "red"
+    return "•", "dim"
+
+
+def _subtask_rows(nodes: Sequence[SubtaskView], *, expanded: bool, pad: str = "") -> list[Text]:
+    rows: list[Text] = []
+    last = len(nodes) - 1
+    for index, node in enumerate(nodes):
+        glyph = "└─" if index == last else "├─"
+        symbol, color = _subtask_marker(node.status)
+        suffix, suffix_style = "", "dim"
+        if node.status in {"failed", "error"}:
+            suffix, suffix_style = " — failed", "red"
+        elif node.status == "cancelled":
+            suffix = " — cancelled"
+        text = Text.assemble(
+            (f"  {pad}{glyph} ", TREE_BRANCH_STYLE),
+            (f"{symbol} ", color),
+            (node.description or "Delegated task", "bold" if node.status == "running" else ""),
+            (suffix, suffix_style),
+        )
+        stats = _format_task_stats(node)
+        if stats:
+            text.append(f"  {stats}", style="dim")
+        if node.reason:
+            text.append(f"  {node.reason}", style="red" if node.status in {"failed", "error"} else "dim")
+        rows.append(text)
+        if node.children and (expanded or _subtask_running(node.children)):
+            child_pad = pad + ("   " if index == last else "│  ")
+            rows.extend(_subtask_rows(node.children, expanded=expanded, pad=child_pad))
+    return rows
+
+
+def _task_tree_lines(
+    nodes: Sequence[SubtaskView], *, expanded: bool, console: Console, width: int,
+) -> list[Any]:
+    if not nodes:
+        return []
+    done, total = _subtask_progress(nodes)
+    open_tree = expanded or _subtask_running(nodes)
+    mark = "▾" if open_tree else "▸"
+    hint = ""
+    if not open_tree:
+        failed = _subtask_failures(nodes)
+        if failed:
+            hint += f" · {failed} failed"
+        hint += f" · {EXPAND_HINT}"
+    lines: list[Any] = list(_wrap_card_line(Text(f"  {mark} {done}/{total}{hint}", style="dim"), console, width))
+    if open_tree:
+        for row in _subtask_rows(nodes, expanded=expanded):
+            lines.extend(_wrap_card_line(row, console, width))
+    return lines
 
 
 def _command_card(
