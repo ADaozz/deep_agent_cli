@@ -260,9 +260,13 @@ class Companion:
     def log(self, message, speaker="Lain", *, stamp=None):
         self.log_sequence += 1
         limit = QUESTION_LIMIT if speaker == "You" else 1600
+        if stamp is None:
+            now = datetime.now(self.timezone)
+            # Status uses full wall time for app-log style rows in the panel.
+            stamp = now.strftime("%Y-%m-%d %H:%M:%S" if speaker == "Status" else "%H:%M:%S")
         self.logs.append(
             (
-                stamp or datetime.now(self.timezone).strftime("%H:%M:%S"),
+                stamp,
                 speaker,
                 "".join(c for c in str(message) if c.isprintable() or c in "\n\t")[:limit],
             )

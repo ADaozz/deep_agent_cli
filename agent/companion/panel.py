@@ -117,9 +117,36 @@ class ChatRows(Rows):
         return lines[self.top : self.top + height]
 
     @staticmethod
+    def _wrap_muted(text: str, width: int) -> list[list[tuple[str, str]]]:
+        """Plain muted lines for Status/log entries (no Markdown bubble)."""
+        width = max(1, width)
+        rows: list[list[tuple[str, str]]] = []
+        for paragraph in text.splitlines() or [""]:
+            if not paragraph:
+                rows.append([(MUTED, "")])
+                continue
+            line, used = [], 0
+            for char in paragraph:
+                char_width = get_cwidth(char)
+                if line and used + char_width > width:
+                    rows.append([(MUTED, "".join(line))])
+                    line, used = [], 0
+                line.append(char)
+                used += char_width
+            if line:
+                rows.append([(MUTED, "".join(line))])
+        return rows or [[(MUTED, "")]]
+
+    @staticmethod
     def _message_rows(stamp, speaker, message, width):
         user = speaker == "You"
-        name = {"You": "你", "Lain": "玲音", "Status": "提示"}.get(speaker, speaker)
+        status = speaker == "Status"
+        if status:
+            # App-log style: 2026-11-23 17:33:21 | INFO     | …
+            text = "" if message is None else " ".join(message.split())
+            return ChatRows._wrap_muted(f"{stamp} | INFO     | {text}", width)
+
+        name = {"You": "你", "Lain": "玲音"}.get(speaker, speaker)
         suffix = stamp if stamp.startswith("·") else f"· {stamp[:5]}"
         label = [(ACCENT if speaker in ("You", "Lain") else MUTED, f"{name} {suffix}")]
         rows = [aligned([], label, width) if user else label]

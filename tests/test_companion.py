@@ -553,6 +553,34 @@ def test_chat_rows_render_markdown_like_main_transcript(tmp_path):
     assert "read_file" in plain
 
 
+def test_status_rows_render_as_muted_logs(tmp_path):
+    from agent.companion.panel import ChatRows
+    from agent.companion.theme import MUTED
+
+    c = companion(tmp_path, lambda: "session")
+    c.log("服务已启动：demo（PID 1）", "Status")
+    c.log("未配置 **Companion** 密钥", "Status")
+    lines = ChatRows(c).visible_lines(80, 12)
+    compact = "".join(text for line in lines for _, text in line)
+    assert " | INFO     | " in compact
+    assert "服务已启动：demo（PID 1）" in compact
+    assert "**Companion**" in compact
+    assert "日志 · " not in compact
+    assert "提示" not in compact
+    # Full wall-clock stamp, not HH:MM only.
+    assert any(
+        stamp.count("-") == 2 and ":" in stamp
+        for stamp, speaker, _ in c.logs
+        if speaker == "Status"
+    )
+    assert all(
+        style == MUTED
+        for line in lines
+        for style, text in line
+        if text.strip()
+    )
+
+
 def test_broken_clip_is_local_and_other_behavior_recovers(tmp_path, monkeypatch):
     from agent.companion.config import CompanionConfig
 

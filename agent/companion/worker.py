@@ -176,7 +176,9 @@ def create_chat(model, query, *, persona=None, instructions=None):
             f"当前会话资料（供参考）\n{json.dumps(context, ensure_ascii=False)}"
             f"\n\n用户当前问题（question）\n{question}"
         )
-        config = {"recursion_limit": 20}
+        # create_react_agent burns ~2 steps per tool round; 20 often hits
+        # "Sorry, need more steps…" on inspect-heavy questions.
+        config = {"recursion_limit": 60}
         if on_chunk is not None:
             published = ""
 
