@@ -121,6 +121,66 @@ def test_cancel_owner_recurses_to_registered_children():
         root.end_run()
 
 
+def test_cancel_isolates_sibling_subtrees():
+    """Cancel A cancels A1; sibling B and Root keep running."""
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+    a_id, a = manager.admit('session', root)
+    b_id, b = manager.admit('session', root)
+    a1_id, a1 = manager.admit(a_id, a)
+    try:
+        assert not root.cancel_requested
+        a.cancel()
+        assert a.cancel_requested and a1.cancel_requested
+        assert not b.cancel_requested
+        assert not root.cancel_requested
+        assert manager.active_count == 3  # still admitted until release
+    finally:
+        manager.release(a1_id)
+        manager.release(a_id)
+        manager.release(b_id)
+        root.end_run()
+
+
+def test_per_parent_and_total_limits_under_nested_load():
+    """Root fills 4 direct children; nested parents hit per-parent 4 and tree-wide 10."""
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+    level1 = []
+    level2 = []
+    try:
+        for _ in range(4):
+            level1.append(manager.admit('session', root))
+        assert manager.active_children('session') == 4
+        with pytest.raises(RuntimeError, match='per-parent concurrency limit'):
+            manager.admit('session', root)
+
+        parent_a_id, parent_a = level1[0]
+        parent_b_id, parent_b = level1[1]
+        # Fill parent_a to its direct-child cap while total still has room (4+4=8).
+        for _ in range(4):
+            level2.append(manager.admit(parent_a_id, parent_a))
+        assert manager.active_children(parent_a_id) == 4
+        assert manager.active_count == 8
+        with pytest.raises(RuntimeError, match='per-parent concurrency limit'):
+            manager.admit(parent_a_id, parent_a)
+
+        # parent_b consumes the remaining two total slots, then total cap fires.
+        level2.append(manager.admit(parent_b_id, parent_b))
+        level2.append(manager.admit(parent_b_id, parent_b))
+        assert manager.active_count == 10
+        with pytest.raises(RuntimeError, match='total concurrency limit'):
+            manager.admit(parent_b_id, parent_b)
+        with pytest.raises(RuntimeError, match='total concurrency limit'):
+            manager.admit(parent_a_id, parent_a)
+    finally:
+        for run_id, _ in reversed(level2 + level1):
+            manager.release(run_id)
+        root.end_run()
+
+
 def test_child_stream_is_cancelled_and_parent_waits_for_close():
     parent = RunController()
     parent.begin_run()

@@ -30,6 +30,38 @@ def test_log_restart_paging_ownership_and_redaction(tmp_path):
             restarted.read('parent-a', run, offset, limit)
 
 
+def test_read_task_log_enforces_direct_parent_isolation(tmp_path):
+    """Root cannot read A1; A can read A1; A cannot read B's child (via read_task_log)."""
+    from types import SimpleNamespace
+
+    from agent.tools.subagent_logs import build_subagent_log_tool
+
+    store = SubAgentLogStore(tmp_path)
+    root, agent_a, agent_b = "root-session", "agent-a-run", "agent-b-run"
+    a1, b1 = uuid4().hex, uuid4().hex
+    store.append(agent_a, a1, "finish", status="completed", summary="a1-only")
+    store.append(agent_b, b1, "finish", status="completed", summary="b1-only")
+    tool = build_subagent_log_tool(store)
+
+    def read_as(parent: str, run_id: str | None = None) -> dict:
+        runtime = SimpleNamespace(config={"configurable": {"thread_id": parent}})
+        return tool.func(runtime, run_id=run_id)
+
+    # Direct parent A sees A1; listing is scoped to A.
+    assert read_as(agent_a)["runs"] == [a1]
+    page = read_as(agent_a, a1)
+    assert page["records"][0]["summary"] == "a1-only"
+
+    # Root cannot see or open A1 (grandchild / other parent's child).
+    assert read_as(root)["runs"] == []
+    assert "error" in read_as(root, a1)
+
+    # A cannot open B's direct child even with a known run_id.
+    assert read_as(agent_a)["runs"] == [a1]
+    assert "error" in read_as(agent_a, b1)
+    assert read_as(agent_b, b1)["records"][0]["summary"] == "b1-only"
+
+
 def test_log_bounds_and_crash_tail(tmp_path):
     store = SubAgentLogStore(tmp_path)
     run = uuid4().hex
