@@ -111,6 +111,7 @@ class SubAgentManager:
             run_id = uuid4().hex
             child = RunController()
             child.begin_run()
+            child.on_model_streams_idle = self.reap_closed
             owner.register_child(child)
             self._active[run_id] = child
             self._parents[run_id] = parent_id

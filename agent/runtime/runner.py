@@ -1029,6 +1029,9 @@ class AgentRunner:
                 "Runner close could not confirm the model request stopped; the "
                 "session lease is kept until it closes and close is retried"
             )
+        manager = self._subagent_manager()
+        if manager is not None:
+            manager.reap_closed()
         self._close_mcp()
         self._close_completed = True
         self._runtime.close()

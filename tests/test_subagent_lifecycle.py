@@ -301,7 +301,7 @@ def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, 
         runner.close()
 
 
-def test_ainvoke_cancel_targets_owner_not_root(tmp_path):
+def test_ainvoke_cancel_targets_child_not_parent_or_siblings(tmp_path):
     import asyncio
 
     async def scenario() -> None:
@@ -310,10 +310,14 @@ def test_ainvoke_cancel_targets_owner_not_root(tmp_path):
         owner = RunController()
         owner.begin_run()
         manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+        _sibling_id, sibling = manager.admit("session-root", root)
         started = threading.Event()
         proceed = threading.Event()
+        child_holder: dict = {}
 
         def prepare(controller):
+            child_holder["controller"] = controller
+
             class Graph:
                 def stream(self, input, config, **kwargs):
                     started.set()
@@ -337,14 +341,29 @@ def test_ainvoke_cancel_targets_owner_not_root(tmp_path):
                 break
             await asyncio.sleep(0.01)
         assert started.is_set()
+        child = child_holder["controller"]
         task.cancel()
+        # Confirm cancel reached this child before releasing the graph gate.
+        cancel_deadline = asyncio.get_running_loop().time() + 3
+        while not child.cancel_requested:
+            if asyncio.get_running_loop().time() >= cancel_deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert child.cancel_requested
+        assert not owner.cancel_requested
+        assert not root.cancel_requested
+        assert not sibling.cancel_requested
+        proceed.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        proceed.set()
-        assert owner.cancel_requested
-        assert not root.cancel_requested
-        # Let the worker finish release under cancel.
-        await asyncio.sleep(0.05)
+        # Wait for release to reclaim the slot (sibling still occupies one).
+        reclaim_deadline = asyncio.get_running_loop().time() + 3
+        while manager.active_count != 1:
+            if asyncio.get_running_loop().time() >= reclaim_deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.active_count == 1
+        manager.release(_sibling_id)
         root.end_run()
 
     asyncio.run(scenario())
@@ -360,12 +379,18 @@ def test_release_holds_slot_until_streams_close(tmp_path, monkeypatch):
 
     class StuckStream:
         closed = False
+        on_closed = None
 
         def cancel(self):
             return None
 
         def wait_closed(self, timeout):
             return self.closed
+
+        def mark_closed(self):
+            self.closed = True
+            if self.on_closed is not None:
+                self.on_closed()
 
     run_id, child = manager.admit("session", root)
     stream = StuckStream()
@@ -384,8 +409,8 @@ def test_release_holds_slot_until_streams_close(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="total concurrency limit"):
         manager.admit("session", root)
 
-    stream.closed = True
-    assert manager.reap_closed() == 1
+    # Stream close lifecycle notifies the controller → automatic reap.
+    stream.mark_closed()
     assert manager.active_count == 0
     assert child not in root._children
     freed_id, _ = manager.admit("session", root)

@@ -149,6 +149,15 @@ class SubAgentRuntime(Runnable):
         self.owner_controller = owner_controller if owner_controller is not None else manager.parent
 
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
+        return self._invoke_tracked({}, input, config, **kwargs)
+
+    def _invoke_tracked(
+        self,
+        call: dict[str, Any],
+        input: dict,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> dict:
         parent = str((config or {}).get("configurable", {}).get("thread_id", ""))
         # Native task supplies only its tag explicitly. Recover the parent ID
         # here, before entering the clean execution context.
@@ -159,6 +168,8 @@ class SubAgentRuntime(Runnable):
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
         try:
             with self.manager.running(parent, self.owner_controller) as (run_id, controller):
+                # Publish immediately so ainvoke CancelledError can target this child only.
+                call["controller"] = controller
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
@@ -167,14 +178,25 @@ class SubAgentRuntime(Runnable):
 
     async def ainvoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         # Keep synchronous task completion semantics even when the caller is async.
-        operation = asyncio.create_task(asyncio.to_thread(self.invoke, input, config, **kwargs))
+        call: dict[str, Any] = {"controller": None}
+        operation = asyncio.create_task(
+            asyncio.to_thread(self._invoke_tracked, call, input, config, **kwargs),
+        )
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
-            # Cancel only this runtime's owning agent — never the shared Root manager.parent.
-            self.owner_controller.cancel()
+            # Cancel only this invocation's admitted child — never owner / Root / siblings.
+            deadline = asyncio.get_running_loop().time() + AINVOKE_CANCEL_WAIT
+            while call["controller"] is None and not operation.done():
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.01)
+            controller = call["controller"]
+            if controller is not None:
+                controller.cancel()
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
             try:
-                await asyncio.wait_for(asyncio.shield(operation), timeout=AINVOKE_CANCEL_WAIT)
+                await asyncio.wait_for(asyncio.shield(operation), timeout=remaining)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             raise

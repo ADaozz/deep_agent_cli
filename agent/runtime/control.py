@@ -64,6 +64,8 @@ class RunController:
         self._on_control_event = on_control_event
         self._children: set[RunController] = set()
         self._pending_config_check: Callable[[], bool] = lambda: False
+        # Fired when tracked model streams become idle (all closed); used to reap closing slots.
+        self.on_model_streams_idle: Callable[[], None] | None = None
 
     def register_child(self, child: RunController) -> None:
         with self._lock:
@@ -311,7 +313,9 @@ class RunController:
                 return False
             scope.model_streams.add(stream)
             self._stream_scopes[stream] = scope
-            return True
+        # Notify when the HTTP request finishes so closing slots can be reaped promptly.
+        stream.on_closed = lambda closed=stream: self._notify_model_stream_closed(closed)
+        return True
 
     def unregister_model_stream(self, stream: Any) -> None:
         with self._lock:
@@ -320,6 +324,31 @@ class RunController:
                 scope.model_streams.discard(stream)
             if not stream.closed:
                 self._unclosed_streams.add(stream)
+            elif stream in self._unclosed_streams:
+                self._unclosed_streams.discard(stream)
+        if stream.closed:
+            self._maybe_fire_streams_idle()
+
+    def _notify_model_stream_closed(self, stream: Any) -> None:
+        """Called from a stream's close lifecycle; drop it and reap if idle."""
+        with self._lock:
+            self._unclosed_streams.discard(stream)
+            scope = self._stream_scopes.get(stream)
+            if scope is not None:
+                scope.model_streams.discard(stream)
+        self._maybe_fire_streams_idle()
+
+    def _maybe_fire_streams_idle(self) -> None:
+        if self.unclosed_model_streams() != 0:
+            return
+        with self._lock:
+            # Active-scope streams that are still open also count as busy.
+            active = self._active
+            if active is not None and any(not item.closed for item in active.model_streams):
+                return
+            hook = self.on_model_streams_idle
+        if hook is not None:
+            hook()
 
     def unclosed_model_streams(self) -> int:
         """Finished-or-cancelled model streams whose HTTP request has not closed yet."""
