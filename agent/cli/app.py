@@ -102,6 +102,7 @@ from agent.cli.rendering import (
     render_queued_messages,
     render_review,
     rendered_unit_from_ansi,
+    spinner_frame,
 )
 from agent.cli.session_controller import SessionController
 from agent.cli.session_summaries import SessionSummaries
@@ -1254,7 +1255,7 @@ class CliApplication:
         active = self.state.running and self.dialogs.current is None and not self.state.status.startswith("Cancelling")
         now = monotonic()
         message = self._working_messages.current(active, now)
-        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(now * 10) % 10] + " " if self.state.running else ""
+        spinner = f"{spinner_frame(now)} " if self.state.running else ""
         width = self._width()
         counter = ""
         if self.state.subagent_count:
