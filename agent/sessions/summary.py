@@ -26,7 +26,7 @@ _TITLE_REDACTION_PARAPHRASE = re.compile(
 )
 FALLBACK_SUMMARY_CHARS = 10
 
-Secrets = Iterable[SecretRef] | Mapping[str, str] | Iterable[str]
+Secrets = Iterable[SecretRef] | Mapping[str, str]
 
 
 def redact_summary_input(text: str, secrets: Secrets = ()) -> str:

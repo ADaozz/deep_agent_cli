@@ -23,7 +23,7 @@ _SOURCE_PRIVATE_KEY = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*(?:\r?\n|(?:\\r)?\\n)"
 )
 
-Secrets = Iterable[SecretRef] | Mapping[str, str] | Iterable[str]
+Secrets = Iterable[SecretRef] | Mapping[str, str]
 
 
 def redact_diagnostic_text(text: str, secrets: Secrets = ()) -> str:

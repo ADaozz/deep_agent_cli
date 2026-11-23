@@ -82,7 +82,8 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         assert len(cards) == 1 and cards[0].name == 'start_task'
         assert cards[0].arguments['description'] == 'Only delegated instructions'
         assert cards[0].content == tool_result.content
-        assert [e.result['count'] for e in events if e.type == 'subagents_changed'] == [1, 0]
+        # admit → 1; release enters closing (still 1); streams clear → 0
+        assert [e.result['count'] for e in events if e.type == 'subagents_changed'] == [1, 1, 0]
         logs = list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
         assert len(logs) == 1
         import json

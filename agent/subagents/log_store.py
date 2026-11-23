@@ -21,9 +21,9 @@ MAX_PAGE_BYTES = 64_000
 
 
 class SubAgentLogStore:
-    def __init__(self, root: Path, secrets: tuple[SecretRef, ...] | tuple[str, ...] = ()) -> None:
+    def __init__(self, root: Path, secrets: tuple[SecretRef, ...] = ()) -> None:
         self.root = root
-        self.secrets = tuple(item for item in secrets if item)
+        self.secrets = tuple(item for item in secrets if isinstance(item, SecretRef) and item.value)
         self._lock = threading.Lock()
 
     def _directory(self, parent: str) -> Path:

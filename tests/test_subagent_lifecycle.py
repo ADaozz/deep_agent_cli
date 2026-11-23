@@ -299,3 +299,139 @@ def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, 
         assert runner.prepared.subagent_manager.active_count == 0
     finally:
         runner.close()
+
+
+def test_ainvoke_cancel_targets_owner_not_root(tmp_path):
+    import asyncio
+
+    async def scenario() -> None:
+        root = RunController()
+        root.begin_run()
+        owner = RunController()
+        owner.begin_run()
+        manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+        started = threading.Event()
+        proceed = threading.Event()
+
+        def prepare(controller):
+            class Graph:
+                def stream(self, input, config, **kwargs):
+                    started.set()
+                    assert proceed.wait(5)
+                    if controller.cancel_requested:
+                        raise RuntimeError("Cancelled by parent")
+                    yield {"messages": [AIMessage(content="should not finish")]}
+            return SimpleNamespace(graph=Graph(), owns_model_clients=False)
+
+        runtime = SubAgentRuntime(
+            manager, SubAgentLogStore(tmp_path), prepare, "fake", owner_controller=owner,
+        )
+        task = asyncio.create_task(runtime.ainvoke(
+            {"messages": [HumanMessage(content="work")]},
+            {"configurable": {"thread_id": "session-a"}},
+        ))
+        # Do not block the event loop — ainvoke needs it to schedule to_thread.
+        deadline = asyncio.get_running_loop().time() + 3
+        while not started.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert started.is_set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+        assert owner.cancel_requested
+        assert not root.cancel_requested
+        # Let the worker finish release under cancel.
+        await asyncio.sleep(0.05)
+        root.end_run()
+
+    asyncio.run(scenario())
+
+
+def test_release_holds_slot_until_streams_close(tmp_path, monkeypatch):
+    import agent.subagents.manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "STREAM_CLOSE_WAIT", 0.05)
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=1)
+
+    class StuckStream:
+        closed = False
+
+        def cancel(self):
+            return None
+
+        def wait_closed(self, timeout):
+            return self.closed
+
+    run_id, child = manager.admit("session", root)
+    stream = StuckStream()
+    assert child.register_model_stream(stream)
+
+    release_done = threading.Event()
+
+    def do_release():
+        manager.release(run_id)
+        release_done.set()
+
+    threading.Thread(target=do_release, daemon=True).start()
+    assert release_done.wait(2)
+    assert manager.active_count == 1
+    assert child in root._children
+    with pytest.raises(RuntimeError, match="total concurrency limit"):
+        manager.admit("session", root)
+
+    stream.closed = True
+    assert manager.reap_closed() == 1
+    assert manager.active_count == 0
+    assert child not in root._children
+    freed_id, _ = manager.admit("session", root)
+    manager.release(freed_id)
+    root.end_run()
+
+
+def test_background_thread_start_failure_releases_slot(tmp_path, monkeypatch):
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root, max_concurrent=4, max_total=2)
+    runtime = SubAgentRuntime(
+        manager, SubAgentLogStore(tmp_path),
+        lambda controller: SimpleNamespace(graph=SimpleNamespace(stream=lambda *a, **k: iter([]))),
+        "fake", owner_controller=root,
+    )
+
+    def boom(self):
+        raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError, match="cannot start thread"):
+        runtime.start_background("bg work", parent="session", tool_call_id="t1")
+    assert manager.active_count == 0
+    assert manager.background_count == 0
+    root.end_run()
+
+
+def test_subagent_error_messages_redact_known_secrets(tmp_path):
+    from agent.redaction import SecretRef
+
+    secret = "configured-api-key-value-xyz"
+    store = SubAgentLogStore(tmp_path, (SecretRef("llm.models.deepseek.api_key", secret),))
+    root = RunController()
+    root.begin_run()
+    manager = SubAgentManager(root)
+
+    def prepare(controller):
+        raise RuntimeError(f"upstream failed with {secret}")
+
+    runtime = SubAgentRuntime(manager, store, prepare, "fake", owner_controller=root)
+    result = runtime.invoke(
+        {"messages": [HumanMessage(content="go")]},
+        {"configurable": {"thread_id": "session"}},
+    )
+    text = result["messages"][0].content
+    assert secret not in text
+    assert "$llm.models.deepseek.api_key" in text
+    root.end_run()

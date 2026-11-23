@@ -12,6 +12,7 @@ from agent.runtime.control import RunController
 
 
 FINISHED_TASK_LIMIT = 50
+STREAM_CLOSE_WAIT = 5.0
 
 
 @dataclass(eq=False)
@@ -44,19 +45,44 @@ class SubAgentManager:
         self.max_total = max_total
         self._lock = threading.RLock()
         self._active: dict[str, RunController] = {}
+        self._closing: dict[str, RunController] = {}
         self._parents: dict[str, str] = {}
         self._owners: dict[str, RunController] = {}
-        self._retired: list[RunController] = []
         self._tasks: dict[str, BackgroundTask] = {}
 
     @property
     def active_count(self) -> int:
+        """Running plus still-closing tasks (both hold concurrency slots)."""
         with self._lock:
-            return len(self._active)
+            return len(self._active) + len(self._closing)
 
     def active_children(self, parent_id: str) -> int:
         with self._lock:
             return sum(1 for value in self._parents.values() if value == parent_id)
+
+    def _occupied(self) -> int:
+        return len(self._active) + len(self._closing)
+
+    def reap_closed(self) -> int:
+        """Finish unregistering closing tasks whose model streams have closed.
+
+        Returns how many closing slots were reclaimed.
+        """
+        with self._lock:
+            items = [(run_id, self._closing[run_id], self._owners.get(run_id, self.parent))
+                     for run_id in list(self._closing)]
+        reclaimed = 0
+        for run_id, child, owner in items:
+            if not child.wait_model_streams_closed(0.0):
+                continue
+            owner.unregister_child(child)
+            with self._lock:
+                if self._closing.pop(run_id, None) is not None:
+                    self._parents.pop(run_id, None)
+                    self._owners.pop(run_id, None)
+                    reclaimed += 1
+                    self.parent._emit("subagents_changed", {"count": self._occupied()})
+        return reclaimed
 
     def admit(self, parent_id: str, owner: RunController | None = None) -> tuple[str, RunController]:
         """Take one concurrency permit under ``parent_id``.
@@ -68,12 +94,13 @@ class SubAgentManager:
         if not isinstance(parent_id, str) or not parent_id.strip():
             raise ValueError("Subagent parent_id must be a non-empty string")
         owner = owner or self.parent
+        self.reap_closed()
         with self._lock:
             if self.parent.cancel_requested:
                 raise RuntimeError("Parent run cancelled")
             if owner.cancel_requested:
                 raise RuntimeError("Owning agent cancelled")
-            if len(self._active) >= self.max_total:
+            if self._occupied() >= self.max_total:
                 raise RuntimeError(f"Subagent total concurrency limit ({self.max_total}) reached")
             at_parent = sum(1 for value in self._parents.values() if value == parent_id)
             if at_parent >= self.max_concurrent:
@@ -88,7 +115,7 @@ class SubAgentManager:
             self._active[run_id] = child
             self._parents[run_id] = parent_id
             self._owners[run_id] = owner
-            self.parent._emit("subagents_changed", {"count": len(self._active)})
+            self.parent._emit("subagents_changed", {"count": self._occupied()})
         return run_id, child
 
     def release(self, run_id: str) -> None:
@@ -96,21 +123,31 @@ class SubAgentManager:
             child = self._active.get(run_id)
             owner = self._owners.get(run_id, self.parent)
         if child is None:
+            # Already closing or unknown — try to reap stale closing entries.
+            self.reap_closed()
             return
         child.cancel()
         child.end_run()
         with self._lock:
-            self._active.pop(run_id, None)
-            self._parents.pop(run_id, None)
-            self._owners.pop(run_id, None)
-            self._retired.append(child)
-            self.parent._emit("subagents_changed", {"count": len(self._active)})
-        # Keep the child attached until its HTTP requests confirm closure.
-        if child.wait_model_streams_closed(5.0):
+            if self._active.pop(run_id, None) is None:
+                return
+            self._closing[run_id] = child
+            self.parent._emit("subagents_changed", {"count": self._occupied()})
+        # Slot stays occupied until streams close (or reap later).
+        if child.wait_model_streams_closed(STREAM_CLOSE_WAIT):
             owner.unregister_child(child)
             with self._lock:
-                if child in self._retired:
-                    self._retired.remove(child)
+                if self._closing.pop(run_id, None) is not None:
+                    self._parents.pop(run_id, None)
+                    self._owners.pop(run_id, None)
+                    self.parent._emit("subagents_changed", {"count": self._occupied()})
+        else:
+            self.reap_closed()
+
+    def drop_task(self, run_id: str) -> None:
+        """Remove a tracked background task record without touching controllers."""
+        with self._lock:
+            self._tasks.pop(run_id, None)
 
     @contextmanager
     def running(self, parent_id: str, owner: RunController | None = None):

@@ -146,24 +146,21 @@ def _value_to_placeholder(secrets: Iterable[SecretRef] | Mapping[str, str]) -> d
 
 def replace_known_secrets(
     text: str,
-    secrets: Iterable[SecretRef] | Mapping[str, str] | Iterable[str] = (),
+    secrets: Iterable[SecretRef] | Mapping[str, str] = (),
 ) -> str:
     """Replace known credential values with named placeholders.
 
     ``secrets`` may be ``SecretRef`` items or a ``value → name`` mapping (raw names).
-    Bare string iterables are ignored (no invented names); pass ``SecretRef``s.
     """
     if not secrets:
         return text
     if isinstance(secrets, Mapping):
         mapping = _value_to_placeholder(secrets)
     else:
-        sequence = list(secrets)
+        sequence = [item for item in secrets if isinstance(item, SecretRef)]
         if not sequence:
             return text
-        if isinstance(sequence[0], str):
-            return text
-        mapping = _value_to_placeholder(sequence)  # type: ignore[arg-type]
+        mapping = _value_to_placeholder(sequence)
     for value in sorted(mapping, key=len, reverse=True):
         text = text.replace(value, mapping[value])
     return text

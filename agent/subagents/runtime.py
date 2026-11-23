@@ -30,6 +30,7 @@ from agent.subagents.manager import BackgroundTask, SubAgentManager
 SUMMARY_LIMIT = 1000
 COMMAND_LIMIT = 300
 ERROR_LIMIT = 240
+AINVOKE_CANCEL_WAIT = 5.0
 
 
 def _brief(value: str, limit: int) -> str:
@@ -161,7 +162,8 @@ class SubAgentRuntime(Runnable):
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
-            return {"messages": [AIMessage(content=f"Subagent failed: {str(exc)[:1000]}")]}
+            reason = _error_reason(exc, self.store._redact)
+            return {"messages": [AIMessage(content=f"Subagent failed: {reason}")]}
 
     async def ainvoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         # Keep synchronous task completion semantics even when the caller is async.
@@ -169,8 +171,12 @@ class SubAgentRuntime(Runnable):
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
-            self.manager.parent.cancel()
-            await operation
+            # Cancel only this runtime's owning agent — never the shared Root manager.parent.
+            self.owner_controller.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(operation), timeout=AINVOKE_CANCEL_WAIT)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
             raise
 
     def start_background(self, description: str, parent: str, tool_call_id: str) -> BackgroundTask:
@@ -194,7 +200,7 @@ class SubAgentRuntime(Runnable):
                 content = str(output["messages"][-1].content)
             except BaseException as exc:  # noqa: BLE001
                 state = "cancelled" if controller.cancel_requested else "failed"
-                content = f"Subagent {state} (run_id={run_id}): {str(exc)[:1000]}"
+                content = f"Subagent {state} (run_id={run_id}): {_error_reason(exc, self.store._redact)}"
             status = ("cancelled" if content.startswith("Subagent cancelled")
                       else "failed" if content.startswith("Subagent failed") else "completed")
             try:
@@ -211,7 +217,13 @@ class SubAgentRuntime(Runnable):
 
         task.thread = threading.Thread(target=work, name=f"subagent-{run_id[:8]}", daemon=True)
         self.manager.track(task)
-        task.thread.start()
+        try:
+            task.thread.start()
+        except BaseException:
+            self.manager.release(run_id)
+            self.manager.finish(task, "failed", "Failed to start background thread")
+            self.manager.drop_task(run_id)
+            raise
         return task
 
     def _run(self, input: dict, parent: str, run_id: str, controller: Any, scope=None) -> dict:
@@ -273,7 +285,7 @@ class SubAgentRuntime(Runnable):
             status = "cancelled" if controller.cancel_requested else "failed"
             summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
             write("error", status=status, reason=summary)
-            return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {str(exc)[:1000]}")]}
+            return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {summary}")]}
         finally:
             if prepared is not None and getattr(prepared, "owns_model_clients", False):
                 from agent.models.stream_lifecycle import close_model_http_clients

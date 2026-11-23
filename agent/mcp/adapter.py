@@ -47,7 +47,7 @@ class LoadedServer:
         self.warnings = warnings
 
 
-def redact(text: str, secrets: list[SecretRef] | list[str]) -> str:
+def redact(text: str, secrets: list[SecretRef]) -> str:
     return replace_known_secrets(text, secrets)
 
 
@@ -310,7 +310,7 @@ def _bridge_tool(
     )
 
 
-def _redact_value(value: Any, secrets: list[SecretRef] | list[str]) -> Any:
+def _redact_value(value: Any, secrets: list[SecretRef]) -> Any:
     if isinstance(value, str):
         return redact(value, secrets)
     if isinstance(value, list):
