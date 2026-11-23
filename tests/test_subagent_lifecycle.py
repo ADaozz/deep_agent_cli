@@ -369,6 +369,70 @@ def test_ainvoke_cancel_targets_child_not_parent_or_siblings(tmp_path):
     asyncio.run(scenario())
 
 
+def test_ainvoke_cancel_before_admit_stops_child(tmp_path):
+    """Cancel while blocked before admit must still cancel the eventual child."""
+    import asyncio
+
+    async def scenario() -> None:
+        root = RunController()
+        root.begin_run()
+        owner = RunController()
+        owner.begin_run()
+        manager = SubAgentManager(root, max_concurrent=4, max_total=10)
+        entered_admit = threading.Event()
+        release_admit = threading.Event()
+        prepared = threading.Event()
+        child_holder: dict = {}
+        original_admit = manager.admit
+
+        def gated_admit(*args, **kwargs):
+            entered_admit.set()
+            assert release_admit.wait(5)
+            run_id, child = original_admit(*args, **kwargs)
+            child_holder["controller"] = child
+            return run_id, child
+
+        manager.admit = gated_admit  # type: ignore[method-assign]
+
+        def prepare(controller):
+            prepared.set()
+            raise AssertionError("prepare must not run after cancel-before-admit")
+
+        runtime = SubAgentRuntime(
+            manager, SubAgentLogStore(tmp_path), prepare, "fake", owner_controller=owner,
+        )
+        task = asyncio.create_task(runtime.ainvoke(
+            {"messages": [HumanMessage(content="work")]},
+            {"configurable": {"thread_id": "session-a"}},
+        ))
+        deadline = asyncio.get_running_loop().time() + 3
+        while not entered_admit.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert entered_admit.is_set()
+        task.cancel()
+        # Let ainvoke record the cancel Event, then allow admit to finish.
+        await asyncio.sleep(0.05)
+        release_admit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        child = child_holder.get("controller")
+        assert child is not None and child.cancel_requested
+        assert not prepared.is_set()
+        assert not owner.cancel_requested
+        assert not root.cancel_requested
+        reclaim_deadline = asyncio.get_running_loop().time() + 3
+        while manager.active_count != 0:
+            if asyncio.get_running_loop().time() >= reclaim_deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert manager.active_count == 0
+        root.end_run()
+
+    asyncio.run(scenario())
+
+
 def test_release_holds_slot_until_streams_close(tmp_path, monkeypatch):
     import agent.subagents.manager as manager_mod
 

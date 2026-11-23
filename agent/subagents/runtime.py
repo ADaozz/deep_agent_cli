@@ -149,7 +149,7 @@ class SubAgentRuntime(Runnable):
         self.owner_controller = owner_controller if owner_controller is not None else manager.parent
 
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
-        return self._invoke_tracked({}, input, config, **kwargs)
+        return self._invoke_tracked({"cancel": threading.Event()}, input, config, **kwargs)
 
     def _invoke_tracked(
         self,
@@ -166,10 +166,14 @@ class SubAgentRuntime(Runnable):
             parent = str(get_config().get("configurable", {}).get("thread_id", ""))
         if not parent:
             return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
+        cancel = call.get("cancel")
         try:
             with self.manager.running(parent, self.owner_controller) as (run_id, controller):
                 # Publish immediately so ainvoke CancelledError can target this child only.
                 call["controller"] = controller
+                # Persist cancel-before-admit: flag may already be set while we were blocked.
+                if isinstance(cancel, threading.Event) and cancel.is_set():
+                    controller.cancel()
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(self._run, input, parent, run_id, controller, observation_scope.get())
         except Exception as exc:
@@ -178,13 +182,17 @@ class SubAgentRuntime(Runnable):
 
     async def ainvoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         # Keep synchronous task completion semantics even when the caller is async.
-        call: dict[str, Any] = {"controller": None}
+        call: dict[str, Any] = {"controller": None, "cancel": threading.Event()}
         operation = asyncio.create_task(
             asyncio.to_thread(self._invoke_tracked, call, input, config, **kwargs),
         )
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
+            # Record cancel immediately so a late admit still sees it.
+            cancel = call["cancel"]
+            if isinstance(cancel, threading.Event):
+                cancel.set()
             # Cancel only this invocation's admitted child — never owner / Root / siblings.
             deadline = asyncio.get_running_loop().time() + AINVOKE_CANCEL_WAIT
             while call["controller"] is None and not operation.done():
@@ -272,6 +280,9 @@ class SubAgentRuntime(Runnable):
         prepared = None
         status, summary, summary_truncated = "failed", "", False
         try:
+            # Bail before prepare so a cancel-before-admit does not build model clients.
+            if controller.cancel_requested:
+                raise RuntimeError("Cancelled by parent")
             prepared = self.prepare(controller)
             if controller.cancel_requested:
                 raise RuntimeError("Cancelled by parent")
