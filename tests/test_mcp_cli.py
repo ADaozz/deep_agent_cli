@@ -359,7 +359,7 @@ def test_mcp_argument_previews_have_bounded_expansion_without_credential_guessin
                          tools_expanded=expanded)
         rendered = render_transcript(state, 80)
         assert "fake-private-value" in rendered
-        assert "[redacted]" not in rendered
+        assert "[REDACTED]" not in rendered
     assert args["auth"]["api_key"] == "fake-private-value"
     assert len(args["payload"]) == 100000
 

@@ -153,7 +153,7 @@ class ScriptedSSEServer:
         expected = "/v1/chat/completions" if self.api == "chat_completions" else "/v1/responses"
         connection = Connection(handler.path, body, time.monotonic())
         # Optional non-streaming title requests do not consume scripted coding turns.
-        is_summary = "生成一个简洁的中文会话标题" in json.dumps(body, ensure_ascii=False)
+        is_summary = "Generate a concise Chinese session title" in json.dumps(body, ensure_ascii=False)
         if body.get("stream") is not True and is_summary and handler.path == expected:
             with self._lock:
                 self.summary_connections.append(connection)

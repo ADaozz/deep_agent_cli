@@ -9,13 +9,17 @@ from typing import Any
 _EXECUTE_NETWORK: ContextVar[bool] = ContextVar("deep_agent_execute_network", default=False)
 
 
+# execute 的 network 参数由 pydantic 解析；这里与它保持一致，无法识别的值一律按有网处理。
+_NETWORK_OFF = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
 def network_requested(args: dict[str, Any] | None) -> bool:
     """工具调用声明了 NETWORK 能力时为 True。"""
     if not args:
         return False
     value = args.get("network", False)
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        return value.lower() not in _NETWORK_OFF
     return bool(value)
 
 

@@ -22,7 +22,7 @@
 - `RuntimeConfiguration` 管理当前配置及待切换请求；请求不立即改变当前值。Runner 在操作锁和模型安全边界内协调图重建、存储及发布，失败时保留既有执行语义。
 - `GraphExecution` 将图流、框架中断及取消结果转换为运行结果；Runner 负责资源、会话所有权及收尾。
 - 模型传输通过 `ImageReader` 读取附件，不依赖附件文件存储实现。
-- 会话摘要的首轮资格、脱敏和标题校验由 `sessions.summary` 管理；`models.session_summary` 发起独立标题请求，CLI 控制后台任务和显示缓存。摘要以真实 thread_id 进行一次性写入；模型标题失败时回退为提问首行截断（10 字），再不行才显示 thread_id。
+- 会话摘要的首轮资格、标题校验由 `sessions.summary` 管理；已知密钥命名精确替换复用 `agent.redaction`（路径与公开网址保留）。`models.session_summary` 发起独立标题请求，CLI 控制后台任务和显示缓存。摘要以真实 thread_id 进行一次性写入；模型标题失败时回退为提问首行截断（10 字），再不行才显示 thread_id。
 - `SessionRuntime` 通过 `SessionRepository` 访问会话和租约，通过 `ModelCatalog` 决定恢复方案。快照读取不更改活动会话租约。
 - `WorkspaceCompositeBackend` 先准备文件路由，再调用 `ManagedExecutor.reconfigure` 停止旧 Worker 并发布执行配置；失败时不发布新路由。
 - CLI 功能控制器接收所需服务、状态和回调，不保存 `CliApplication`。`DialogState`、`InputDrafts`、`RunPresentation` 保存共享展示状态，导航状态由 `TranscriptNavigation` 管理。跨功能调用保留显式依赖，延迟绑定处理界面组装顺序。
@@ -43,6 +43,7 @@ from agent.bootstrap.config import Settings
 | 配置加载、启动初始化、图装配 | `agent.bootstrap.config`、`agent.bootstrap.setup`、`agent.bootstrap.factory` |
 | 模型配置、目录查找、协议客户端 | `agent.models.profile`、`agent.models.catalog`、`agent.models.client` |
 | 运行入口、事件契约、待生效配置 | `agent.runtime.runner`、`agent.runtime.contracts`、`agent.runtime.configuration` |
+| 工具名称与基础分类 | `agent.tools.catalog` |
 | 审批、取消、队列与计时 | `agent.runtime.permissions`、`agent.runtime.cancellation`、`agent.runtime.control`、`agent.runtime.metrics` |
 | 会话元数据、存储接口、SQLite 实现 | `agent.sessions.contracts`、`agent.sessions.ports`、`agent.sessions.store` |
 | 会话生命周期、快照读取、租约 | `agent.sessions.lifecycle`、`agent.sessions.reader`、`agent.sessions.locks` |

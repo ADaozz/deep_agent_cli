@@ -32,7 +32,7 @@
 
 ## SubAgent 契约
 
-仅当问题能分解为多个独立、互不干扰的子问题时才应派生；条件写在 `general-purpose` 描述中。
+仅当问题能分解为多个独立、互不干扰的子问题时才应派生；条件写在 `start_task` 的工具描述中。
 原生同步 `start_task` 等待结果，每次运行使用独立消息、checkpoint 和取消作用域，默认并发上限 2；
 没有跨轮后台 SubAgent。共享工作区不自动隔离写入，依赖或冲突步骤由主 Agent 顺序处理。
 子任务固定使用已验证沙箱的 `allow`，不装载 MCP、人工输入或递归委派工具。
@@ -76,7 +76,7 @@
 |---|---|---|---|
 | 普通编辑 | 首次清空，1 秒内再次退出；满 1 秒则重新清空 | 关闭补全或斜杠行；上滚时先回底部 | `test_ctrl_c_exit_window_is_one_clock`，`test_ctrl_c_at_window_boundary_clears_again`，`test_escape_prefers_slash_line_over_scroll`，`tests/test_cli.py` 的补全与窗口边界，`tests/test_tui_pty.py` 的 PTY 窗口 |
 | Agent 运行中 | 首次清空且保持运行状态，第二次退出并取消 | 请求取消当前 Run，重复按键不重复发送 | `test_running_ctrl_c_then_exit_cancels_once_per_exit`，`test_repeated_escape_sends_one_cancel_per_run` |
-| 审批或选择 | 关闭界面且不武装退出窗口；不自动批准 | 先关 diff，再关界面；选择器按层返回 | `test_ctrl_c_dismisses_interaction_without_arming_exit`，`test_escape_closes_review_before_approval` |
+| 审批或选择 | 关闭界面且不武装退出窗口；不自动批准 | 直接关闭界面；文件变更展开留在原卡片，不拦截 Esc；选择器按层返回 | `test_ctrl_c_dismisses_interaction_without_arming_exit`，`test_escape_cancels_approval_without_a_review_page` |
 | Session 等待 | 与普通编辑相同，第一次不取消等待 | 取消等待 | `test_session_wait_ctrl_c_uses_the_shared_exit_window`，`test_cli_esc_cancels_wait_and_returns_to_picker` |
 | MCP 后台 | 与普通编辑相同 | 只提示，除非 Run 也在运行 | `test_escape_during_mcp_background_does_not_cancel_a_run` |
 | 正在退出 | 重复退出被忽略 | 运行标记仍在时会再请求一次取消 | `test_repeated_exit_is_ignored`，`test_escape_after_exit_requests_cancel_again_while_running` |

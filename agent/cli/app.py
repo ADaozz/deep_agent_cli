@@ -94,18 +94,16 @@ from agent.cli.interactions import InteractionController
 from agent.cli.mcp_ui import finish_mcp_interaction
 from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.skills import SkillDraft
-from agent.cli.previews import is_mutation_tool, normalize_file_mutation
 from agent.cli.rendering import (
     TranscriptDocument,
     TranscriptRenderer,
     render_interaction,
     render_queued_messages,
-    render_review,
-    rendered_unit_from_ansi,
+    spinner_frame,
 )
 from agent.cli.session_controller import SessionController
 from agent.cli.session_summaries import SessionSummaries
-from agent.cli.state import CliState, ToolBlock
+from agent.cli.state import CliState
 from agent.cli.working_messages import WorkingMessageRotation, load_working_messages
 from agent.bootstrap.config import require_keybindings_outside_workspace
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE
@@ -179,7 +177,6 @@ class CliApplication:
         self.keymap = Keymap.load(keymap_path)
         self.dialogs.current: InteractionController | None = None
         self.dialogs.deferred: InteractionController | None = None
-        self.dialogs.reviewing = False
         self._io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="deep-agent-io")
         self.run_view.loop: asyncio.AbstractEventLoop | None = None
         self.run_view.task: asyncio.Task[None] | None = None
@@ -221,6 +218,7 @@ class CliApplication:
             protected.append(sandbox.protected_config_dir)
         self.companion = Companion(
             workspace=self._workspace(), config_dir=config_dir or default_config_dir(),
+            api_key=runner.prepared.spec.deepseek_api_key,
             protected=protected, secrets=runner.summary_secrets(), profile=self._companion_profile,
             config=runner.settings.companion if runner.settings is not None else None,
             session=lambda: self.runner.thread_id, geometry=self._companion_viewport,
@@ -236,7 +234,7 @@ class CliApplication:
         self.slash_completer = SlashCompleter(
             self.commands,
             model_profiles=self.runner.list_models,
-            permission_modes=lambda: ["ask", "allow"] if self.access_selection._allow_available() else ["ask"],
+            permission_modes=lambda: ["ask"] + (["auto"] if self.runner.auto_available() else []) + (["allow"] if self.access_selection._allow_available() else []),
             sandbox_modes=lambda: ["restricted", "full-access"],
         )
         self.buffer = Buffer(
@@ -868,7 +866,8 @@ class CliApplication:
             ("Ctrl+P / Alt+P", "Select the next or previous model"),
             ("Alt+Up", "Restore queued input"),
             ("Ctrl+O", "Expand tool output"),
-            ("Ctrl+R", "Review file changes"),
+            ("Ctrl+A", "Expand SubAgent results"),
+            ("Ctrl+R", "Expand file changes"),
             ("F2", "Reopen a pending interaction"),
             ("Ctrl+T", "Toggle thinking"),
             ("Ctrl+B", "Toggle long messages"),
@@ -996,7 +995,6 @@ class CliApplication:
         self.transcript.clear_transcript_selection()
         self.dialogs.current = None
         self.dialogs.deferred = None
-        self.dialogs.reviewing = False
         self.transcript.jump_message_id = None
         self.transcript.transcript_anchor = None
         self._renderer.clear()
@@ -1039,12 +1037,11 @@ class CliApplication:
             slash_line=text.startswith("/") and "\n" not in text,
             transcript_away=self.transcript.transcript_away_from_bottom(),
             session_waiting=self.sessions.waiting,
-            reviewing=self.dialogs.reviewing,
             compacting=self.run_view.compacting,
             running=self.state.running,
             cancel_sent=self.run_view.cancel_sent,
             mcp_busy=self.mcp_controller.busy,
-            background_running=bool(self.state.subagent_count),
+            background_running=self.runner.background_task_count() > 0,
             buffer_empty=not text,
             exiting=self._exiting,
         )
@@ -1073,9 +1070,6 @@ class CliApplication:
             return
         if action is InputAction.CANCEL_SESSION_WAIT:
             self.sessions.cancel_wait()
-            return
-        if action is InputAction.CLOSE_REVIEW:
-            self._close_review()
             return
         if action is InputAction.EXIT_CUSTOM_ENTRY:
             assert self.dialogs.current is not None
@@ -1189,11 +1183,7 @@ class CliApplication:
             self.set_status("Selection copied to clipboard")
 
     def _transcript_document(self) -> TranscriptDocument:
-        if self.dialogs.reviewing:
-            unit = rendered_unit_from_ansi(render_review(self._review_calls(), self._width()))
-            document = TranscriptDocument((unit,), (0,), unit.line_count)
-        else:
-            document = self._renderer.render_document(self.state, self._width())
+        document = self._renderer.render_document(self.state, self._width())
         self.transcript.transcript_line_count = document.line_count
         return document
 
@@ -1252,7 +1242,7 @@ class CliApplication:
         active = self.state.running and self.dialogs.current is None and not self.state.status.startswith("Cancelling")
         now = monotonic()
         message = self._working_messages.current(active, now)
-        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(now * 10) % 10] + " " if self.state.running else ""
+        spinner = f"{spinner_frame(now)} " if self.state.running else ""
         width = self._width()
         counter = ""
         if self.state.subagent_count:
@@ -1384,53 +1374,10 @@ class CliApplication:
         _announce_published_switch(self)
 
 
-    def _review_calls(self) -> list[tuple[str, dict[str, Any]]]:
-        if self.dialogs.current is not None and self.dialogs.current.kind == "approval":
-            found = [
-                (str(call.get("name") or "tool"), call.get("args") if isinstance(call.get("args"), dict) else {})
-                for call in self.dialogs.current.calls
-                if is_mutation_tool(str(call.get("name") or ""))
-            ]
-            if found:
-                return found
-        for index in range(len(self.state.blocks) - 1, -1, -1):
-            block = self.state.blocks[index]
-            if isinstance(block, ToolBlock) and is_mutation_tool(block.name):
-                mutation = normalize_file_mutation(block)
-                if mutation is not None and mutation.operation in {"create", "modify"}:
-                    first = index
-                    while first > 0:
-                        prior = self.state.blocks[first - 1]
-                        prior_mutation = normalize_file_mutation(prior) if isinstance(prior, ToolBlock) else None
-                        if prior_mutation is None or prior_mutation.operation != mutation.operation:
-                            break
-                        if mutation.operation == "modify" and prior_mutation.path != mutation.path:
-                            break
-                        first -= 1
-                    return [
-                        (item.name, item.arguments)
-                        for item in self.state.blocks[first:index + 1]
-                        if isinstance(item, ToolBlock)
-                    ]
-                return [(block.name, block.arguments)]
-        return []
-
-    def _toggle_review(self) -> None:
-        if self.dialogs.reviewing:
-            self._close_review()
-            return
-        if not self._review_calls():
-            self.set_status("No pending review")
-            return
-        self.dialogs.reviewing = True
-        self.transcript.transcript_anchor = 0
-        self.set_status("Reviewing diff · Esc or Ctrl+R to close", transient=False)
-
-    def _close_review(self) -> None:
-        self.dialogs.reviewing = False
-        self.transcript.jump_message_id = None
-        self.transcript.transcript_anchor = None
-        self.set_status("Waiting for input" if self.dialogs.current is not None else "Ready", transient=False)
+    def _toggle_file_changes(self) -> None:
+        """Expand or collapse file diffs in the existing cards. Ctrl+O uses the same body."""
+        self.state.diffs_expanded = not self.state.diffs_expanded
+        self.set_status(f"File changes: {'expanded' if self.state.diffs_expanded else 'collapsed'}")
 
 
 def default_config_dir() -> Path:

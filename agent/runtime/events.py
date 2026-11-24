@@ -22,7 +22,8 @@ from agent.runtime.contracts import (
 )
 from agent.models.stream_lifecycle import ModelStreamCancelled
 from agent.sessions.transcript import tool_message_is_error
-from agent.models.messages import visible_text
+from agent.models.messages import final_answer, message_text
+from agent.runtime.metrics import normalize_usage
 
 
 def interrupt_payloads(interrupts: Any) -> list[dict[str, Any]]:
@@ -47,6 +48,7 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
         if isinstance(value, dict):
             for action in value.get("action_requests", []) or []:
                 requested.append({
+                    "tool_call_id": action.get("tool_call_id"),
                     "name": action.get("name"),
                     "args": action.get("args", {}),
                     "description": action.get("description", ""),
@@ -68,7 +70,7 @@ def resolve_pending_tool_calls(interrupts: Any, graph: Any, config: dict[str, An
         name = str(action["name"])
         ids = tool_call_ids.get(name, [])
         pending.append({
-            "toolCallId": ids.pop(0) if ids else "",
+            "toolCallId": action["tool_call_id"] or (ids.pop(0) if ids else ""),
             "name": name,
             "args": action["args"],
         })
@@ -139,27 +141,7 @@ def _last_message_id(values: dict[str, Any]) -> str | None:
 
 def _final_output(graph: Any, config: dict[str, Any]) -> str:
     state = graph.get_state(config)
-    messages = state.values.get("messages", [])
-    for message in reversed(messages):
-        if isinstance(message, AIMessage) and not message.tool_calls:
-            return visible_text(message) or _message_text(message)
-    return ""
-
-
-def _message_text(message: Any) -> str:
-    text = getattr(message, "text", None)
-    if isinstance(text, str) and text:
-        return text
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    parts: list[str] = []
-    for block in content if isinstance(content, list) else []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
-        elif isinstance(block, str):
-            parts.append(block)
-    return "".join(parts)
+    return final_answer(state.values.get("messages", []))
 
 
 def _messages_in_update(value: Any) -> list[BaseMessage]:
@@ -178,16 +160,6 @@ def _messages_in_update(value: Any) -> list[BaseMessage]:
     return found
 
 
-_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
-
-
-def _usage_metadata_dict(message: BaseMessage) -> dict[str, int]:
-    usage = getattr(message, "usage_metadata", None)
-    if not isinstance(usage, dict):
-        return {}
-    return {key: int(usage[key]) for key in _USAGE_KEYS if type(usage.get(key)) is int and usage[key] >= 0}
-
-
 def _usage_from_messages(messages: Any, *, model_id: str | None = None) -> dict[str, int]:
     """Most recent reported usage, which is the size of the context the model saw."""
     for message in reversed(list(messages or [])):
@@ -196,7 +168,7 @@ def _usage_from_messages(messages: Any, *, model_id: str | None = None) -> dict[
                 return {}
             if model_id is not None and message.response_metadata.get("deep_agent_model_id") != model_id:
                 return {}
-            usage = _usage_metadata_dict(message)
+            usage = normalize_usage(getattr(message, "usage_metadata", None))
             if model_id is None or "input_tokens" in usage:
                 return usage
     return {}
@@ -299,7 +271,7 @@ def update_tool_events(chunk: Any, seen: set[str]) -> tuple[list[RunEvent], bool
     for message in _messages_in_update(chunk):
         if isinstance(message, AIMessage):
             message_id = str(getattr(message, "id", "") or "")
-            usage = _usage_metadata_dict(message)
+            usage = normalize_usage(getattr(message, "usage_metadata", None))
             if "input_tokens" in usage:
                 saw_input_usage = True
                 events.append(RunEvent(type="usage", result=usage))
@@ -317,7 +289,7 @@ def update_tool_events(chunk: Any, seen: set[str]) -> tuple[list[RunEvent], bool
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                 ))
         elif isinstance(message, ToolMessage):
-            content = _message_text(message)
+            content = message_text(message)
             events.append(RunEvent(
                 type="tool_completed",
                 tool_call_id=str(getattr(message, "tool_call_id", "") or ""),

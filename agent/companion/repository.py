@@ -7,7 +7,8 @@ import stat
 from time import monotonic
 
 from agent.companion.config import SOURCE_READ_MAX_LINES
-from agent.companion.redaction import redact_source_text, source_contains_private_key
+from agent.companion.redaction import redact_diagnostic_text, source_contains_private_key
+from agent.redaction import secret_values
 
 SOURCE = {
     ".py",
@@ -73,6 +74,7 @@ def _mount(fd):
 class Repository:
     def __init__(self, root, protected=(), secrets=()):
         self.secrets = tuple(s for s in secrets if s)
+        self._secret_values = secret_values(self.secrets)
         self.root = Path(root).resolve()
         self.protected = tuple(Path(path).resolve() for path in protected)
 
@@ -88,7 +90,7 @@ class Repository:
             or p.startswith(".")
             or p in SKIP
             or _private_name(p)
-            or any(secret in p for secret in self.secrets)
+            or any(secret in p for secret in self._secret_values)
             or not p.isprintable()
             for p in parts
         ):
@@ -143,10 +145,10 @@ class Repository:
                 raise ValueError("unsupported content")
             text = data.decode("utf-8")
             if source_contains_private_key(text) or any(
-                "\n" in secret and secret in text for secret in self.secrets
+                "\n" in secret and secret in text for secret in self._secret_values
             ):
                 raise ValueError("private key material")
-            lines = redact_source_text(text, self.secrets).splitlines()
+            lines = redact_diagnostic_text(text, self.secrets).splitlines()
             if budget:
                 budget.check()
             return lines

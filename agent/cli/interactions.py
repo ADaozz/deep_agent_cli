@@ -6,42 +6,39 @@ import re
 from typing import Any
 
 from rich.console import Group
-from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
+from agent.cli.highlighting import code_renderer
+from agent.redaction import SecretRef, replace_known_secrets, sanitize_display_text
+from agent.tools.catalog import FILE_MUTATION_TOOLS, WEB_TOOLS
 from agent.tools.human_interaction import ensure_other_option
 
+_Secrets = tuple[SecretRef, ...] | tuple[str, ...]
 
-def _approval_summary(value: Any, kind: str = "command") -> str:
+
+def _approval_summary(
+    value: Any,
+    kind: str = "command",
+    *,
+    secrets: _Secrets = (),
+) -> str:
+    del kind  # Kind remains for call-site clarity; display no longer guesses credentials.
     command = str(value or "<not supplied>")
-    # Do not add credential literals to the approval card. Full details remain
-    # in the existing tool block; arbitrary JSON arguments are never rendered here.
-    if re.search(r"(?i)(api[_-]?key|authorization|bearer\s|password|secret|token\s*[=:]|--token\b|\bsk-[\w.-]+)", command):
-        return f"[redacted: {kind} may contain credentials]"
-    command = " ".join("".join(c if c.isprintable() else " " for c in command).split())
+    command = replace_known_secrets(command, secrets)
+    command = " ".join(sanitize_display_text(command, keep_newlines=False).split())
     return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
 
 
-def _mcp_approval_summary(text: str) -> str:
-    text = mcp_display_text(text)
-    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+def _mcp_approval_summary(text: str, *, secrets: _Secrets = ()) -> str:
+    text = replace_known_secrets(mcp_display_text(text), secrets)
+    text = " ".join(sanitize_display_text(text, keep_newlines=False).split())
     return text if len(text) <= 180 else text[:180] + "…"
-
-
-_TERMINAL_ESCAPE = re.compile(
-    r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)"
-    r"|\x1b[P^_].*?(?:\x1b\\|$)"
-    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|\x1b[@-_]",
-    re.DOTALL,
-)
 
 
 def mcp_display_text(value: str) -> str:
     """Render untrusted MCP text without terminal control sequences."""
-    value = _TERMINAL_ESCAPE.sub("", value)
-    value = "".join(c for c in value if c.isprintable() or c in "\n\r\t")
-    return value
+    return sanitize_display_text(value, keep_newlines=True)
 
 
 def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
@@ -172,7 +169,12 @@ class InteractionController:
         )
 
     @classmethod
-    def approval(cls, calls: list[dict[str, Any]]) -> "InteractionController":
+    def approval(
+        cls,
+        calls: list[dict[str, Any]],
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> "InteractionController":
         from agent.execution.network import network_requested
 
         details: list[str] = []
@@ -186,20 +188,26 @@ class InteractionController:
                     details.append("Network: ON — allows access to host network (internet, localhost, LAN)")
                 else:
                     details.append("Network: OFF" + (" (default)" if "network" not in args else ""))
-                details.append(f"Command: {_approval_summary(args.get('command'))}")
-            elif name in {"write", "edit", "delete"}:
+                details.append(f"Command: {_approval_summary(args.get('command'), secrets=secrets)}")
+            elif name in FILE_MUTATION_TOOLS:
                 target = args.get("file_path")
-                details.append(f"Target: {_approval_summary(target, kind='target')}")
-            elif name in {"web_search", "web_fetch"}:
+                details.append(f"Target: {_approval_summary(target, kind='target', secrets=secrets)}")
+            elif name in WEB_TOOLS:
                 details.append("Network: request to DeepSeek API")
                 if name == "web_search":
-                    details.append(f"Query: {_approval_summary(args.get('query'))}")
+                    details.append(f"Query: {_approval_summary(args.get('query'), secrets=secrets)}")
                     if args.get("ori_question"):
-                        details.append(f"Original question: {_approval_summary(args['ori_question'])}")
+                        details.append(
+                            f"Original question: {_approval_summary(args['ori_question'], secrets=secrets)}"
+                        )
                     if args.get("localization"):
-                        details.append(f"Localization: {_approval_summary(args['localization'])}")
+                        details.append(
+                            f"Localization: {_approval_summary(args['localization'], secrets=secrets)}"
+                        )
                 else:
-                    details.append(f"URL: {_approval_summary(args.get('url'), kind='target')}")
+                    details.append(
+                        f"URL: {_approval_summary(args.get('url'), kind='target', secrets=secrets)}"
+                    )
             elif name == "mcp_add":
                 transport = str(args.get("transport") or "")
                 details.append(f"Transport: {transport or '<not supplied>'}")
@@ -210,16 +218,21 @@ class InteractionController:
                     rendered = " ".join([command, *[str(item) for item in argv]]).strip()
                     details.append(
                         "Host command (runs outside the sandbox): "
-                        + _mcp_approval_summary(rendered or "<not supplied>")
+                        + _mcp_approval_summary(rendered or "<not supplied>", secrets=secrets)
                     )
                 else:
-                    details.append(f"URL: {_mcp_approval_summary(str(args.get('url') or ''))}")
+                    details.append(
+                        f"URL: {_mcp_approval_summary(str(args.get('url') or ''), secrets=secrets)}"
+                    )
                 auth = str(args.get("auth_type") or "none")
                 token_env = str(args.get("token_env") or "")
                 details.append(f"Auth: {auth}" + (f" via environment variable {token_env}" if auth == "bearer" and token_env else ""))
                 details.append("Saves on the host. Reject makes no change.")
             elif name == "mcp_remove":
-                details.append(f"Remove host MCP server: {_mcp_approval_summary(str(args.get('name') or '<not supplied>'))}")
+                details.append(
+                    "Remove host MCP server: "
+                    + _mcp_approval_summary(str(args.get("name") or "<not supplied>"), secrets=secrets)
+                )
                 details.append("Reject makes no change.")
             elif name.startswith("mcp__"):
                 details.append("Execution: Host (outside sandbox)")
@@ -349,7 +362,10 @@ class InteractionController:
         if self.reason:
             parts.append(Text(self.reason, style="dim"))
         if self.question:
-            parts.append(Text(self.question) if self.kind in {"approval", "mcp_confirm"} else Markdown(self.question))
+            parts.append(
+                Text(self.question) if self.kind in {"approval", "mcp_confirm"}
+                else code_renderer.markdown(self.question)
+            )
         if self.recommendation:
             value = self.recommendation.get("value") or ""
             why = self.recommendation.get("reason") or ""

@@ -19,14 +19,14 @@ OpenAI 兼容接口 · Bubblewrap
 
 在项目目录运行 `deep-agent` 进入交互式终端，用 `deep-agent resume` 恢复已有会话。要在其他 Python 程序里复用同一套运行核心，使用 [Python API](docs/library.md)。
 
-> 当前版本 **v0.3.0**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
+> 当前版本 **v0.4.0**，处于早期开发阶段。稳定版前，配置、会话存储格式和 Python API 可能出现不兼容变更。
 
 ## 能做什么
 
-- **查代码、改文件** — 浏览、读取、正则搜索、编辑和删除；`Ctrl+R` 审阅完整改动，`F2` 处理审批。
+- **查代码、改文件** — 浏览、读取、正则搜索、编辑和删除；`Ctrl+R` 在原卡片展开完整改动，`F2` 处理审批。
 - **运行项目命令** — 实时查看输出，会话内复用持久沙箱；默认审批、隔离直接 IP 网络。
 - **随时介入任务** — 追加指令、排队后续任务、暂停、取消，以及结构化人工输入。
-- **拆分独立任务** — 仅当问题能分解为多个独立、互不干扰的子问题时派生 SubAgent；默认最多并行 2 个；主 Agent 可同步等待最终结果，也可把耗时子任务放到后台继续工作，完成后自动收到结果。TUI 为每个子任务显示独立卡片、状态及可展开的完整返回结果，内部思考和工具输出保持隔离。
+- **拆分独立任务** — 仅当问题能分解为多个独立、互不干扰的子问题时派生 SubAgent；同步子任务可继续委派；根 Agent 可在后台启动任务并自动接收结果。TUI 为每个子任务显示独立卡片、状态及可展开的完整返回结果，内部思考和工具输出保持隔离。
 - **保留工作上下文** — SQLite 会话恢复、模型与推理强度切换、上下文压缩；支持图片输入的模型可接收附件。
 - **观察当前会话** — Lain 侧栏显示工具活动热力图、资源占用、Git 状态和正在运行的服务，也可以通过流式对话查询异常。
 
@@ -107,7 +107,7 @@ llm:
 暂不修改文件或执行命令。
 ```
 
-获得项目概览后，可以继续要求一次小范围修改。默认 `ask` 下，文件变更会等待审批：`Ctrl+R` 查看改动，`F2` 打开审批面板。启动检查失败时默认拒绝进入宿主执行，见 [沙箱与权限](docs/sandbox.md)。
+获得项目概览后，可以继续要求一次小范围修改。默认 `ask` 下，文件变更会等待审批：`Ctrl+R` 在原卡片展开改动，`F2` 打开审批面板。启动检查失败时默认拒绝进入宿主执行，见 [沙箱与权限](docs/sandbox.md)。
 
 <details>
 <summary>恢复会话、升级与虚拟环境安装</summary>
@@ -135,7 +135,7 @@ python3.12 -m venv ~/.venvs/deep-agent
 | 操作 | 用途 |
 |---|---|
 | `/model` | 切换模型与推理强度 |
-| `Ctrl+R` / `F2` | 审阅文件改动 / 处理审批与提问 |
+| `Ctrl+R` / `F2` | 展开文件改动 / 处理审批与提问 |
 | `Enter` / `Alt+Enter` | 提交或运行中追加指令 / 排队后续任务 |
 | `Esc` | 请求取消当前任务 |
 | `Ctrl+O` / `Ctrl+T` | 展开工具输出 / 思考内容 |
@@ -152,9 +152,9 @@ python3.12 -m venv ~/.venvs/deep-agent
 
 - **Tool Health** 按完成顺序显示最近 60 次有明确结果的工具调用，每 3 次一列。颜色表示调用次数，出现失败时显示 `×`。
 - **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示并以 Markdown 渲染；聊天历史可用鼠标滚轮翻看。可只读检查当前会话的工具明细与近期消息。
-- **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据说明异常，也可应用户要求复盘。
+- 用户询问时，Lain 通过只读工具读取原始工具事件、失败记录、资源采样和 Git 记录后自行分析。本地不预生成诊断结论。
 
-Lain 的模型凭据优先读取 `COMPANION_DEEPSEEK_API_KEY`，也可保存在 `~/.deep-agent/companion.key`。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
+Lain 使用 `llm.models.deepseek.api_key`，与 DeepSeek 模型、网页工具和 Auto 审批共用凭据。本地监控和动画无需模型凭据。人设、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
 
 ## 架构与安全
 
@@ -175,9 +175,10 @@ SQLite 保存会话状态。模型工具表不包含 `grep` 和 `glob`。代码�
 | 模式 | 审批 | 命令网络 |
 |---|---|---|
 | **沙箱 + `ask`**（默认） | 文件变更、命令、网页搜索和抓取、MCP 调用及增删服务需批准 | 默认隔离直接 IP 网络；`network=true` 获批后共享宿主网络 |
+| 沙箱 + `auto` | 自动放行工作区内的文件变更、网页工具和 `restricted` 下不联网的命令；联网命令、`full-access` 命令及工作区外的文件变更交给 DeepSeek Flash；宿主 MCP 等调用按[权限规则](docs/sandbox.md#auto-审批)处理 | 按本次命令的 `network` 参数决定 |
 | 沙箱 + `allow` | 所有工具免审批，包括 MCP 工具、`mcp_add`、`mcp_remove` | 所有 execute 共享宿主网络 |
 
-SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权限，即使主 Agent 处于 `ask` 也不弹出子任务审批；子 Agent 不装载 MCP、人工输入或递归委派工具。其默认思考强度使用子模型原生默认，不继承主 Agent 的强度。
+SubAgent 共享已验证的沙箱，继承启动时的权限。委派范围、并发配额及日志边界见 [SubAgent 委派](docs/configuration.md#subagent-委派)。
 
 只读文件工具免审批；`/permission` 统一控制原生与 MCP 工具审批，`allow` 仅限沙箱模式。MCP 在宿主进程中运行，不经过 Bubblewrap，也不受沙箱网络策略限制。配置在 `~/.deep-agent/mcp.json`，根级 `enabled` 是全局开关（默认开启）；用 `/mcp`、`/mcp enable`、`/mcp disable` 或 `mcp_add` / `mcp_remove` 管理。全局关闭时不连接、不启动 stdio、不打开 OAuth，也不把 MCP 工具交给模型；配置和令牌缓存仍保留。**工作区内的 `.env`、`.git` 同样可访问，取消不回滚已发生的副作用。**
 
@@ -188,7 +189,7 @@ SubAgent 共享已验证的沙箱 Backend 和 Pool，使用独立的 `allow` 权
 
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。模型与会话切换复用 Pool，关闭 Runner 或更换文件系统模式时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
-- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，只精确替换已知模型及 DeepSeek 网页工具密钥；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，按[脱敏配置](docs/configuration.md#脱敏redaction)替换已知字面量；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
 - **客户端**：模型、MCP、DeepSeek 网页工具和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。

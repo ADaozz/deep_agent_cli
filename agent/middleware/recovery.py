@@ -23,10 +23,9 @@ def reset_recovery_context(token: Token[RecoveryContext | None]) -> None:
 
 
 class RecoveryContextMiddleware(AgentMiddleware):
-    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
-        context = _active_context.get()
+    def _request(self, request: Any, context: RecoveryContext | None) -> Any:
         if context is None or not context.armed or context.text is None:
-            return handler(request)
+            return request
         original = request.system_message
         if original is None:
             system_message = SystemMessage(content=context.text)
@@ -36,6 +35,18 @@ class RecoveryContextMiddleware(AgentMiddleware):
             system_message = original.model_copy(update={
                 "content": [*original.content, {"type": "text", "text": context.text}],
             })
-        response = handler(request.override(system_message=system_message))
-        context.text = None
+        return request.override(system_message=system_message)
+
+    def wrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        context = _active_context.get()
+        response = handler(self._request(request, context))
+        if context is not None and context.armed:
+            context.text = None
+        return response
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        context = _active_context.get()
+        response = await handler(self._request(request, context))
+        if context is not None and context.armed:
+            context.text = None
         return response

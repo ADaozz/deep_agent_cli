@@ -16,7 +16,7 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 - 取消不回滚已经发生的文件写入或外部副作用；Worker 失效不自动重放正在执行的命令。
 - 同一 Runner 的模型、权限切换及新建、切换对话会话复用沙箱；文件系统模式变化或关闭 Runner 时清理沙箱。
 
-当前通过原生同步 `start_task` 和本地后台委派工具启用隔离 SubAgent；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
+本地 `start_task` 统一隔离 SubAgent 的同步与后台委派；只有问题可分解为多个独立、互不干扰的子问题时才应派生。没有容器编排、CPU、内存、磁盘或进程数的硬配额。MCP 工具在宿主进程中执行，不进入 Bubblewrap；沙箱权限模式不决定某个 MCP 服务是否可信。
 
 ## 分层
 
@@ -30,7 +30,7 @@ flowchart TB
     FACTORY --> GRAPH["Deep Agents / LangGraph"]
     GRAPH --> MODEL["LLM 协议适配"]
     GRAPH --> TOOLS["工具与 Middleware"]
-    GRAPH --> TASK["原生 task / SubAgentMiddleware"]
+    GRAPH --> TASK["start_task / SubAgentRuntime"]
     TASK --> MANAGER["SubAgentManager · 并发 / 取消"]
     MANAGER --> CHILD["CompiledSubAgent · isolated"]
     CHILD --> FILES
@@ -53,7 +53,7 @@ flowchart TB
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
 | 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久进程、超时与清理 |
 | 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约、恢复与会话标题 |
-| Companion | `agent/companion/` | 侧栏监控、本地异常检测、独立对话 Worker 与宿主只读 RPC |
+| Companion | `agent/companion/` | 侧栏监控、原始事件与统计、独立对话 Worker 与宿主只读 RPC |
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
@@ -71,7 +71,7 @@ flowchart TB
 
 - **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。
 - **等待与异常单独表达**：等待执行使用中性动作名和 `waiting for input`；完成未确认使用 `interrupted (completion unconfirmed)`。命令失败、超时、取消、启动失败分别显示 `Failed`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
-- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续新建合并为 `Created N files`。
+- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`。多文件树与嵌套 SubAgent 共用同一套灰色树干；文件行用短的 `├` / `│` / `└`，并在每文件下展示 compact diff。`Ctrl+R` 与 `Ctrl+O` 都在这张卡片上展开全部变更行。
 - **区分动作标签与状态标题**：工具名、审批动作和探索明细中的 `Read`、`Search`、`List` 等动作标签不承担完成状态；成功与否由状态标题、标记及异常提示表达。
 - **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
 
@@ -86,11 +86,11 @@ flowchart TB
 | `ls`、`read` | Deep Agents 文件系统中间件 | 免审批 |
 | `write`、`edit`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
-| `web_search`、`web_fetch` | 配置 `DEEPSEEK_API_KEY` 或 `web_tools.api_key` 时注册 | 每次审批 |
+| `web_search`、`web_fetch` | 配置 `llm.models.deepseek.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
-| `start_task` | 主 Agent 且 `subagents.enabled: true` | 同步等待子任务；子任务使用沙箱 `allow` |
-| `read_task_log` | 同上 | 查询当前父会话的日志索引或有界日志页 |
-| `start_background_task`、`check_background_task`、`cancel_background_task` | 同上且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
+| `start_task` | 能继续派发、且权限为 `auto` 或 `allow` | 任务正文是 `description`。Root 可传 `run_in_background`；同步子 Agent 只能同步派发 |
+| `read_task` | 能继续派发的 Agent，含 `ask` | 列出或查看自己的直接子任务；`include_logs=true` 读取一页日志 |
+| `cancel_task` | 仅 Root，含 `ask` | 请求取消一个后台任务。取消请求不表示已经停止 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -100,47 +100,55 @@ flowchart TB
 
 文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read`、`write`、`edit` 和 `delete`，不包含 `grep` 或 `glob`。
 
-`ls` 和 `read` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本，其余文件工具沿用上游说明。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`。调用方传入的 `custom_tool_descriptions` 优先于这两条默认值。
+`ls`、`read`、`write`、`edit`、`delete` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`；`write` / `edit` / `delete` 明确同一 `file_path` 不可同轮并发、不同路径可以并行。调用方传入的 `custom_tool_descriptions` 优先于这些默认值。
 
-Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `start_task`。关闭 `subagents.enabled` 后不提供 `start_task` 或 `read_task_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项目不注册子 Agent 类型，`start_task` 由本地工具直接调用 `SubAgentRuntime`。关闭 `subagents.enabled` 后不提供 `start_task`、`read_task` 或 `cancel_task`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+
+### 系统与委派提示词
+
+构图时依次读取 `agent/bootstrap/prompts/system.md`、子 Agent 专用的 `subagent.md`（仅子 Agent）、`agent.instructions` 和工作区根目录的 `AGENTS.md`。主 Agent 注入 MCP 工具时追加宿主运行说明，运行时环境快照由中间件随模型调用附加。
+
+`start_task` 的工具描述由 `agent/tools/prompts/delegation.md` 与当前角色适用的 `delegation_root.md` 或 `delegation_sync.md` 组成。当前容量由 `read_task` 返回。Flash 审查使用独立的 `agent/runtime/approval/review.md`。
 
 ### SubAgent 委派边界
 
 只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
-这个条件通过 `general-purpose` 描述告知主模型，不负责检测文件冲突，也不构成沙箱安全边界。
+这个条件写在 `start_task` 的工具描述里，不负责检测文件冲突，也不构成沙箱安全边界。
 子任务共享工作区，依赖前一任务结果或会竞争修改同一文件的步骤应顺序执行。
 
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
 `mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
-执行前清空父级隐式回调与配置上下文。默认最多同时运行 2 个子任务，第三个立即返回超限错误，
-完成、失败和取消均释放许可；原生 `start_task` 在任务结束后返回最终结果或简短错误。
+执行前清空父级隐式回调与配置上下文。每个父 Agent 默认最多 4 个同时运行的直接子任务，全树默认最多 10 个同时存在的子任务（均与用户配置取最小、受宿主硬顶约束），超限立即返回错误；
+完成、失败和取消均释放许可。同步 `start_task` 返回 `run_id`、`mode`、`status` 和 `result`。后台启动只返回 `running`，终态稍后写入同一条任务记录。
+主 Agent depth 为 0；每次 `start_task` 子代 depth = 父 depth + 1。默认与硬顶均为 `max_subagent_depth: 2`（与用户配置取最小）；达到上限后当前 Agent 仍执行任务但不能再委派。配额由 Root Manager 统一记账；子 Controller 注册到真实父 Agent，取消一级会递归二级。后台委派仅根可发起。日志仅直接父级可读；Flash 证据的 `user_messages` 沿树传递 Root 用户原文。
 
 ### 后台委派
 
-`start_background_task` 与同步 `start_task` 并存，由主模型按场景选择：需要等结果才能继续时用 `start_task`，
-子任务耗时较长且下一步不依赖其结果时用后台委派。没有使用上游 `AsyncSubAgentMiddleware`，
+同一个 `start_task` 同时承担同步和后台派发。需要结果才能继续时用 `run_in_background=false`，
+子任务可以独立进行时用 `run_in_background=true`。同一次模型响应可以同时派发这两种任务，它们并行执行。没有使用上游 `AsyncSubAgentMiddleware`，
 它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
 
-- 启动：工具取得一个并发许可（与 `start_task` 共用 `max_concurrent`，超限立即返回错误）后启动线程并返回 `run_id`，
+- 启动：工具取得一个并发许可（与 `start_task` 共用每父节点 / 全树上限，超限立即返回错误）后启动线程并返回 `run_id`，
   主 Agent 继续推理、调用其他工具或结束本轮回答。执行环境、权限、工具集和 JSONL 日志与同步子任务相同。
 - 回传：子任务完成或失败时，结果进入 `RunController` 的独立通知队列，并发出 `subagent_finished` 事件。
   通知队列不是用户输入队列：不会被回收到输入框，不显示为待发送消息，也不阻止会话切换。
 - 注入：`SteeringMiddleware` 在 `before_model` 和 `after_agent` 先处理用户 steering，再把通知作为带
   `additional_kwargs["deep_agent_notification"]` 标记的 `HumanMessage` 写入对话；通知不会撤销模型已提议的工具调用。
   图返回后才到达的通知由 `AgentRunner` 的收尾循环作为新一轮继续。
-- 空闲唤醒：主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
-  存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。
-- 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_background_task` 只停止指定任务。
+- 空闲唤醒：这是 Runtime 的确定行为。主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
+  存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。模型不能选择是否唤醒，也不能通过工具等待结果。
+- 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_task` 只请求停止指定任务，并发名额要等任务真正结束才释放。
   被取消的子任务只更新卡片，不产生通知，也不唤醒主 Agent。
 - 会话边界：新建会话、切换到其他会话或关闭 Runner 时取消全部后台任务并丢弃未送达的通知，结果不会进入另一个会话。
 - 沙箱模式切换会丢弃沙箱内进程：空闲时若仍有后台任务，切换保持排队；在运行边界应用时，后台子任务正在执行的命令会失败并由子任务自行处理。
 
 主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
-恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
+恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task` 查看。
 
-子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以 `allow` 执行文件工具、execute、
-已配置的网页工具和 Skills；不装载 MCP、人工输入、日志查询或递归委派工具。
-主 Agent 的 `ask` 不会触发子任务审批；不能提供已验证沙箱时明确拒绝委派。
+子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以主任务的权限模式（`auto` 或 `allow`）执行文件工具、execute、
+已配置的网页工具和 Skills；不装载 MCP 或人工输入。在深度上限内可继续同步委派，并可读取自己直接子任务日志。
+子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task`；`read_task` 和 `cancel_task` 仍然保留。
+`auto` 和 `allow` 本身要求已验证沙箱，委派不会落到宿主上。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
 显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
 
@@ -150,11 +158,11 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 操作描述由结构化参数直接生成，不额外调用模型；文件工具仅记录路径，execute 保留有界命令、
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
-摘要只精确替换已知模型和 DeepSeek 网页工具密钥；未知凭据原样保存。
-主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
-TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
+已知密钥精确替换集中在 `agent/redaction.py`：收集配置中的模型 `api_key`（替换为 `$llm.models.…` 路径名）以及顶层 `redaction.replacements` 中的字面量（按用户写的展示名原样替换，可不带 `$`）。沙箱 `env_set` / `env_allowlist` 与 MCP `env_passthrough` / bearer 环境值**不**自动登记。按长度降序替换；等长冲突保留先登记的名称。Auto 证据、MCP、子任务日志、审批卡与 Companion 走这一路径，不对自由文本中的 JWT / `sk-` 等形态做正则遮盖。会话标题同样只做命名精确替换，公开网址与本地路径保留。历史数据中的 `[REDACTED]` / `[已隐藏]` 在读取与校验时仍兼容。
+主上下文仅接收最终 task 结果，主动调用 `read_task` 才读取自己直接子任务的日志页。
+TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。进度事件只带任务 ID、直接父节点、描述、深度、状态、耗时和最终结果或失败原因，不带 Token、TPS、TTFT 或压缩状态。思考、中间回答和内部工具调用不进入主界面。子图仍执行上下文压缩，但不记录或展示压缩过程。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
-实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
+实时与历史恢复复用同一套任务树。终态来自任务记录和日志里的 finish，不根据正文推断。没有 finish 且没有存活记录时显示未确认。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware
 
@@ -178,7 +186,7 @@ TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示�
 | `MCPMiddleware` | `mcp.json` 根级 `enabled` 为 true 且 Manager 无配置错误时注入管理工具和已连接服务的工具；全局关闭时不进入中间件列表 |
 | `HiddenToolsMiddleware` | 按 `tools.hidden` 从模型请求中过滤工具，不改变审批规则 |
 
-工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。
+工具名称与基础分类的唯一来源是 `agent/tools/catalog.py`（副作用集合、文件系统有序名、MCP 保留名等）；Ask 的 `interrupt_on` 由 `ask_interrupt_on()` / `host_decision_rule()` 每次新建，避免共享可变 `allowed_decisions`。工具审批通过 `interrupt_on` 交给 Deep Agents HITL，不在各工具内部重复实现审批流程。`auto` 模式下由 `AutoApprovalMiddleware`（`agent/runtime/auto_approval.py` 与 `agent/runtime/approval/`）先按由 Ask 规则派生的静态规则判断，再把剩余调用交给 Flash 审查授权；被拦截的调用把原因返回给 Agent，仅将 `ask` 交给 HITL；决策与环境指纹写入 Session SQLite。全局关闭 MCP 或未传入 Manager 时，工具表与未配置 MCP 一致。权限可用性、降级文案与 CLI 展示元数据集中在 `permissions.py`。
 
 ## 运行与中断
 
@@ -229,7 +237,7 @@ sequenceDiagram
 
 | 概念 | 决定什么 | 实现位置 |
 |---|---|---|
-| `ask` / `allow` | 工具调用前是否审批 | `agent/runtime/permissions.py`、Deep Agents HITL |
+| `ask` / `auto` / `allow` | 工具调用前是否审批 | `agent/tools/catalog.py`（工具分类）、`agent/runtime/permissions.py`（可用性与 interrupt_on）、Deep Agents HITL |
 | `SANDBOXED` / `CUSTOM` | 进程在哪里运行、由谁隔离 | Backend 选择与沙箱配置 |
 | `restricted` / `full-access` | 沙箱文件系统可见范围 | `SandboxConfig.mode` 与 Bubblewrap 挂载 |
 | `execute.network` | 选择有网或无网实例，受权限模式约束 | execute、网络上下文与 SandboxPool |
@@ -280,7 +288,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 1. **权限隔离**：`restricted` 使用受限文件系统视图；`full-access` 在当前用户的操作系统权限内访问真实文件系统。
 2. **环境持久化**：`HOME` 和 `TMP` 落在持久目录上，不跟着 Bubblewrap 进程一起消失。
 3. **环境独立性**：两种模式默认使用不同的 HOME，不要求用户级安装结果互相可用，也不自动复制或迁移。
-4. **工具审批**：`ask` / `allow` 只决定调用前要不要批准，不决定 HOME、工作区或系统目录怎么挂。
+4. **工具审批**：`ask` / `auto` / `allow` 只决定调用前要不要批准，不决定 HOME、工作区或系统目录怎么挂。
 
 `restricted` 的持久 HOME（`~/.deep-agent/sandbox/home`）是沙箱运行数据，不是 Agent 配置或凭据目录。`full-access` 使用宿主机真实家目录。路径和切换时能观察到的行为见 [sandbox.md](sandbox.md#home-隔离与持久化)。
 
@@ -290,7 +298,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ### 线程环境快照
 
-固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
+固定系统提示在构图时生成，不包含环境快照。`EnvironmentContextMiddleware` 在每次模型调用时，把当前沙箱的短快照附到这条系统提示后面，不写入 checkpoint 的消息。快照描述这次 `execute` 会进入的沙箱，不描述 `read` 等文件工具的宿主访问范围。额外挂载只列沙箱内目标路径和 `ro`/`rw`，不写宿主源路径；超过 8 条时只列前 8 条并标出剩余数量。同一沙箱指纹下复用探测结果。`ask` / `auto` / `allow` 只更新审批和网络。`restricted` / `full-access`，或工作区、HOME、额外挂载变化后，下一次模型调用重新采集受影响的字段。恢复会话时丢掉内存里的旧快照，下一次模型调用按当前沙箱重新检查。已给出的字段直接使用，不要再查。
 
 采集使用与 `execute` 相同的离线挂载做一次只读探测，不经过工具审批，也不扫描软件包、进程、CPU 负载或内存。探测失败的字段为 `unknown`，不中断线程。这里没有新的配置项。
 
@@ -302,28 +310,13 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ## grep 搜索
 
-`grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。代码里仍保留本地搜索实现，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。该实现没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
+`grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。没有单独的本地搜索实现。
 
-```text
-参数与 Glob 校验
-  → WorkspaceCompositeBackend.regex_search_location() 按固定挂载表路由路径
-  → 宿主以 O_NOFOLLOW 和文件描述符校验挂载根、目标与文件限制
-  ├─ Bubblewrap 且有 rg
-  │    → SandboxPool → start_argv → 原 Worker → 单个 rg
-  └─ 无 rg，或执行器不是 Bubblewrap
-       → 独立宿主 Python Worker → 目录描述符遍历与 re 匹配
-  → 流式解析、计数、去重、截断 → 工具结果
-```
+`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 先找当前 Python 环境里的 `rg`，再找系统 `PATH`。定位与安装见 [search.md](search.md)。
 
-`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
+沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志和 `execute` 说明中写明 `rg` 不可用。
 
-沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志中说明 `rg` 不可用。上面保留的搜索实现在没有 `rg` 或执行器不是 Bubblewrap 时使用宿主 Python worker；有 `rg` 时仍通过 `start_argv` 调用 `/run/deep-agent/rg`，与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
-
-`start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
-
-**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消、超时或截断只清理本条 rg；Worker 失效则沿用 Pool 的丢失与替换机制。搜索总预算 10 秒，包含 Pool 等待和冷启动。
-
-Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历限制文件访问，不具备 Bubblewrap 隔离。Python `re` 与 Rust Regex、ignore 解析的差异见 [search.md](search.md)；不通过静默字面量匹配掩盖。
+**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消或超时只清理本条命令；Worker 失效则沿用 Pool 的丢失与替换机制。
 
 ## 模型适配
 
@@ -342,7 +335,7 @@ Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历�
 
 ## 上下文压缩
 
-自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `agent.compaction_threshold` 与 0.85 的较小值触发，通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85。示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
+自动压缩使用 Deep Agents 的 `SummarizationMiddleware`：有 `max_input_tokens` 时按 `min(模型默认 fraction, agent.compaction_threshold)` 触发（见 `Settings.effective_compaction_fraction`），通常保留最近约 10% 上下文；阈值不高于 10% 时保留比例降为阈值的一半。配置省略时默认 0.85；示例配置设为 0.60。没有窗口信息时仍约在 170,000 tokens 触发，保留最近 6 条消息；比例配置此时不生效。
 
 `/compact` 调用 `AgentRunner.compact_context()`，在图内执行 `compact_conversation`，要求 usage 达到自动阈值的一半。压缩历史以 Markdown 保存到 `<工作区真实路径>/.deepagents/conversation_history/<id>.md`，之后仍可读取。升级上游时需重验触发条件和历史存储契约。
 
@@ -369,12 +362,12 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 观察与验证
 
-主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏在本地聚合同类事实做失败率异常与轮次复盘，主动开口或用户提问时才调用 Companion 模型。
+主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏保留原始工具事件、失败分类、资源采样、Git 记录和统计图表；不在本地生成诊断结论。只有用户提问时才调用 Companion 模型，由模型通过只读工具读取这些原始记录后自行分析。
 
 | 行为契约 | 相关测试 |
 |---|---|
 | 工具注册、审批、拒绝与权限切换 | `test_runner.py`、`test_permission.py`、`test_web_search.py` |
-| 正则、Glob、结果限制、回退、路径边界和搜索取消 | `test_grep.py` |
+| `rg` 定位，以及 grep、glob 不注册为模型工具 | `test_grep.py` |
 | 双沙箱复用、argv/Shell、网络模式、超时及 Worker 失效 | `test_sandbox.py`、`test_persistent_sandbox.py` |
 | 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |
@@ -397,7 +390,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 源码入口
 
-- 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)。
+- 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)、[tools/catalog.py](../agent/tools/catalog.py)。
 - 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
 - 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
 - Companion 侧栏：[companion/](../agent/companion/)、[cli 挂载与 RunEvent 转发](../agent/cli/app.py)。

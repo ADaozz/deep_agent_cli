@@ -17,3 +17,6 @@ class PauseGateMiddleware(AgentMiddleware):
         if self._should_pause():
             interrupt({"type": "pause"})
         return handler(request)
+
+    async def awrap_model_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        return await self.wrap_model_call(request, handler)

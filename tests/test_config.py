@@ -24,6 +24,30 @@ def test_compaction_threshold_defaults_and_loads() -> None:
     assert Settings.from_mapping({"agent": {"compaction_threshold": 0.6}}).compaction_threshold == 0.6
 
 
+def test_effective_compaction_fraction_does_not_hard_cap_at_default() -> None:
+    """配置可高于默认 0.85；有效值是 min(模型默认, 配置)，不是固定 0.85 顶。"""
+    high = Settings.from_mapping({"agent": {"compaction_threshold": 0.95}})
+    low = Settings.from_mapping({"agent": {"compaction_threshold": 0.6}})
+    assert high.effective_compaction_fraction() == 0.95
+    assert high.effective_compaction_fraction(0.9) == 0.9
+    assert high.effective_compaction_fraction(0.99) == 0.95
+    assert low.effective_compaction_fraction(0.9) == 0.6
+    assert low.effective_compaction_fraction(0.5) == 0.5
+
+
+def test_redaction_replacements_load_and_reject_invalid() -> None:
+    assert Settings.from_mapping({}).redaction_replacements == ()
+    assert Settings.from_mapping({"redaction": {}}).redaction_replacements == ()
+    loaded = Settings.from_mapping({"redaction": {"replacements": {"sk-XXXX": "密钥"}}})
+    assert loaded.redaction_replacements == (("sk-XXXX", "密钥"),)
+    with pytest.raises(ValueError, match="redaction.replacements"):
+        Settings.from_mapping({"redaction": {"replacements": []}})
+    with pytest.raises(ValueError, match="non-empty"):
+        Settings.from_mapping({"redaction": {"replacements": {"": "密钥"}}})
+    with pytest.raises(ValueError, match="unsupported"):
+        Settings.from_mapping({"redaction": {"unknown": True}})
+
+
 def test_load_defaults_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEP_AGENT_CONFIG", raising=False)
@@ -45,19 +69,20 @@ def test_secret_environment_references_and_web_tools_precedence(monkeypatch: pyt
         "llm": {"default": "local/test", "models": {"local": {
             "api_key": "${MODEL_API_KEY}", "models": {"test": {}},
         }}},
-        "web_tools": {"api_key": "${YAML_WEB_TOOLS_KEY}"},
+
     }
+    data["llm"]["models"]["deepseek"] = {"api_key": "${YAML_WEB_TOOLS_KEY}", "models": {"flash": {}}}
     settings = Settings.from_mapping(data)
     assert settings.llm_api_key == "model-secret"
-    assert settings.web_tools_api_key == "yaml-secret"
+    assert settings.resolved_deepseek_api_key == "yaml-secret"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "env-secret")
-    assert Settings.from_mapping(data).resolved_web_tools_api_key == "env-secret"
+    assert Settings.from_mapping(data).resolved_deepseek_api_key == "yaml-secret"
 
 
 def test_missing_secret_reference_reports_field_without_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MISSING_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="web_tools.api_key references missing environment variable MISSING_API_KEY"):
+    with pytest.raises(ValueError, match="web_tools.api_key was removed"):
         Settings.from_mapping({"web_tools": {"api_key": "${MISSING_API_KEY}"}})
     with pytest.raises(ValueError, match="llm.models.local.models.test.api_key references missing environment variable MISSING_API_KEY"):
         Settings.from_mapping({"llm": {"default": "local/test", "models": {
@@ -92,7 +117,6 @@ def test_companion_paths_resolve_relative_to_config_and_allow_partial_overrides(
         _MODEL_YAML
         + "companion:\n"
         + "  persona_prompt: prompts/persona.md\n"
-        + "  observation_prompt: null\n"
         + "  chat_prompt: prompts/chat.md\n"
         + "  rpc_timeout_seconds: 2\n"
         + "  question_timeout_seconds: 70\n"
@@ -105,7 +129,6 @@ def test_companion_paths_resolve_relative_to_config_and_allow_partial_overrides(
     config = Settings.load(path).companion
     assert config.persona_prompt == tmp_path / "prompts/persona.md"
     assert config.chat_prompt == tmp_path / "prompts/chat.md"
-    assert config.observation_prompt == Settings().companion.observation_prompt
     assert config.gifs == {"idle": tmp_path / "animations/idle.gif"}
     assert (config.rpc_timeout_seconds, config.question_timeout_seconds, config.source_read_lines) == (2, 70, 150)
     with pytest.raises(ValueError, match="unknown companion.gifs state"):
@@ -926,10 +949,25 @@ def test_subagents_defaults_and_validation():
     cfg = Settings(llm_profiles=(profile,), llm_default=profile.id,
                    subagents=SubAgentConfig(model=profile.id, reasoning_effort='low'))
     assert cfg.subagents.model == profile.id
+    assert cfg.subagents.max_concurrent == 4
+    assert cfg.subagents.max_total == 10
+    assert cfg.subagents.max_subagent_depth == 2
+    assert SubAgentConfig().may_create_subagent(0) and SubAgentConfig().may_create_subagent(1)
+    assert not SubAgentConfig().may_create_subagent(2)
+    assert not SubAgentConfig(max_subagent_depth=1).may_create_subagent(1)
+    # Host ceilings: per-parent ≤4, total ≤10, depth ≤2.
+    assert SubAgentConfig(max_concurrent=20).max_concurrent == 4
+    assert SubAgentConfig(max_total=99).max_total == 10
+    assert SubAgentConfig(max_subagent_depth=9).max_subagent_depth == 2
+    assert SubAgentConfig(max_concurrent=2, max_total=3, max_subagent_depth=1).max_concurrent == 2
+    assert SubAgentConfig(max_concurrent=2, max_total=3, max_subagent_depth=1).max_total == 3
     for values in ({'enabled': 'true'}, {'max_concurrent': 0}, {'max_concurrent': True},
-                   {'permission': 'ask'}, {'model': ''}, {'reasoning_effort': False}):
+                   {'max_total': 0}, {'max_subagent_depth': 0}, {'max_subagent_depth': True},
+                   {'model': ''}, {'reasoning_effort': False}):
         with pytest.raises(ValueError):
             SubAgentConfig(**values)
+    with pytest.raises(ValueError, match='Unknown subagents settings: permission'):
+        SubAgentConfig.from_mapping({'permission': 'allow'})
     with pytest.raises(ValueError, match='Unknown subagents.model'):
         replace(cfg, subagents=SubAgentConfig(model='unknown'))
     with pytest.raises(ValueError, match='Unsupported subagents.reasoning_effort'):
@@ -967,3 +1005,26 @@ def test_subagent_auto_is_reserved_and_rejected():
     from agent.subagents.configuration import SubAgentConfig
     with pytest.raises(ValueError, match='auto is not supported'):
         SubAgentConfig(reasoning_effort='auto')
+
+
+def test_deepseek_optional_reference_is_resolved_once(monkeypatch):
+    from agent.models.client import build_chat_model
+
+    monkeypatch.delenv("UNIFIED_TEST_KEY", raising=False)
+    data = {"llm": {"default": "other/model", "models": {
+        "other": {"api_key": "other-secret", "models": {"model": {}}},
+        "deepseek": {"api_key": "${UNIFIED_TEST_KEY}", "models": {"a": {}, "b": {}}},
+    }}}
+    settings = Settings.from_mapping(data)
+    assert settings.resolved_deepseek_api_key is None
+    assert settings.llm_api_key == "other-secret"
+    with pytest.raises(ValueError, match="llm.models.deepseek.api_key"):
+        build_chat_model(settings.get_profile("deepseek/a"))
+    monkeypatch.setenv("UNIFIED_TEST_KEY", "unified")
+    settings = Settings.from_mapping(data)
+    monkeypatch.setenv("UNIFIED_TEST_KEY", "rotated")
+    assert settings.resolved_deepseek_api_key == "unified"
+    assert {settings.get_profile(f"deepseek/{m}").api_key for m in ("a", "b")} == {"unified"}
+    data["llm"]["models"]["deepseek"]["models"]["a"]["api_key"] = "override"
+    with pytest.raises(ValueError, match="use llm.models.deepseek.api_key"):
+        Settings.from_mapping(data)

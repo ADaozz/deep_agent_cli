@@ -38,7 +38,7 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 ## SubAgent 开发契约
 
 只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent；
-这条条件位于 `agent/bootstrap/factory.py` 中 `general-purpose` 的描述，由主模型判断，
+这条条件位于 `start_task` 的工具描述，由主模型判断，
 不增加原生 `start_task` 参数，也不自动检测共享文件的修改冲突。实现边界见 [架构](architecture.md#subagent-委派边界)。
 
 修改相关逻辑后运行现有回归：
@@ -80,16 +80,16 @@ python examples/sandbox_probe.py --require-sandbox [--report report.json]
 
 推送 `v*` 标签触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：先跑测试，检查标签与 `pyproject.toml` 中的版本一致，构建后发布到 GitHub Releases（说明取自 `.github/release-notes.md`）和 PyPI（trusted publishing）。**只合并 PR 或推送 `main` 不会触发 PyPI 发布**。
 
-发布时先确保 README、Release Notes、`pyproject.toml` 的版本一致，且对应提交的 CI 已通过；标签必须指向包含这些文件的 `main` 提交。例如发布 `0.3.0`：
+发布时先确保 README、Release Notes、`pyproject.toml` 的版本一致，且对应提交的 CI 已通过；标签必须指向包含这些文件的 `main` 提交。例如发布 `0.4.0`：
 
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-通过 GitHub Actions `release` 工作流确认 `tests`、`build`、`github`、`pypi` 都成功后，再到 GitHub Releases 和 PyPI 核对 `0.3.0` 的 wheel 和源码包。若发布失败，应检查失败步骤后修复，**不要对已经发布到 PyPI 的版本号重新上传覆盖**。
+通过 GitHub Actions `release` 工作流确认 `tests`、`build`、`github`、`pypi` 都成功后，再到 GitHub Releases 和 PyPI 核对 `0.4.0` 的 wheel 和源码包。若发布失败，应检查失败步骤后修复，**不要对已经发布到 PyPI 的版本号重新上传覆盖**。
 
 ## 贡献
 

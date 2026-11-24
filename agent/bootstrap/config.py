@@ -25,6 +25,7 @@ from agent.models.profile import (
 
 
 _DEFAULT_CONFIG_NAME = "config.yaml"
+DEFAULT_COMPACTION_THRESHOLD = 0.85
 
 
 class ConfigError(ValueError):
@@ -58,11 +59,25 @@ class Settings:
     ui_timezone: str = DEFAULT_UI_TIMEZONE
     ui_display_limits: UiDisplayLimits = field(default_factory=UiDisplayLimits)
     hidden_tools: tuple[str, ...] = ()
-    web_tools_api_key: str | None = field(default=None, repr=False)
+    resolved_deepseek_api_key: str | None = field(default=None, repr=False)
     trust_env: bool = False
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    compaction_threshold: float = 0.85
+    # Deep Agents 手动压缩门槛与模型默认 fraction 的上限共用此默认值。
+    compaction_threshold: float = DEFAULT_COMPACTION_THRESHOLD
     companion: CompanionConfig = field(default_factory=CompanionConfig)
+    # Exact literal → display name pairs from config ``redaction.replacements``.
+    redaction_replacements: tuple[tuple[str, str], ...] = ()
+
+    def effective_compaction_fraction(self, model_fraction: float | None = None) -> float:
+        """工厂与手动压缩共用的有效 fraction：min(模型默认, 配置门槛)。
+
+        ``DEFAULT_COMPACTION_THRESHOLD`` 只是 Settings 缺省值，不是硬顶。
+        配置可高于 0.85（校验允许 ``<= 1``）；此时以配置与模型默认的较小值为准。
+        """
+        configured = float(self.compaction_threshold)
+        if model_fraction is None:
+            return configured
+        return min(float(model_fraction), configured)
 
     def __post_init__(self) -> None:
         if (isinstance(self.compaction_threshold, bool)
@@ -84,10 +99,6 @@ class Settings:
             self, "request_timeout",
             _model_request_timeout(self.request_timeout, field_name="llm.timeout"),
         )
-
-    @property
-    def resolved_web_tools_api_key(self) -> str | None:
-        return os.environ.get("DEEPSEEK_API_KEY", "").strip() or (self.web_tools_api_key or "").strip() or None
 
     @property
     def llm_model(self) -> str:
@@ -179,6 +190,8 @@ class Settings:
             raise ValueError(
                 "sandbox.dev was removed; use extra_read_write_mounts with dev_bind: true for host device nodes"
             )
+        if web_tools.get("api_key") not in (None, ""):
+            raise ConfigError("web_tools.api_key was removed; use llm.models.deepseek.api_key")
         profiles, default_id = _llm_profiles_from_mapping(llm) if "llm" in raw else (_default_profiles(), "default")
         request_timeout = _model_request_timeout(llm.get("timeout"), field_name="llm.timeout")
         instructions = agent.get("instructions")
@@ -203,14 +216,13 @@ class Settings:
             config_dir=_optional_path(paths.get("config_dir"), base_dir=root),
             source_path=source_path.resolve() if source_path is not None else None,
             agent_instructions=instructions,
-            compaction_threshold=agent.get("compaction_threshold", 0.85),
+            compaction_threshold=agent.get("compaction_threshold", DEFAULT_COMPACTION_THRESHOLD),
             ui_timezone=timezone_name,
             ui_display_limits=display_limits,
             companion=_companion_from_mapping(_section(raw, "companion"), base_dir=root),
-            web_tools_api_key=_optional_secret(
-                web_tools.get("api_key"), field_name="web_tools.api_key"
-            ),
+            resolved_deepseek_api_key=next((p.api_key or None for p in profiles if p.source == "deepseek"), None),
             request_timeout=request_timeout,
+            redaction_replacements=_redaction_replacements_from_mapping(_section(raw, "redaction")),
         )
         if result.source_path is not None:
             require_outside_workspace(result.source_path, result.sandbox.workspace, label="config file")
@@ -307,7 +319,6 @@ def _companion_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Compa
     defaults = CompanionConfig()
     return CompanionConfig(
         persona_prompt=path(data.get("persona_prompt"), "persona_prompt") or defaults.persona_prompt,
-        observation_prompt=path(data.get("observation_prompt"), "observation_prompt") or defaults.observation_prompt,
         chat_prompt=path(data.get("chat_prompt"), "chat_prompt") or defaults.chat_prompt,
         gifs=gifs,
         rpc_timeout_seconds=data.get("rpc_timeout_seconds", defaults.rpc_timeout_seconds),
@@ -382,6 +393,28 @@ def _as_str_dict(value: Any, *, field_name: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field_name} must be a mapping, got {value!r}")
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _redaction_replacements_from_mapping(data: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Parse ``redaction.replacements`` as ordered (literal, display_name) pairs."""
+    unknown = set(data) - {"replacements"}
+    if unknown:
+        raise ValueError(f"redaction has unsupported fields: {', '.join(sorted(unknown))}")
+    raw = data.get("replacements")
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError("redaction.replacements must be a mapping of literal to display name")
+    pairs: list[tuple[str, str]] = []
+    for key, value in raw.items():
+        literal = str(key).strip() if key is not None else ""
+        name = str(value).strip() if value is not None else ""
+        if not literal or not name:
+            raise ValueError(
+                "redaction.replacements entries must have non-empty literal keys and display names"
+            )
+        pairs.append((literal, name))
+    return tuple(pairs)
 
 
 def _mount_modes(value: Any, *, field_name: str) -> tuple[SandboxMode, ...] | None:
@@ -469,6 +502,8 @@ def _grouped_llm_profiles(
                 f"llm.models.{source}.timeout is not per model; set llm.timeout once for every model"
             )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
+        if source == "deepseek":
+            deepseek_key = _optional_secret(group.get("api_key"), field_name="llm.models.deepseek.api_key", allow_missing=True)
         for model_key, item in group["models"].items():
             if not isinstance(model_key, str) or not model_key.strip() or "/" in model_key:
                 raise ValueError(f"llm.models.{source}.models keys must be non-empty strings containing no slash")
@@ -487,10 +522,12 @@ def _grouped_llm_profiles(
             model_name = item.get("model", name)
             if not isinstance(model_name, str) or not model_name.strip():
                 raise ValueError(f"{field}.model must be a non-empty string")
+            if source == "deepseek" and item.get("api_key") not in (None, ""):
+                raise ConfigError(f"{field}.api_key was removed; use llm.models.deepseek.api_key")
             profiles.append(ModelProfile(
                 id=f"{source}/{name}",
                 model=model_name.strip(),
-                api_key=_optional_secret(
+                api_key=(deepseek_key or "") if source == "deepseek" else _optional_secret(
                     _model_text(inherited("api_key"), field_name=f"{field}.api_key", default="sk-local"),
                     field_name=f"{field}.api_key",
                 ) or "sk-local",
@@ -525,7 +562,7 @@ def _model_text(value: Any, *, field_name: str, default: str) -> str:
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
-def _optional_secret(value: Any, *, field_name: str) -> str | None:
+def _optional_secret(value: Any, *, field_name: str, allow_missing: bool = False) -> str | None:
     if value is None or value == "":
         return None
     if not isinstance(value, str) or not value.strip():
@@ -535,6 +572,8 @@ def _optional_secret(value: Any, *, field_name: str) -> str | None:
     if match:
         variable = match.group(1)
         secret = os.environ.get(variable, "").strip()
+        if not secret and allow_missing:
+            return None
         if not secret:
             raise ValueError(f"{field_name} references missing environment variable {variable}")
     return secret

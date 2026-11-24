@@ -13,7 +13,7 @@
 
 - **沙箱**（Bubblewrap）决定 `execute` 运行的命令能访问什么。找不到可用的 `bwrap` 时启动失败，不会改在宿主机上执行。
 - **文件系统模式**（`restricted` / `full-access`）决定沙箱里能看见和写入哪些路径。它不提权，也不取消审批。
-- **权限模式**（`ask` / `allow`）决定工具调用前是否需要你确认。
+- **权限模式**（`ask` / `auto` / `allow`）决定工具调用前是否需要你确认。
 
 ## 执行模式
 
@@ -32,17 +32,24 @@
 子任务共享已验证的 Backend 和 SandboxPool；`isolated` 隔离消息历史，不创建独立工作区，
 也不自动防止多个任务修改同一文件。主 Agent 应顺序处理存在依赖或写入冲突的步骤。
 
-子任务固定使用 `allow`，即使主 Agent 在 `ask` 下，也不弹出子任务审批；execute 使用有网实例。
-文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具、人工输入或递归委派工具。
-没有经过验证的 `SANDBOXED` 身份时明确拒绝委派，不退化到宿主免审批执行。
+子任务的权限跟随主 Agent：
+
+| 主 Agent | 子任务 |
+|---|---|
+| `ask` | 不提供 `start_task`。子任务没有审批入口，无法逐项向你确认 |
+| `auto` | Auto，按命令的网络参数运行；需要人工决定时将拒绝原因返回父任务 |
+| `allow` | `allow` 的有网实例 |
+
+切换到 `ask` 之前启动的后台任务继续按启动时的权限运行，仍可用 `read_task` 和 `cancel_task` 查看或取消。完成后由 Runtime 自动把结果送回主 Agent。
+文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具或人工输入；是否可继续委派由 `max_subagent_depth` 决定。
+`auto` 和 `allow` 只在经过验证的 `SANDBOXED` 身份下可用，因此委派不会退化到宿主免审批执行。
 
 父任务取消会终止关联子任务的模型流和命令，单个任务结束不会关闭共享 Pool。
-子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；仅对已知模型及 DeepSeek 网页工具密钥 做精确替换，
-未知凭据原样保存。配置和日志访问边界见 [SubAgent 委派](configuration.md#subagent-委派)。
+子任务执行摘要位于受保护配置目录，不保存模型 Token、思考、文件全文或原始工具输出；内容按[脱敏配置](configuration.md#脱敏redaction)做字面量替换。配置和日志访问边界见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ## 文件系统模式
 
-配置文件未写 `sandbox.mode` 时，代码缺省为 `restricted`。随程序提供的模板也是 `restricted`。模板里的宿主 `/dev` 只在 `modes: [full-access]` 时做 `dev_bind`；restricted 使用 Bubblewrap 的私有 `/dev`。没有 `modes` 的旧挂载仍在两种模式生效，程序不会自动删掉它们。运行中用 `/sandbox` 切换；`/sandbox mounts` 打印下一次创建 Worker 会使用的有效启动策略，不读取内核挂载表，也不启动或关闭沙箱。切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。候选挂载、文件路由，以及配置目录和安装路径的保护缓存会先建好；构建失败或旧沙箱停不下来时，当前模式和这些保护都不发布。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `allow`。
+配置文件未写 `sandbox.mode` 时，代码缺省为 `restricted`。随程序提供的模板也是 `restricted`。模板里的宿主 `/dev` 只在 `modes: [full-access]` 时做 `dev_bind`；restricted 使用 Bubblewrap 的私有 `/dev`。没有 `modes` 的旧挂载仍在两种模式生效，程序不会自动删掉它们。运行中用 `/sandbox` 切换；`/sandbox mounts` 打印下一次创建 Worker 会使用的有效启动策略，不读取内核挂载表，也不启动或关闭沙箱。切换在下一次模型调用前生效，不打断正在执行的命令，也不写回 `config.yaml`。候选挂载、文件路由，以及配置目录和安装路径的保护缓存会先建好；构建失败或旧沙箱停不下来时，当前模式和这些保护都不发布。新进程和恢复会话都回到配置文件里的模式。`/sandbox` 不改变模型看到的工作区路径，也不改变 `ask` / `auto` / `allow`。
 
 随程序提供的沙箱配置是一份最小基线，不是针对具体部署的安全策略。它只确定工作区、运行所需的只读系统目录、持久的 `/tmp` 与 `/home`，以及 full-access 模式下的宿主 `/dev`；Node、Cargo、Chrome 等常见工具路径的挂载只作为注释示例写在模板里。这些可选路径在源目录不存在时跳过，既不表示工具已经可用，也不覆盖容器、多用户主机或自定义安装前缀。
 
@@ -100,7 +107,7 @@
 
 额外挂载的限制：`source` 支持 `~`，相对路径按配置文件目录解析；`destination` 必须是沙箱内的绝对路径，不支持 `~`，不能是工作区挂载根（本例为 `/mnt/d/test`）、`/tmp`、`/home/agent`，也不能与 `/skills` 或 `/run/deep-agent` 重叠。`source` 必须存在，除非该项写了 `optional: true`；可选源不存在时跳过，不寻找替代来源。
 
-挂载用于控制文件系统可见范围。用户可以选择较宽的只读目录，也可以只暴露所需版本或文件，均通过现有挂载列表表达，审批规则仍由 `ask` / `allow` 独立决定。只读只能禁止写入，不能阻止读取其中的密钥、凭据等敏感文件。
+挂载用于控制文件系统可见范围。用户可以选择较宽的只读目录，也可以只暴露所需版本或文件，均通过现有挂载列表表达，审批规则仍由 `ask` / `auto` / `allow` 独立决定。只读只能禁止写入，不能阻止读取其中的密钥、凭据等敏感文件。
 
 文件工具使用同一份启动配置。能安全表达的挂载才会同时进入 Bubblewrap 和文件工具路由：
 
@@ -113,7 +120,7 @@
 
 - 独立的 PID、IPC、UTS 命名空间；`deep-agent` 退出（包括被强制结束）时沙箱进程随之结束。
 - 沙箱内需要 `/usr/bin/python3`（或 `/usr/local/bin/python3`、`/bin/python3`）来运行常驻 Worker；Worker 脚本只读挂载在 `/run/deep-agent/`，额外挂载不能覆盖该目录。
-- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。代理与 CA 变量由主配置顶层 [`trust_env`](configuration.md#全局网络环境trust_env) 统一控制：`true` 时自动继承，`false` 时移除，包括显式配置的同名变量。其余变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。
+- 环境变量先清空，再设置 `PATH=/run/deep-agent:/usr/local/bin:/usr/bin:/bin`、`HOME`、`PWD`、`TMPDIR`，并传入宿主的 `LANG`、`TERM`、`COLORTERM`、`NO_COLOR`、`TZ` 和 `LC_*`。代理与 CA 变量由主配置顶层 [`trust_env`](configuration.md#全局网络环境trust_env) 统一控制：`true` 时自动继承，`false` 时移除，包括显式配置的同名变量。其余变量需要列入 `sandbox.env_allowlist` 或写在 `sandbox.env_set` 中。把 `PATH` 列入 `env_allowlist` 才使用宿主 `PATH`；`env_set.PATH` 会盖住它。程序随后自动将 `/run/deep-agent` 放到最前；宿主已安装的内置 `rg` 因此仍可直接调用。模板默认列入 `PATH` 和 `DISPLAY`，见下节。`env_set` / `env_allowlist` 中的值**不会**自动进入展示侧脱敏；需要遮盖时写入主配置 [`redaction.replacements`](configuration.md#脱敏redaction)。
 - 不限制 CPU、内存、磁盘或进程数。
 
 ## 工具目录与环境变量
@@ -190,7 +197,7 @@ Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib
 
 CUSTOM backend 保留调用方自己的规则。
 
-`grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同，不再使用以前独立 `grep` 工具的免审批规则。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。未注册的搜索实现仍留在代码里，不会作为工具交给模型。
+`grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 
@@ -198,14 +205,35 @@ CUSTOM backend 保留调用方自己的规则。
 
 | 模式 | 需要确认的工具 | 可用条件 |
 |---|---|---|
-| `ask`（默认） | `execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
+| `ask`（默认） | 副作用工具（`agent/tools/catalog.py` 的 `SIDE_EFFECT_TOOLS`：`execute`、`web_search`、`web_fetch`、`write`、`edit`、`delete`）、MCP 工具及 `mcp_add` / `mcp_remove`（`mcp_list` 免审批） | 所有执行模式 |
+| `auto` | Ask 不拦的工具、`web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute` 直接放行。联网或 `full-access` 下的 `execute`、工作区外的文件变更由独立的 DeepSeek Flash 判断是否在用户授权范围内。未信任的 MCP 工具、`mcp_add` / `mcp_remove` 和自定义工具需人工确认 | `SANDBOXED` 且已配置 DeepSeek 来源级凭据 |
 | `allow` | 所有工具自动批准，包括宿主 MCP 工具、`mcp_add` 和 `mcp_remove`；所有 `execute` 开放宿主网络 | 仅 `SANDBOXED`；开启时需输入 `ALLOW` |
 
-- `/permission ask|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
-- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `allow`，工具审批仍统一由 `/permission` 决定，也不写入会话目录。
+- `/permission ask|auto|allow` 切换。空闲时立即生效；有任务运行或有待处理的审批、暂停时，在下一次模型调用前生效。切到 `allow` 不会自动批准已经在等待的审批。
+- `/sandbox restricted|full-access` 切换文件系统模式，时机与 `/permission` 相同。空闲时打开选择；运行中必须写出目标模式。`full-access` 会写入当前真实环境。待生效时底栏显示 pending。它不修改 `ask` / `auto` / `allow`，工具审批仍统一由 `/permission` 决定，也不写入会话目录。
 - 正在输入 `ALLOW` 时，新的工具审批、提问或暂停不会替换确认栏。提交或取消确认后才打开该面板；`F2` 可先查看，`Esc` 回到确认栏。
 - 会话保存其权限模式，恢复会话时沿用。
 - 作为库使用时，自定义工具如果有副作用，需要通过 `create_agent(interrupt_on=...)` 显式加入审批规则；内置工具的审批规则不能被覆盖。
+
+### Auto 审批
+
+Auto 按三层判断，前一层给出结论就不再往下走。
+
+1. **沿用 Ask 的规则。** Ask 不需要确认的工具，Auto 也不拦。自定义工具、未信任的宿主 MCP 工具和 `mcp_add` / `mcp_remove` 在沙箱之外生效，始终人工确认。
+2. **沙箱已经限定范围的操作直接放行。** 包括 `web_search` / `web_fetch`、工作区内的 `write` / `edit` / `delete`，以及 `restricted` 下不联网的 `execute`。这类命令没有网络，能写到的只有工作区、读写挂载和沙箱自己的 `/tmp`、`/home`。额外的读写挂载也在这个范围内，不希望被自动改写的目录不要以读写方式挂载。
+3. **其余调用交给 Flash。** 即联网的 `execute`、`full-access` 下的 `execute`，以及工作区外的文件变更。
+
+Flash 是独立的审批员，判断待审调用是否在用户授权范围内。它看到的只有用户消息、此前的工具调用（名称和参数）、待审调用，以及工作区、沙箱模式、网络策略和读写挂载。主 Agent 的文字和工具输出不发送，避免 Agent 的自我解释或工具结果里的注入内容影响判断。子任务证据沿用根 Agent 收到的真实用户请求，委派说明单独放在 `delegated_task`。发送前按[脱敏配置](configuration.md#脱敏redaction)替换已知字面量。替换先于截断，截断边界不会切断 `$名称`。过长的参数会截断并标记；证据仍超过上限时转人工。
+
+判断依据是操作的实际效果和用户授权，不是命令里出现的关键词。拦截的是未授权的数据外发、用户未要求的不可逆破坏、对共享或生产环境的修改、持久削弱安全边界，以及出自不可信内容的指令。按依赖清单安装依赖、读取项目 `.env` 调用对应服务、构建和测试、向已有远程非强制推送功能分支等常规开发操作属于放行例外。
+
+Flash 只输出 `allow` 或 `block` 和一个固定的原因代码，每个调用只请求一次（`reasoning_effort: none`）。请求格式见 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。每批最多同时审查 4 个调用，共用 18 秒；到期时保留已完成的决定，未返回的调用转人工。请求失败、审查过程出现任何异常或输出不符合约定也转人工；只有你主动取消会中止运行。
+
+被拦截的调用不执行，原因作为工具错误返回给 Agent，由它换一种方式继续或向用户说明。同一会话里 Flash 连续拦截 3 次或累计拦截 20 次时，这一次改为人工确认，两个计数随之清零。计数只在内存中，重启后重新开始。子任务需要人工确认时把原因返回父任务，由父任务决定是否重新发起。
+
+Auto 减少的是确认次数，不是安全边界：Flash 可能判断错误，`web_fetch` 的 URL 和不联网命令写入 `/tmp` 的内容也不经审查。联网命令送审时会带上此前的工具调用，用来识别先收集、后外发的组合。真正的边界仍是沙箱模式、挂载和网络参数。
+
+使用 Session SQLite 时，Auto 持久化调用摘要、决定、固定原因、执行状态和审批环境指纹。恢复待审批批次时保留原提示和调用顺序。工具执行前会核对沙箱模式、工作区、挂载、受保护路径、网络策略、`env_allowlist`、`env_set`（仅本地哈希）和 `trust_env`；依赖 MCP 信任、文件路径或沙箱模式的直接放行还会重新判定一次。环境变化，或审批已执行、结果未知时，会阻止旧调用并要求重新发起。用过 Auto 的会话切回 `ask` 后仍保留这层重放防护；从未用过 Auto 的会话在 `ask` 下只走普通审批。无持久会话时记录仅在内存中有效。
 
 ## 命令输出与日志
 

@@ -21,16 +21,30 @@ from agent.execution.network import network_requested
 from agent.execution.network import get_execute_network
 from agent.tools.execute import build_execute_tool
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+from agent.mcp.names import host_interrupt_on
 from agent.runtime.permissions import (
-    ASK_INTERRUPT_ON,
+    ask_interrupt_on,
+    AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
+    host_decision_rule,
     interrupt_on_for_mode,
     parse_permission_mode,
+    permission_available,
+    permission_completion_description,
     permission_mode_label,
     permission_mode_from_interrupt_on,
+    permission_unavailable_reason,
 )
+from agent.tools.catalog import (
+    FILE_MUTATION_TOOLS,
+    FILESYSTEM_TOOL_NAMES,
+    NATIVE_TOOL_NAMES,
+    SIDE_EFFECT_TOOLS,
+    WEB_TOOLS,
+)
+from agent.bootstrap.factory import DEFAULT_FS_TOOLS
 from agent.runtime.runner import AgentRunner
 from agent.runtime.contracts import RunEvent
 from agent.execution.backend import BackendSelection, select_backend
@@ -66,6 +80,59 @@ def test_mcp_approval_rules_are_part_of_the_global_permission_mode() -> None:
 def test_allow_only_for_sandboxed() -> None:
     assert allow_mode_available(ExecutionMode.SANDBOXED)
     assert not allow_mode_available(ExecutionMode.CUSTOM)
+
+
+def test_permission_availability_is_shared() -> None:
+    assert permission_available(
+        PermissionMode.ASK, execution_mode=ExecutionMode.CUSTOM, has_deepseek_key=False,
+    )
+    assert permission_unavailable_reason(
+        PermissionMode.ALLOW, execution_mode=ExecutionMode.CUSTOM, has_deepseek_key=True,
+    )
+    assert permission_unavailable_reason(
+        PermissionMode.AUTO, execution_mode=ExecutionMode.SANDBOXED, has_deepseek_key=False,
+    ) == AUTO_FALLBACK_REASON
+    assert permission_available(
+        PermissionMode.AUTO, execution_mode=ExecutionMode.SANDBOXED, has_deepseek_key=True,
+    )
+    assert permission_completion_description("auto")
+    assert permission_completion_description("unknown-mode") == "Permission mode"
+
+
+def test_tool_catalog_drives_ask_interrupt_and_native_reserved() -> None:
+    assert SIDE_EFFECT_TOOLS <= NATIVE_TOOL_NAMES
+    assert FILE_MUTATION_TOOLS | WEB_TOOLS | {"execute"} == SIDE_EFFECT_TOOLS
+    for name in SIDE_EFFECT_TOOLS:
+        assert name in ask_interrupt_on()
+    assert "read" in NATIVE_TOOL_NAMES
+    assert "read" not in SIDE_EFFECT_TOOLS
+    assert "request_human_input" in NATIVE_TOOL_NAMES
+    assert "compact_conversation" in NATIVE_TOOL_NAMES
+    assert DEFAULT_FS_TOOLS == list(FILESYSTEM_TOOL_NAMES)
+    assert FILESYSTEM_TOOL_NAMES == ("ls", "read", "write", "edit", "delete")
+
+
+def test_host_decision_rules_do_not_share_mutable_lists() -> None:
+    left = host_decision_rule()
+    right = host_decision_rule()
+    assert left == right and left is not right
+    assert left["allowed_decisions"] is not right["allowed_decisions"]
+    left["allowed_decisions"].append("edit_without_approval")
+    assert right["allowed_decisions"] == ["approve", "reject"]
+
+    first = ask_interrupt_on()
+    second = ask_interrupt_on()
+    assert first == second and first is not second
+    assert first["execute"]["allowed_decisions"] is not second["execute"]["allowed_decisions"]
+    first["execute"]["allowed_decisions"].clear()
+    assert ask_interrupt_on()["execute"]["allowed_decisions"] == ["approve", "reject"]
+    assert interrupt_on_for_mode(PermissionMode.ASK) == ask_interrupt_on()
+
+    mcp = host_interrupt_on(["mcp__demo__echo"])
+    mcp["mcp_add"]["allowed_decisions"].append("extra")
+    other = host_interrupt_on(["mcp__demo__echo"])
+    assert other["mcp_add"]["allowed_decisions"] == ["approve", "reject"]
+    assert other["mcp__demo__echo"]["allowed_decisions"] is not mcp["mcp__demo__echo"]["allowed_decisions"]
 
 
 def test_network_requested_truthy() -> None:
@@ -104,7 +171,7 @@ def test_execute_tool_network_by_default_applies_without_declaration() -> None:
             seen.append(get_execute_network())
             return ExecuteResponse(command, 0, False)
 
-    execute = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
+    execute = build_execute_tool(Backend(), permission=PermissionMode.ALLOW)  # type: ignore[arg-type]
     assert execute.invoke({"command": "one"}) == "one"
     assert execute.invoke({"command": "two", "network": False}) == "two"
     assert seen == [True, True]
@@ -118,7 +185,7 @@ def test_runner_defaults_to_ask() -> None:
         thread_id="perm-default",
     )
     assert runner.permission_mode() is PermissionMode.ASK
-    assert runner.prepared.interrupt_on == ASK_INTERRUPT_ON
+    assert runner.prepared.interrupt_on == ask_interrupt_on()
     assert runner.prepared.execution_mode is ExecutionMode.CUSTOM
 
 
@@ -131,7 +198,7 @@ def test_custom_interrupt_mapping_is_applied() -> None:
         interrupt_on={"lookup_docs": True},
     )
     runner = AgentRunner(prepared=prepared)
-    assert prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+    assert prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
     waiting = runner.invoke("look up")
     assert waiting.status == "waiting_confirmation"
     assert waiting.pending_tool_calls[0]["name"] == "lookup_docs"
@@ -146,12 +213,12 @@ def test_custom_approval_survives_permission_round_trip() -> None:
         runner = AgentRunner(prepared=prepared)
         runner.set_permission_mode("allow")
         assert runner.pending_permission_mode() is PermissionMode.ALLOW
-        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+        assert runner.prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
         assert runner.invoke("x").status == "completed"
         assert runner.prepared.interrupt_on == {}
         runner.set_permission_mode("ask")
         assert runner.invoke("y").status == "completed"
-        assert runner.prepared.interrupt_on == {**ASK_INTERRUPT_ON, "lookup_docs": True}
+        assert runner.prepared.interrupt_on == {**ask_interrupt_on(), "lookup_docs": True}
 
 
 def test_deferred_allow_keeps_existing_approval_and_applies_before_next_model() -> None:
@@ -616,14 +683,24 @@ def test_approval_execute_network_summary(network, label) -> None:
 
 
 def test_approval_multiple_tools_truncation_and_redaction() -> None:
-    ui = InteractionController.approval([
-        {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
-        {"toolCallId": "b", "name": "execute", "args": {"command": "curl -H 'Authorization: Bearer private-value' site"}},
-        {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
-    ])
+    from agent.redaction import SecretRef
+
+    ui = InteractionController.approval(
+        [
+            {"toolCallId": "a", "name": "execute", "args": {"command": "echo " + "x" * 1000}},
+            {
+                "toolCallId": "b",
+                "name": "execute",
+                "args": {"command": "curl -H 'Authorization: Bearer private-value' site"},
+            },
+            {"toolCallId": "c", "name": "write", "args": {"content": "private-file-content"}},
+        ],
+        secrets=(SecretRef("SECRET", "private-value"),),
+    )
     assert ui.tool_call_ids == ["a", "b", "c"]
     assert "truncated" in ui.question and "Ctrl+O" in ui.question
     assert "private-value" not in ui.question
+    assert "$SECRET" in ui.question
     assert "private-file-content" not in ui.question
     assert "Tool: write" in ui.question
     assert ui.option_index == 0
@@ -718,14 +795,19 @@ def test_approval_file_tool_shows_only_target(tool, key) -> None:
 
 
 def test_approval_file_targets_bound_and_redact_summary() -> None:
-    ui = InteractionController.approval([
-        {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
-        {"name": "edit", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
-        {"name": "delete", "args": {"file_path": "/workspace/api_key=private-value"}},
-        {"name": "delete", "args": {}},
-    ])
+    from agent.redaction import SecretRef
+
+    ui = InteractionController.approval(
+        [
+            {"name": "write", "args": {"file_path": "/workspace/" + "x" * 400}},
+            {"name": "edit", "args": {"file_path": "/workspace/line\n\x1b[31m.txt"}},
+            {"name": "delete", "args": {"file_path": "/workspace/token=private-value"}},
+            {"name": "delete", "args": {}},
+        ],
+        secrets=(SecretRef("SECRET", "private-value"),),
+    )
     assert "truncated; Ctrl+O" in ui.question
     assert "\x1b" not in ui.question
     assert "private-value" not in ui.question
-    assert "[redacted: target may contain credentials]" in ui.question
+    assert "$SECRET" in ui.question
     assert "Target: <not supplied>" in ui.question

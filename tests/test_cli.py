@@ -958,7 +958,7 @@ def test_status_tool_usage_table_has_a_column_per_model() -> None:
                 {"model": "deepseek-flash", "reasoning_effort": "low", "tool_calls": ["execute", "read"]},
                 {"model": "deepseek-flash", "reasoning_effort": "high", "tool_calls": ["execute", "mcp__docs__search"]},
                 {"model": "qwen3.8-max", "reasoning_effort": "default",
-                 "tool_calls": ["read", "grep", "start_task", "read_task_log"]},
+                 "tool_calls": ["read", "grep", "start_task", "read_task"]},
                 {"model": "glm-5.3", "tps": 10.0},
             ])
             assert app._tool_usage_lines().splitlines() == [

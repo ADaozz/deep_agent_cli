@@ -145,7 +145,6 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
     from prompt_toolkit.output import DummyOutput
 
     from agent.cli.app import CliApplication
-    from agent.companion.timeline import SESSION_RELIABILITY
     from tests.conftest import scripted_model
 
     workspace = tmp_path / "workspace"
@@ -157,7 +156,7 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
         "def test_fixture_comparison():\n    assert False, 'fixture comparison failed'\n",
     )
     canary = "opaque-companion-integration-secret"
-    monkeypatch.setenv("COMPANION_DEEPSEEK_API_KEY", canary)
+    from agent.bootstrap.config import Settings
 
     cases = {
         "dependency": ["-c", "import _lain_missing_fixture_"],
@@ -189,7 +188,6 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
         *({"tool": "inspect_current_session", "id": "detail-" + case,
            "args": {"view": "tool_detail", "tool_call_id": case}} for case in cases),
         {"text": explanation},
-        {"text": '{"behavior":"curious","message":"错误类型发生了变化。"}'},
     ]
 
     async def scenario(endpoint, requests):
@@ -203,12 +201,12 @@ worker.build_chat_model = lambda profile, **kwargs: build(replace(profile, base_
 asyncio.run(worker.main())
 """
 
-        async def start_worker(directory, config):
+        async def start_worker(directory, config, api_key):
             return await asyncio.create_subprocess_exec(
                 sys.executable, "-c", launch, endpoint, str(directory),
-                str(config.persona_prompt), str(config.observation_prompt), str(config.chat_prompt),
+                str(config.persona_prompt), str(config.chat_prompt),
                 str(config.rpc_timeout_seconds), str(config.question_timeout_seconds),
-                env={"PATH": os.environ["PATH"], "COMPANION_DEEPSEEK_API_KEY": canary},
+                env={"PATH": os.environ["PATH"], "DEEPSEEK_API_KEY": api_key},
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -222,7 +220,7 @@ asyncio.run(worker.main())
             ]),
             AIMessage(content="Main agent completed the fixture"),
         ])
-        runner = AgentRunner(model=model, backend=FixtureBackend(), session_store=store)
+        runner = AgentRunner(model=model, backend=FixtureBackend(), session_store=store, settings=Settings(resolved_deepseek_api_key=canary))
         try:
             with create_pipe_input() as pipe:
                 app = CliApplication(runner, config_dir=tmp_path / "config", input=pipe, output=DummyOutput())
@@ -254,24 +252,16 @@ asyncio.run(worker.main())
                 assert [row["tool_call_id"] for row in rows] == list(cases)
                 assert [row["error_category"] for row in rows] == ["dependency", "assertion", "permission", ""]
                 await companion.save_statistics()
-                state = companion.timeline
-                state.queue.clear()
-                incident = dict(id="fixture-incident", version=1, state="open", scope="session",
-                                turn=rows[-1]["turn_id"])
-                state.incidents[SESSION_RELIABILITY] = incident
-                state.queue.append((SESSION_RELIABILITY, incident["id"], incident["version"]))
                 companion.ask("解释 execute 的失败变化。")
                 worker = asyncio.create_task(companion.worker_session())
                 try:
                     async with asyncio.timeout(15):
-                        while companion.question or "analysis" not in incident:
+                        while companion.question:
                             await asyncio.sleep(.02)
                 finally:
                     worker.cancel()
                     await asyncio.gather(worker, return_exceptions=True)
-                assert [message for _, role, message in companion.logs if role == "Lain"] == [
-                    explanation, "错误类型发生了变化。",
-                ]
+                assert [message for _, role, message in companion.logs if role == "Lain"] == [explanation]
                 runner.new_session()
                 missing = await inspect(view="tool_detail", tool_call_id="success")
                 assert missing["error"]["code"] == "tool_call_not_found"
@@ -281,10 +271,8 @@ asyncio.run(worker.main())
             runner.close()
             store.close()
 
-        final_request, observation = requests[-2:]
-        assert observation["response_format"] == {"type": "json_object"}
-        assert not observation.get("tools")
-        assert "fixture-incident" in observation["messages"][-1]["content"]
+        final_request = requests[-1]
+        assert all(item.get("tools") for item in requests)
         assert {item["function"]["name"] for item in final_request["tools"]} == {
             "session_evidence", "inspect_current_session", "search_workspace_text",
             "list_workspace_files", "read_workspace_file",

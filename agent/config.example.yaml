@@ -24,17 +24,23 @@ agent:
 # 仅当问题可分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 subagents:
   enabled: true
-  max_concurrent: 2
+  # 每个父 Agent 同时最多几个直接子任务；默认 4，与宿主硬顶取最小。
+  max_concurrent: 4
+  # 全树累计同时存在的 SubAgent 上限（不含 Root）；默认 10，与宿主硬顶取最小。
+  max_total: 10
+  # 允许的 SubAgent 嵌套层数（不是 Agent 总层数）。主 Agent depth=0；
+  # 其创建的 SubAgent 为 1，再下一层为 2。默认与宿主上限均为 2。
+  # 达到上限的 Agent 仍可执行任务，但不能再 start_task。
+  max_subagent_depth: 2
   # model 为 null：继承主 Agent 当前模型；否则必须是 llm.models 中的完整 ID。
   model: null
   # 默认填写 default；省略此项或旧配置 null 也使用子模型原生默认强度。
   # default 不向 API 发送推理强度参数，不继承主 Agent 的 high/low 等强度。
   # 可显式填写目标模型支持的 low/high 等强度；暂不支持 auto。
   reasoning_effort: default
-  # 只支持 allow；必须使用已经验证的 Bubblewrap 沙箱，无法使用时 start_task 明确失败。
-  permission: allow
-  # 是否同时提供后台委派工具（start/check/cancel_background_task）。
-  # 后台子任务运行期间主 Agent 继续工作，完成后自动通知；与 start_task 共用 max_concurrent。
+  # 子任务使用主 Agent 的权限模式（auto 或 allow）；ask 下不提供委派。
+  # 是否在根 Agent 的 start_task 中提供 run_in_background。
+  # 嵌套 SubAgent 只能同步委派。read_task 只读取直接子任务及其日志。
   background: true
 
 tools:
@@ -61,7 +67,6 @@ ui:
 # 路径相对于本配置文件，也可填写绝对路径。null 使用内置文件。
 companion:
   persona_prompt: companion/prompts/persona.md
-  observation_prompt: companion/prompts/observation.md
   chat_prompt: companion/prompts/chat.md
   gifs:
     idle: companion/gifs/lain_idle.gif
@@ -115,6 +120,7 @@ llm:
     # --- DeepSeek 官方：Chat Completions API ---
     # https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
     deepseek:
+      # DeepSeek 模型、网页搜索和抓取、Lain 与 Auto 审批共用此来源级凭据。
       api_key: ${DEEPSEEK_API_KEY}
       base_url: https://api.deepseek.com/v1
       api: chat_completions
@@ -138,11 +144,6 @@ llm:
     # 子智能体的 subagents.reasoning_effort 可单独填写 default。
     # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
 
-
-web_tools:
-  # 可选配置。DEEPSEEK_API_KEY 环境变量优先；未配置凭据时不注册 web_search 和 web_fetch。
-  # 也可以在私有配置 ~/.deep-agent/config.yaml 中直接填写密钥。
-  api_key: null
 
 sandbox:
   # 本段是最小基线，只覆盖常见本机布局。请按实际部署以及需要保护的目录调整挂载、PATH 和环境变量。
@@ -211,3 +212,10 @@ paths:
   state_path: null
   # 快捷键配置目录；null 表示使用 ~/.deep-agent。
   config_dir: null
+
+# 脱敏：配置文件中的模型 api_key 会自动替换为 $llm.models.… 路径名。
+# 额外字面量用 replacements 精确替换为自定义名称（不必带 $）；沙箱/MCP 环境变量不自动脱敏。
+redaction:
+  replacements: {}
+  # replacements:
+  #   "sk-XXXX": "密钥"

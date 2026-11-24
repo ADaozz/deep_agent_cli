@@ -30,11 +30,9 @@ class FieldOption(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    value: str = Field(
-        description="选项值，用户选中后按这个值回传",
-    )
-    label: str = Field(default="", description="展示给用户的选项文案")
-    description: str = Field(default="", description="选项补充说明，可留空")
+    value: str = Field(description="Value returned when the user selects this option.")
+    label: str = Field(default="", description="Label shown to the user.")
+    description: str = Field(default="", description="Optional explanation of the option.")
 
 
 class FieldSpec(BaseModel):
@@ -42,15 +40,15 @@ class FieldSpec(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(default="", description="字段 id，用户的回答按这个 key 回传")
-    type: FieldType = Field(default="text", description="字段类型")
-    label: str = Field(default="", description="字段标题")
-    required: bool = Field(default=False, description="是否必须回答")
-    placeholder: str = Field(default="", description="输入框占位提示，可留空")
+    id: str = Field(default="", description="Field id. The user's answer is returned under this key.")
+    type: FieldType = Field(default="text", description="Field type.")
+    label: str = Field(default="", description="Field title.")
+    required: bool = Field(default=False, description="Whether an answer is required.")
+    placeholder: str = Field(default="", description="Optional input placeholder.")
     options: list[FieldOption] = Field(
         default_factory=list,
         max_length=3,
-        description="single_select / multi_select 的候选项，最多 3 个，保留最相关的；系统会另加 Other 自定义输入，不要自行提供",
+        description="Options for single_select or multi_select, at most 3. The system adds Other. Do not add it yourself.",
     )
 
     @field_validator("type", mode="before")
@@ -65,8 +63,8 @@ class Recommendation(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    value: str = Field(default="", description="推荐选中或填写的内容")
-    reason: str = Field(default="", description="推荐理由，可留空")
+    value: str = Field(default="", description="Recommended selection or text.")
+    reason: str = Field(default="", description="Optional reason for the recommendation.")
 
 
 class HumanInputArgs(BaseModel):
@@ -74,21 +72,21 @@ class HumanInputArgs(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    reason: str = Field(description="为什么必须由用户介入才能继续")
-    question: str = Field(description="简短题干，不要把选项写成 Markdown 列表")
+    reason: str = Field(description="Why progress requires the user.")
+    question: str = Field(description="Short question. Do not write options as a Markdown list.")
     interaction_type: InteractionType = Field(
-        default="clarification", description="交互类型"
+        default="clarification", description="Interaction type."
     )
-    title: str = Field(default="", description="交互标题，可留空")
+    title: str = Field(default="", description="Optional title.")
     fields: list[FieldSpec] = Field(
         default_factory=list,
-        description="需要用户填写的字段；留空表示只有一个自由文本回复框",
+        description="Fields for the user. Empty means one free-text reply.",
     )
     recommendation: Recommendation | None = Field(
-        default=None, description="推荐答案，没有明确推荐时整个省略"
+        default=None, description="Recommended answer. Omit when there is no recommendation."
     )
     impact: list[str] = Field(
-        default_factory=list, description="这个决策会影响什么，每条一句；可留空"
+        default_factory=list, description="What this decision affects, one sentence each. Optional."
     )
 
     @field_validator("interaction_type", mode="before")
@@ -159,8 +157,9 @@ def _plain(value: Any) -> Any:
 
 def _request_description() -> str:
     return (
-        "暂停并请用户提供继续执行所必需、且无法自行合理确定的信息或决策；"
-        "能自行判断的技术细节自主处理，任务完成后介绍后续选项时不要调用。这不是工具权限确认。"
-        "有可选项时用 single_select / multi_select 字段的 options 提供，不要写进 question。"
-        "fields / recommendation / impact 传原生 JSON 结构，不要序列化成字符串。"
+        "Request user input only when missing information or a decision prevents meaningful progress. "
+        "Resolve ordinary technical details independently using the available context and tools. "
+        "Do not use this tool for permission approvals. "
+        "Provide structured options when a choice is required. "
+        "Pass fields, recommendation, and impact as JSON values, not serialized strings."
     )

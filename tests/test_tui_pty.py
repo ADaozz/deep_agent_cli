@@ -368,7 +368,7 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             assert state['summary'] == '修复会话恢复流程中的异常中断问题'
             assert len(server.summary_connections) == 1
             assert len(server.connections) == 2
-            assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
+            assert 'stopped by the user' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
             tui.close()
         assert server.open_connections() == []
@@ -654,6 +654,7 @@ def _subagent_stream_probe():
     from agent.bootstrap.config import SandboxConfig
     settings = replace(settings, sandbox=SandboxConfig(workspace=workspace), config_dir=workspace.parent/'private')
     runner = AgentRunner(settings=settings, session_store=store, thread_id='pty-cancel')
+    runner.set_permission_mode('allow')
 """.strip(),
     ).replace(
         "from agent.cli.app import CliApplication",
@@ -683,7 +684,7 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
     from tests.model_stream_server import ScriptedSSEServer, Turn
     probe = _subagent_stream_probe()
     call = {'name': 'start_task', 'id': 'delegate', 'args': {
-        'description': 'private child task', 'subagent_type': 'general-purpose'}}
+        'description': 'private child task'}}
     with ScriptedSSEServer('chat_completions', [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
         tui = Tui(tmp_path, probe=probe, extra_args=(server.base_url, 'chat_completions'))
         try:
@@ -712,7 +713,7 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
 def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
     from tests.model_stream_server import ScriptedSSEServer, Turn
     calls = [{'name': 'start_task', 'id': identifier, 'args': {
-        'description': description, 'subagent_type': 'general-purpose'}}
+        'description': description}}
         for identifier, description in [('median', 'Fix median3'), ('date', 'Fix is_leap_year')]]
     with ScriptedSSEServer('chat_completions', [
         Turn(tool_calls=calls),
@@ -741,7 +742,7 @@ def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
             )
             assert sample['status_line'].endswith('1 subagent')
             assert sample['rendered'].count('Running SubAgent') == 1
-            assert '└ result' in sample['rendered']
+            assert '└ result' not in sample['rendered']
             state = tui.wait(lambda state: not state['running'] and 'Parent completed both fixes' in state['rendered'], timeout=10)
             assert state['subagents'] == 0 and state['live_streams'] == 0
             assert 'subagent' not in state['status_line']

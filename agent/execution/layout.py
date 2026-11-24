@@ -43,6 +43,10 @@ NETWORK_FILES = ("/etc/hosts", "/etc/resolv.conf", "/etc/ssl")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def valid_env_name(value: str) -> bool:
+    return isinstance(value, str) and ENV_NAME.fullmatch(value) is not None
+
+
 SEARCH_BINARY_PATH = "/run/deep-agent/rg"
 
 
@@ -431,7 +435,7 @@ def _validate_config(config: SandboxConfig) -> Path:
         _mount_args("--bind", mount, workspace_root=sandbox_workspace_root(workspace))
     _mount_points(replace(config, workspace=workspace), skills)
     for name in (*config.env_allowlist, *config.env_set):
-        if not ENV_NAME.fullmatch(name):
+        if not valid_env_name(name):
             raise ValueError(f"invalid environment variable name: {name!r}")
     return workspace
 

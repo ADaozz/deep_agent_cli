@@ -15,6 +15,9 @@ import tempfile
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from agent.execution.layout import valid_env_name
+from agent.mcp.names import valid_server_name
+
 
 class MCPConfigError(ValueError):
     """The MCP catalog is missing a required field or has an illegal value."""
@@ -24,8 +27,6 @@ class MCPAuthError(MCPConfigError):
     """A server needs credentials that are missing or were not accepted."""
 
 
-_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,32}$")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SECRET_FIELD = re.compile(r"(?i)token|secret|password|authorization|api_key|apikey")
 _URL_SECRET = re.compile(r"(?i)(token|access_token|api_key|key|password)=")
 
@@ -55,9 +56,12 @@ class MCPServerConfig:
     args: tuple[str, ...] = ()
     env_passthrough: tuple[str, ...] = ()
     auth: MCPAuth | None = None
+    auto_approve: bool = False
 
     def to_json(self) -> dict[str, Any]:
         body: dict[str, Any] = {"transport": self.transport, "enabled": self.enabled}
+        if self.auto_approve:
+            body["auto_approve"] = True
         if self.transport == "streamable_http":
             body["url"] = self.url
             if self.auth is not None:
@@ -98,7 +102,7 @@ class MCPFile:
 def parse_server(name: str, raw: Any) -> MCPServerConfig:
     if not isinstance(raw, dict):
         raise MCPConfigError(f"MCP server {name} must be an object")
-    if not _NAME.fullmatch(name):
+    if not valid_server_name(name):
         raise MCPConfigError(
             "MCP server name must start with a letter and contain only letters, digits, '_' or '-'"
         )
@@ -109,14 +113,17 @@ def parse_server(name: str, raw: Any) -> MCPServerConfig:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise MCPConfigError(f"MCP server {name} enabled must be a boolean")
-    unknown = set(raw) - {"transport", "enabled", "url", "command", "args", "env_passthrough", "auth"}
+    auto_approve = raw.get("auto_approve", False)
+    if not isinstance(auto_approve, bool):
+        raise MCPConfigError(f"MCP server {name} auto_approve must be a boolean")
+    unknown = set(raw) - {"auto_approve", "transport", "enabled", "url", "command", "args", "env_passthrough", "auth"}
     if unknown:
         raise MCPConfigError(f"MCP server {name} has unknown fields: {', '.join(sorted(unknown))}")
     if transport == "streamable_http":
         return MCPServerConfig(
             name=name,
             transport=transport,
-            enabled=enabled,
+            enabled=enabled, auto_approve=auto_approve,
             url=_http_url(name, raw.get("url")),
             auth=_auth(name, raw.get("auth")),
         )
@@ -129,7 +136,7 @@ def parse_server(name: str, raw: Any) -> MCPServerConfig:
     return MCPServerConfig(
         name=name,
         transport="stdio",
-        enabled=enabled,
+        enabled=enabled, auto_approve=auto_approve,
         command=_command(name, raw.get("command")),
         args=_args(name, raw.get("args", [])),
         env_passthrough=_env_names(name, raw.get("env_passthrough", [])),
@@ -293,7 +300,7 @@ def _auth(name: str, value: Any) -> MCPAuth | None:
     kind = value.get("type")
     if kind == "bearer":
         token_env = value.get("token_env")
-        if not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env):
+        if not isinstance(token_env, str) or not valid_env_name(token_env):
             raise MCPConfigError(f"MCP server {name} token_env must be an environment variable name")
         return MCPAuth(type="bearer", token_env=token_env)
     if kind == "oauth":
@@ -327,6 +334,6 @@ def _args(name: str, value: Any) -> tuple[str, ...]:
 def _env_names(name: str, value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or not all(isinstance(item, str) and _ENV_NAME.fullmatch(item) for item in value):
+    if not isinstance(value, list) or not all(isinstance(item, str) and valid_env_name(item) for item in value):
         raise MCPConfigError(f"MCP server {name} env_passthrough must be a list of environment variable names")
     return tuple(value)

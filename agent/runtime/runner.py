@@ -31,6 +31,7 @@ from agent.sessions.images import (
 )
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig, SandboxMode
+from agent.redaction import SecretRef, known_secret_refs
 from agent.models.profile import InputKind, ModelProfile
 from agent.runtime.control import RunController
 from agent.runtime.configuration import RuntimeConfiguration
@@ -75,28 +76,27 @@ from agent.runtime.contracts import (
     TurnTiming,
 )
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PermissionMode,
     allow_mode_available,
     allow_mode_unavailable_reason,
     interrupt_on_for_mode,
     parse_permission_mode,
+    permission_available,
     permission_mode_from_interrupt_on,
 )
 from agent.sessions.store import SessionStore, workspace_state_path
-from agent.sessions.transcript import subagent_result_status
-from agent.subagents.notifications import notification_message
+from agent.subagents.notifications import NOTIFICATION_KEY, notification_message
 from agent.sessions.contracts import SessionInfo, StopReason
 from agent.sessions.locks import SessionLockBusyError
 from agent.sessions.lifecycle import RestorePlan, SessionLeaseLike, SessionRuntime
-from agent.models.messages import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks
+from agent.models.messages import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, message_text
 from agent.tools.human_interaction import validate_human_input_values
 
 # Stream the compiled graph and resume with Command.
 # Interrupt classification and terminal RunResult / RunEvent construction live in run_events.
 # Token-level reasoning/assistant deltas use LangChain callbacks (ChatOpenAI streaming=True).
 
-
-HUMAN_TOOLS = frozenset({"request_human_input"})
 
 # Maximum time close() waits for an active operation to drain. Timing out never
 # releases the session lease early: close() raises, keeps the lease, and can be
@@ -127,6 +127,22 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
                 self.control.release_reservation(reservation)
             self._operation_lock.release()
     return guarded
+
+
+def _user_turn_text(graph_input: Any) -> str:
+    """User text that starts this run. Host notifications are not a query."""
+    if not isinstance(graph_input, dict):
+        return ""
+    texts = []
+    for message in graph_input.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        if NOTIFICATION_KEY in (getattr(message, "additional_kwargs", None) or {}):
+            continue
+        text = message_text(message).strip()
+        if text:
+            texts.append(text)
+    return "\n\n".join(texts)
 
 
 class AgentRunner:
@@ -178,6 +194,7 @@ class AgentRunner:
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._environment = EnvironmentCache()
+        self.control.environment_cache = self._environment
         self._closed = False
         self._close_completed = False
         self.mcp = mcp_manager
@@ -219,11 +236,11 @@ class AgentRunner:
             instructions=cfg.agent_instructions,
             hidden_tools=cfg.hidden_tools,
             backend=backend, sandbox=self._sandbox_config or cfg.sandbox,
-            web_tools_api_key=cfg.resolved_web_tools_api_key,
+            deepseek_api_key=cfg.resolved_deepseek_api_key,
         )
         self._pause_condition = prepared.pause_condition if prepared is not None else (lambda: False)
         self._custom_interrupt_on = None
-        if prepared is not None and prepared.interrupt_on:
+        if prepared is not None and prepared.interrupt_on and prepared.permission_mode is not PermissionMode.AUTO:
             from agent.mcp.names import is_managed_mcp_name
 
             native_interrupt = {
@@ -232,7 +249,7 @@ class AgentRunner:
             if native_interrupt and native_interrupt != (interrupt_on_for_mode(PermissionMode.ASK) or {}):
                 self._custom_interrupt_on = native_interrupt
         if prepared is not None:
-            inferred = permission_mode_from_interrupt_on(prepared.interrupt_on)
+            inferred = prepared.permission_mode or permission_mode_from_interrupt_on(prepared.interrupt_on)
             if inferred is PermissionMode.ALLOW and not allow_mode_available(prepared.execution_mode):
                 raise ValueError(allow_mode_unavailable_reason(prepared.execution_mode))
             self.configuration.permission_mode = inferred
@@ -269,7 +286,7 @@ class AgentRunner:
         if self.session_store is not None:
             saved = self.session_store.get(self.thread_id)
             if saved is not None:
-                plan = self._runtime.restore_plan(saved, execution_mode=self.prepared.execution_mode)
+                plan = self._runtime.restore_plan(saved, execution_mode=self.prepared.execution_mode, auto_available=self.auto_available())
                 try:
                     self._apply_restore_plan(plan)
                 except Exception:
@@ -280,6 +297,11 @@ class AgentRunner:
                 self.configuration.pending_reasoning_effort = saved.pending_reasoning_effort
                 self.configuration.pending_model_id = saved.pending_model_id
                 self.configuration.pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
+        try:
+            self._ensure_approval_guard(self.thread_id)
+        except Exception:
+            self._runtime.release()
+            raise
         self.control.set_pending_config_check(self._has_pending_runtime_config)
 
         self.state_path = (
@@ -377,11 +399,20 @@ class AgentRunner:
             self._save_pending_config()
         return profile
 
+    def auto_available(self) -> bool:
+        return permission_available(
+            PermissionMode.AUTO,
+            execution_mode=self.prepared.execution_mode,
+            has_deepseek_key=bool(self._spec.deepseek_api_key),
+        )
+
     def request_permission_change(self, mode: PermissionMode | str) -> PermissionMode:
         if self._closed:
             raise RuntimeError("Runner is closed")
         self._require_active_session()
         with self.configuration.lock:
+            if mode == PermissionMode.AUTO and not self.auto_available():
+                mode = PermissionMode.ASK
             mode = self.configuration.request_permission(mode, self.prepared.execution_mode)
             self._save_pending_config()
         return mode
@@ -447,6 +478,9 @@ class AgentRunner:
             if mode is PermissionMode.ALLOW and not allow_mode_available(self.prepared.execution_mode):
                 failures.append(allow_mode_unavailable_reason(self.prepared.execution_mode))
                 mode = None
+            if mode is PermissionMode.AUTO and not self.auto_available():
+                failures.append(AUTO_FALLBACK_REASON)
+                mode = PermissionMode.ASK
             previous = self.prepared, self._chat_model
             applied_mcp = False
             try:
@@ -636,6 +670,7 @@ class AgentRunner:
         *,
         model: BaseChatModel | None = None,
         permission_mode: PermissionMode | None = None,
+        thread_id: str | None = ...,
     ) -> None:
         mode = permission_mode or self.configuration.permission_mode
         chat = model if model is not None else self._chat_model
@@ -647,14 +682,27 @@ class AgentRunner:
                 attachment_store=self.attachment_store,
                 timeout=self.settings.request_timeout,
             )
+        if thread_id is ...:
+            thread_id = self._runtime.thread_id if self._runtime is not None else None
         self.prepared = build_agent(
             self._spec, chat, mode, self._checkpointer,
             self.control, self._pause_condition,
             interrupt_on_override=self._custom_interrupt_on if mode is PermissionMode.ASK else None,
             backend_selection=self.prepared.backend_selection,
             mcp=self.mcp, settings=self.settings,
+            thread_id=thread_id,
         )
         self._chat_model = chat
+
+    def _ensure_approval_guard(self, thread_id: str | None) -> None:
+        """Rebuild when Ask needs a different Auto replay guard for ``thread_id`` than the current graph has."""
+        from agent.runtime.auto_approval import ApprovalJournal
+
+        if self.prepared.permission_mode is not PermissionMode.ASK:
+            return
+        needed = bool(thread_id) and ApprovalJournal.has_thread(self._checkpointer, thread_id)
+        if needed != self.prepared.approval_guard:
+            self._rebuild_prepared(thread_id=thread_id)
 
     @property
     def sandbox_pool(self) -> SandboxPool | None:
@@ -698,6 +746,11 @@ class AgentRunner:
         manager = self._subagent_manager()
         return manager.background_count if manager is not None else 0
 
+    def task_log_store(self) -> Any:
+        """The tree's task log, or None when this runner has no subagent manager."""
+        manager = self._subagent_manager()
+        return getattr(manager, "log_store", None) if manager is not None else None
+
     def cancel_background_tasks(self) -> None:
         """Stop background subagents without cancelling the parent run."""
         manager = self._subagent_manager()
@@ -735,15 +788,8 @@ class AgentRunner:
     def take_unapplied_messages(self) -> list[str]:
         return [item.text for item in self.control.take_unapplied()]
 
-    def summary_secrets(self) -> tuple[str, ...]:
-        settings = self.settings or self._spec.settings
-        if settings is None:
-            key = self._spec.web_tools_api_key
-            return (key,) if key else ()
-        return tuple(value for value in (
-            *(profile.api_key for profile in settings.llm_profiles),
-            settings.web_tools_api_key, self._spec.web_tools_api_key,
-        ) if value)
+    def summary_secrets(self) -> tuple[SecretRef, ...]:
+        return known_secret_refs(self.settings or self._spec.settings, self._spec.deepseek_api_key)
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         assert self._runtime is not None
@@ -856,12 +902,12 @@ class AgentRunner:
         previous = (self._chat_model, self.configuration.current_model_id, self.configuration.permission_mode,
                     self.configuration.pending_model_id, self.configuration.pending_permission_mode,
                     self.configuration.reasoning_effort, self.configuration.pending_reasoning_effort)
-        plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode)
+        plan = self._runtime.restore_plan(info, execution_mode=self.prepared.execution_mode, auto_available=self.auto_available())
         try:
             snapshot = self.load_session(info.id)
             if snapshot is None:
                 raise KeyError(f"Unknown session: {info.id}")
-            self._apply_restore_plan(plan)
+            self._apply_restore_plan(plan, thread_id=info.id)
             has_checkpoint = self._runtime.thread_has_checkpoint(info.id)
             recovery = self._runtime.recovery_context(
                 info,
@@ -873,6 +919,8 @@ class AgentRunner:
                 info.id, model_id=self.configuration.current_model_id,
                 permission_mode=self.configuration.permission_mode.value, reasoning_effort=self.configuration.reasoning_effort,
             )
+            # Guard rebuild is fallible; keep it before adopt so failure rolls back.
+            self._ensure_approval_guard(info.id)
         except Exception:
             old_model, old_id, old_mode, old_pending_model, old_pending_mode, old_effort, old_pending_effort = previous
             self._rebuild_prepared(model=old_model, permission_mode=old_mode)
@@ -924,7 +972,9 @@ class AgentRunner:
             backend.apply_sandbox_mode(self._configured_sandbox_mode)
         self.configuration.sandbox_mode = self._configured_sandbox_mode
 
-    def _apply_restore_plan(self, plan: RestorePlan) -> None:
+    def _apply_restore_plan(self, plan: RestorePlan, *, thread_id: str | None = ...) -> None:
+        if thread_id is ...:
+            thread_id = self._runtime.thread_id if self._runtime is not None else None
         if self.settings is not None and plan.model_id and (
             plan.model_id != self.configuration.current_model_id or plan.reasoning_effort != self.configuration.reasoning_effort
         ):
@@ -937,12 +987,13 @@ class AgentRunner:
                     timeout=self.settings.request_timeout,
                 ),
                 permission_mode=plan.permission_mode,
+                thread_id=thread_id,
             )
             self.configuration.current_model_id = profile.id
         elif plan.permission_mode is not self.configuration.permission_mode:
-            self._rebuild_prepared(permission_mode=plan.permission_mode)
+            self._rebuild_prepared(permission_mode=plan.permission_mode, thread_id=thread_id)
         self.configuration.reasoning_effort = plan.reasoning_effort
-        self.configuration.permission_mode = plan.permission_mode
+        self.configuration.permission_mode = self.prepared.permission_mode or plan.permission_mode
 
     @_exclusive_operation
     def new_session(self, *, title: str = "") -> SessionInfo:
@@ -957,6 +1008,8 @@ class AgentRunner:
         self.configuration.pending_model_id = None
         self.configuration.pending_permission_mode = None
         self.configuration.pending_sandbox_mode = None
+        # New sessions have no Auto history; drop any Ask replay guard before the lease commit.
+        self._ensure_approval_guard(None)
         return self._runtime.create_new(
             title=title, model_id=self.configuration.current_model_id,
             permission_mode=self.configuration.permission_mode.value,
@@ -997,6 +1050,9 @@ class AgentRunner:
                 "Runner close could not confirm the model request stopped; the "
                 "session lease is kept until it closes and close is retried"
             )
+        manager = self._subagent_manager()
+        if manager is not None:
+            manager.reap_closed()
         self._close_mcp()
         self._close_completed = True
         self._runtime.close()
@@ -1374,7 +1430,10 @@ class AgentRunner:
         self._busy = True
         run_id, turn_id = uuid4().hex, uuid4().hex
         scope_token = observation_scope.set((self.thread_id, run_id, turn_id))
-        _emit(event_handler, RunEvent(type="run_started", run_id=run_id, turn_id=turn_id))
+        _emit(event_handler, RunEvent(
+            type="run_started", run_id=run_id, turn_id=turn_id,
+            content=_user_turn_text(graph_input),
+        ))
 
         result: RunResult | None = None
         turn_started = time.monotonic()
@@ -1418,7 +1477,9 @@ class AgentRunner:
                 turn_id = uuid4().hex
                 observation_scope.set((self.thread_id, run_id, turn_id))
                 self._apply_pending_runtime_config(event_handler)
-                _emit(event_handler, RunEvent(type="turn_started", run_id=run_id, turn_id=turn_id))
+                _emit(event_handler, RunEvent(
+                    type="turn_started", run_id=run_id, turn_id=turn_id, content=text or "",
+                ))
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)] if text is not None
                      else [notification_message(item) for item in notices]},
@@ -1586,9 +1647,6 @@ class AgentRunner:
             if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:
-                # Native task returns an unnamed ToolMessage. Preserve the
-                # presentation identity even when resuming a saved tool step.
-                event = replace(event, name="start_task", is_error=(
-                    subagent_result_status(event.content, is_error=event.is_error) != "completed"
-                ))
+                # The tool node may omit the name. Task failure stays in the artifact.
+                event = replace(event, name="start_task")
             _emit(handler, event)

@@ -24,7 +24,6 @@ from agent.companion.theme import ACCENT
 from agent.companion.animation import ASSETS, frames
 from agent.companion.controller import Companion
 from agent.companion.monitor import Service, services
-from agent.companion.worker import create_observer
 from agent.execution.process import _run_process
 from agent.runtime.contracts import RunEvent
 from agent.runtime.runner import AgentRunner
@@ -108,9 +107,10 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                                   for y in range(rows))
                 for label in (
                     "CPU", "GPU", "RAM", "DISK", "GIT", "SERVICES",
-                    "Talk TO Lain", "Ctrl←/→", "Tool Health",
+                    "Talk TO Lain", "Tool Health",
                 ):
                     assert label in right
+                assert "Ctrl←/→" not in right
                 panel = right.splitlines()[2:]
                 timestamp = f"2026-11-20 13:16:{seconds:02d}"
                 separator = "·" if columns == 120 else " · "
@@ -132,7 +132,7 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 assert chart_heading == heading + 3 + count
                 assert set(panel[chart_heading - 1].strip()) == {"─"}
                 assert panel[chart_heading + 1].strip() == "No tool calls yet"
-                assert not panel[chart_heading + 2].strip()
+                assert panel[chart_heading + 2].strip() == "─" * (columns - width - 5)
                 assert panel[chart_heading + 3].strip().startswith("Talk TO Lain")
                 watching = chart_heading + 4
                 assert panel[watching].strip() == "Watching current session..."
@@ -147,7 +147,10 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 assert panel[heading].index("│") == resource_dividers[1]
                 assert panel[heading + 1].index("│") == resource_dividers[1]
                 title_divider = 1 if suffix else 2
-                for divider in (title_divider, resources - 1, resources + 2, chart_heading - 1):
+                for divider in (
+                    title_divider, resources - 1, resources + 2,
+                    chart_heading - 1, chart_heading + 2,
+                ):
                     assert panel[divider].strip() == "─" * (columns - width - 5)
                     assert ACCENT in screen.data_buffer[divider + 2][width + 3].style
                 for service in app.companion.services:
@@ -190,7 +193,7 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                 side_rows = ["".join(screen.data_buffer[y][x].char for x in range(width + 1, columns))
                              for y in range(rows)]
                 chat_y = next(y for y, row in enumerate(side_rows) if "Talk TO Lain" in row)
-                assert not side_rows[chat_y - 1].strip()
+                assert set(side_rows[chat_y - 1].strip()) == {"─"}
                 assert side_rows[chat_y - 2].strip().endswith("failed")
                 assert side_rows[chat_y + 1].strip() == "Watching current session..."
                 editor = next(pos for window, pos in screen.visible_windows_to_write_positions.items()
@@ -241,13 +244,13 @@ def test_mouse_drag_copies_lain_chat_and_preserves_scroll_and_input_focus(monkey
             first_y, first_cells = find_line("玲音 alpha line")
             last_y, last_cells = find_line("下一行 beta")
             assert first_y < last_y
-            _, hint_cells = find_line("Ctrl←/→")
-            hint_start = next(x for x in range(side_x, 180) if hint_cells[x].char == "C")
+            _, talk_cells = find_line("Talk TO Lain")
+            talk_start = next(x for x in range(side_x, 180) if talk_cells[x].char == "T")
             _, user_cells = find_line("你 · ")
             user_start = next(x for x in range(side_x, 180) if user_cells[x].char == "你")
             _, lain_cells = find_line("玲音 · ")
             lain_start = next(x for x in range(side_x, 180) if lain_cells[x].char == "玲")
-            assert ACCENT in hint_cells[hint_start].style
+            assert ACCENT in talk_cells[talk_start].style
             assert ACCENT in user_cells[user_start].style
             assert ACCENT in lain_cells[lain_start].style
             first_x = next(x for x in range(side_x, 180) if first_cells[x].char == "玲")
@@ -362,26 +365,7 @@ def test_statistics_idempotent_attributed_at_start_and_persisted(tmp_path):
     asyncio.run(run())
 
 
-def test_observer_makes_one_structured_decision_and_can_remain_silent():
-    from agent.companion.diagnosis import InvalidObservation
-
-    async def run():
-        longer = "更详细的观察。" * 50
-        respond = create_observer(scripted_model([
-            AIMessage(content='{"behavior":"curious","message":"看到变化了。"}'),
-            AIMessage(content='{"behavior":"idle","message":""}'),
-            AIMessage(content=json.dumps({"behavior": "focused", "message": longer, "extra": "ignored"})),
-            AIMessage(content='{"behavior":"busy","message":"Invalid"}'),
-        ]))
-        assert await respond({"windows": []}) == {"behavior":"curious","message":"看到变化了。"}
-        assert await respond({"windows": []}) == {"behavior": "idle", "message": ""}
-        assert await respond({"windows": []}) == {"behavior": "focused", "message": longer}
-        with pytest.raises(InvalidObservation):
-            await respond({"windows": []})
-    asyncio.run(run())
-
-
-def test_persona_is_shared_and_each_graph_gets_its_own_instructions(monkeypatch):
+def test_persona_is_shared_and_chat_uses_its_own_instructions(monkeypatch):
     from langchain_core.messages import AIMessageChunk
 
     from agent.companion.worker import create_chat
@@ -402,34 +386,18 @@ def test_persona_is_shared_and_each_graph_gets_its_own_instructions(monkeypatch)
                 callback.on_llm_new_token(text, chunk=AIMessageChunk(content=text))
             return {"messages": [AIMessage(content="我看到了一次超时。")]}
 
-    class ObserverModel:
-        def bind(self, **options):
-            assert options == {"response_format": {"type": "json_object"}}
-            return self
-
-        async def ainvoke(self, messages):
-            system, user = messages
-            prompts.append(system.content)
-            requests.append(user[1])
-            return AIMessage(content='{"behavior":"idle","message":""}')
-
     monkeypatch.setattr("agent.companion.worker.create_react_agent", lambda model, tools: Graph())
-    observer = create_observer(ObserverModel(), persona="Shared persona", instructions="Observe only")
     chat = create_chat(None, None, persona="Shared persona", instructions="Chat only")
-    assert asyncio.run(observer({"execute_environment": environment, "findings": ["timeout"]})) == {
-        "behavior": "idle", "message": "",
-    }
     snapshot = {"question": "为什么execute工具出错多", "tool_evidence": [], "execute_environment": environment}
     assert asyncio.run(chat(snapshot, on_chunk=chunks.append)) == {
         "message": "我看到了一次超时。",
     }
-    for prompt, instruction in zip(prompts, ("Observe only", "Chat only"), strict=True):
-        assert prompt.startswith("Shared persona") and instruction in prompt and prompt.endswith(environment)
-    assert json.loads(requests[0]) == {"findings": ["timeout"]}
+    prompt = prompts[0]
+    assert prompt.startswith("Shared persona") and "Chat only" in prompt and prompt.endswith(environment)
     assert chunks == ["我看到", "我看到了一次超时。"]
-    assert requests[1].endswith("\n为什么execute工具出错多")
-    assert '"tool_evidence": []' in requests[1]
-    assert '"execute_environment"' not in requests[1]
+    assert requests[0].endswith("\n为什么execute工具出错多")
+    assert '"tool_evidence": []' in requests[0]
+    assert '"execute_environment"' not in requests[0]
 
 
 def test_late_reply_from_old_session_and_worker_crash(tmp_path, monkeypatch):
@@ -456,6 +424,8 @@ print(json.dumps(dict(session=r['session'],seq=r['seq'],token=r['token'],behavio
             c.event(RunEvent("tool_started",tool_call_id=str(i),name="write"),"a")
             c.event(RunEvent("tool_completed",tool_call_id=str(i),is_error=True),"a")
         c.event(RunEvent("run_completed"),"a")
+        assert not c.timeline.queue
+        assert c.ask("刚才的失败是什么") == "已发给玲音。"
         task = asyncio.create_task(c.worker_session())
         async with asyncio.timeout(5):
             while not signal_path.with_suffix(".waiting").exists():
@@ -547,6 +517,34 @@ def test_chat_rows_render_markdown_like_main_transcript(tmp_path):
     assert "**失败率" not in plain
     assert "execute" in plain
     assert "read_file" in plain
+
+
+def test_status_rows_render_as_muted_logs(tmp_path):
+    from agent.companion.panel import ChatRows
+    from agent.companion.theme import MUTED
+
+    c = companion(tmp_path, lambda: "session")
+    c.log("服务已启动：demo（PID 1）", "Status")
+    c.log("未配置 **Companion** 密钥", "Status")
+    lines = ChatRows(c).visible_lines(80, 12)
+    compact = "".join(text for line in lines for _, text in line)
+    assert " | INFO     | " in compact
+    assert "服务已启动：demo（PID 1）" in compact
+    assert "**Companion**" in compact
+    assert "日志 · " not in compact
+    assert "提示" not in compact
+    # Full wall-clock stamp, not HH:MM only.
+    assert any(
+        stamp.count("-") == 2 and ":" in stamp
+        for stamp, speaker, _ in c.logs
+        if speaker == "Status"
+    )
+    assert all(
+        style == MUTED
+        for line in lines
+        for style, text in line
+        if text.strip()
+    )
 
 
 def test_broken_clip_is_local_and_other_behavior_recovers(tmp_path, monkeypatch):
@@ -739,8 +737,9 @@ print(json.dumps(dict(**identity, message='这次是命令找不到。', status=
 
 def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     from agent.companion.repository import Repository
+    from agent.redaction import SecretRef
 
-    repo = Repository(tmp_path, secrets=("fixture-sensitive-value",))
+    repo = Repository(tmp_path, secrets=(SecretRef("FIXTURE", "fixture-sensitive-value"),))
     for name in ("auth.py", "tokenizer.py", "config.py", "authorization.py", "password_policy.py"):
         (tmp_path / name).write_text("token = generate_token()\npassword = request.headers.get('Password')\n")
         result = repo.read(name)
@@ -757,10 +756,11 @@ def test_source_filters_credential_files_and_redacts_literals(tmp_path):
     source.write_text("import client\napi_key = 'private-value'\nprint('fixture-sensitive-value')\nclient.connect()")
     result = repo.read(source.name)
     assert "example.py:4 client.connect()" in result
-    assert result.count("[已隐藏]") == 2
-    assert "private-value" not in result and "fixture-sensitive-value" not in result
+    assert "$FIXTURE" in result
+    assert "fixture-sensitive-value" not in result
+    # Unknown assignment literals are not regex-covered.
+    assert "private-value" in result
     assert "example.py:4" in repo.search("client.connect()")
-    assert repo.search("private-value").startswith("No match")
     (tmp_path / "pem_parser.py").write_text('HEADER = "-----BEGIN PRIVATE KEY-----"\nparse_header(HEADER)')
     assert "pem_parser.py:2 parse_header(HEADER)" in repo.read("pem_parser.py")
 
@@ -866,7 +866,8 @@ def test_inspector_live_completion_cache_and_session_boundary(tmp_path):
         detail = dict(view="tool_detail", tool_call_id="a")
         result = await query(**detail)
         assert result["arguments"]["command"] == "pytest -q"
-        assert "opaque-private-value" not in json.dumps(result)
+        # Unknown argument values are not regex-covered; only configured secrets become $name.
+        assert result["arguments"]["api_key"] == "opaque-private-value"
         assert result["result"]["error_category"] == "assertion"
         assert result["result"]["output_excerpt"] == "AssertionError: failed"
         checkpoint.append(TranscriptBlock(kind="tool", tool_call_id="a", name="execute",
@@ -939,11 +940,8 @@ def test_worker_ipc_recovers_after_tool_and_model_timeouts():
 
             return chat
 
-        async def observe(snapshot):
-            return {}
-
         task = asyncio.create_task(serve(
-            reader, outputs.put_nowait, build_chat=build_chat, observe=observe,
+            reader, outputs.put_nowait, build_chat=build_chat,
             config=CompanionConfig(rpc_timeout_seconds=.06, question_timeout_seconds=1),
         ))
 
@@ -1073,3 +1071,23 @@ def test_chat_history_uses_dialogue_budget_and_allows_long_questions(tmp_path):
     assert c.question == question
     assert c.logs[-1][2] == question
     assert c.chat_history(question) == [("You", "Earlier question"), ("Lain", "earlier reply " * 50)]
+
+
+def test_worker_environment_uses_only_injected_key(tmp_path, monkeypatch):
+    from agent.companion.config import CompanionConfig
+    from agent.companion.controller import start_worker
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "host-key")
+    monkeypatch.setenv("COMPANION_DEEPSEEK_API_KEY", "legacy")
+    monkeypatch.setenv("UNRELATED_CREDENTIAL", "private")
+    captured = []
+
+    async def spawn(*args, **kwargs):
+        captured.append(kwargs["env"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    asyncio.run(start_worker(tmp_path, CompanionConfig(), "from-config"))
+    asyncio.run(start_worker(tmp_path, CompanionConfig()))
+    assert captured[0]["DEEPSEEK_API_KEY"] == "from-config"
+    assert "DEEPSEEK_API_KEY" not in captured[1]
+    assert all(set(env) <= {"HOME", "PATH", "LANG", "DEEPSEEK_API_KEY"} for env in captured)

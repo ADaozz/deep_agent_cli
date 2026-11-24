@@ -1,5 +1,6 @@
 """Public task cards show delegation and final results, never child internals."""
 from contextlib import closing
+import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from deepagents.backends import StateBackend
@@ -19,7 +20,7 @@ from tests.conftest import scripted_model
 
 def start(state, identifier, description):
     state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id=identifier,
-                         arguments={'description': description, 'subagent_type': 'general-purpose'}))
+                         arguments={'description': description}))
 
 
 @pytest.mark.parametrize('scheduler_first', [False, True])
@@ -40,7 +41,10 @@ def test_counter_tracks_cards_when_scheduler_and_tool_events_arrive_separately(s
     for identifier, remaining in [('a', 1), ('b', 0)]:
         events = [
             RunEvent(type='subagents_changed', result={'count': remaining}),
-            RunEvent(type='tool_completed', name='start_task', tool_call_id=identifier, content='Result'),
+            RunEvent(
+                type='tool_completed', name='start_task', tool_call_id=identifier, content='Result',
+                artifact={"mode": "sync", "status": "completed", "run_id": identifier, "result": "Result"},
+            ),
         ]
         if not scheduler_first:
             events.reverse()
@@ -92,13 +96,17 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     assert 'Fix median3' in text and 'Fix is_leap_year' in text
     assert 'Explored' not in text
     first, second = state.blocks
-    state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='a', content='All median tests passed'))
+    state.apply(RunEvent(
+        type='tool_completed', name='start_task', tool_call_id='a', content='All median tests passed',
+        artifact={"run_id": "a", "mode": "sync", "status": "completed", "result": "All median tests passed"},
+    ))
     state.apply(RunEvent(type='subagents_changed', result={'count': 1}))
     assert state.blocks[0] is first and state.blocks[1] is second
     assert first.status == 'completed' and second.status == 'running'
     assert first.output == 'All median tests passed' and second.output == ''
     text = plain(render_transcript(state, 100))
-    assert text.count('Running SubAgent') == 1 and '└ result' in text
+    assert text.count('Running SubAgent') == 1 and 'All median tests passed' in text
+    assert '└ result' not in text
     assert state.subagent_count == 1
     monkeypatch.setattr('agent.cli.rendering._spinner_tick', lambda: 0)
     assert _tool_status_marker('running') == ('⠋', 'green')
@@ -107,16 +115,16 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
     assert _tool_status_marker('completed') == ('•', 'green')
 
 
-@pytest.mark.parametrize('result,status', [
-    ('[subagent run_id=abc]\nSubagent failed: quoted source text', 'completed'),
-    ('Subagent failed (run_id=abc): model unavailable', 'error'),
-    ('Subagent failed: Subagent concurrency limit reached', 'error'),
-    ('Subagent cancelled (run_id=abc): Cancelled by parent', 'cancelled'),
+@pytest.mark.parametrize('status,card_status', [
+    ('completed', 'completed'),
+    ('failed', 'error'),
+    ('cancelled', 'cancelled'),
 ])
-def test_runner_and_unnamed_history_results_share_status(result, status):
+def test_runner_and_history_share_structured_task_status(status, card_status):
     calls = [AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
-        'description': 'Fix median3', 'subagent_type': 'general-purpose'}}])]
-    message = ToolMessage(content=result, tool_call_id='d')
+        'description': 'Fix median3'}}])]
+    payload = {"run_id": "abc", "mode": "sync", "status": status, "result": "median reviewed"}
+    message = ToolMessage(content=json.dumps(payload), artifact=payload, tool_call_id='d', name='start_task')
     runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
     state = CliState()
     events = []
@@ -127,15 +135,19 @@ def test_runner_and_unnamed_history_results_share_status(result, status):
         runner._emit_update_events({'model': {'messages': calls}}, emit)
         runner._emit_update_events({'tools': {'messages': [message]}}, emit)
         card = state.blocks[0]
-        assert isinstance(card, ToolBlock) and card.status == status
-        assert events[-1].name == 'start_task'
-        assert events[-1].is_error == (status != 'completed')
+        assert isinstance(card, ToolBlock) and card.status == card_status
+        assert events[-1].name == 'start_task' and events[-1].is_error is False
         restored = CliState()
         restored.load_transcript(messages_to_transcript([*calls, message]))
         other = restored.blocks[0]
         assert (other.name, other.arguments, other.output, other.status, other.is_error) == (
             card.name, card.arguments, card.output, card.status, card.is_error)
-        assert plain(render_transcript(restored, 100)) == plain(render_transcript(state, 100))
+        rendered = plain(render_transcript(state, 100))
+        assert plain(render_transcript(restored, 100)) == rendered
+        if card_status == 'completed':
+            assert '— failed' not in rendered and '— cancelled' not in rendered
+        if card_status == 'error':
+            assert '— failed' in rendered
     finally:
         runner.close()
 
@@ -145,15 +157,19 @@ def test_long_result_folds_tail_and_control_o_expands_full_text():
     def scenario(app):
         app.state.clear()
         start(app.state, 'd', 'Fix median3')
-        app.state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='d', content=output))
+        app.state.apply(RunEvent(
+            type='tool_completed', name='start_task', tool_call_id='d', content=output,
+            artifact={"mode": "sync", "status": "completed", "run_id": "d", "result": output},
+        ))
         limits = UiDisplayLimits(tail_lines=3)
         collapsed = plain(render_transcript(app.state, 100, limits=limits))
-        assert 'Ctrl+O to expand' in collapsed and 'line 0' not in collapsed
+        assert 'Ctrl+A to expand' in collapsed and 'line 0' not in collapsed
         assert 'line 39' in collapsed and app.state.blocks[0].output == output
-        binding = next(b for b in app.bindings.bindings if b.keys == ('c-o',))
+        assert '└ result' not in collapsed
+        binding = next(b for b in app.bindings.bindings if b.keys == ('c-a',))
         binding.handler(None)
         expanded = plain(render_transcript(app.state, 100, limits=limits))
-        assert app.state.tools_expanded
+        assert app.state.tasks_expanded
         assert 'line 0' in expanded and 'line 39' in expanded
         assert 'output lines hidden' not in expanded
     with_painted_app('task-result-expand', scenario, lines=0)
@@ -173,25 +189,32 @@ def test_unfinished_tasks_keep_description_without_fabricating_results(event, st
         assert 'cancelled' in text
 
 
-def test_title_is_bounded_and_does_not_modify_delegated_description():
-    description = 'Fix\n  median3\t' + 'details ' * 100
+def test_title_collapses_whitespace_without_changing_the_delegation():
+    from agent.cli.rendering import _subagent_title
+
+    description = 'Fix\n  median3\t' + 'details ' * 40
     block = ToolBlock('d', 'start_task', {'description': description})
     preview = build_task_preview(block)
-    assert preview.target.startswith('Fix median3 ') and len(preview.target) == 120
-    assert '\n' not in preview.target and preview.target.endswith('…')
+    assert preview.target == description
+    title = _subagent_title('running', preview.target).plain
+    assert 'Fix median3' in title and '\n' not in title
     assert block.arguments['description'] == description
 
 
 def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
     path = tmp_path / 'sessions.sqlite3'
     calls = AIMessage(content='', tool_calls=[{'id': name, 'name': 'start_task', 'args': {
-        'description': f'Fix {name}', 'subagent_type': 'general-purpose'}} for name in ['a', 'b']])
+        'description': f'Fix {name}'}} for name in ['a', 'b']])
     with closing(SessionStore(path)) as store:
         runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store)
         identifier = runner.thread_id
         runner.prepared.graph.update_state(runner._thread_config(), {'messages': [
             HumanMessage(content='Two independent fixes'), calls,
-            ToolMessage(content='Subagent failed: unavailable', tool_call_id='a'),
+            ToolMessage(
+                content=json.dumps({"run_id": "a", "mode": "sync", "status": "failed", "result": "unavailable"}),
+                artifact={"run_id": "a", "mode": "sync", "status": "failed", "result": "unavailable"},
+                tool_call_id='a', name='start_task',
+            ),
         ]}, as_node='tools')
         runner.close()
     with closing(SessionStore(path)) as store:
@@ -200,7 +223,7 @@ def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
             snapshot = runner.switch_session(identifier)
             cards = [b for b in snapshot.transcript if b.kind == 'tool']
             assert len(cards) == 2
-            assert cards[0].status == 'error' and cards[0].content == 'Subagent failed: unavailable'
+            assert cards[0].status == 'error' and 'unavailable' in cards[0].content
             assert cards[1].status == 'interrupted' and cards[1].content == ''
             assert cards[1].arguments['description'] == 'Fix b'
         finally:
@@ -216,7 +239,7 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'delegate', 'args': {
-            'description': 'Inspect isolated file', 'subagent_type': 'general-purpose'}}]),
+            'description': 'Inspect isolated file'}}]),
         AIMessage(content='', additional_kwargs={'reasoning_content': 'private child thinking'},
                   tool_calls=[{'name': 'read', 'id': 'private-read', 'args': {'file_path': '/private-child.txt'}}]),
         AIMessage(content='Final child result'), AIMessage(content='Parent final answer'),
@@ -227,6 +250,7 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
         events.append(event)
         state.apply(event)
     runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path), on_event=emit)
+    runner.set_permission_mode('allow')
     try:
         result = runner.invoke('Inspect independent tasks')
         assert result.status == 'completed'
@@ -241,3 +265,166 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
         assert len(restored) == 1 and restored[0].name == 'start_task'
     finally:
         runner.close()
+
+
+def _task_update(state, **fields):
+    payload = {
+        'run_id': 'a', 'parent_run_id': 'root', 'depth': 1, 'description': '执行与取消链路',
+        'status': 'running', 'tool_call_id': 'card-a', 'elapsed_seconds': 1.2,
+    }
+    payload.update(fields)
+    state.apply(RunEvent(type='subagent_update', result=payload))
+
+
+def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
+    state = CliState()
+    state.apply(RunEvent(type='run_started'))
+    start(state, 'card-a', '执行与取消链路')
+    start(state, 'card-b', '审批与权限链路')
+    _task_update(state)
+    _task_update(
+        state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
+        tool_call_id='inner-1', elapsed_seconds=0.2,
+    )
+    _task_update(
+        state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
+        tool_call_id='inner-2', elapsed_seconds=0.1,
+    )
+    # Two root cards plus two running children. A closing HTTP stream is not a third source.
+    state.apply(RunEvent(type='subagents_changed', result={'count': 9}))
+    assert state.subagent_count == 4
+    text = plain(render_transcript(state, 120))
+    assert '▾' not in text and '▸' not in text
+    assert 'Running SubAgent · RunController 取消传播' in text
+    assert 'Running SubAgent · 异步调用与资源回收' in text
+    assert 'general-purpose' not in text and 'tok' not in text and 'tps' not in text
+    child = next(line for line in text.splitlines() if 'RunController 取消传播' in line).rstrip()
+    parent = next(line for line in text.splitlines() if '执行与取消链路' in line).rstrip()
+    # Nested rows reuse the root title; only the tree prefix is added.
+    assert child[child.index('Running SubAgent'):] == 'Running SubAgent · RunController 取消传播'
+    assert parent[parent.index('Running SubAgent'):] == 'Running SubAgent · 执行与取消链路'
+    assert '├ ' in child and '├─' not in child
+    assert child.index('Running SubAgent') > child.index('├')
+    assert '审批与权限链路' in text and 'RunController 取消传播' in text.split('审批与权限链路')[0]
+
+    _task_update(
+        state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
+        status='completed', elapsed_seconds=0.4,
+        result='取消传播已核对',
+    )
+    assert state.blocks[0].status == 'running' and state.blocks[1].status == 'running'
+    assert state.subagent_count == 3
+    text = plain(render_transcript(state, 120))
+    assert 'SubAgent · RunController 取消传播' in text and 'Running SubAgent · 异步调用与资源回收' in text
+    assert '▾' not in text
+    answer = next(line for line in text.splitlines() if '取消传播已核对' in line)
+    assert '│' in answer and '├' not in answer
+    assert answer.index('取消传播已核对') == text.splitlines()[text.splitlines().index(answer) - 1].index('SubAgent')
+
+    _task_update(
+        state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
+        status='completed', elapsed_seconds=0.5,
+    )
+    assert state.blocks[0].status == 'running'
+    assert state.subagent_count == 2
+    settled = plain(render_transcript(state, 120))
+    assert 'SubAgent · RunController 取消传播' in settled and 'SubAgent · 异步调用与资源回收' in settled
+    assert '▾' not in settled and '▸' not in settled
+
+    state.apply(RunEvent(
+        type='tool_completed', name='start_task', tool_call_id='card-a',
+        content='汇总完成，其中引用了 cancelled by user。',
+        artifact={
+            "mode": "sync", "status": "completed", "run_id": "a",
+            "result": "汇总完成，其中引用了 cancelled by user。",
+        },
+    ))
+    parent, other = state.blocks[0], state.blocks[1]
+    assert parent.status == 'completed' and not parent.is_error
+    assert other.status == 'running'
+    done = plain(render_transcript(state, 120))
+    assert '汇总完成' in done and '— failed' not in done
+    assert '└ result' not in done
+    assert 'SubAgent · RunController 取消传播' in done
+
+
+def test_task_card_leaves_one_blank_line_before_the_next_tool():
+    state = CliState()
+    start(state, 'a', '隔离')
+    folded = '\n'.join(f'line {n}' for n in range(5))
+    state.apply(RunEvent(
+        type='tool_completed', name='start_task', tool_call_id='a',
+        content=folded,
+        artifact={"mode": "sync", "status": "completed", "run_id": "a", "result": folded},
+    ))
+    start(state, 'b', '重绘')
+    lines = [line.rstrip() for line in plain(
+        render_transcript(state, 80, limits=UiDisplayLimits(tail_lines=3)),
+    ).splitlines()]
+    last = max(index for index, line in enumerate(lines) if 'line 4' in line)
+    blanks = 0
+    for line in lines[last + 1:]:
+        if line:
+            break
+        blanks += 1
+    assert blanks == 1
+    assert '重绘' in lines[last + 1 + blanks]
+    assert 'line 0' not in '\n'.join(lines) and 'line 2' in lines[last - 2]
+
+
+def test_failed_child_shows_its_reason_on_its_own_row():
+    state = CliState()
+    start(state, 'card-b', '审批与权限链路')
+    _task_update(state, run_id='b', tool_call_id='card-b', description='审批与权限链路', parent_run_id='root')
+    _task_update(
+        state, run_id='b1', parent_run_id='b', depth=2, description='Ask / Auto 审批',
+        tool_call_id='b1-call', status='running', elapsed_seconds=0.2,
+    )
+    _task_update(
+        state, run_id='b2', parent_run_id='b', depth=2, description='Flash 审批与恢复',
+        tool_call_id='b2-call', status='failed', reason='model unavailable', elapsed_seconds=0.3,
+    )
+    assert state.blocks[0].status == 'running' and not state.blocks[0].is_error
+    assert state.subagent_count == 2
+    text = plain(render_transcript(state, 120))
+    assert '▾' not in text and 'Running SubAgent · Ask / Auto 审批' in text
+    assert 'SubAgent · Flash 审批与恢复' in text
+    assert '— failed' in text and 'model unavailable' in text
+    failed = next(line for line in text.splitlines() if 'Flash 审批与恢复' in line)
+    reason = next(line for line in text.splitlines() if 'model unavailable' in line)
+    assert '├' not in reason and reason.startswith(' ' * failed.index('SubAgent'))
+    # A late progress tick must not reopen the failed row or add it back to the count.
+    _task_update(
+        state, run_id='b2', parent_run_id='b', depth=2, description='Flash 审批与恢复',
+        status='running', tool_call_id='b2-call',
+    )
+    assert state.subagent_count == 2
+    _task_update(
+        state, run_id='b1', parent_run_id='b', depth=2, description='Ask / Auto 审批',
+        status='completed', tool_call_id='b1-call', elapsed_seconds=0.4,
+    )
+    assert state.blocks[0].status == 'running'
+    assert state.subagent_count == 1
+    settled = plain(render_transcript(state, 120))
+    assert '▾' not in settled and '▸' not in settled
+    assert '— failed' in settled and 'model unavailable' in settled
+
+
+def test_parent_card_does_not_rewrite_a_running_child():
+    state = CliState()
+    start(state, 'card-b', '审批与权限链路')
+    _task_update(state, run_id='b', tool_call_id='card-b', description='审批与权限链路', parent_run_id='root')
+    _task_update(
+        state, run_id='b1', parent_run_id='b', depth=2, description='still going',
+        tool_call_id='b1-call', status='running',
+    )
+    state.apply(RunEvent(
+        type='tool_completed', name='start_task', tool_call_id='card-b',
+        content='parent done',
+        artifact={"mode": "sync", "status": "completed", "run_id": "b", "result": "parent done"},
+    ))
+    child = state.subagent_nodes['b1']
+    assert state.blocks[0].status == 'completed'
+    assert child.status == 'running'
+    text = plain(render_transcript(state, 120))
+    assert 'Running SubAgent · still going' in text

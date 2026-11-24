@@ -170,6 +170,8 @@ class CancellableStreamBridge(Generic[T]):
         self._task: asyncio.Task[None] | None = None
         self._slots: asyncio.Semaphore | None = None
         self._closed = threading.Event()
+        # Optional close hook (e.g. RunController reclaim); set by register_model_stream.
+        self.on_closed: Callable[[], None] | None = None
 
     @property
     def cancel_requested(self) -> bool:
@@ -237,6 +239,12 @@ class CancellableStreamBridge(Generic[T]):
             if self._cancel_requested:
                 self._state = "finished"
                 self._closed.set()
+                hook = self.on_closed
+                if hook is not None:
+                    try:
+                        hook()
+                    except Exception:
+                        pass
                 self._queue.put((_CANCELLED, None))
                 return
             loop = _LOOP.get()
@@ -280,6 +288,12 @@ class CancellableStreamBridge(Generic[T]):
         with _LIVE_LOCK:
             _LIVE.discard(self)
         self._closed.set()
+        hook = self.on_closed
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                pass
 
     async def _pump(self) -> None:
         assert self._slots is not None

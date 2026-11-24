@@ -9,7 +9,6 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgentMiddleware
 from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT, SkillsMiddleware
 from deepagents.middleware.summarization import (
     SummarizationMiddleware,
@@ -24,7 +23,9 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.config import Settings
+from agent.prompts import read_prompt
 from agent.execution.policy import SandboxConfig
+from agent.redaction import known_secret_refs
 from agent.runtime.control import RunController
 from agent.execution.environment import EnvironmentContextMiddleware
 from agent.models.client import ProtocolChatOpenAI, build_chat_model
@@ -40,10 +41,21 @@ from agent.middleware.tool_arg_hints import ToolArgHintMiddleware
 from agent.middleware.write_operation import WriteOperationMiddleware
 from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PermissionMode,
     allow_mode_unavailable_reason,
     interrupt_on_for_mode,
     permission_mode_from_interrupt_on,
+    permission_unavailable_reason,
+)
+from agent.tools.catalog import (
+    FILE_MUTATION_TOOLS,
+    FILESYSTEM_TOOL_NAMES,
+    ROOT_TASK_TOOLS,
+    SYNC_TASK_TOOLS,
+    NodeKind,
+    apply_runtime_limits,
+    node_tools,
 )
 from agent.execution.backend import BackendSelection, sandbox_pool_of, select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
@@ -58,55 +70,9 @@ from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 # Middleware augments the Deep Agents defaults; create_deep_agent remains the only assembly entry.
 
 
-DEFAULT_FS_TOOLS = ["ls", "read", "write", "edit", "delete"]
+DEFAULT_FS_TOOLS = list(FILESYSTEM_TOOL_NAMES)
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
-    "你的职责是理解用户需求、检查相关代码、完成任务、验证结果并准确汇报。\n\n"
-
-    "# 任务执行\n"
-    "- 优先自主完成用户请求，不要只停留在分析或建议阶段。\n"
-    "- 简单任务直接执行；复杂任务先明确实施顺序，再逐步推进。\n"
-    "- 充分利用现有上下文和工具，不要反复询问能够自行确定的信息。\n"
-    "- 遇到失败时分析原因并调整方法，不要无意义地重复相同操作。\n"
-    "- 不猜测文件内容、工具结果或执行状态；无法完成时明确说明原因。\n\n"
-
-    "# 代码修改\n"
-    "- 修改前先理解相关实现、依赖关系和项目约定。\n"
-    "- 优先修复根本原因，保持改动最小、聚焦且符合现有代码风格。\n"
-    "- 不进行无关重构，不修复无关问题，不引入不必要的依赖或抽象。\n"
-    "- 遵循适用的 AGENTS.md 项目规则，目录越深的规则在其作用域内越优先。\n"
-    "- 遵守沙箱限制、文件访问权限和审批机制。\n"
-    "- 未经用户明确要求，不创建 Git 分支、不提交或推送代码。\n"
-    "- 必要时同步更新相关测试和文档。\n\n"
-
-    "# 验证\n"
-    "- 修改代码后尽可能进行验证，从与改动直接相关的测试开始。\n"
-    "- 根据风险和执行成本决定是否扩大测试范围。\n"
-    "- 区分本次修改引入的错误与项目原有问题，不擅自修改无关测试。\n"
-    "- 无法运行测试时说明限制，不声称未经验证的结果已经通过。\n\n"
-
-    "# 沟通与结果\n"
-    "- 长任务在关键阶段简要报告进度，避免逐条复述工具调用。\n"
-    "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
-    "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
-)
-
-
-class StartTaskMiddleware(SubAgentMiddleware):
-    @property
-    def name(self) -> str:
-        return "SubAgentMiddleware"
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.tools[0].name = "start_task"
-
-    @SubAgentMiddleware.private_state_keys.setter
-    def private_state_keys(self, value: frozenset[str]) -> None:
-        # create_deep_agent rebuilds the native tool after collecting state keys.
-        SubAgentMiddleware.private_state_keys.fset(self, value)
-        self.tools[0].name = "start_task"
+_PROMPT_DIR = Path(__file__).parent / "prompts"
 
 
 class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
@@ -125,7 +91,9 @@ class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
             if not isinstance(message, AIMessage):
                 continue
             calls = [
-                self._truncate_tool_call(call) if call["name"] in {"write", "edit"} else call
+                self._truncate_tool_call(call)
+                if call["name"] in FILE_MUTATION_TOOLS and call["name"] != "delete"
+                else call
                 for call in message.tool_calls
             ]
             if calls != message.tool_calls:
@@ -161,10 +129,12 @@ class AgentSpec:
     skills: tuple[str, ...] | None = None
     backend: BackendProtocol | None = None
     sandbox: SandboxConfig | None = None
-    web_tools_api_key: str | None = field(default=None, repr=False)
+    deepseek_api_key: str | None = field(default=None, repr=False)
     hidden_tools: tuple[str, ...] = ()
     trust_env: bool = False
     role: str = "main"
+    # Root = 0; each start_task child is parent depth + 1.
+    depth: int = 0
     settings: Settings | None = field(default=None, repr=False)
 
 
@@ -175,6 +145,7 @@ class PreparedAgent:
     model: BaseChatModel | None = None
     spec: AgentSpec = field(default_factory=AgentSpec)
     interrupt_on: dict[str, Any] = field(default_factory=dict)
+    permission_mode: PermissionMode | None = None
     system_prompt: str = ""
     exposed_tool_names: list[str] = field(default_factory=list)
     filesystem_tools: list[str] = field(default_factory=list)
@@ -191,16 +162,19 @@ class PreparedAgent:
     model_tool_names: tuple[str, ...] = ()
     subagent_manager: Any = None
     owns_model_clients: bool = False
+    # Ask mounted the Auto replay guard for the thread it was built for.
+    approval_guard: bool = False
 
 
-def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
-    model_name = str(getattr(model, "model_name", None) or get_model_identifier(model) or type(model).__name__)
-    sections = [DEFAULT_SYSTEM_PROMPT.format(model_name=model_name)]
+def compose_system_prompt(spec: AgentSpec, workspace: Path) -> str:
+    sections = [read_prompt(_PROMPT_DIR / "system.md")]
+    if spec.role == "subagent":
+        sections.append(read_prompt(_PROMPT_DIR / "subagent.md"))
     if spec.instructions and spec.instructions.strip():
-        sections.append(f"# 用户指令\n{spec.instructions.strip()}")
+        sections.append(f"## User instructions\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
     if project_instructions.is_file():
-        sections.append(f"# 项目指令\n{project_instructions.read_text(encoding='utf-8')}")
+        sections.append(f"## Project instructions\n{project_instructions.read_text(encoding='utf-8')}")
     return "\n\n".join(sections)
 
 
@@ -215,6 +189,8 @@ def build_agent(
     backend_selection: BackendSelection | None = None,
     mcp: Any | None = None,
     settings: Settings | None = None,
+    approval_journal=None,
+    thread_id: str | None = None,
 ) -> PreparedAgent:
     sandbox_cfg = replace(spec.sandbox or SandboxConfig(), trust_env=spec.trust_env)
     selected: BackendSelection | None = None
@@ -228,36 +204,52 @@ def build_agent(
         selected = backend_selection if backend_selection is not None and backend_selection.backend is fs_backend else None
         execution_mode = selected.mode if selected is not None else ExecutionMode.CUSTOM
         security_warning = selected.warning if selected is not None else ""
+    auto_block = permission_unavailable_reason(
+        PermissionMode.AUTO,
+        execution_mode=execution_mode,
+        has_deepseek_key=bool(spec.deepseek_api_key),
+    )
+    if permission is PermissionMode.AUTO and auto_block is not None:
+        permission = PermissionMode.ASK
+        security_warning = AUTO_FALLBACK_REASON
     if permission is PermissionMode.ALLOW and execution_mode is not ExecutionMode.SANDBOXED:
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
     sandbox_pool = sandbox_pool_of(fs_backend)
     _disable_general_purpose_task(model)
-    prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
-    tools = [*build_human_input_tools(), *spec.tools] if spec.role == "main" else []
-    if spec.web_tools_api_key:
-        tools.extend((
-            build_web_search_tool(spec.web_tools_api_key, trust_env=spec.trust_env),
-            build_web_fetch_tool(spec.web_tools_api_key, trust_env=spec.trust_env),
-        ))
+    prompt = compose_system_prompt(spec, sandbox_cfg.workspace)
+    cfg = settings or spec.settings or Settings()
+    kind = _node_kind(spec, run_controller, cfg)
+    allowed = apply_runtime_limits(
+        node_tools(kind),
+        subagents_enabled=cfg.subagents.enabled,
+        can_launch=permission is not PermissionMode.ASK,
+        hidden=spec.hidden_tools,
+    )
+    tools: list[Any] = []
+    if "request_human_input" in allowed:
+        tools.extend(build_human_input_tools())
+    tools.extend(tool for tool in spec.tools if tool.name not in spec.hidden_tools)
+    if spec.deepseek_api_key:
+        if "web_search" in allowed:
+            tools.append(build_web_search_tool(spec.deepseek_api_key, trust_env=spec.trust_env))
+        if "web_fetch" in allowed:
+            tools.append(build_web_fetch_tool(spec.deepseek_api_key, trust_env=spec.trust_env))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
+    # File tools are common to every node. The middleware requires the full list;
+    # hidden_tools removes names from the model after that.
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
-    if supports_execute:
-        tools.append(build_execute_tool(
-            fs_backend,
-            network_by_default=permission is PermissionMode.ALLOW,
-        ))
+    if supports_execute and "execute" in allowed:
+        tools.append(build_execute_tool(fs_backend, permission=permission))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )
-    tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     saver = checkpointer if checkpointer is not None else InMemorySaver()
-    cfg = settings or spec.settings or Settings()
     summary_defaults = compute_summarization_defaults(model)
     trigger = summary_defaults["trigger"]
     keep = summary_defaults["keep"]
     if trigger[0] == "fraction":
-        trigger = ("fraction", min(trigger[1], cfg.compaction_threshold))
+        trigger = ("fraction", cfg.effective_compaction_fraction(trigger[1]))
         if keep[0] == "fraction" and keep[1] >= trigger[1]:
             keep = ("fraction", trigger[1] / 2)
     summarization = WorkspaceSummarizationMiddleware(
@@ -269,39 +261,70 @@ def build_agent(
     mcp_revision: int | None = None
     mcp_tools: list[Any] = []
     include_mcp = False
-    if mcp is not None and spec.role == "main":
+    if mcp is not None and kind == "root":
         from agent.mcp.middleware import MCPMiddleware, MCP_HOST_PROMPT
         from agent.mcp.names import host_interrupt_on
 
         mcp_revision, mcp_tools = mcp.snapshot()
         include_mcp = bool(mcp.snapshot_includes_mcp(mcp_revision))
         if include_mcp:
-            if permission is PermissionMode.ASK:
+            if permission is not PermissionMode.ALLOW:
                 hitl.update(host_interrupt_on(tool.name for tool in mcp_tools))
             prompt = f"{prompt}\n\n{MCP_HOST_PROMPT}"
-    subagents: list[CompiledSubAgent] = []
+    auto_middleware = []
+    from agent.runtime.auto_approval import ApprovalJournal, AutoApprovalMiddleware
+    # An interrupted Auto batch can be reopened after its key or sandbox became
+    # unavailable. Preserve the original human decision indices and block its
+    # pending automatic grants; subsequent turns follow the regular Ask rules.
+    # Only the thread that recorded Auto decisions needs this guard under Ask.
+    approval_guard = permission is PermissionMode.ASK and bool(thread_id) and ApprovalJournal.has_thread(saver, thread_id)
+    if permission is PermissionMode.AUTO or approval_guard:
+        if approval_journal is None:
+            approval_journal = getattr(saver, "_auto_approval_journal", None)
+        if approval_journal is None:
+            approval_journal = ApprovalJournal(saver)
+            saver._auto_approval_journal = approval_journal
+        ask_only = permission is PermissionMode.ASK
+        auto_middleware.append(AutoApprovalMiddleware(
+            spec=spec, backend=fs_backend, controller=run_controller, journal=approval_journal,
+            trusted=mcp.snapshot_trusted_tools(mcp_revision) if include_mcp and not ask_only else (),
+            # Auto never gates less than Ask does, whatever override the caller passed.
+            gated=hitl if ask_only else {**(interrupt_on_for_mode(PermissionMode.ASK) or {}), **hitl},
+            ask_only=ask_only,
+        ))
     manager = None
-    if spec.role == "main" and cfg.subagents.enabled:
+    task_names = allowed & (ROOT_TASK_TOOLS | SYNC_TASK_TOOLS)
+    # Only a node whose set includes task tools gets a runtime. Async and
+    # max-depth nodes stay on the common tools.
+    if task_names:
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
         from agent.subagents.runtime import SubAgentRuntime
-        from agent.subagents.notifications import BACKGROUND_TOOLS
-        from agent.tools.background_tasks import build_background_task_tools
-        from agent.tools.subagent_logs import build_subagent_log_tool
+        from agent.tools.subagent_tasks import build_subagent_tools
         # Rebuilds occur at a safe boundary; keep lifetime accounting on the
         # parent controller, which survives model changes and session switches.
+        # Nested agents reuse the root manager (set on the child controller in
+        # prepare_child) so concurrency stays global for the whole tree.
         manager = getattr(run_controller, "subagent_manager", None)
         if manager is None:
-            manager = SubAgentManager(run_controller, cfg.subagents.max_concurrent)
+            manager = SubAgentManager(
+                run_controller,
+                max_concurrent=cfg.subagents.max_concurrent,
+                max_total=cfg.subagents.max_total,
+            )
             run_controller.subagent_manager = manager
-        manager.max_concurrent = cfg.subagents.max_concurrent
-        root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-        store = SubAgentLogStore(root, tuple(p.api_key for p in cfg.llm_profiles) + (spec.web_tools_api_key or "",))
-        tools.append(build_subagent_log_tool(store))
+        manager.set_limits(
+            max_concurrent=cfg.subagents.max_concurrent,
+            max_total=cfg.subagents.max_total,
+        )
+        if manager.log_store is None:
+            root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
+            manager.log_store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
+        store = manager.log_store
 
         def prepare_child(controller: RunController) -> PreparedAgent:
-            if execution_mode is not ExecutionMode.SANDBOXED:
-                raise ValueError("Subagents require a verified SANDBOXED backend for allow permission")
+            if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:
+                raise ValueError("Subagents require a verified SANDBOXED backend and auto or allow permission")
             effort = cfg.subagents.reasoning_effort
             effort = None if effort in (None, "default") else effort
             if cfg.subagents.model is not None or isinstance(model, ProtocolChatOpenAI):
@@ -319,15 +342,18 @@ def build_agent(
                 if effort is not None:
                     raise ValueError("A custom BaseChatModel requires subagents.model to override reasoning_effort")
                 child_model = model
+            child_depth = spec.depth + 1
             child_spec = replace(
-                spec, role="subagent", tools=(), backend=fs_backend,
+                spec, role="subagent", depth=child_depth, tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),
-                hidden_tools=tuple(set(spec.hidden_tools) | BACKGROUND_TOOLS
-                                   | {"start_task", "request_human_input", "read_task_log"}),
+                hidden_tools=spec.hidden_tools,
             )
+            # Share the tree's concurrency manager; cancel chains use owner controllers.
+            controller.subagent_manager = manager
             try:
-                child = build_agent(child_spec, child_model, PermissionMode.ALLOW, None,
-                                    controller, lambda: False, backend_selection=selected, settings=cfg)
+                # The child runs under the parent's permission mode; it never gains more than the parent has.
+                child = build_agent(child_spec, child_model, permission, None, controller, lambda: False,
+                                    backend_selection=selected, settings=cfg, approval_journal=approval_journal)
             except BaseException:
                 if child_model is not model:
                     from agent.models.stream_lifecycle import close_model_http_clients
@@ -336,36 +362,26 @@ def build_agent(
             child.owns_model_clients = child_model is not model
             return child
 
-        runtime = SubAgentRuntime(manager, store, prepare_child,
-                                  cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
-                                  cfg.subagents.reasoning_effort or "default")
-        if cfg.subagents.background:
-            tools.extend(build_background_task_tools(
-                runtime, manager,
-                unavailable="" if execution_mode is ExecutionMode.SANDBOXED
-                else "Subagents require a verified SANDBOXED backend for allow permission",
-            ))
-        subagents.append({
-            "name": "general-purpose",
-            "description": (
-                "Only delegate when the problem can be decomposed into independent "
-                "subproblems that do not interfere with one another. "
-                "Complete an isolated coding or research task. "
-                "Only the final result is returned. "
-                "No MCP, user interaction, or recursive delegation. "
-                "Maximum concurrent tasks is configured by the host."
-            ),
-            "runnable": runtime,
-            "mode": "isolated",
-        })
+        runtime = SubAgentRuntime(
+            manager, store, prepare_child,
+            cfg.subagents.model or str(get_model_identifier(model) or type(model).__name__),
+            cfg.subagents.reasoning_effort or "default",
+            child_depth=spec.depth + 1,
+            owner_controller=run_controller,
+        )
+        tools.extend(build_subagent_tools(
+            runtime, manager, store,
+            names=task_names,
+            allow_background=kind == "root" and bool(cfg.subagents.background),
+        ))
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(
             model=model,
-            subagents=subagents,
             tools=tools,
             system_prompt=prompt,
             middleware=[
+                *auto_middleware,
                 RuntimeConfigGateMiddleware(run_controller.has_pending_config),
                 PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
                 RecoveryContextMiddleware(),
@@ -379,7 +395,6 @@ def build_agent(
                 AttachmentMaterializationMiddleware(),
                 PayloadRecoveryMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
-                *([StartTaskMiddleware(backend=fs_backend, subagents=subagents)] if subagents else []),
                 *([SkillsMiddleware(
                     backend=fs_backend, sources=skill_sources,
                     system_prompt=SKILLS_SYSTEM_PROMPT.replace("read_file", "read"),
@@ -391,7 +406,7 @@ def build_agent(
             ],
             skills=skill_sources,
             backend=fs_backend,
-            interrupt_on=hitl or None,
+            interrupt_on=None if auto_middleware else hitl or None,
             checkpointer=saver,
             name="deep-agent-template",
         )
@@ -400,6 +415,7 @@ def build_agent(
             backend=fs_backend,
             model=model,
             spec=spec,
+            permission_mode=permission,
             interrupt_on=hitl,
             system_prompt=prompt,
             model_tool_names=tuple(
@@ -417,6 +433,7 @@ def build_agent(
             sandbox_pool=sandbox_pool,
             skill_sources=tuple(skill_sources or ()),
             subagent_manager=manager,
+            approval_guard=approval_guard,
         )
 
         if mcp is not None and mcp_revision is not None:
@@ -443,7 +460,9 @@ def create_agent(
     run_controller: RunController | None = None,
     mcp: Any | None = None,
     role: str = "main",
+    permission_mode: PermissionMode | str | None = None,
     backend_selection: BackendSelection | None = None,
+    thread_id: str | None = None,
 ) -> PreparedAgent:
     cfg = settings or Settings()
     if role not in {"main", "subagent"}:
@@ -457,11 +476,15 @@ def create_agent(
         skills=tuple(skills) if skills is not None else None,
         backend=backend,
         sandbox=sandbox_config or cfg.sandbox,
-        web_tools_api_key=cfg.resolved_web_tools_api_key,
+        deepseek_api_key=cfg.resolved_deepseek_api_key,
     )
     if role == "subagent":
         interrupt_on = {}
     permission = permission_mode_from_interrupt_on(interrupt_on) if interrupt_on is not None else PermissionMode.ASK
+    if permission_mode is not None:
+        permission = PermissionMode(permission_mode)
+        if interrupt_on is not None and role != "subagent":
+            raise ValueError("Specify permission_mode or interrupt_on")
     effective_interrupt_on = interrupt_on
     if interrupt_on:
         defaults = interrupt_on_for_mode(PermissionMode.ASK) or {}
@@ -475,6 +498,7 @@ def create_agent(
         interrupt_on_override=effective_interrupt_on,
         mcp=mcp if role == "main" else None,
         backend_selection=backend_selection,
+        thread_id=thread_id,
     )
 
 
@@ -491,6 +515,17 @@ def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:
 
 
 _NO_GP = HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False))
+
+
+def _node_kind(spec: AgentSpec, controller: RunController, cfg: Settings) -> NodeKind:
+    """Which catalog set this agent is allowed to draw from."""
+    if getattr(controller, "background_leaf", False):
+        return "async"
+    if spec.role != "main" and not cfg.subagents.may_create_subagent(spec.depth):
+        return "max_depth"
+    if spec.role == "main":
+        return "root"
+    return "sync"
 
 
 def _disable_general_purpose_task(model: BaseChatModel) -> None:

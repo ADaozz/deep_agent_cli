@@ -6,6 +6,7 @@ from collections.abc import Iterable
 import hashlib
 import re
 
+from agent.runtime.permissions import host_decision_rule
 
 MCP_ADD = "mcp_add"
 MCP_LIST = "mcp_list"
@@ -13,11 +14,15 @@ MCP_REMOVE = "mcp_remove"
 MANAGEMENT_TOOLS = frozenset({MCP_ADD, MCP_LIST, MCP_REMOVE})
 EXTERNAL_PREFIX = "mcp__"
 
-HOST_APPROVAL: dict[str, list[str]] = {"allowed_decisions": ["approve", "reject"]}
+_SERVER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,32}$")
+
+
+def valid_server_name(value: str) -> bool:
+    return isinstance(value, str) and _SERVER_NAME.fullmatch(value) is not None
 
 
 def external_tool_name(server: str, remote: str) -> str:
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,32}", server):
+    if not valid_server_name(server):
         raise ValueError("invalid MCP server name")
     if not isinstance(remote, str) or not remote:
         raise ValueError("remote tool name must be a non-empty string")
@@ -48,11 +53,12 @@ def host_interrupt_on(tool_names: Iterable[str]) -> dict[str, dict[str, list[str
     Applied by the factory in permission ask mode only. Every external tool
     requires approval in ask, regardless of server-supplied read-only hints.
     Permission allow skips these rules along with the native tool rules.
+    Each entry gets a fresh allowed_decisions list.
     """
     entries = {
-        MCP_ADD: dict(HOST_APPROVAL),
-        MCP_REMOVE: dict(HOST_APPROVAL),
+        MCP_ADD: host_decision_rule(),
+        MCP_REMOVE: host_decision_rule(),
     }
     for name in tool_names:
-        entries[name] = dict(HOST_APPROVAL)
+        entries[name] = host_decision_rule()
     return entries

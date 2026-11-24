@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from agent.redaction import SecretRef, replace_known_secrets
+
+
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,9 +21,9 @@ MAX_PAGE_BYTES = 64_000
 
 
 class SubAgentLogStore:
-    def __init__(self, root: Path, secrets: tuple[str, ...] = ()) -> None:
+    def __init__(self, root: Path, secrets: tuple[SecretRef, ...] = ()) -> None:
         self.root = root
-        self.secrets = tuple(value for value in secrets if value)
+        self.secrets = tuple(item for item in secrets if isinstance(item, SecretRef) and item.value)
         self._lock = threading.Lock()
 
     def _directory(self, parent: str) -> Path:
@@ -28,10 +31,7 @@ class SubAgentLogStore:
         return self.root / hashlib.sha256(parent.encode()).hexdigest()
 
     def _redact(self, text: str) -> str:
-        for secret in self.secrets:
-            if secret:
-                text = text.replace(secret, "[REDACTED]")
-        return text
+        return replace_known_secrets(text, self.secrets)
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -52,9 +52,18 @@ class SubAgentLogStore:
         record = self._sanitize(dict(timestamp=datetime.now(timezone.utc).isoformat(), run_id=run_id, event=event, **payload))
         encoded = json.dumps(record, ensure_ascii=False)
         if len(encoded.encode()) > MAX_EVENT_BYTES:
-            record = dict(timestamp=record["timestamp"], run_id=record["run_id"], event=record["event"],
-                          truncated=True, status=record.get("status"), model=record.get("model"),
-                          preview=encoded.encode()[:MAX_EVENT_BYTES // 4].decode(errors="ignore"))
+            kept = {
+                key: record[key]
+                for key in (
+                    "timestamp", "run_id", "event", "status", "mode", "parent_run_id",
+                    "tool_call_id", "depth", "elapsed_seconds", "description", "model",
+                )
+                if key in record
+            }
+            kept["truncated"] = True
+            kept["summary_truncated"] = True
+            kept["result_summary"] = encoded.encode()[:1000].decode(errors="ignore")
+            record = kept
             encoded = json.dumps(record, ensure_ascii=False)
         with self._lock:
             directory = self._directory(parent)
@@ -69,8 +78,8 @@ class SubAgentLogStore:
             raise ValueError("offset must be non-negative and limit must be 1..100")
         directory = self._directory(parent)
         if run_id is None:
-            paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-            return {"runs": [path.stem for path in paths[offset:offset + limit] if _ID.fullmatch(path.stem)]}
+            runs = self.list_runs(parent)
+            return {"runs": runs[offset:offset + limit]}
         if not _ID.fullmatch(run_id):
             raise ValueError("Invalid subagent run ID")
         try:
@@ -78,7 +87,7 @@ class SubAgentLogStore:
         except FileNotFoundError:
             return {"error": "Subagent log not found in this parent session"}
         records, size = [], 1024
-        with os.fdopen(descriptor, encoding="utf-8") as source:
+        with self._lock, os.fdopen(descriptor, encoding="utf-8") as source:
             for index, line in enumerate(source):
                 if index < offset:
                     continue
@@ -90,3 +99,80 @@ class SubAgentLogStore:
                     break  # A crash may leave a partial final line.
                 size += len(line.encode())
         return {"run_id": run_id, "records": records, "next_offset": offset + len(records)}
+
+    def list_runs(self, parent: str) -> list[str]:
+        """Every direct child run, newest first. Not limited to one page."""
+        directory = self._directory(parent)
+        with self._lock:
+            if not directory.is_dir():
+                return []
+            paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
+            return [path.stem for path in paths if _ID.fullmatch(path.stem)]
+
+    def task_metadata(self, parent: str, run_id: str) -> dict[str, Any] | None:
+        """The start record and the last finish record, ignoring page limits.
+
+        A start without a finish is ``unconfirmed``. It is not reported as running:
+        the process that wrote the start may already be gone.
+        """
+        if not _ID.fullmatch(run_id):
+            raise ValueError("Invalid subagent run ID")
+        try:
+            descriptor = os.open(self._directory(parent) / f"{run_id}.jsonl", os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        start: dict[str, Any] | None = None
+        finish: dict[str, Any] | None = None
+        with self._lock, os.fdopen(descriptor, encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(record, dict):
+                    continue
+                event = record.get("event")
+                if event == "start" and start is None:
+                    start = record
+                elif event == "finish":
+                    finish = record
+        if start is None and finish is None:
+            return None
+        start = start or {}
+        finish = finish or {}
+
+        def text(*records: dict[str, Any], key: str) -> str:
+            for record in records:
+                value = record.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            return ""
+
+        def depth_of(*records: dict[str, Any]) -> int:
+            for record in records:
+                value = record.get("depth")
+                if type(value) is int and not isinstance(value, bool) and value > 0:
+                    return value
+            return 1
+
+        recorded = str(finish.get("status") or "")
+        status = recorded if recorded in {"completed", "failed", "cancelled"} else "unconfirmed"
+        item: dict[str, Any] = {
+            "run_id": run_id,
+            "parent_run_id": text(start, finish, key="parent_run_id") or parent,
+            "tool_call_id": text(start, finish, key="tool_call_id"),
+            "depth": depth_of(start, finish),
+            "description": text(start, finish, key="description"),
+            "mode": text(start, finish, key="mode") or "sync",
+            "status": status,
+            "elapsed_seconds": finish.get("elapsed_seconds"),
+            "started_at": str(start.get("timestamp") or ""),
+        }
+        if finish.get("summary_truncated") and isinstance(finish.get("result_summary"), str):
+            item["result_summary"] = finish["result_summary"]
+            item["summary_truncated"] = True
+        elif isinstance(finish.get("result"), str):
+            item["result"] = finish["result"]
+        return item

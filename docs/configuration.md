@@ -14,7 +14,7 @@ CLI 按以下顺序查找主配置：
 - 主配置、`~/.deep-agent/skills/` 和按键配置目录必须位于工作区之外，否则启动报错。因此不能把家目录（或其上层目录）作为工作区启动。
 - 配置中的相对路径相对于配置文件所在目录解析；例外是 `sandbox.workspace: .`，它表示启动时的当前目录。
 - 解析失败时 CLI 输出 `Configuration error: <文件>: <原因>` 并以退出码 2 退出，不会自动回退到其他模型或配置。
-- 只有 `api_key` 和 `web_tools.api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；引用的变量不存在时报错。
+- 模型 `api_key` 支持 `${变量名}` 形式的环境变量引用，且必须是整个值；其他供应商引用未设置的变量时报错。DeepSeek 来源级凭据缺失时按下文降级。
 
 ## Lain 侧栏（`companion`）
 
@@ -23,7 +23,7 @@ CLI 按以下顺序查找主配置：
 ```yaml
 companion:
   persona_prompt: companion/prompts/persona.md
-  observation_prompt: companion/prompts/observation.md
+  # 表情状态由宿主本地完成，不再读取模型观察提示词。
   chat_prompt: companion/prompts/chat.md
   rpc_timeout_seconds: 3
   question_timeout_seconds: 60
@@ -32,8 +32,8 @@ companion:
     idle: companion/gifs/lain_idle.gif
 ```
 
-- `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
-- `observation_prompt` 定义如何分析异常摘要、何时主动开口。[`observation.md`](../agent/companion/observation.md)
+- `persona_prompt` 定义聊天使用的人设和语气。[`persona.md`](../agent/companion/persona.md)
+- 表情变化由宿主本地完成，不调用模型，也不再读取 `observation.md`。
 - `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `rpc_timeout_seconds` 限制一次宿主只读查询。`question_timeout_seconds` 限制一轮问答。单次模型 HTTP 超时为 15 秒，源码搜索的扫描预算为 1.5 秒。
 - `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。
@@ -111,6 +111,8 @@ MCP 服务器在宿主进程中连接和执行，不经过 Bubblewrap，也不�
   }
 }
 ```
+
+在私有 `mcp.json` 的某个服务对象中写入 `"auto_approve": true`，表示在 Auto 模式下信任该服务当前及后续新增的全部工具。省略时逐次人工确认。模型发起的 `mcp_add` 无法设置此标志，删除服务后同名重建需重新指定信任。新增和删除服务在 Auto 下始终需人工确认。
 
 MCP HTTP 请求与模型、DeepSeek 网页工具客户端统一受全局 `trust_env` 控制。stdio 使用 `command` 和 `args`（参数数组，不是 shell），需要的环境变量名放在 `env_passthrough`。服务器名在文件内唯一。工具在 Agent 里的名称是 `mcp__<服务器>__<远程工具>`。一个服务器连不上不会阻止其他服务器。文件损坏时启动会报错，并且拒绝覆盖原文件。用 `/mcp` 或 Agent 的 `mcp_list` / `mcp_add` / `mcp_remove` 修改。`mcp_list` 只读、免审批；`mcp_add` / `mcp_remove` 在 `ask` 下需确认，`allow` 免审批；`/mcp add` 向导在 `allow` 下也跳过最终保存确认。全局关闭时不注入这些管理工具。OAuth 浏览器授权仍由用户完成。工具表只在下一次安全点重建，不会卸掉正在执行或正在等待审批的图。
 
@@ -253,20 +255,28 @@ agent:
   compaction_threshold: 0.60
 ```
 
-`compaction_threshold` 是自动压缩上下文的触发比例，取值大于 0 且不超过 1，省略时为 0.85；实际使用此值与 0.85 中的较小值。仅在模型配置了 `context_window` 时生效，没有窗口信息时仍约在 170,000 tokens 触发。
+`compaction_threshold` 是自动压缩上下文的触发比例，取值大于 0 且不超过 1，省略时为 0.85。有模型窗口信息时，实际触发比例为 `min(模型默认 fraction, compaction_threshold)`（由 `Settings.effective_compaction_fraction` 计算）；`0.85` 只是缺省配置值，不是额外硬顶。没有窗口信息时仍约在 170,000 tokens 触发。
 
-system prompt 按顺序由三部分组成：内置身份说明、`agent.instructions`、工作区根目录的 `AGENTS.md`（若存在）。启用 MCP 且注入工具时，构图阶段还会在末尾追加一段宿主运行与不可信数据说明。切换模型或权限模式时会重新读取 `AGENTS.md`。它在构图时确定，不包含环境快照。环境快照由中间件在每次模型调用时附到系统提示后面，不写入 checkpoint。它不是配置项。沙箱模式、工作区、HOME 或额外挂载变化后重新采集；恢复会话时按当前沙箱重新检查；切换模型不会因此重新探测。已给出的字段不要再查。
+系统提示词的组成与加载顺序见[架构说明](architecture.md#系统与委派提示词)。启用 MCP 且注入工具时，构图阶段还会在末尾追加一段宿主运行与不可信数据说明。切换模型或权限模式时会重新读取 `AGENTS.md`。它在构图时确定，不包含环境快照。环境快照由中间件在每次模型调用时附到系统提示后面，不写入 checkpoint。它不是配置项。沙箱模式、工作区、HOME 或额外挂载变化后重新采集；恢复会话时按当前沙箱重新检查；切换模型不会因此重新探测。已给出的字段不要再查。
 
 ## 网页搜索与抓取
 
-设置 `DEEPSEEK_API_KEY` 环境变量，或在私有配置中填写 `web_tools.api_key`。
+在私有配置中设置 DeepSeek 来源级凭据。以下片段可放入已有模型配置。
 
 ```yaml
-web_tools:
-  api_key: ${MY_DEEPSEEK_API_KEY}
+llm:
+  models:
+    deepseek:
+      api_key: ${DEEPSEEK_API_KEY}
+      base_url: https://api.deepseek.com/v1
+      api: chat_completions
+      models:
+        deepseek-flash: {}
 ```
 
-`DEEPSEEK_API_KEY` 优先于配置文件的值。两个工具使用同一个 DeepSeek API Key，凭据配置独立于当前对话模型。没有凭据时，两者均不注册。
+配置加载时解析一次 `llm.models.deepseek.api_key`。可以引用其他环境变量或填写私有配置中的字面值。DeepSeek 主模型、子模型、网页工具、Lain 和 Auto 审批使用同一解析结果，各自创建客户端。若未配置此字段或引用变量未设置，网页工具不注册，Lain 继续本地监控，Auto 退回 Ask。选择 DeepSeek 模型时会提示缺少凭据。其他模型来源使用各自配置。
+
+升级前将旧 `web_tools.api_key` 或 `llm.models.deepseek.models.<模型>.api_key` 中的密钥移到来源级，删除旧字段。配置加载会拒绝这些非空旧字段。若原来只有 `COMPANION_DEEPSEEK_API_KEY` 或 `companion.key`，请把密钥迁到来源级或设为 YAML 引用的环境变量；程序只读取新入口。
 
 | 工具 | 参数与结果 |
 | --- | --- |
@@ -314,7 +324,7 @@ web_tools:
 
 `source` 支持 `~`；相对源路径按配置文件目录解析。`destination` 必须是沙箱绝对路径，不支持 `~`。`env_set.PATH` 也应使用沙箱中的实际路径。挂载权限由这两个列表表达，程序没有工具链自动发现或版本选择逻辑。
 
-用户可以缩小到单个版本或所需子目录，也可以显式扩大可见范围；挂载调整不改变 `ask` / `allow` 的审批规则。只读挂载禁止写入，仍会暴露目录中的敏感文件。缓存自定义目录、WSLg 源路径和配置合并示例见 [沙箱与权限](sandbox.md#工具目录与环境变量)。
+用户可以缩小到单个版本或所需子目录，也可以显式扩大可见范围；挂载调整不改变 当前权限模式的审批规则。只读挂载禁止写入，仍会暴露目录中的敏感文件。缓存自定义目录、WSLg 源路径和配置合并示例见 [沙箱与权限](sandbox.md#工具目录与环境变量)。
 
 ## 路径（`paths`）
 
@@ -322,6 +332,25 @@ web_tools:
 |---|---|---|
 | `state_path` | `null` | 会话数据库路径。默认 `~/.deep-agent/sessions/<工作区路径哈希>.sqlite3`，每个工作区一个文件。设置后所有工作区共用这一个文件 |
 | `config_dir` | `null` | `keybindings.json` 和 `working_messages.yaml` 所在目录，默认 `~/.deep-agent` |
+
+## 脱敏（`redaction`）
+
+展示侧（审批卡、Auto 证据、会话标题、MCP 工具输出、Companion 诊断等）会对**已知字面量**做精确替换：
+
+1. 配置里解析出的模型 `api_key` → `$llm.models.…` 路径名（如 `$llm.models.deepseek.api_key`）。
+2. 可选字典 `redaction.replacements`：字面值 → 自定义展示名（不必带 `$`）。
+
+```yaml
+redaction:
+  replacements:
+    "sk-XXXX": "密钥"
+```
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `replacements` | `{}` | 精确匹配的字面量 → 展示名；键与值均须非空。类型错误时启动失败 |
+
+沙箱 `env_set` / `env_allowlist`、MCP bearer / `env_passthrough` 的环境变量值**不会**自动加入替换表。需要遮盖时，把对应字面量写进 `replacements`。不对自由文本中的 JWT / `sk-` 等形态做正则猜测遮盖。
 
 ## 界面（`ui`）
 
@@ -342,7 +371,7 @@ ui:
 | `tail_lines` | `3` | 内容折叠时保留的末尾行数 |
 | `explore_preview_items` | `5` | 合并的“Explored N items”保留的最后几项 |
 | `explore_failure_items` | `3` | 探索摘要中额外列出的最近失败项数 |
-| `create_preview_items` | `5` | 合并的“Created N files”保留的最后几个路径 |
+| `create_preview_items` | `5` | 保留字段；多文件 `Created N files` 现列出连续组内全部路径，每文件 diff 行数由 `head_lines` 控制 |
 | `editor_max_lines` | `5` | 输入框最多显示 5 行，可配置更小值；实际还不超过终端高度的三分之一 |
 | `completion_menu_lines` | `8` | 命令补全菜单最大行数 |
 
@@ -351,9 +380,10 @@ ui:
 例如，`ui.timezone: Asia/Shanghai` 对应的提示词片段为：
 
 ```text
-# 当前用户时间
-当前日期：2026-10-28
-用户时区：Asia/Shanghai
+## Current date and timezone
+
+Date: 2026-10-28
+Timezone: Asia/Shanghai
 ```
 
 ## 按键（`keybindings.json`）
@@ -378,6 +408,7 @@ ui:
 | `clear_or_exit` | `c-c` |
 | `exit` | `c-d` |
 | `tools_expand` | `c-o` |
+| `tasks_expand` | `c-a` |
 | `review_diff` | `c-r` |
 | `reopen_interaction` | `f2` |
 | `thinking_toggle` | `c-t` |
@@ -415,7 +446,7 @@ fgo:
 | `DEEP_AGENT_CONFIG` | 主配置文件路径 |
 | `DEEP_AGENT_CONFIG_DIR` | `paths.config_dir` 未设置时的按键与文案目录 |
 | `DEEP_AGENT_STATE_PATH` | `paths.state_path` 未设置时的会话数据库路径 |
-| `DEEPSEEK_API_KEY` | DeepSeek 网页工具密钥，优先于 `web_tools.api_key` |
+| `DEEPSEEK_API_KEY` | 示例配置中 `llm.models.deepseek.api_key` 引用的环境变量，仅在 YAML 引用时读取 |
 
 
 ## 百炼官方来源
@@ -446,28 +477,34 @@ bailian:
 
 ## SubAgent 委派
 
-默认启用 Deep Agents 原生同步 `start_task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
-只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
-例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
-或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
-这一条件写入子 Agent 的描述，供主模型判断是否委派；`isolated` 隔离消息上下文，
-不隔离共享工作区中的文件修改，也不自动检测子任务之间的依赖或冲突。
+委派工具是 `start_task`。任务内容只有 `description`，没有子 Agent 类型。
+Root 在 `subagents.background: true` 时还可以传 `run_in_background`。
+委派只在主 Agent 的权限模式为 `auto` 或 `allow` 时可用；`ask` 下不提供 `start_task`。
+什么时候该派、怎么写任务，写在 `start_task` 的工具描述里，并按当前 Agent 的实际能力拼接。
+同步子 Agent 的描述不提后台参数。后台子 Agent 和已经到深度上限的节点不获得派发工具，也不获得这段描述。
+子任务只收到 `description`，不继承父对话。共享工作区里的文件修改不会自动隔离，也不会自动检测任务之间的依赖或冲突。
 
 配置位于顶层 `subagents`：
 
 ```yaml
 subagents:
   enabled: true
-  max_concurrent: 2
+  max_concurrent: 4
+  max_total: 10
+  # 允许的 SubAgent 嵌套层数（主 Agent depth=0；其子代为 1、2…）。
+  max_subagent_depth: 2
   model: null
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
-  permission: allow
-  # 同时提供 start/check/cancel_background_task；false 时只保留同步 start_task。
+  # false 时 Root 的 start_task 不再接受 run_in_background，描述改为同步派发。
   background: true
 ```
 
-`max_concurrent` 是同时执行上限；达到上限的调用立即返回错误，已有任务结束后可以继续委派。
+`max_concurrent` 是**每个父 Agent** 的直接子同时执行上限，默认 `4`，与宿主硬顶取最小后最多 `4`。
+`max_total` 是**全树同时存在**的任务上限（不含 Root），默认 `10`，与宿主硬顶取最小后最多 `10`。任一上限触达时新委派立即返回错误；任务结束后释放许可。
+当前还剩多少名额不写进 `start_task` 的描述。模型调用 `read_task` 读取同一把锁下的容量快照。
+`max_subagent_depth` 是允许的 **SubAgent 嵌套层数**，不是 Agent 总层数：主 Agent 为 depth `0`，其创建的 SubAgent 为 `1`，再下一层为 `2`。默认与宿主硬顶均为 `2`（用户配置与硬顶取最小）。创建条件为 `parent_depth < max_subagent_depth`；达到上限的 Agent 仍可执行任务，但不能再 `start_task`。只有 Root 能把 `run_in_background` 设为 true。同步子 Agent 只能再派同步任务。后台子 Agent 是叶子，不能再派发。
+`read_task` 遵循直接父级可见：只能读自己创建的直接子任务，不可跨层；`include_logs=true` 才返回该任务的日志页，并且必须带 `run_id`。depth 到顶的叶子和后台子 Agent 不注册该工具。Auto 证据中 `user_messages` 始终为 Root 真实用户请求，本层任务描述只出现在 `delegated_task`。
 `model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
 `reasoning_effort` 默认 `default`，省略该项或旧配置 `null` 与它等价：使用子模型原生默认强度，
 不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
@@ -477,37 +514,39 @@ subagents:
 例如，主 Agent 通过 `/model` 选择 `high` 时，`subagents.reasoning_effort: default` 仍使用子模型原生默认；只有显式配置 `subagents.reasoning_effort: high` 才会为子任务发送 `high`。这里的 `default` 是子任务配置值，不应加入模型能力列表 `reasoning_efforts`。修改配置后重启 CLI 生效，程序不会自动覆盖已有配置。
 直接注入的自定义 `BaseChatModel` 保留原对象作为兼容路径，避免改用配置默认模型；
 此路径若要覆盖强度，必须显式配置 `subagents.model`，使用对应 Profile 构造独立子模型。
-当前原生 `start_task` 参数不包含思考强度，未来的自动选择能力不在本次实现范围内。
-当前仅支持 `allow` 权限，不提供子任务审批；没有经过验证的 `SANDBOXED` 后端时，委派明确失败。
+`start_task` 参数不包含思考强度。
+子任务的权限跟随主 Agent。主 Agent 使用 Auto 时，子任务也使用 Auto 分类，需要人工确认的子任务操作会被阻止并反馈给父任务；主 Agent 使用 `allow` 时子任务使用 `allow`。
+子任务没有审批入口，因此 `ask` 下不提供委派工具；切换到 `ask` 之前启动的后台任务继续运行，仍可查看、取消和读取日志。
+`auto` 和 `allow` 都要求经过验证的 `SANDBOXED` 后端，委派不会在宿主上免审批执行。
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，
-不装载 MCP、人工输入、TUI 审批或递归委派工具。文件修改仍遵循原有沙箱边界。
+不装载 MCP、人工输入或 TUI 审批。同步子 Agent 在 `max_subagent_depth` 允许时可继续同步 `start_task`，并读取自己直接子任务的 `read_task`。
+后台子 Agent 不能再派发。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
-`start_task` 等待任务实际完成后才返回。
+同步 `start_task` 等待任务实际完成后返回 `run_id`、`status` 和 `result`。`run_in_background=true` 在提交成功后立即返回 `status: running`，这不是任务完成。
 
 ### 后台委派
 
-`subagents.background: true`（默认）时，主 Agent 另有三个工具，与同步 `start_task` 并存：
+`subagents.background: true`（默认）时，Root 的 `start_task` 接受 `run_in_background`。同一次模型响应可以同时派发同步和后台 `start_task`，它们并行执行。Root 另外有两个工具：
 
 | 工具 | 作用 |
 |---|---|
-| `start_background_task(description)` | 启动隔离子任务并立即返回 `run_id`，主 Agent 继续工作 |
-| `check_background_task(run_id=null)` | 不传参列出当前会话的后台任务；指定 ID 返回状态，已结束时带结果 |
-| `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
+| `read_task` | 不传 `run_id` 时列出自己的直接子任务；传入后返回描述、执行模式、状态、耗时和结果。`include_logs=true` 同时返回一页日志 |
+| `cancel_task(run_id)` | 请求取消一个属于当前 Agent 的后台任务。请求成功不表示任务已经停止，也不提前释放并发名额 |
 
-后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用 `max_concurrent`；
-没有已验证的 `SANDBOXED` 后端时启动直接失败。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
-主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
+后台子任务的模型、强度、权限、沙箱和执行摘要与同步子任务相同，并共用每父节点 / 全树并发上限。后台子 Agent 不再获得派发工具。
+`ask` 下保留 `read_task` 和 `cancel_task`。子任务完成或失败后，Runtime 自动把结果送回主 Agent：
+主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已空闲时自动开始新一轮，不需要用户再发消息，模型也不能选择是否唤醒，也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
 新建或切换会话、退出程序会取消后台任务并丢弃未送达的结果；未完成的任务恢复后显示为中断。
 存在后台任务时，空闲状态下的沙箱文件系统模式切换保持排队。
 主 Agent 与后台子任务同时使用共享工作区，不检测文件冲突，应避免修改子任务正在处理的文件。
 
 `1 subagent` / `2 subagents` 等运行数量与 `⠼ Working…` 显示在同一条状态行，Working 靠左，数量靠右，数量为零时隐藏；输入框内不显示子任务数量。
-每个 `start_task` 和后台任务在实时与恢复后均显示独立卡片：任务描述、运行/完成/失败/取消状态及原始最终返回结果。结果按 `ui.tail_lines` 折叠，`Ctrl+O` 展开全文；内部思考和工具输出不显示。卡片不读取 JSONL、不额外生成摘要，checkpoint 保留原始消息。
+卡片布局、按键及会话恢复中的任务树见 [TUI 文档](tui.md)。
 
-右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限仍由 `max_concurrent` 控制。
+右侧数量统计当前记录中状态为运行中的 SubAgent 卡片；任务卡片完成、失败、取消或中断时同步减少。调度器的准入/资源清理事件不单独改变这个界面数量，实际并发上限由每父节点 `max_concurrent` 与全树 `max_total` 共同控制。
 
 执行摘要写入配置目录（默认 `~/.deep-agent`）下的
 `subagents/<父会话 ID 的 SHA-256>/<run_id>.jsonl`，使用私有目录/文件权限。
@@ -536,6 +575,6 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
 日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
 
-主 Agent 可按需调用 `read_task_log(run_id=null, offset=0, limit=100)` 查看当前会话的
-最近任务 ID；指定 ID 后分页读取事件。ID 不接受路径，查询限定父会话，单页最多 100 项、约 64 KB。
+主 Agent 可按需调用 `read_task(run_id=null, offset=0, limit=100)` 查看自己的直接子任务。
+指定 `run_id` 且 `include_logs=true` 后分页读取事件。ID 不接受路径，查询限定直接父级，单页最多 100 项、约 64 KB。
 常规 start_task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。

@@ -1,1 +1,1 @@
-"""Isolated delegated tasks: the native synchronous task and background runs."""
+"""Isolated delegated tasks. The task text is the description passed to start_task."""

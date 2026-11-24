@@ -281,14 +281,8 @@ def test_escape_prefers_slash_line_over_scroll(cli: Harness) -> None:
     assert cli.app.transcript.transcript_anchor is None
 
 
-def test_escape_closes_review_before_approval(cli: Harness) -> None:
+def test_escape_cancels_approval_without_a_review_page(cli: Harness) -> None:
     cli.app.dialogs.current = InteractionController.approval(_APPROVAL)
-    cli.app.dialogs.reviewing = True
-    cli.press(("escape",))
-    assert not cli.app.dialogs.reviewing
-    assert cli.app.dialogs.current is not None
-    assert cli.decisions == []
-
     cli.press(("escape",))
     assert cli.app.dialogs.current is None
     assert cli.app.state.status == "Approval still pending · F2 to decide"

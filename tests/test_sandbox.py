@@ -367,13 +367,10 @@ def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.Monkey
         "delete",
         "execute",
         "compact_conversation",
-        "start_task",
-        "read_task_log",
-        "start_background_task",
-        "check_background_task",
-        "cancel_background_task",
+        "read_task",
+        "cancel_task",
     }
-    assert len(names) == 13
+    assert len(names) == 10
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 
@@ -953,7 +950,7 @@ def test_bubblewrap_execute_and_file_tools_share_declared_mounts(tmp_path: Path)
     import shutil
     import subprocess
 
-    from agent.tools.grep import search
+    from agent.tools.grep import resolve_rg
 
     executable = shutil.which("bwrap")
     if not executable:
@@ -1004,9 +1001,11 @@ def test_bubblewrap_execute_and_file_tools_share_declared_mounts(tmp_path: Path)
         assert (reference / "guide.txt").read_text() == "guide-marker\n"
         assert backend.write("/reference/new.txt", "no").error
         assert not (reference / "new.txt").exists()
-        assert "mount-marker" in search(backend, "mount-marker", "/app", None, "content", None, False)
-        assert "guide-marker" in search(backend, "guide-marker", "/reference", None, "content", None, False)
-        assert search(backend, "marker", "/etc", None, "content", None, False).startswith("Error:")
+        if resolve_rg():
+            found = backend.execute("rg -n --no-config mount-marker /app")
+            assert found.exit_code == 0 and "mount-marker" in found.output
+            guide = backend.execute("rg -n --no-config guide-marker /reference")
+            assert guide.exit_code == 0 and "guide-marker" in guide.output
 
         pool_id = id(backend.executor.pool)
         backend.executor.pool.shutdown("mount integration finished")
@@ -1383,7 +1382,6 @@ def test_workspace_uses_its_real_absolute_path(tmp_path, monkeypatch, name):
     assert backend.read("/workspace/note.txt").error
     assert backend.read(f"{root}2/note.txt").error
     assert backend.delete(root).error == "Permission denied: cannot delete a sandbox mount point"
-    assert backend.regex_search_location(None)[2] == root
     assert backend.artifacts_root == f"{root}/.deepagents"
     with pytest.raises(ValueError, match="protected destination"):
         BubblewrapBackend(replace(config, extra_read_write_mounts=(BindMount(project, root),)), executable="/bin/true")

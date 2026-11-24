@@ -831,7 +831,7 @@ def test_subagent_effort_stays_independent_after_main_model_switch(api, child_ef
     from tests.model_stream_server import ScriptedSSEServer, Turn
     def task_call(identity):
         return {'id': identity, 'name': 'start_task', 'args': {
-            'description': identity, 'subagent_type': 'general-purpose'}}
+            'description': identity}}
     turns = [Turn(tool_calls=[task_call('first')]), Turn(text='first child'), Turn(text='first parent'),
              Turn(tool_calls=[task_call('second')]), Turn(text='second child'), Turn(text='second parent')]
     with ScriptedSSEServer(api, turns) as server:
@@ -848,6 +848,7 @@ def test_subagent_effort_stays_independent_after_main_model_switch(api, child_ef
         monkeypatch.setattr(factory, 'build_chat_model', build_child)
         monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
         runner = AgentRunner(model=first_model, settings=cfg)
+        runner.set_permission_mode('allow')
         try:
             assert runner.invoke('first').output == 'first parent'
             runner.request_model_change('beta', reasoning_effort='low')

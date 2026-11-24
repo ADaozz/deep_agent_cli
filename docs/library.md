@@ -41,14 +41,16 @@ runner.close()
 
 ## SubAgent 委派
 
-与 CLI 使用同一套 `settings.subagents` 配置，默认提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
+与 CLI 使用同一套 `settings.subagents` 配置，在 `auto` 或 `allow` 权限下提供原生同步 `start_task` 和后台委派工具（`subagents.background`）。
+`create_agent` 和 `AgentRunner` 默认使用 `ask`，此时不提供委派；需要委派时向 `create_agent` 传入 `permission_mode="auto"` 或 `"allow"`，或调用 `runner.set_permission_mode(...)`。
+若只用 `create_agent` 恢复曾用过 Auto 的 Ask 会话，须传入同一 `thread_id`（及该会话的 Checkpointer），才会安装 Auto 重放防护；省略时按普通 Ask 构建。`AgentRunner` 会在绑定会话后自动对齐。
 只有问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
 共享工作区不会自动隔离文件修改；存在依赖或修改冲突的步骤由主 Agent 顺序处理。
 
-子任务复用工厂图和已验证的 Backend/Pool，不创建新的 Runner；默认并发 2，超限立即返回错误。
+子任务复用工厂图和已验证的 Backend/Pool，不创建新的 Runner；每父节点默认直接子并发 4、全树累计最多 10、最多两层 SubAgent 嵌套（均与用户配置取最小），超限立即返回错误。
 `AgentRunner` 的单操作限制仍然有效，不能通过并发调用同一 Runner 的 `invoke()` 派生任务。
-子任务使用独立上下文和 `allow`，不装载 MCP、调用方的 `extra_tools`、人工输入或递归委派工具；
-显式注入的 `CUSTOM` Backend 无已验证沙箱身份时，委派会被拒绝。主任务取消及 Runner 关闭会传播到关联子任务。
+子任务使用独立上下文和主任务的权限模式，不装载 MCP、调用方的 `extra_tools` 或人工输入；深度上限内可同步嵌套委派；
+显式注入的 `CUSTOM` Backend 没有已验证沙箱身份，只能使用 `ask`，因此也没有委派。主任务取消及 Runner 关闭会传播到关联子任务。
 
 默认模型 Profile 继承主模型，思考强度 `default/null` 使用子模型原生默认；独立客户端在任务结束后关闭。
 直接注入的自定义 `BaseChatModel` 保留原对象，强度覆盖需显式指定子模型 Profile。
@@ -90,13 +92,13 @@ followup = runner.deliver_notifications()   # 没有可送达的结果或存在�
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
 
-原生 `start_task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
+原生 `start_task` 的开始和完成事件可用于构建独立任务卡片。同步结果和后台终态都带结构化 `status`。历史恢复读取任务日志里的 start 与 finish，不根据通知正文推断。
 
 `subagent_finished` 事件在后台任务结束时发出，可能发生在没有运行的空闲期间：`content` 是最终结果或失败/取消说明，
 `result` 包含 `run_id`、`tool_call_id`、`status`（`completed` / `failed` / `cancelled`）和父会话 ID。
-`start_background_task` 的 `tool_completed` 只表示启动成功，不代表任务完成。
+`start_task` 且 `run_in_background=true` 的 `tool_completed` 只表示启动成功，不代表任务完成。
 
-`subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
+`subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务不采集 Token、TPS、TTFT 或压缩状态，思考、中间回答和内部工具调用不进入主界面。模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
 

@@ -56,16 +56,16 @@ def _post(
 
 def build_web_search_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
     def web_search(
-        query: Annotated[str, Field(min_length=1, max_length=128, description="搜索词，可使用 site:、lang:、after: 等操作符。")],
-        count: Annotated[int, Field(strict=True, ge=1, le=50, description="最多返回的结果数。")] = 10,
-        ori_question: Annotated[str | None, Field(min_length=1, max_length=128, description="触发搜索的用户原始问题，可省略。")] = None,
-        localization: Annotated[str, Field(description="用于优先返回本地化结果的 IP 地址，可省略。")] = "",
-        need_content: Annotated[bool, Field(strict=True, description="是否同时返回可用的网页正文。")] = False,
+        query: Annotated[str, Field(min_length=1, max_length=128, description="Search query. Operators such as site:, lang:, and after: are allowed.")],
+        count: Annotated[int, Field(strict=True, ge=1, le=50, description="Maximum number of results.")] = 10,
+        ori_question: Annotated[str | None, Field(min_length=1, max_length=128, description="The user question that triggered the search. Optional.")] = None,
+        localization: Annotated[str, Field(description="IP address used to prefer localized results. Optional.")] = "",
+        need_content: Annotated[bool, Field(strict=True, description="When true, also return usable page text with the search results.")] = False,
     ) -> tuple[str, dict[str, object]]:
-        """搜索公共网页，返回标题、URL、摘要和可选正文。
+        """Use web_search to discover relevant information and sources.
 
-        用于查找最新信息、外部资料和权威来源。用 site: 限定站点，
-        用 after: 和 before: 限定日期。已知具体网页地址时可用 web_fetch 阅读。
+        Verify publication dates when answering time-sensitive questions.
+        Use web_fetch when the webpage address is already known.
         """
         if not query.strip():
             raise ToolException("Web search query must not be blank.")
@@ -108,9 +108,9 @@ def build_web_search_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
 
 def build_web_fetch_tool(api_key: str, *, trust_env: bool = False) -> BaseTool:
     def web_fetch(
-        url: Annotated[str, Field(min_length=1, max_length=8192, description="待抓取的 HTTP 或 HTTPS 网页地址。")],
+        url: Annotated[str, Field(min_length=1, max_length=8192, description="HTTP or HTTPS webpage to retrieve.")],
     ) -> tuple[str, dict[str, object]]:
-        """通过 DeepSeek 抓取指定公共网页并返回 Markdown 正文及标题。"""
+        """Use web_fetch to retrieve a known webpage as Markdown, including its title."""
         try:
             parsed = urlsplit(url)
             valid_url = (

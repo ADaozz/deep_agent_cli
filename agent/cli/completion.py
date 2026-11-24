@@ -8,6 +8,7 @@ from prompt_toolkit.completion import Completer, Completion
 
 from agent.cli.commands import Command
 from agent.models.profile import ModelProfile
+from agent.runtime.permissions import permission_completion_description
 
 
 def model_display_name(profile: ModelProfile) -> str:
@@ -73,8 +74,10 @@ class SlashCompleter(Completer):
             candidates.extend((source, "Model source") for source in sources)
             candidates.extend((profile.id, f"Model: {model_display_name(profile)}") for profile in profiles)
         elif name == "permission":
-            descriptions = {"ask": "Require approval for tools", "allow": "Auto-approve tools (SANDBOXED, HIGH RISK)"}
-            candidates.extend((mode, descriptions[mode]) for mode in self.permission_modes())
+            candidates.extend(
+                (mode, permission_completion_description(mode))
+                for mode in self.permission_modes()
+            )
         elif name == "sandbox":
             descriptions = {
                 "restricted": "Workspace, skills, and declared mounts; system directories stay read-only",

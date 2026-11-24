@@ -62,7 +62,6 @@ class InteractionFlow:
         interaction = self.dialogs.current
         if interaction is None:
             return
-        self.dialogs.reviewing = False
         if interaction.kind.startswith("mcp_"):
             from agent.cli.mcp_ui import finish_mcp_interaction
 
@@ -144,7 +143,6 @@ class InteractionFlow:
 
     def _dismiss_pending_interrupt(self, kind: str) -> None:
         self.dialogs.current = None
-        self.dialogs.reviewing = False
         self.state.running = False
         deferred = self.dialogs.deferred
         if deferred is not None:
@@ -194,7 +192,10 @@ class InteractionFlow:
                 self.drafts.pasted = PastedContentDraft()
                 self.drafts.skill = SkillDraft()
                 self.buffer.reset()
-            self.dialogs.current = InteractionController.approval(list(interrupt.pending_tools))
+            self.dialogs.current = InteractionController.approval(
+                list(interrupt.pending_tools),
+                secrets=self.runner.summary_secrets(),
+            )
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:
             self.dialogs.current = InteractionController.human(interrupt.payload)

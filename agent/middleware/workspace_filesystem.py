@@ -11,25 +11,60 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.tools.catalog import FILE_MUTATION_TOOLS
 
 
 LS_DESCRIPTION = (
-    "列出目录中的文件和子目录。path 必须是绝对路径。\n"
-    "已知文件路径时直接用 read，不必先 ls；按名称查找文件用 execute 运行 rg --files。"
+    "List files and directories at the specified absolute path.\n"
+    "If the file path is already known, use read directly.\n"
+    "Use rg --files to locate files by name when available."
 )
 
 READ_FILE_DESCRIPTION = (
-    "读取文件。file_path 必须是绝对路径；文件不存在时返回错误。\n"
-    "- 默认从开头读 100 行。阅读代码时按需传更大的 limit（如 500）一次读够上下文，"
-    "避免逐页翻读；超大文件再用 offset/limit 分段。\n"
-    "- 内容上方有一行 `@@ ... @@` 状态头，之后每行都是文件原文；编辑时不要包含状态头。\n"
-    "- 需要多个文件时，在同一轮回复中并行调用。\n"
-    "- 被转存到文件的大工具结果，按消息中给出的路径用本工具分页读取。\n"
-    "- 图片、PDF、音视频返回多模态内容，只传 file_path；视频的 offset/limit 按秒计。\n"
-    "- 编辑文件前必须先读取。"
+    "Read the file at the specified absolute path.\n"
+    "By default, read the first 100 lines.\n"
+    "Use an appropriately larger limit when more context is needed.\n"
+    "Read independent files concurrently when practical.\n"
+    "Read an existing file before editing it.\n"
+    "Do not include the read-result status header in edit arguments.\n"
+    "Large tool results saved to a file are read from the path given in the message.\n"
+    "Images, PDFs, and audio or video return multimodal content; pass only file_path. "
+    "For video, offset and limit are in seconds."
 )
 
-TOOL_DESCRIPTIONS = {"ls": LS_DESCRIPTION, "read": READ_FILE_DESCRIPTION}
+WRITE_FILE_DESCRIPTION = (
+    "Create a new file or replace the entire contents of an existing file.\n"
+    "Confirm that existing content can be replaced before overwriting a file.\n"
+    "Prefer edit for targeted modifications.\n"
+    "Do not issue concurrent write, edit, or delete calls for the same file_path. "
+    "Independent files may be modified concurrently."
+)
+
+EDIT_FILE_DESCRIPTION = (
+    "Modify a file through exact string replacement.\n"
+    "Read the file before editing it.\n"
+    "Preserve the original indentation and whitespace.\n"
+    "Apply related changes together when appropriate.\n"
+    "Perform separate modifications to the same file sequentially.\n"
+    "Independent files may be modified concurrently.\n"
+    "Do not include the read-result status header in edit arguments."
+)
+
+DELETE_FILE_DESCRIPTION = (
+    "Delete the specified file or directory.\n"
+    "Deleting a directory recursively removes its contents.\n"
+    "Only delete paths within the authorized task scope that are no longer needed.\n"
+    "Do not issue concurrent write, edit, or delete calls for the same file_path. "
+    "Independent files may be modified concurrently."
+)
+
+TOOL_DESCRIPTIONS = {
+    "ls": LS_DESCRIPTION,
+    "read": READ_FILE_DESCRIPTION,
+    "write": WRITE_FILE_DESCRIPTION,
+    "edit": EDIT_FILE_DESCRIPTION,
+    "delete": DELETE_FILE_DESCRIPTION,
+}
 
 _NATIVE_FILE_NAMES = {"read": "read_file", "write": "write_file", "edit": "edit_file"}
 _FILE_TOOL_NAMES = {native: name for name, native in _NATIVE_FILE_NAMES.items()}
@@ -68,7 +103,7 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
             return request
         call = {**request.tool_call, "name": _NATIVE_FILE_NAMES.get(name, name)}
         state = request.state
-        if name in {"write", "edit", "delete"} and isinstance(state, Mapping):
+        if name in FILE_MUTATION_TOOLS and isinstance(state, Mapping):
             messages = list(state.get("messages", ()))
             for index in range(len(messages) - 1, -1, -1):
                 message = messages[index]

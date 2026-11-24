@@ -18,6 +18,7 @@ from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
 from rich.segment import Segment
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
@@ -25,32 +26,94 @@ from rich.theme import Theme
 from agent.cli.previews import (
     CommandExecutionPreview,
     EXPAND_HINT,
+    TASK_EXPAND_HINT,
     ToolPreview,
-    added_line_label,
+    hidden_output_notice,
     aggregate_file_mutations,
-    build_review_mutation,
     build_tool_preview,
     file_tool_preview,
     normalize_file_mutation,
     tool_group,
 )
-from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
+from agent.cli.highlighting import (
+    HighlightMarkdown,
+    code_renderer,
+    parse_numbered_change,
+)
+from agent.cli.state import CliState, MessageBlock, SubtaskView, ToolBlock, TurnSummaryBlock
+from agent.subagents.notifications import is_background_launch
 from agent.cli.skills import skill_message_display
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
 from agent.version import package_version
 
+
+# Diff palette: exact hex so truecolor terminals keep the intended shades.
+DIFF_ADD_BG = "#005f00"
+DIFF_DELETE_BG = "#5f0000"
+DIFF_ADD_MARKER = "#00af00"
+DIFF_DELETE_MARKER = "#af0000"
+DIFF_ADD_STAT = "#13a10e"
+DIFF_DELETE_STAT = "#c50f1f"
+DIFF_TRAIL_BG = "#0c0c0c"
+# Shared style for tree leaders (Ran └ output, explore and SubAgent ├ / │ / └).
+TREE_BRANCH_STYLE = "dim"
+# format_numbered_change gutter. A 1-digit number's digit sits on the tree text column.
+_NUMBER_GUTTER = 4
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {
     "plain": "",
     "dim": "dim",
     "hunk": "bold cyan",
-    # Use exact xterm-256 colors: muted RGB shades quantize to grayscale.
-    "add": "white on #005f00",
-    "delete": "white on #5f0000",
+    "add": f"white on {DIFF_ADD_BG}",
+    "delete": f"white on {DIFF_DELETE_BG}",
     "error": "red",
     "url": "bright_cyan",
 }
+
+
+def _tree_branch(
+    label: str, *, glyph: str = "└", indent: str = "  ", label_style: str | None = None,
+) -> Text:
+    """Shared `└` / `├` row. Default matches Ran: whole line dim; pass label_style to keep label undimmed."""
+    leader = f"{indent}{glyph} "
+    if label_style is None:
+        return Text(f"{leader}{label}", style=TREE_BRANCH_STYLE)
+    return Text.assemble((leader, TREE_BRANCH_STYLE), (label, label_style))
+
+
+def _tree_frame(*, last: bool, pad: str = "") -> tuple[str, str, int]:
+    """One sibling in the shared tree.
+
+    Every tree uses a short ``├`` / ``└``. ``spine`` continues under every
+    non-last sibling. ``text_at`` is where nested title text starts.
+    """
+    branch = f"  {pad}{'└' if last else '├'} "
+    spine = "" if last else f"  {pad}│"
+    return branch, spine, len(branch) + 2
+
+
+def _tree_child_pad(pad: str, *, last: bool) -> str:
+    return pad + ("  " if last else "│ ")
+
+
+def _frame_text(text: Text, *, spine: str, column: int) -> Text:
+    """Put ``text`` at ``column``, keeping ``spine`` dim and out of the text style."""
+    gap = " " * max(0, column - len(spine))
+    return Text.assemble(
+        Text(spine, style=TREE_BRANCH_STYLE) if spine else Text(""),
+        Text(gap),
+        text,
+    )
+
+
+def _framed(
+    text: Text, *, spine: str, column: int, console: Console, width: int,
+) -> list[Text]:
+    return _wrap_card_line(
+        _frame_text(text, spine=spine, column=column),
+        console, width, indent=column, spine=spine,
+    )
 
 
 def render_transcript(
@@ -192,7 +255,8 @@ def transcript_units(
         units, _ends = _units_from(blocks, 0, state, timezone, width, limits)
         return [TranscriptUnit("header", (), lambda: Group(*_header())), *units]
     settings = (
-        width, timezone.key, limits, state.thinking_collapsed, state.messages_expanded, state.tools_expanded,
+        width, timezone.key, limits, state.thinking_collapsed, state.messages_expanded,
+        state.tools_expanded, state.tasks_expanded, state.diffs_expanded,
     )
     kept = 0
     if memo.settings == settings:
@@ -254,8 +318,9 @@ def _next_unit(
                 break
             group.append(candidate)
         if len(group) > 1:
-            return _create_group_unit(
+            return _file_mutation_group_unit(
                 group, state.tools_expanded, width, limits=limits, after_user=after_user,
+                files_full=_files_expanded(state),
             ), index + len(group)
     if not state.tools_expanded and _is_explore(block):
         group = [block]
@@ -267,17 +332,39 @@ def _next_unit(
             group.append(next_block)
             index += 1
         return _explore_unit(group, width, limits=limits, after_user=after_user), index
-    edit_path = _mergeable_modify_path(block)
-    if edit_path is not None:
+    if _is_mergeable_modify(block):
         group = [block]
         while index + len(group) < len(blocks):
             candidate = blocks[index + len(group)]
-            if _mergeable_modify_path(candidate) != edit_path:
+            if not _is_mergeable_modify(candidate):
                 break
             group.append(candidate)
         if len(group) > 1:
-            return _modify_group_unit(group, width, limits=limits, after_user=after_user), index + len(group)
-    return _tool_unit(block, state.tools_expanded, width, limits=limits, after_user=after_user), index + 1
+            return _file_mutation_group_unit(
+                group, state.tools_expanded, width, limits=limits, after_user=after_user,
+                files_full=_files_expanded(state),
+            ), index + len(group)
+    if _is_mergeable_overwrite(block):
+        group = [block]
+        while index + len(group) < len(blocks):
+            candidate = blocks[index + len(group)]
+            if not _is_mergeable_overwrite(candidate):
+                break
+            group.append(candidate)
+        if len(group) > 1:
+            return _file_mutation_group_unit(
+                group, state.tools_expanded, width, limits=limits, after_user=after_user,
+                files_full=_files_expanded(state),
+            ), index + len(group)
+    return _tool_unit(
+        block, state.tools_expanded, width, limits=limits, after_user=after_user,
+        tasks_expanded=state.tasks_expanded, files_full=_files_expanded(state),
+    ), index + 1
+
+
+def _files_expanded(state: CliState) -> bool:
+    """Ctrl+R and Ctrl+O both reveal every changed line in the existing card."""
+    return state.diffs_expanded or state.tools_expanded
 
 
 def _message_unit(
@@ -295,12 +382,16 @@ def _message_unit(
 
 
 def _tool_unit(
-    block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    block: ToolBlock, expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, tasks_expanded: bool = False, files_full: bool = False,
 ) -> TranscriptUnit:
     return TranscriptUnit(
-        key=("tool", id(block), expanded),
-        fingerprint=(block.revision, expanded, _live_tick(block), limits, after_user),
-        build=lambda: _tool(block, expanded, width, limits=limits, after_user=after_user),
+        key=("tool", id(block), expanded, tasks_expanded, files_full),
+        fingerprint=(block.revision, expanded, tasks_expanded, files_full, _live_tick(block), limits, after_user),
+        build=lambda: _tool(
+            block, expanded, width, limits=limits, after_user=after_user, tasks_expanded=tasks_expanded,
+            files_full=files_full,
+        ),
         owner=block,
     )
 
@@ -318,9 +409,14 @@ def _explore_unit(
     )
 
 
-def _mergeable_modify_path(block: Any) -> str | None:
+def _is_mergeable_modify(block: Any) -> bool:
     mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
-    return mutation.path if mutation and mutation.operation == "modify" and mutation.diff else None
+    return bool(mutation and mutation.operation == "modify" and mutation.diff)
+
+
+def _is_mergeable_overwrite(block: Any) -> bool:
+    mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
+    return bool(mutation and mutation.operation == "overwrite")
 
 
 def _created_file_path(block: Any) -> str | None:
@@ -328,50 +424,35 @@ def _created_file_path(block: Any) -> str | None:
     return mutation.path if mutation and mutation.operation == "create" else None
 
 
-def _create_group_unit(
-    blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+def _file_mutation_group_unit(
+    blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, files_full: bool = False,
 ) -> TranscriptUnit:
     members = tuple(blocks)
     return TranscriptUnit(
-        key=("create_group", id(members[0]), expanded),
-        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), expanded, limits, after_user),
-        build=lambda: _create_group(members, expanded, width, limits=limits, after_user=after_user),
+        key=("file_mutation_group", id(members[0]), expanded, files_full),
+        fingerprint=tuple(block.revision for block in members) + (
+            tuple(id(block) for block in members), expanded, files_full, limits, after_user,
+        ),
+        build=lambda: _file_mutation_group(
+            members, expanded, width, limits=limits, after_user=after_user, files_full=files_full,
+        ),
         owner=members,
     )
 
 
-def _create_group(
-    blocks: Sequence[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+def _file_mutation_group(
+    blocks: Sequence[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, files_full: bool = False,
 ) -> Any:
-    mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits)) is not None]
-    mutation = aggregate_file_mutations(mutations, expanded=expanded, limits=limits)
-    if len(mutation.paths) == 1:
-        return _tool(blocks[-1], expanded, width, limits=limits, after_user=after_user)
-    symbol, color = _tool_status_marker("completed")
-    title = Text.assemble((f"{symbol} ", color), (f"Created {len(mutation.paths)} files", "bold"))
-    rows = [Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]) for line in mutation.compact_lines]
-    for row in (title, *rows):
-        row.truncate(max(1, width - 1), overflow="ellipsis")
-    return Group(*([] if after_user else [Text("")]), title, *rows)
-
-
-def _modify_group_unit(
-    blocks: list[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
-) -> TranscriptUnit:
-    members = tuple(blocks)
-    return TranscriptUnit(
-        key=("modify_group", id(members[0])),
-        fingerprint=tuple(block.revision for block in members) + (tuple(id(block) for block in members), limits, after_user),
-        build=lambda: _modify_group(members, width, limits=limits, after_user=after_user),
-        owner=members,
-    )
-
-
-def _modify_group(
-    blocks: Sequence[ToolBlock], width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
-) -> Any:
-    mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits)) is not None]
-    mutation = aggregate_file_mutations(mutations, limits=limits)
+    full = expanded or files_full
+    mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits, full=full)) is not None]
+    mutation = aggregate_file_mutations(mutations, expanded=full, limits=limits)
+    # A single created path stays one file card. Edit and overwrite keep the aggregate.
+    if len(mutation.paths) == 1 and mutation.operation == "create":
+        return _tool(
+            blocks[-1], expanded, width, limits=limits, after_user=after_user, files_full=files_full,
+        )
     preview = file_tool_preview(mutation)
     return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
 
@@ -399,8 +480,8 @@ class TranscriptRenderer:
     def __init__(self, timezone: ZoneInfo | None = None, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, show_header: bool = True) -> None:
         self._show_header = show_header
         self._cache: dict[Any, tuple[Any, Any, RenderedUnit]] = {}
-        self._units: dict[bool, TranscriptUnitMemo] = {}
-        self._documents: dict[bool, tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
+        self._units: dict[tuple[bool, bool, bool], TranscriptUnitMemo] = {}
+        self._documents: dict[tuple[bool, bool, bool], tuple[tuple[TranscriptUnit, ...], TranscriptDocument]] = {}
         self._width = 0
         self._timezone = timezone or ZoneInfo(DEFAULT_UI_TIMEZONE)
         self._limits = limits
@@ -409,7 +490,7 @@ class TranscriptRenderer:
         if width != self._width:
             self.clear()
             self._width = width
-        mode = state.tools_expanded
+        mode = (state.tools_expanded, state.tasks_expanded, state.diffs_expanded)
         memo = self._units.setdefault(mode, TranscriptUnitMemo())
         units = transcript_units(state, self._timezone, width, limits=self._limits, memo=memo)
         if not self._show_header:
@@ -512,78 +593,51 @@ def render_interaction_viewport(controller: Any, width: int, height: int, offset
     return "\n".join(visible[:height]), offset
 
 
-def render_review(calls: list[tuple[str, dict[str, Any]]], width: int) -> str:
-    parts: list[Any] = [
-        Text("Review", style="bold bright_cyan"),
-        Text("Esc or Ctrl+R close · this is not an approval", style="dim"),
-    ]
-    for name, args in calls:
-        mutation = build_review_mutation(name, args)
-        if mutation is None or mutation.diff is None or not mutation.diff.full_diff:
-            continue
-        diff = mutation.diff
-        parts.append(Text(""))
-        if mutation.operation == "overwrite":
-            parts.append(Text(f"write {diff.path}", style="bold"))
-            parts.append(Text(added_line_label(diff.added or 0), style="green"))
-            parts.append(Group(*(
-                row
-                for number, line in enumerate(diff.lines, 1)
-                for row in _diff_row(f"{number:>4} {line.text}", "add", width)
-            )))
-        elif mutation.operation == "delete":
-            parts.append(Text(f"delete {diff.path}", style="dim"))
-        else:
-            parts.append(Text(f"edit {diff.path} · snippet line numbers", style="dim"))
-            parts.append(Group(*_numbered_diff(diff.full_diff, width)))
-    if len(parts) == 2:
-        parts.append(Text("Nothing to review.", style="dim"))
-    return _capture(Group(*parts), width)
+def _diff_row(
+    content: str,
+    kind: str,
+    width: int,
+    *,
+    highlighter=None,
+) -> list[Text]:
+    """Wrap a diff line; add/delete highlight from line number through last visible char."""
 
-
-def _diff_row(content: str, kind: str, width: int) -> list[Text]:
-    """Fill every visual row of a changed line, including wrapped rows."""
-    style = _PREVIEW_LINE_STYLES[kind]
     available = max(1, width - 1)  # Spare terminal column avoids auto-wrap.
     console = Console(width=max(20, width))
-    text = Text(content, style=style)
-    if kind in {"add", "delete"}:
-        marker = re.match(r"^ *[0-9]+ ([-+])", content)
-        if marker:
-            color = "#459745" if kind == "add" else "#c45555"
-            text.stylize(color, marker.start(1), marker.end(1))
+    if kind not in {"add", "delete"}:
+        return list(Text(content, style=_PREVIEW_LINE_STYLES[kind]).wrap(console, available, overflow="fold"))
+
+    bg = DIFF_ADD_BG if kind == "add" else DIFF_DELETE_BG
+    marker_fg = DIFF_ADD_MARKER if kind == "add" else DIFF_DELETE_MARKER
+    parsed = parse_numbered_change(content) if highlighter is not None else None
+    if parsed is None or highlighter is None:
+        text = Text(content)
+        end = len(content.rstrip())
+        matched = re.match(r"^ *([0-9]+)([-+])", content)
+        if matched and matched.start(1) < end:
+            text.stylize(f"white on {bg}", matched.start(1), end)
+            text.stylize(f"{marker_fg} on {bg}", matched.start(2), matched.end(2))
+        elif end:
+            text.stylize(f"white on {bg}", 0, end)
+    else:
+        indent, number, diff_kind, body = parsed
+        mark = "-" if diff_kind == "delete" else "+"
+        text = Text()
+        text.append(indent)
+        text.append(str(number), Style(color="white", bgcolor=bg))
+        text.append(mark, Style(color=marker_fg, bgcolor=bg))
+        # format_numbered_change: space before body only when body is non-empty.
+        if body:
+            text.append(" ", Style(color="white", bgcolor=bg))
+            styled = highlighter.style_body(diff_kind, number, body)
+            styled.stylize(Style(bgcolor=bg), 0, len(styled))
+            text.append_text(styled)
     rows = list(text.wrap(console, available, overflow="fold"))
-    if kind in {"add", "delete"}:
-        for row in rows:
-            row.pad_right(max(0, available - row.cell_len))
+    for row in rows:
+        pad = max(0, available - row.cell_len)
+        if pad:
+            row.append(" " * pad, f"on {DIFF_TRAIL_BG}")
     return rows
-
-
-def _numbered_diff(raw: str, width: int) -> list[Text]:
-    """Render source line numbers from unified hunk coordinates."""
-    result: list[Text] = []
-    old_number = new_number = 0
-    for line in raw.splitlines():
-        if line.startswith("@@"):
-            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            if match:
-                old_number, new_number = map(int, match.groups())
-            result.extend(_diff_row(line, "hunk", width))
-        elif line.startswith(("---", "+++")):
-            result.extend(_diff_row(line, "dim", width))
-        elif line.startswith("-"):
-            result.extend(_diff_row(f"{old_number:>4} {line}", "delete", width))
-            old_number += 1
-        elif line.startswith("+"):
-            result.extend(_diff_row(f"{new_number:>4} {line}", "add", width))
-            new_number += 1
-        elif line.startswith(" "):
-            result.extend(_diff_row(f"{new_number:>4} {line}", "dim", width))
-            old_number += 1
-            new_number += 1
-        else:
-            result.extend(_diff_row(line, "dim", width))
-    return result
 
 
 @dataclass(frozen=True)
@@ -617,11 +671,11 @@ class _ThinkingDetails:
             yield row
 
 
-class _SkillMessageMarkdown(Markdown):
+class _SkillMessageMarkdown(HighlightMarkdown):
     """保留用户正文的 Markdown 格式，在折行前为技能引用添加块样式。"""
 
     def __init__(self, text: str, labels: tuple[str, ...]) -> None:
-        super().__init__(text)
+        super().__init__(text, renderer=code_renderer)
         self.inlines = self.inlines | {"skill"}
         pattern = re.compile("(" + "|".join(re.escape(label) for label in labels) + ")")
 
@@ -652,7 +706,7 @@ class _SkillMessageMarkdown(Markdown):
 
 def _user_message_content(text: str) -> Markdown:
     displayed, labels = skill_message_display(text)
-    return _SkillMessageMarkdown(displayed, labels) if labels else Markdown(text)
+    return _SkillMessageMarkdown(displayed, labels) if labels else code_renderer.markdown(text)
 
 
 @dataclass(frozen=True)
@@ -711,7 +765,10 @@ def _message(
             body.append(Padding(details, (0, 0, 0, 2)))
             items.append(Padding(Group(*body), (top, 1, 0, 1)))
         if block.content:
-            items.append(Padding(Markdown(block.content), (1 if block.thinking else top, 1, 0, 1)))
+            items.append(Padding(
+                code_renderer.markdown(block.content),
+                (1 if block.thinking else top, 1, 0, 1),
+            ))
     elif block.kind == "error":
         items.append(Padding(Text(f"Error: {block.content}", style="red"), (top, 1, 0, 1)))
     else:
@@ -791,27 +848,27 @@ def _explore_group(
     rows: list[Text] = []
     hidden = count - limits.explore_preview_items
     if hidden > 0:
-        row = Text(f"  ├ … {hidden} more", style="dim")
+        row = _tree_branch(f"… {hidden} more", glyph="├")
         row.truncate(max(1, width - 1), overflow="ellipsis")
         rows.append(row)
     shown = previews[-limits.explore_preview_items:]
     for index, preview in enumerate(shown):
-        branch = "└" if index == len(shown) - 1 else "├"
-        row = Text.assemble((f"  {branch} ", "dim"), (_preview_label(preview), ""))
+        glyph = "└" if index == len(shown) - 1 else "├"
+        row = _tree_branch(_preview_label(preview), glyph=glyph, label_style="")
         row.truncate(max(1, width - 1), overflow="ellipsis")
         rows.append(row)
     if failed:
         omitted = max(0, len(failed) - limits.explore_failure_items)
         if omitted:
-            row = Text(f"  ├ … {omitted} more failed", style="dim")
+            row = _tree_branch(f"… {omitted} more failed", glyph="├")
             row.truncate(max(1, width - 1), overflow="ellipsis")
             rows.append(row)
         for block, preview in failed[-limits.explore_failure_items:]:
             reason = preview.detail
+            heading = _failure_title(_preview_label(preview), exit_code=block.exit_code)
             row = Text.assemble(
-                (f"  ├ Failed (exit {_failure_code(block)}) ", "dim"),
-                (_preview_label(preview), ""),
-                (f": {reason}" if reason else "", "dim"),
+                (f"  ├ {heading}", TREE_BRANCH_STYLE),
+                (f": {reason}" if reason else "", TREE_BRANCH_STYLE),
             )
             row.truncate(max(1, width - 1), overflow="ellipsis")
             rows.append(row)
@@ -824,7 +881,8 @@ def _explore_group(
 
 
 def _tool(
-    block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    after_user: bool = False, tasks_expanded: bool = False, files_full: bool = False,
 ) -> Any:
     if block.name.startswith("mcp__"):
         from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
@@ -835,60 +893,70 @@ def _tool(
             Text("Arguments:\n" + mcp_arguments_preview(block.arguments, expanded=expanded)),
         ]
         if block.output and block.status != "waiting":
-            output = mcp_display_text(block.output).splitlines()
-            limit = len(output) if expanded else limits.tail_lines
-            if len(output) > limit:
-                output = [f"… output omitted · {EXPAND_HINT}", *output[-limit:]]
-            body.append(Text("\n".join(output), style="dim"))
+            console = Console(width=max(20, width))
+            body.extend(_output_tail(
+                mcp_display_text(block.output).splitlines(), console, width,
+                expanded=expanded, limit=limits.tail_lines, indent=0, earlier=False,
+            ))
         return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
     return render_tool_preview(
-        block, build_tool_preview(block, limits=limits), expanded=expanded, width=width, limits=limits, after_user=after_user,
+        block, build_tool_preview(block, limits=limits, full=expanded or files_full),
+        expanded=expanded, width=width, limits=limits,
+        after_user=after_user, tasks_expanded=tasks_expanded,
     )
 
 
 def render_tool_preview(
     block: ToolBlock, preview: ToolPreview, *, expanded: bool, width: int = 80,
     limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    tasks_expanded: bool = False,
 ) -> Any:
     """Generic tool card: status, spinner, colors, folding — no tool semantics."""
     if preview.command_execution is not None:
         return _command_card(block.output, preview.command_execution, expanded, width, limits=limits, after_user=after_user)
     if preview.kind == "failure":
         return _failure_card(block, preview, expanded, width, after_user=after_user)
-    symbol, color = _tool_status_marker(block.status, block.is_error)
-    suffix = (
-        " — waiting for input" if block.status == "waiting"
-        else " — interrupted (completion unconfirmed)" if block.status == "interrupted"
-        else " — cancelled" if block.status == "cancelled"
-        else " — failed" if preview.kind == "task" and block.is_error
-        else ""
-    )
-    verb = preview.verb
-    if block.status == "running":
-        verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
-    summary = f"{verb} {preview.target}".strip()
-    if preview.kind == "task":
-        summary = f"{'Running SubAgent' if block.status == 'running' else 'SubAgent'} · {preview.target}"
-    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
-    mutation = preview.file_mutation
-    if mutation is not None and mutation.operation == "modify" and mutation.diff is not None:
-        title.append(" (")
-        title.append(f"+{mutation.diff.added or 0}", style="green")
-        title.append(" ")
-        title.append(f"-{mutation.diff.deleted or 0}", style="red")
-        title.append(")")
-    elif preview.group == "mutation" and preview.detail:
-        title.append(f" {preview.detail}", style="bold")
-    title.append(suffix, style="dim")
     console = Console(width=max(20, width))
+    if preview.kind == "task":
+        # Same title a nested row uses. Depth only adds the tree prefix.
+        title = _subagent_title(
+            block.status, preview.target, is_error=block.is_error,
+            background=is_background_launch(block.name, block.arguments),
+        )
+    else:
+        symbol, color = _tool_status_marker(block.status, block.is_error)
+        suffix = _tool_status_suffix(block.status)
+        verb = preview.verb
+        if block.status == "running":
+            verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
+        summary = f"{verb} {preview.target}".strip()
+        title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
+        mutation = preview.file_mutation
+        counts = preview.detail if preview.detail.startswith("(+") and preview.detail.endswith(")") else ""
+        if mutation is not None and mutation.diff is not None and counts:
+            title.append(" (")
+            title.append(f"+{mutation.diff.added or 0}", style=DIFF_ADD_STAT)
+            title.append(" ")
+            title.append(f"-{mutation.diff.deleted or 0}", style=DIFF_DELETE_STAT)
+            title.append(")")
+        elif preview.group == "mutation" and preview.detail:
+            title.append(f" {preview.detail}", style="bold")
+        title.append(suffix, style="dim")
     # Same wrap/indent as execute and failure cards: first visual row keeps the
     # status marker; wrapped rows indent under the title text.
     body: list[Any] = list(_wrap_card_line(title, console, width))
     if preview.kind == "task":
-        body.extend(_wrap_card_line(Text(f"  {preview.detail}", style="dim"), console, width))
-        if block.output:
-            body.extend(_wrap_card_line(Text("  └ result", style="dim"), console, width))
-    if preview.group == "mutation":
+        output = block.output.strip()
+        if output:
+            body.extend(_subagent_result(
+                output, console, width, expanded=tasks_expanded, limit=limits.tail_lines,
+                error=block.is_error, text_at=2, spine="",
+            ))
+        body.extend(_subagent_tree(
+            block.subtasks, console=console, width=width,
+            expanded=tasks_expanded, limit=limits.tail_lines,
+        ))
+    elif preview.group == "mutation":
         body.extend(_mutation_body(preview, width))
     elif preview.lines:
         style = "dim" if not block.is_error else "red"
@@ -901,12 +969,75 @@ def render_tool_preview(
     else:
         output = block.output.strip()
         if output:
+            error = block.is_error
+            syntax = preview.syntax if preview.kind == "read" and not error else None
             body.extend(_output_tail(
                 output.splitlines(), console, width,
                 expanded=expanded, limit=limits.tail_lines, indent=2,
-                style="dim" if not block.is_error else "red", earlier=False,
+                style="dim" if not error else "red", earlier=False,
+                filename=preview.target if syntax else None,
+                language=syntax,
             ))
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
+
+
+def _subagent_title(status: str, description: str, *, is_error: bool = False, background: bool = False) -> Text:
+    """The one SubAgent title. Every depth uses it; only the tree prefix changes."""
+    description = " ".join(str(description or "").split()) or "Delegated task"
+    failed = status not in {"cancelled", "interrupted", "waiting", "unconfirmed"} and (
+        is_error or status in {"failed", "error"}
+    )
+    symbol, color = _tool_status_marker("error" if failed else status, failed)
+    label = "Running SubAgent" if status == "running" else "SubAgent"
+    summary = f"{label} · {description}"
+    if background:
+        summary += " · background"
+    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
+    title.append(_tool_status_suffix(status, failed=failed), style="dim")
+    return title
+
+
+def _subagent_result(
+    text: str, console: Console, width: int, *, expanded: bool, limit: int,
+    error: bool, text_at: int, spine: str,
+) -> list[Text]:
+    """Fold one task's own result the way other tool output folds, under its title."""
+    style = "red" if error else "dim"
+    rows: list[Text] = []
+    for line in text.splitlines() or [""]:
+        rows.extend(_framed(Text(line, style=style), spine=spine, column=text_at, console=console, width=width))
+    hidden = max(0, len(rows) - limit)
+    notice = _framed(
+        Text(hidden_output_notice(hidden, hint=TASK_EXPAND_HINT), style="dim"),
+        spine=spine, column=text_at, console=console, width=width,
+    )
+    return _fold_output_rows(rows, notice, expanded=expanded, limit=limit)
+
+
+def _subagent_tree(
+    nodes: Sequence[SubtaskView], *, console: Console, width: int, expanded: bool, limit: int, pad: str = "",
+) -> list[Text]:
+    """Nest the same SubAgent title and result. `pad` is only the ancestor spine."""
+    lines: list[Text] = []
+    last = len(nodes) - 1
+    for index, node in enumerate(nodes):
+        last_sibling = index == last
+        branch, spine, text_at = _tree_frame(last=last_sibling, pad=pad)
+        failed = node.status in {"failed", "error"}
+        title = Text.assemble((branch, TREE_BRANCH_STYLE), _subagent_title(node.status, node.description, is_error=failed))
+        lines.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
+        body = (node.result or node.reason).strip()
+        if body:
+            lines.extend(_subagent_result(
+                body, console, width, expanded=expanded, limit=limit,
+                error=failed, text_at=text_at, spine=spine,
+            ))
+        if node.children:
+            lines.extend(_subagent_tree(
+                node.children, console=console, width=width, expanded=expanded, limit=limit,
+                pad=_tree_child_pad(pad, last=last_sibling),
+            ))
+    return lines
 
 
 def _command_card(
@@ -917,20 +1048,18 @@ def _command_card(
     status = preview.status
     verb = {
         "running": "Running", "waiting": "execute", "interrupted": "execute",
-        "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
+        "succeeded": "Ran",
+        "failed": _failure_title(preview.command, exit_code=preview.exit_code),
         "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
     }[status]
-    suffix = (
-        " — waiting for input" if status == "waiting"
-        else " — interrupted (completion unconfirmed)" if status == "interrupted"
-        else ""
-    )
+    suffix = _tool_status_suffix(status, cancelled=False)
     marker_status = {
         "running": "running", "waiting": "waiting", "succeeded": "completed",
     }.get(status, "error")
     symbol, color = _tool_status_marker(marker_status)
+    heading = verb if status == "failed" else f"{verb} {preview.command}"
     title = Text.assemble(
-        (f"{symbol} ", color), (f"{verb} {preview.command}", "bold"), (suffix, "dim"),
+        (f"{symbol} ", color), (heading, "bold"), (suffix, "dim"),
     )
     console = Console(width=max(20, width))
     body: list[Any] = []
@@ -968,7 +1097,7 @@ def _command_card(
     if not lines and status not in {"running", "waiting", "interrupted"}:
         lines = ["(no output)"]
     if lines:
-        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(_tree_branch("output"), console, width))
     body.extend(_output_tail(lines, console, width, expanded=expanded, limit=limits.tail_lines))
 
     if preview.truncated:
@@ -982,17 +1111,82 @@ def _command_card(
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
-def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
-    body: list[Any] = []
-    if preview.label:
-        body.append(Text(f"  {preview.label}", style="green"))
-        body.append(Text(""))
+def _mutation_highlighters(preview: ToolPreview):
+    """Primary highlighter plus per-path map for multi-file └ sections."""
+    mutation = preview.file_mutation
+    by_path = {}
+    if mutation is not None and mutation.diff is not None and mutation.diff.full_diff:
+        primary = code_renderer.diff_from_unified(
+            mutation.diff.full_diff, path=mutation.diff.path, language=preview.syntax,
+        )
+        by_path[mutation.path] = primary
+        return primary, by_path
+    path = mutation.path if mutation is not None else preview.target
+    primary = code_renderer.diff_for_path(path, language=preview.syntax)
+    if path:
+        by_path[path] = primary
+    return primary, by_path
+
+
+def _section_has_counts(operation: str, added: int, deleted: int) -> bool:
+    if operation == "create" and added == 0 and deleted == 0:
+        return False
+    return operation in {"create", "modify", "overwrite"}
+
+
+def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
+    """Multi-file card. Same short ├ / │ / └ spine as a nested SubAgent."""
+    mutation = preview.file_mutation
+    if mutation is None:
+        return []
     console = Console(width=max(20, width))
+    body: list[Any] = []
+    last = len(mutation.sections) - 1
+    for index, section in enumerate(mutation.sections):
+        branch, spine, text_at = _tree_frame(last=index == last)
+        # Number gutter is 4 columns; shift so a 1-digit number lands on text_at.
+        gutter = max(0, text_at - (_NUMBER_GUTTER - 1))
+        label = Text(section.path)
+        if _section_has_counts(mutation.operation, section.added, section.deleted):
+            label.append(" (")
+            label.append(f"+{section.added}", style=DIFF_ADD_STAT)
+            label.append(" ")
+            label.append(f"-{section.deleted}", style=DIFF_DELETE_STAT)
+            label.append(")")
+        title = Text.assemble((branch, TREE_BRANCH_STYLE), label)
+        body.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
+        highlighter = code_renderer.diff_for_path(section.path)
+        content_width = max(2, width - gutter)
+        for line in section.lines:
+            if line.style in {"add", "delete"}:
+                rows = _diff_row(line.text, line.style, content_width, highlighter=highlighter)
+                body.extend(_frame_text(row, spine=spine, column=gutter) for row in rows)
+            elif line.text:
+                body.extend(_framed(
+                    Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]),
+                    spine=spine, column=gutter, console=console, width=width,
+                ))
+    for line in preview.lines:
+        if not line.text:
+            body.append(Text(""))
+            continue
+        text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
+        body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
+    return body
+
+
+def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
+    mutation = preview.file_mutation
+    if mutation is not None and len(mutation.sections) > 1:
+        return _mutation_tree(preview, width)
+    body: list[Any] = []
+    console = Console(width=max(20, width))
+    primary, _by_path = _mutation_highlighters(preview)
     for line in preview.lines:
         if not line.text:
             body.append(Text(""))
         elif line.style in {"add", "delete"}:
-            body.extend(_diff_row(f"  {line.text}", line.style, width))
+            body.extend(_diff_row(f"  {line.text}", line.style, width, highlighter=primary))
         else:
             text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
             body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
@@ -1003,8 +1197,7 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     symbol, color = _tool_status_marker("error")
     title = Text.assemble(
         (f"{symbol} ", color),
-        (f"Failed (exit {_failure_code(block)}) ", "bold"),
-        (preview.target, ""),
+        (f"{_failure_title(preview.target, exit_code=block.exit_code)} ", "bold"),
     )
     console = Console(width=max(20, width))
     body: list[Any] = [] if after_user else [Text("")]
@@ -1014,51 +1207,103 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     else:
         lines = [line.text for line in preview.lines]
     if lines:
-        body.extend(_wrap_card_line(Text("  └ output", style="dim"), console, width))
+        body.extend(_wrap_card_line(_tree_branch("output"), console, width))
         for line in lines:
             body.extend(_wrap_card_line(Text(f"    {line}", style="dim"), console, width, indent=4))
     return Group(*body)
 
 
-def _failure_code(block: ToolBlock) -> int:
-    return block.exit_code if isinstance(block.exit_code, int) and not isinstance(block.exit_code, bool) else 1
+def _failure_title(target: str, *, exit_code: object = None) -> str:
+    """Failed, plus an exit code only when the tool reported one."""
+    code = exit_code if type(exit_code) is int else None
+    head = f"Failed (exit {code})" if code is not None else "Failed"
+    text = str(target or "").strip()
+    return f"{head} {text}".strip() if text else head
 
 
 def _output_tail(
     lines: list[str], console: Console, width: int, *, expanded: bool, limit: int,
     indent: int = 4, style: str = "dim", earlier: bool = True,
+    filename: str | None = None, language: str | None = None,
 ) -> list[Text]:
     """Apply the output budget after terminal wrapping, preserving the full output."""
-    rows = [
-        row for line in lines
-        for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
-    ]
+    use_syntax = language is not None or (
+        filename is not None and code_renderer.syntax_for_path(filename) is not None
+    )
+    if use_syntax and style != "red":
+        blob = "\n".join(lines)
+        highlighted = code_renderer.render_code(blob, filename=filename, language=language)
+        styled_lines = list(highlighted.split("\n"))
+        # Pad if split under-counts blank trailing lines.
+        while len(styled_lines) < len(lines):
+            styled_lines.append(Text())
+        rows: list[Text] = []
+        for styled in styled_lines[:len(lines)]:
+            line = Text(f"{' ' * indent}")
+            line.append_text(styled)
+            rows.extend(_wrap_card_line(line, console, width, indent=indent))
+    else:
+        rows = [
+            row for line in lines
+            for row in _wrap_card_line(Text(f"{' ' * indent}{line}", style=style), console, width, indent=indent)
+        ]
+    return _fold_output_rows(
+        rows,
+        _wrap_card_line(
+            Text(f"{' ' * indent}{hidden_output_notice(len(rows) - limit, earlier=earlier)}", style=style),
+            console, width, indent=indent,
+        ),
+        expanded=expanded, limit=limit,
+    )
+
+
+def _fold_output_rows(rows: list[Text], notice: list[Text], *, expanded: bool, limit: int) -> list[Text]:
+    """Hint, then the last `limit` wrapped rows. Short and expanded text is unchanged."""
     if expanded or len(rows) <= limit:
         return rows
-    hidden = len(rows) - limit
-    notice = f"… {hidden} {'earlier ' if earlier else ''}output lines hidden · {EXPAND_HINT}"
-    return [
-        *_wrap_card_line(Text(f"{' ' * indent}{notice}", style=style), console, width, indent=indent),
-        *rows[-limit:],
-    ]
+    return [*notice, *rows[-limit:]]
 
 
-def _wrap_card_line(line: Text, console: Console, width: int, *, indent: int = 2) -> list[Text]:
+def _wrap_card_line(
+    line: Text, console: Console, width: int, *, indent: int = 2, spine: str = "",
+) -> list[Text]:
     """Keep the first prefix and indent continuations within the terminal margin.
 
-    Shared by every tool card so titles, commands, and body lines wrap alike.
+    Every card and nested row uses this. `spine` keeps `│` in the branch column
+    on continuations; without it, continuations indent under the title text.
     """
     available = max(1, width - 2)
-    indent = min(indent, available - 1)
+    indent = min(max(0, indent), available - 1)
     prefix, content = line[:indent], line[indent:]
-    wrapped = list(content.wrap(console, available - indent, overflow="fold"))
-    return [
-        Text.assemble(prefix if index == 0 else Text(" " * indent, style=line.style), part)
-        for index, part in enumerate(wrapped)
-    ]
+    wrapped = list(content.wrap(console, max(1, available - indent), overflow="fold")) or [Text("")]
+    gap = " " * max(0, indent - len(spine))
+    rows: list[Text] = []
+    for index, part in enumerate(wrapped):
+        if index == 0:
+            rows.append(Text.assemble(prefix, part))
+        elif spine:
+            rows.append(Text.assemble(Text(spine, style=TREE_BRANCH_STYLE), Text(gap), part))
+        else:
+            rows.append(Text.assemble(Text(" " * indent, style=line.style), part))
+    return rows
 
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _tool_status_suffix(status: str, *, failed: bool = False, cancelled: bool = True) -> str:
+    """Status words after a tool or SubAgent title."""
+    if status == "waiting":
+        return " — waiting for input"
+    if status == "interrupted":
+        return " — interrupted (completion unconfirmed)"
+    if status == "unconfirmed":
+        return " — completion unconfirmed"
+    if cancelled and status == "cancelled":
+        return " — cancelled"
+    if failed:
+        return " — failed"
+    return ""
 
 
 def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
@@ -1068,7 +1313,7 @@ def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
         return _spinner(), "green"
     if status == "waiting":
         return dot, "yellow"
-    if status in {"error", "interrupted", "cancelled"} or is_error:
+    if status in {"error", "interrupted", "cancelled", "unconfirmed"} or is_error:
         return dot, "#888888"
     return dot, "green"
 
@@ -1077,8 +1322,14 @@ def _spinner_tick() -> int:
     return int(time.monotonic() * 10) % len(_SPINNER_FRAMES)
 
 
+def spinner_frame(now: float | None = None) -> str:
+    """The braille frame shared by tool cards and the status line."""
+    tick = _spinner_tick() if now is None else int(now * 10) % len(_SPINNER_FRAMES)
+    return _SPINNER_FRAMES[tick]
+
+
 def _spinner() -> str:
-    return _SPINNER_FRAMES[_spinner_tick()]
+    return spinner_frame()
 
 
 def _format_bytes(size: int) -> str:

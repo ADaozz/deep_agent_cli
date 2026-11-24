@@ -10,7 +10,8 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig
-from agent.bootstrap.factory import create_agent
+from agent.bootstrap.factory import AgentSpec, compose_system_prompt, create_agent
+from agent.prompts import read_prompt
 from agent.execution.backend import BackendSelection
 from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
@@ -50,10 +51,10 @@ def test_current_user_date_refreshes_in_configured_timezone(tmp_path, monkeypatc
     assert len(capture.messages) == 2
     for message, date in zip(capture.messages, dates):
         content = str(message.content)
-        assert f'当前日期：{date}' in content
-        assert f'用户时区：{timezone_name}' in content
-        assert content.count('# 当前用户时间') == 1
-    assert '# 当前用户时间' not in prepared.system_prompt
+        assert f'Date: {date}' in content
+        assert f'Timezone: {timezone_name}' in content
+        assert content.count('## Current date and timezone') == 1
+    assert '## Current date and timezone' not in prepared.system_prompt
 
 
 class CaptureSystem(BaseCallbackHandler):
@@ -97,10 +98,39 @@ def test_system_prompt_composition_and_native_tool_schemas(tmp_path, with_skills
         assert convert_to_openai_tool(bound[name]) == convert_to_openai_tool(schemas[name])
     assert len(capture.messages) == 1
     content = str(capture.messages[0].content)
-    for expected in ("# 用户指令", "保留用户约定。", "# 项目指令", "保留项目约定。"):
+    for expected in ("## User instructions", "保留用户约定。", "## Project instructions", "保留项目约定。"):
         assert expected in content
     if with_skills:
         # 上游 SkillsMiddleware 渲染技能目录，技能可被发现并呈现。
         assert content.count("## Skills System") == 1
         assert "demo" in content and "示例技能" in content and "/skills/demo/SKILL.md" in content
     assert {"read", "request_human_input", "compact_conversation"} <= graph_tool_names(prepared.graph)
+
+
+def test_root_and_subagent_share_the_system_prompt(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("保留项目约定。", encoding="utf-8")
+    root = compose_system_prompt(AgentSpec(instructions="保留用户约定。"), tmp_path)
+    child = compose_system_prompt(
+        AgentSpec(instructions="保留用户约定。", role="subagent"), tmp_path,
+    )
+    shared = "You are a coding agent running in Deep Agent CLI."
+    assert root.startswith(shared) and child.startswith(shared)
+    assert "## Delegated task" not in root
+    assert "## Delegated task" in child
+    assert root.split(shared, 1)[1].split("## User instructions", 1)[0] in child
+    assert "保留用户约定。" in child and "保留项目约定。" in child
+    with pytest.raises(FileNotFoundError, match="missing"):
+        read_prompt(tmp_path / "missing.md")
+
+
+def test_core_modules_load_prompts_without_companion():
+    import agent.bootstrap.factory as factory
+    import agent.companion.config as companion_config
+    import agent.prompts as prompts
+    import agent.runtime.approval.policy as policy
+    import agent.tools.subagent_tasks as tasks
+
+    assert factory.read_prompt is prompts.read_prompt
+    assert policy.read_prompt is prompts.read_prompt
+    assert tasks.read_prompt is prompts.read_prompt
+    assert not hasattr(companion_config, "read_prompt")

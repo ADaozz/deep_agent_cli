@@ -8,11 +8,13 @@ from typing import Any
 from agent.cli.interactions import InteractionController
 from agent.execution.policy import parse_sandbox_mode
 from agent.runtime.permissions import (
+    AUTO_FALLBACK_REASON,
     PERMISSION_ALLOW_WARNING,
     PermissionMode,
     allow_mode_available,
     allow_mode_unavailable_reason,
     parse_permission_mode,
+    permission_mode_option_label,
 )
 from agent.runtime.contracts import InterruptKind, RunEvent, UnknownInterruptError
 
@@ -102,6 +104,8 @@ class AccessSelection:
             mode = parse_permission_mode(raw)
             if mode is None:
                 hint = "ask or allow" if self._allow_available() else "ask"
+                if self.runner.auto_available():
+                    hint = "ask, auto or allow"
                 self.state.add_system(
                     f"Unknown permission mode. Use /permission {hint}",
                     error=True,
@@ -110,21 +114,30 @@ class AccessSelection:
             await self._apply_permission_mode(mode)
             return
         if self.state.running:
-            self.set_status("Use /permission ask|allow while a run is active")
+            self.set_status("Use /permission ask|auto|allow while a run is active")
             return
         current = self.runner.permission_mode()
         options = [
             {
                 "value": PermissionMode.ASK.value,
-                "label": "ask · require approval for every execute and side-effect tool"
-                + (" · current" if current is PermissionMode.ASK else ""),
+                "label": permission_mode_option_label(
+                    PermissionMode.ASK, current=current is PermissionMode.ASK,
+                ),
             },
         ]
+        if self.runner.auto_available():
+            options.append({
+                "value": PermissionMode.AUTO.value,
+                "label": permission_mode_option_label(
+                    PermissionMode.AUTO, current=current is PermissionMode.AUTO,
+                ),
+            })
         if self._allow_available():
             options.append({
                 "value": PermissionMode.ALLOW.value,
-                "label": "allow · auto-approve all tools; sandbox network open (SANDBOXED, HIGH RISK)"
-                + (" · current" if current is PermissionMode.ALLOW else ""),
+                "label": permission_mode_option_label(
+                    PermissionMode.ALLOW, current=current is PermissionMode.ALLOW,
+                ),
             })
         if len(options) == 1:
             self.state.add_system(
@@ -144,7 +157,7 @@ class AccessSelection:
                 "options": options,
             }],
         )
-        self.dialogs.current.option_index = 0 if current is PermissionMode.ASK else 1
+        self.dialogs.current.option_index = next(i for i, option in enumerate(options) if option["value"] == current.value)
         self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
@@ -203,7 +216,7 @@ class AccessSelection:
         self.dialogs.current = InteractionController(
             kind="sandbox",
             title="Sandbox filesystem",
-            question="Choose which files execute and file tools can change. ask/allow is unchanged.",
+            question="Choose which files execute and file tools can change.",
             fields=[{
                 "id": "mode",
                 "type": "single_select",
@@ -220,6 +233,10 @@ class AccessSelection:
         return allow_mode_available(self.runner.prepared.execution_mode)
 
     async def _apply_permission_mode(self, mode: PermissionMode) -> None:
+        if mode is PermissionMode.AUTO and not self.runner.auto_available():
+            self._request_permission_mode(PermissionMode.ASK)
+            self.set_status(AUTO_FALLBACK_REASON)
+            return
         if mode is PermissionMode.ALLOW and not self._allow_available():
             self.state.add_system(
                 allow_mode_unavailable_reason(self.runner.prepared.execution_mode),

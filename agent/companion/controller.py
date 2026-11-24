@@ -16,10 +16,9 @@ from time import monotonic, perf_counter, time
 from uuid import uuid4
 
 from agent.companion import STATES
-from agent.companion.config import CompanionConfig, companion_key
+from agent.companion.config import CompanionConfig
 from agent.companion.diagnostic_io import QueryBudget
 from agent.companion.timeline import (
-    SESSION_RELIABILITY,
     Timeline,
     ToolObservation,
     category,
@@ -33,7 +32,7 @@ from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
     observation_views, result_status,
 )
-from agent.companion.diagnosis import InvalidObservation, interpret_turn, reply_text, validate_observation
+from agent.companion.diagnosis import reply_text
 from agent.companion.monitor import Resources, services
 
 
@@ -61,7 +60,7 @@ def clean(value):
     return "".join(c for c in str(value)[:512] if c.isprintable())[:240]
 
 
-async def start_worker(config_dir, config: CompanionConfig):
+async def start_worker(config_dir, config: CompanionConfig, api_key=None):
     # Isolated Python ignores user site packages and PYTHONPATH. Inject only
     # the install root so the same entry point also works in a source checkout.
     root = str(Path(__file__).resolve().parents[2])
@@ -71,9 +70,11 @@ async def start_worker(config_dir, config: CompanionConfig):
     )
     env = {
         k: os.environ[k]
-        for k in ("HOME", "PATH", "LANG", "COMPANION_DEEPSEEK_API_KEY")
+        for k in ("HOME", "PATH", "LANG")
         if k in os.environ
     }
+    if api_key:
+        env["DEEPSEEK_API_KEY"] = api_key
     return await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
@@ -83,7 +84,6 @@ async def start_worker(config_dir, config: CompanionConfig):
         root,
         str(config_dir),
         str(config.persona_prompt),
-        str(config.observation_prompt),
         str(config.chat_prompt),
         str(config.rpc_timeout_seconds),
         str(config.question_timeout_seconds),
@@ -106,6 +106,7 @@ class Companion:
         timezone,
         protected=(),
         secrets=(),
+        api_key=None,
         profile=None,
         window=None,
         execute_environment=None,
@@ -114,7 +115,20 @@ class Companion:
     ):
         self.workspace = workspace.resolve()
         self.protected = (config_dir, *protected)
-        self.secrets = tuple(filter(None, (*secrets, companion_key(config_dir))))
+        self.api_key = api_key
+        from agent.redaction import SecretRef, secret_values
+
+        refs: list[SecretRef] = []
+        for item in secrets:
+            if isinstance(item, SecretRef):
+                if item.value:
+                    refs.append(item)
+            elif item:
+                refs.append(SecretRef(name="secret", value=str(item)))
+        if api_key:
+            refs.append(SecretRef(name="llm.models.deepseek.api_key", value=str(api_key)))
+        self.secrets = tuple(refs)
+        self._secret_values = secret_values(self.secrets)
         self.repository = Repository(self.workspace, self.protected, self.secrets)
         self.inspect_session = inspect_session
         self.worker_ready = False
@@ -150,10 +164,10 @@ class Companion:
         self.next_prune = 0
         self.starts = {}
         self.turn = self.run
+        self.turn_query = ""
         self.turn_start = None
         self.turn_profile = self.profile()
         self.last_profile = None
-        self.turn_rates = {}
         self.turn_metrics = []
         self.turn_git = []
         self.last_git = None
@@ -174,6 +188,9 @@ class Companion:
         self.anchor = None
         self.frame = []
         self.changed = asyncio.Event()
+        if "COMPANION_DEEPSEEK_API_KEY" in os.environ or (config_dir / "companion.key").exists():
+            import warnings
+            warnings.warn("旧 Companion 凭据已停用，请配置 llm.models.deepseek.api_key", UserWarning, stacklevel=2)
 
     def ask(self, text):
         self.sync_session()
@@ -221,7 +238,7 @@ class Companion:
 
     def _update_chat_preview(self, text):
         text = redact_diagnostic_text(text, self.secrets)
-        text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"), partial=True)
+        text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"))
         if self.reply_stamp is None:
             if not text:
                 return
@@ -241,9 +258,13 @@ class Companion:
     def log(self, message, speaker="Lain", *, stamp=None):
         self.log_sequence += 1
         limit = QUESTION_LIMIT if speaker == "You" else 1600
+        if stamp is None:
+            now = datetime.now(self.timezone)
+            # Status uses full wall time for app-log style rows in the panel.
+            stamp = now.strftime("%Y-%m-%d %H:%M:%S" if speaker == "Status" else "%H:%M:%S")
         self.logs.append(
             (
-                stamp or datetime.now(self.timezone).strftime("%H:%M:%S"),
+                stamp,
                 speaker,
                 "".join(c for c in str(message) if c.isprintable() or c in "\n\t")[:limit],
             )
@@ -298,6 +319,7 @@ class Companion:
             self.batches.clear()
             self.run = uuid4().hex
             self.turn = self.run
+            self.turn_query = ""
             self.services = ()
 
     def close_call(self, obs, outcome, wall, tick, error="", exit_code=None):
@@ -347,46 +369,24 @@ class Companion:
             if self.turn_start is not None
             else None
         )
-        previous = [
-            r["duration_ms"]
-            for r in self.timeline.summaries
-            if r["duration_ms"] is not None
-        ]
         summary = dict(
             turn=self.turn,
             run=self.run,
+            query=self.turn_query,
             profile=self.turn_profile,
             outcome=outcome,
             duration_ms=elapsed,
-            previous_turn_ms=previous[-3:],
             git=self.turn_git,
             resources=self.turn_metrics,
             tools=[
-                dict(
-                    model=m,
-                    effort=e,
-                    tool=t,
-                    **d,
-                    recent_pct=self.timeline.series[m, e, t].rate,
-                    start_pct=self.turn_rates.get((m, e, t)),
-                )
+                dict(model=m, effort=e, tool=t, **d)
                 for (m, e, t), d in tools.items()
             ],
-            retry_chains=[
-                (o.tool_call_id, o.retry_of) for o in self.calls.values() if o.retry_of
-            ],
-            incidents=[
-                i.copy()
-                for i in self.timeline.incidents.values()
-                if self.turn in (i["turn"], i.get("resolved_turn"))
-            ],
-        )
-        summary["findings"] = interpret_turn(
-            summary, self.timeline.failures, self.timeline.samples
         )
         self.timeline.record("turn", summary, key=self.turn, stamp=wall, turn=self.turn)
         self.timeline.summaries.append(summary)
         self.calls.clear()
+        self.turn_query = ""
         self.turn_start = None
         self.turn_metrics = []
         self.turn_git = []
@@ -427,15 +427,15 @@ class Companion:
             self.close_turn("unknown", wall, tick)
             self.run = event.run_id or uuid4().hex
             self.turn = event.turn_id or turn_id or self.run
+            self.turn_query = redact_diagnostic_text(event.content or "", self.secrets)
             self.turn_start = tick
             self.turn_profile = (model, effort)
             self.last_profile = (model, effort)
-            self.turn_rates = {k: s.rate for k, s in self.timeline.series.items()}
             self.turn_metrics = [self.metrics]
             self.turn_git = [self.last_git] if self.last_git else []
             self.timeline.record(
                 "run",
-                dict(model=model, effort=effort, agent=agent, run=self.run),
+                dict(model=model, effort=effort, agent=agent, run=self.run, query=self.turn_query),
                 key=self.turn,
                 stamp=wall,
                 turn=self.turn,
@@ -599,7 +599,8 @@ class Companion:
                 "completed": "success",
             }.get(event["status"], "unknown")
             if obs.outcome == "failed":
-                obs.error_category = category("", obs.exit_code)
+                recorded = event.get("error_category")
+                obs.error_category = recorded if isinstance(recorded, str) and recorded else category("", obs.exit_code)
             self.timeline.completed(obs)
             if turn == self.turn and self.turn_start is not None:
                 self.calls[run, call] = obs
@@ -800,14 +801,13 @@ class Companion:
             return [
                 dict(
                     turn_id=summary["turn"],
+                    query=summary.get("query", ""),
                     outcome=summary["outcome"],
                     duration_ms=summary["duration_ms"],
-                    previous_turn_ms=summary["previous_turn_ms"][-3:],
-                    findings=(summary.get("findings") or interpret_turn(summary, state.failures, state.samples))[:8],
                 )
                 for summary in state.summaries
                 if (not turn_id or turn_id == summary["turn"])
-                and (not tool_name or any(row["tool"] == tool_name for row in summary["tools"]))
+                and (not tool_name or any(row["tool"] == tool_name for row in summary.get("tools") or ()))
             ]
 
         observations = observation_views(state, cache=self.call_cache)
@@ -974,7 +974,7 @@ class Companion:
     async def worker_session(self):
         process = None
         restart = False
-        spawn = asyncio.create_task(start_worker(self.config_dir, self.config))
+        spawn = asyncio.create_task(start_worker(self.config_dir, self.config, self.api_key))
         try:
             process = await asyncio.shield(spawn)
             hello = json.loads(await asyncio.wait_for(process.stdout.readline(), 30))
@@ -992,7 +992,7 @@ class Companion:
             self.connection = "CONNECTED"
             while True:
                 self.sync_session()
-                if not self.question and not self.timeline.queue:
+                if not self.question:
                     self.changed.clear()
                     try:
                         await asyncio.wait_for(self.changed.wait(), 1)
@@ -1003,54 +1003,15 @@ class Companion:
                 question = self.question
                 state = self.timeline
                 generation = self.session_generation
-                incident = None
-                if question:
-                    snapshot = dict(
-                        question=redact_diagnostic_text(question, self.secrets),
-                        snapshot_version=state.version,
-                        profile=self.profile(),
-                        tool_evidence=self.chat_tool_evidence(question),
-                        recent_errors=list(self.errors),
-                        latest_review=self.session_evidence("turns")[-1:],
-                        conversation=self.chat_history(question),
-                    )
-                elif state.queue:
-                    key, incident_id, version = state.queue.popleft()
-                    incident = state.incidents.get(key)
-                    if not incident or (
-                        incident["id"],
-                        incident["version"],
-                        incident["state"],
-                    ) != (incident_id, version, "open"):
-                        continue
-                    incident["requested"] = True
-                    state.record(
-                        "incident",
-                        incident.copy(),
-                        key=incident_id,
-                        turn=incident["turn"],
-                    )
-                    if (
-                        self.session() != self.thread
-                        or state is not self.timeline
-                        or state.incidents.get(key) is not incident
-                    ):
-                        continue
-                    snapshot = dict(
-                        incident=incident,
-                        snapshot_version=state.version,
-                        recent_failures=[
-                            f
-                            for f in state.failures
-                            if (
-                                key == SESSION_RELIABILITY
-                                or (f["model_id"], f["reasoning_effort"]) == key[:2]
-                            )
-                            and key[2] in ("*", f["tool_name"])
-                        ][-5:],
-                    )
-                else:
-                    continue
+                snapshot = dict(
+                    question=redact_diagnostic_text(question, self.secrets),
+                    snapshot_version=state.version,
+                    profile=self.profile(),
+                    tool_evidence=self.chat_tool_evidence(question),
+                    recent_errors=list(self.errors),
+                    latest_review=self.session_evidence("turns")[-1:],
+                    conversation=self.chat_history(question),
+                )
                 self.request_version += 1
                 identity = dict(
                     session=self.thread, seq=self.request_version, token=uuid4().hex
@@ -1060,7 +1021,6 @@ class Companion:
                     return (
                         self.session() == identity["session"]
                         and generation == self.session_generation
-                        and (not incident or self.timeline is state and state.incidents.get(key) is incident)
                     )
 
                 timeout = self.config.question_timeout_seconds
@@ -1087,55 +1047,11 @@ class Companion:
                 self.sync_session()
                 if not current():
                     continue
-                if question:
-                    stamp = self._clear_chat_reply()
-                    if reply.get("status") == "ok":
-                        self.log(reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets)), stamp=stamp)
-                    else:
-                        self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
+                stamp = self._clear_chat_reply()
+                if reply.get("status") == "ok":
+                    self.log(reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets)), stamp=stamp)
                 else:
-                    status = reply.get("status")
-                    decision = None
-                    if status == "ok":
-                        try:
-                            decision = validate_observation({field: reply.get(field) for field in ("behavior", "message")})
-                        except InvalidObservation:
-                            status = "invalid_observation"
-                    message = reply_text(redact_diagnostic_text(decision["message"], self.secrets),
-                                         proactive=True) if decision else ""
-                    analysis = dict(
-                        incident=incident_id,
-                        version=version,
-                        turn=incident["turn"],
-                        status=status,
-                        message=message,
-                    )
-                    state.record(
-                        "analysis",
-                        analysis,
-                        key=f"{incident_id}/{version}",
-                        turn=incident["turn"],
-                    )
-                    incident["analysis"] = analysis
-                    for summary in state.summaries:
-                        if summary["turn"] == incident["turn"]:
-                            summary.setdefault("analyses", []).append(analysis)
-                            state.record(
-                                "turn",
-                                summary.copy(),
-                                key=summary["turn"],
-                                turn=summary["turn"],
-                            )
-                    state.record(
-                        "incident",
-                        incident.copy(),
-                        key=incident_id,
-                        turn=incident["turn"],
-                    )
-                    if decision:
-                        self.queue_behavior(decision["behavior"], temporary=True)
-                    if message:
-                        self.log(message)
+                    self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
         finally:
             if not restart:
                 if self.question:

@@ -1,35 +1,16 @@
 """File paths and request budgets for Lain and its worker."""
 
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
-import stat
 from typing import Mapping
 
 
 SOURCE_READ_MAX_LINES = 200
 
 
-def companion_key(directory):
-    if key := os.environ.get("COMPANION_DEEPSEEK_API_KEY"):
-        return key
-    try:
-        fd = os.open(Path(directory) / "companion.key", os.O_RDONLY | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if stat.S_ISREG(info.st_mode) and info.st_size <= 4096:
-                value = stream.read(4097)
-                if len(value) <= 4096:
-                    return value.decode("utf-8").strip()
-    except (OSError, UnicodeError):
-        pass
-    return ""
-
-
 @dataclass(frozen=True)
 class CompanionConfig:
     persona_prompt: Path = Path(__file__).with_name("persona.md")
-    observation_prompt: Path = Path(__file__).with_name("observation.md")
     chat_prompt: Path = Path(__file__).with_name("chat.md")
     gifs: Mapping[str, Path] = field(default_factory=dict)
     rpc_timeout_seconds: float = 3.0

@@ -486,8 +486,10 @@ def test_busy_session_wait_preserves_sandbox(workspace: Path, tmp_path: Path, ne
         assert pool.sandbox(False) is sandbox
         assert _host_pids_with_arg(marker)
         assert run(backend, "cat /tmp/wait-kept").output == "kept\n"
+        background_pids = _host_pids_with_arg(marker)
+        assert background_pids
         waiter.close()
-        assert _wait_gone({sandbox.host_pid}) == []
+        assert _wait_gone({sandbox.host_pid, *background_pids}) == []
         assert not _host_pids_with_arg(marker)
     finally:
         waiter.close()

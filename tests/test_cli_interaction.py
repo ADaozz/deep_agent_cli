@@ -128,9 +128,10 @@ def test_escape_closes_interrupt_ui_without_resuming() -> None:
             assert app.dialogs.current.kind == "approval"
             assert app.state.status == "Waiting for input"
 
-            app._toggle_review()
-            assert app.dialogs.reviewing
-            app._close_review()
+            app._toggle_file_changes()
+            assert app.state.diffs_expanded
+            app._toggle_file_changes()
+            assert not app.state.diffs_expanded
             assert app.dialogs.current is not None
             assert runner.current_interrupt().kind.value == "waiting_confirmation"
 

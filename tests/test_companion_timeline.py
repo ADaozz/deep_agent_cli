@@ -2,6 +2,8 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
+
 from agent.runtime.contracts import RunEvent
 from tests.test_companion import companion
 
@@ -323,25 +325,19 @@ def test_first_live_window_on_resume_uses_persisted_baseline(tmp_path):
             "select payload from timeline where kind='window' and id like '%/failure'"
         ).fetchone()
         assert json.loads(row[0])["recent_pct"] == 5
-        assert resumed.timeline.summaries[-1]["tools"][0]["start_pct"] == 0
+        tools = resumed.timeline.summaries[-1]["tools"][0]
+        assert "start_pct" not in tools and "findings" not in resumed.timeline.summaries[-1]
 
     asyncio.run(run())
 
 
-def test_distributed_decline_with_low_individual_rates_survives_resume(tmp_path):
-    from agent.companion.timeline import (
-        SESSION_RELIABILITY,
-        ToolObservation,
-        restore_session,
-        transact,
-    )
+def test_tool_rates_survive_resume_without_local_incidents(tmp_path):
+    from agent.companion.timeline import ToolObservation, restore_session, transact
     from time import time
 
     c = companion(tmp_path, lambda: "s")
     stamp = time() - 1000
     call = 0
-    # Interleave tools, spacing failures across the population. Each tool's
-    # latest 20 calls contain two failures; every call contributes to overall.
     for step in range(40):
         for tool in range(20):
             failed = step >= 20 and (step + tool) % 10 == 0
@@ -365,76 +361,16 @@ def test_distributed_decline_with_low_individual_rates_survives_resume(tmp_path)
             c.timeline.record("tool", vars(obs), key=str(call), stamp=obs.finished_at)
     assert all(v.rate == 10 for v in c.timeline.series.values())
     assert c.timeline.overall.rate == 10
-    incident = c.timeline.incidents[SESSION_RELIABILITY]
-    assert incident["state"] == "open" and incident["scope"] == "session"
-    assert sum(key == SESSION_RELIABILITY for key, _, _ in c.timeline.queue) == 1
+    assert not hasattr(c.timeline, "incidents")
     transact(c.database, c.timeline.pending)
     restored = restore_session(c.database, "s", 20)
     assert restored.overall.statistics() == c.timeline.overall.statistics()
-    assert restored.incidents[SESSION_RELIABILITY]["id"] == incident["id"]
+    assert not hasattr(restored, "incidents")
 
 
-def test_incident_recovers_only_after_clean_results(tmp_path):
-    c = companion(tmp_path, lambda: "s")
-    key = ("fixed model", "default", "probe")
-    for i in range(3):
-        _observe_tool(c.timeline, i, "probe", failed=True)
-    assert len(c.timeline.queue) == 1
-    assert c.timeline.incidents[key]["state"] == "open"
-    for i in range(3, 7):
-        _observe_tool(c.timeline, i, "probe")
-        assert c.timeline.incidents[key]["state"] == "open"
-    _observe_tool(c.timeline, 7, "probe")
-    assert c.timeline.incidents[key]["state"] == "resolved"
+def test_reply_text_keeps_model_speech_within_the_chat_cap():
+    from agent.companion.diagnosis import reply_text
 
-
-def test_turn_review_filters_evidence_and_voice():
-    from agent.companion.diagnosis import interpret_turn, reply_text
-
-    summary = dict(
-        turn="t",
-        tools=[],
-        git=[],
-        incidents=[],
-        previous_turn_ms=[1000, 1100, 1200],
-        duration_ms=6000,
-    )
-    summary["tools"] = [
-        dict(
-            tool="execute",
-            duration_ms=4200,
-            outcomes={"success": 2, "failed": 2},
-            recent_pct=40,
-            start_pct=10,
-        )
-    ]
-    failures = [
-        dict(
-            turn_id="t",
-            tool_name="execute",
-            tool_call_id="a",
-            retry_of=None,
-            error_category="timeout",
-            finished_at=100,
-        ),
-        dict(
-            turn_id="t",
-            tool_name="execute",
-            tool_call_id="b",
-            retry_of="a",
-            retry_basis="matching_visible_arguments",
-            error_category="timeout",
-            finished_at=103,
-        ),
-    ]
-    findings = " ".join(
-        interpret_turn(
-            summary, failures, [(101, "resources", {"percent": [10, None, 96, 20]})]
-        )
-    )
-    assert all(term in findings for term in ("上升", "疑似重试", "RAM", "更慢"))
-    assert "4200" not in findings and "Git" not in findings
-    assert reply_text("Uncertain.", proactive=True) == "Uncertain."
     assert reply_text("No evidence.") == "No evidence."
     assert reply_text("先看依赖声明。") == "先看依赖声明。"
     long = (
@@ -443,8 +379,9 @@ def test_turn_review_filters_evidence_and_voice():
         "完整命令需要 tool_detail。"
     )
     assert reply_text(long) == long
-    assert reply_text("x" * 90, proactive=True) == "x" * 90
-    assert reply_text("x" * 500, proactive=True).endswith("…")
+    assert reply_text("x" * 1600) == "x" * 1600
+    assert reply_text("x" * 1601).endswith("…")
+    assert len(reply_text("x" * 1601)) == 1600
 
 
 def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):
@@ -453,16 +390,80 @@ def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):
     path = tmp_path / "timeline.db"
     transact(path, [
         ("s", "tool", "call", 1, "turn", {"tool_name": "execute"}),
-        ("s", "incident", "notice", 2, "turn", {"state": "open"}),
-        ("s", "turn", "turn", 3, "turn", {"turn": "turn"}),
+        ("s", "turn", "turn", 3, "turn", {"turn": "turn", "findings": ["old"]}),
         ("s", "git", "git", 4, "turn", {"branch": "fixture"}),
-        ("other", "incident", "other", 5, "turn", {"state": "resolved"}),
         *(("s", "resources", str(i), i, "turn", {"percent": [50]}) for i in range(6, 25)),
     ])
-    recent = timeline_window(path, "s", "timeline", 0, 30, limit=3)
-    assert [kind for _, kind, _ in recent["records"]] == ["turn", "incident", "tool"]
+    recent = timeline_window(path, "s", "timeline", 0, 30, limit=2)
+    assert [kind for _, kind, _ in recent["records"]] == ["turn", "tool"]
+    assert "findings" not in recent["records"][0][2]
     assert not recent["truncated"]
-    incidents = timeline_window(path, "s", "timeline", 0, 30, event_type="incident", turn_id="turn", limit=1)
-    assert incidents == {"records": [(2.0, "incident", {"state": "open"})], "truncated": False}
+    with pytest.raises(ValueError, match="Unsupported diagnostic event type"):
+        timeline_window(path, "s", "timeline", 0, 30, event_type="incident", turn_id="turn", limit=1)
     git = timeline_window(path, "s", "git", 0, 30, limit=1)
     assert git["records"][0][1] == "git"
+
+
+def test_timeline_event_type_reads_resource_samples(tmp_path, monkeypatch):
+    from agent.companion.timeline import timeline_window, transact
+    from agent.companion.worker import create_chat
+
+    path = tmp_path / "timeline.db"
+    sample = {"percent": [11, None, 64, 40], "disk_bytes": 900}
+    transact(path, [
+        ("s", "resources", "sample", 8, "turn", sample),
+        ("s", "tool", "call", 9, "turn", {"tool_name": "execute"}),
+    ])
+    window = timeline_window(path, "s", "timeline", 0, 30, event_type="resources", limit=5)
+    assert window == {"records": [(8.0, "resources", sample)], "truncated": False}
+    default = timeline_window(path, "s", "timeline", 0, 30, limit=5)
+    assert [kind for _, kind, _ in default["records"]] == ["tool"]
+
+    captured = {}
+
+    def build(_model, tools):
+        captured["tools"] = tools
+        return object()
+
+    monkeypatch.setattr("agent.companion.worker.create_react_agent", build)
+    create_chat(None, None, persona="persona", instructions="chat")
+    evidence = next(tool for tool in captured["tools"] if tool.name == "session_evidence")
+    assert "resources" in json.dumps(evidence.args_schema.model_json_schema())
+
+
+def test_turn_payload_stores_the_user_query(tmp_path):
+    from zoneinfo import ZoneInfo
+
+    from agent.companion.controller import Companion
+    from agent.companion.timeline import timeline_window
+
+    async def run():
+        c = Companion(
+            workspace=tmp_path, config_dir=tmp_path, session=lambda: "s",
+            geometry=lambda: (64, 16), invalidate=lambda: None,
+            timezone=ZoneInfo("UTC"), secrets=("sk-live-value",),
+        )
+        c.event(RunEvent("run_started", run_id="r1", turn_id="t1", content="use sk-live-value please"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        c.event(RunEvent("turn_started", run_id="r1", turn_id="t2", content="follow up"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        c.event(RunEvent("run_started", run_id="r2", turn_id="t3"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        queries = [row["query"] for row in c.session_evidence("turns")]
+        assert queries == ["use $secret please", "follow up", ""]
+        assert "sk-live-value" not in "".join(queries)
+        await c.save_statistics()
+        stored = {
+            (kind, key): json.loads(payload)
+            for kind, key, payload in sqlite3.connect(c.database).execute(
+                "select kind, id, payload from timeline where kind in ('run','turn')"
+            )
+        }
+        assert "sk-live-value" not in json.dumps(list(stored.values()))
+        assert stored[("run", "t1")]["query"] == stored[("turn", "t1")]["query"] == "use $secret please"
+        assert stored[("run", "t2")]["query"] == "follow up"
+        assert stored[("turn", "t3")]["query"] == ""
+        window = timeline_window(c.database, "s", "timeline", 0, 10**12, event_type="turn", limit=10)
+        assert [row["query"] for _, _, row in window["records"]] == ["", "follow up", "use $secret please"]
+
+    asyncio.run(run())

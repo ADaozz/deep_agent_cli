@@ -48,7 +48,15 @@ class ContextCompaction:
             self.state.running = False
             self.invalidate()
         if result.status == "ineligible":
-            threshold = min(0.85, self.runner.settings.compaction_threshold if self.runner.settings else 0.85) * 50
+            from agent.bootstrap.config import DEFAULT_COMPACTION_THRESHOLD, Settings
+
+            settings = self.runner.settings
+            fraction = (
+                settings.effective_compaction_fraction()
+                if isinstance(settings, Settings)
+                else DEFAULT_COMPACTION_THRESHOLD
+            )
+            threshold = fraction * 50
             if result.percent is not None:
                 notice = (
                     f"Manual compaction is allowed at about {threshold:g}% of the context window; "
