@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent.companion.config import read_prompt
+from agent.prompts import read_prompt
 from agent.runtime.approval.types import Decision
 
 # Persisted and agent-visible reasons come only from this table, never from classifier text or tool arguments.

@@ -404,6 +404,33 @@ def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):
     assert git["records"][0][1] == "git"
 
 
+def test_timeline_event_type_reads_resource_samples(tmp_path, monkeypatch):
+    from agent.companion.timeline import timeline_window, transact
+    from agent.companion.worker import create_chat
+
+    path = tmp_path / "timeline.db"
+    sample = {"percent": [11, None, 64, 40], "disk_bytes": 900}
+    transact(path, [
+        ("s", "resources", "sample", 8, "turn", sample),
+        ("s", "tool", "call", 9, "turn", {"tool_name": "execute"}),
+    ])
+    window = timeline_window(path, "s", "timeline", 0, 30, event_type="resources", limit=5)
+    assert window == {"records": [(8.0, "resources", sample)], "truncated": False}
+    default = timeline_window(path, "s", "timeline", 0, 30, limit=5)
+    assert [kind for _, kind, _ in default["records"]] == ["tool"]
+
+    captured = {}
+
+    def build(_model, tools):
+        captured["tools"] = tools
+        return object()
+
+    monkeypatch.setattr("agent.companion.worker.create_react_agent", build)
+    create_chat(None, None, persona="persona", instructions="chat")
+    evidence = next(tool for tool in captured["tools"] if tool.name == "session_evidence")
+    assert "resources" in json.dumps(evidence.args_schema.model_json_schema())
+
+
 def test_turn_payload_stores_the_user_query(tmp_path):
     from zoneinfo import ZoneInfo
 

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import threading
 import time
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from agent.runtime.control import RunController
@@ -39,6 +39,21 @@ class TaskRecord:
     report_cancel: bool = False
     done: threading.Event = field(default_factory=threading.Event, repr=False)
     thread: threading.Thread | None = field(default=None, repr=False)
+
+
+def _task_snapshot(task: TaskRecord) -> dict[str, Any]:
+    """Plain fields. The caller must hold the manager lock."""
+    return {
+        "run_id": task.run_id,
+        "parent_run_id": task.parent_run_id,
+        "tool_call_id": task.tool_call_id,
+        "depth": task.depth,
+        "description": task.description,
+        "mode": task.mode,
+        "status": task.status,
+        "elapsed_seconds": task.elapsed_seconds,
+        "result": task.result,
+    }
 
 
 class SubAgentManager:
@@ -268,9 +283,14 @@ class SubAgentManager:
             found = self._tasks.get(run_id)
         return found if found is not None and found.parent_run_id == parent else None
 
-    def tasks_for(self, parent: str) -> list[TaskRecord]:
+    def tasks_for(self, parent: str, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Copy this parent's task fields before releasing the lock."""
         with self._lock:
-            return [task for task in self._tasks.values() if task.parent_run_id == parent]
+            return [
+                _task_snapshot(task)
+                for task in self._tasks.values()
+                if task.parent_run_id == parent and (run_id is None or task.run_id == run_id)
+            ]
 
     def background_task(self, run_id: str, parent: str) -> TaskRecord | None:
         found = self.task(run_id, parent)

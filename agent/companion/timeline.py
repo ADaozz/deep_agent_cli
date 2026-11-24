@@ -330,7 +330,7 @@ def timeline_window(path, session, kind, start, end, budget=None, *,
         if kind == "git":
             query += " AND kind='git'"
         elif event_type is not None:
-            if event_type not in {"tool", "turn", "run", "analysis", "git"}:
+            if event_type not in {"tool", "turn", "run", "analysis", "git", "resources"}:
                 raise ValueError("Unsupported diagnostic event type")
             query += " AND kind=?"
             args.append(event_type)

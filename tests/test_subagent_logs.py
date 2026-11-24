@@ -541,6 +541,57 @@ def test_read_task_merges_live_tasks_with_history_before_paging(tmp_path):
     assert logged_task.result == "live-result"
 
 
+def test_read_task_uses_the_snapshot_taken_under_the_manager_lock(tmp_path):
+    from types import SimpleNamespace
+    from agent.runtime.control import RunController
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    from agent.subagents.manager import SubAgentManager
+    from agent.tools.subagent_tasks import build_subagent_tools
+
+    parent = RunController()
+    manager = SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
+    record = manager.open_record(
+        run_id=uuid4().hex, parent_run_id="parent", description="live", tool_call_id="call",
+        controller=RunController(), mode="background", depth=1,
+    )
+    snapshot = manager.tasks_for("parent")
+    record.status = "completed"
+    record.result = "changed after the lock"
+    assert snapshot[0]["status"] == "running"
+    assert snapshot[0]["result"] is None
+    record.status = "running"
+    record.result = None
+
+    tool = next(item for item in build_subagent_tools(
+        None, manager, SubAgentLogStore(tmp_path), names=frozenset({"read_task"}), allow_background=False,
+    ) if item.name == "read_task")
+    original = manager.tasks_for
+
+    def snapshot_then_mutate(parent_id, run_id=None):
+        copied = original(parent_id, run_id)
+        record.status = "completed"
+        record.result = "changed after the lock"
+        return copied
+
+    manager.tasks_for = snapshot_then_mutate
+
+    def read(**kwargs):
+        runtime = SimpleNamespace(config={"configurable": {"thread_id": "parent"}}, tool_call_id="read")
+        value = tool.func(runtime, **kwargs)
+        if isinstance(value, tuple):
+            value = value[0]
+        return json.loads(value)
+
+    listed = read(limit=1)
+    assert listed["tasks"][0]["run_id"] == record.run_id
+    assert listed["tasks"][0]["status"] == "running"
+    record.status = "running"
+    record.result = None
+    detail = read(run_id=record.run_id)
+    assert detail["status"] == "running"
+    assert "result" not in detail
+
+
 def test_store_reads_stay_consistent_while_appends_continue(tmp_path):
     import threading
 

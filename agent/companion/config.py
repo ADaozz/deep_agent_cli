@@ -8,16 +8,6 @@ from typing import Mapping
 SOURCE_READ_MAX_LINES = 200
 
 
-def read_prompt(path: Path) -> str:
-    """Load one required prompt file. Missing or empty files are errors."""
-    if not path.is_file():
-        raise FileNotFoundError(f"Required prompt file is missing: {path}")
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        raise FileNotFoundError(f"Required prompt file is empty: {path}")
-    return text
-
-
 @dataclass(frozen=True)
 class CompanionConfig:
     persona_prompt: Path = Path(__file__).with_name("persona.md")

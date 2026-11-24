@@ -23,7 +23,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.config import Settings
-from agent.companion.config import read_prompt
+from agent.prompts import read_prompt
 from agent.execution.policy import SandboxConfig
 from agent.redaction import known_secret_refs
 from agent.runtime.control import RunController

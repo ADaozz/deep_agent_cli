@@ -11,7 +11,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig
 from agent.bootstrap.factory import AgentSpec, compose_system_prompt, create_agent
-from agent.companion.config import read_prompt
+from agent.prompts import read_prompt
 from agent.execution.backend import BackendSelection
 from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
@@ -121,3 +121,16 @@ def test_root_and_subagent_share_the_system_prompt(tmp_path):
     assert "保留用户约定。" in child and "保留项目约定。" in child
     with pytest.raises(FileNotFoundError, match="missing"):
         read_prompt(tmp_path / "missing.md")
+
+
+def test_core_modules_load_prompts_without_companion():
+    import agent.bootstrap.factory as factory
+    import agent.companion.config as companion_config
+    import agent.prompts as prompts
+    import agent.runtime.approval.policy as policy
+    import agent.tools.subagent_tasks as tasks
+
+    assert factory.read_prompt is prompts.read_prompt
+    assert policy.read_prompt is prompts.read_prompt
+    assert tasks.read_prompt is prompts.read_prompt
+    assert not hasattr(companion_config, "read_prompt")

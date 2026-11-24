@@ -12,9 +12,9 @@ from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails
 
-from agent.companion.config import read_prompt
+from agent.prompts import read_prompt
 from agent.subagents.log_store import SubAgentLogStore
-from agent.subagents.manager import SubAgentManager, TaskRecord
+from agent.subagents.manager import SubAgentManager
 from agent.subagents.runtime import SubAgentRuntime
 
 _INJECTED = frozenset({"runtime"})
@@ -134,20 +134,6 @@ def _public_task(fields: dict[str, Any], *, with_result: bool) -> dict[str, Any]
     elif fields.get("status") != "running" and fields.get("result") is not None:
         item["result"] = fields.get("result")
     return item
-
-
-def _task_fields(task: TaskRecord, *, with_result: bool) -> dict[str, Any]:
-    return _public_task({
-        "run_id": task.run_id,
-        "parent_run_id": task.parent_run_id,
-        "tool_call_id": task.tool_call_id,
-        "depth": task.depth,
-        "description": task.description,
-        "mode": task.mode,
-        "status": task.status,
-        "elapsed_seconds": task.elapsed_seconds,
-        "result": task.result,
-    }, with_result=with_result)
 
 
 def _pack(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -276,29 +262,29 @@ def _start_tool(runtime_: SubAgentRuntime, *, allow_background: bool) -> Structu
 
 def _merged_task_ids(
     manager: SubAgentManager | None, store: SubAgentLogStore, parent: str,
-) -> tuple[list[str], dict[str, TaskRecord]]:
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Snapshot live tasks, then merge their IDs with historical runs.
 
     The result is the paging order. Historical files are not opened here.
     """
     live = manager.tasks_for(parent) if manager is not None else []
-    by_id = {task.run_id: task for task in live}
+    by_id = {task["run_id"]: task for task in live}
     logged = store.list_runs(parent)
     logged_ids = set(logged)
-    ordered = [task.run_id for task in reversed(live) if task.run_id not in logged_ids]
+    ordered = [task["run_id"] for task in reversed(live) if task["run_id"] not in logged_ids]
     ordered.extend(logged)
     return ordered, by_id
 
 
 def _tasks_for_ids(
-    store: SubAgentLogStore, parent: str, run_ids: list[str], by_id: dict[str, TaskRecord],
+    store: SubAgentLogStore, parent: str, run_ids: list[str], by_id: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Materialize one page. Live records win; only historical IDs open a log."""
+    """Materialize one page. Live snapshots win; only historical IDs open a log."""
     items: list[dict[str, Any]] = []
     for run_id in run_ids:
         task = by_id.get(run_id)
         if task is not None:
-            items.append(_task_fields(task, with_result=False))
+            items.append(_public_task(task, with_result=False))
             continue
         meta = store.task_metadata(parent, run_id)
         if meta is not None:
@@ -333,14 +319,15 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
                 page_ids = ordered[offset:offset + limit]
                 page = _tasks_for_ids(store, parent, page_ids, by_id)
                 return finish({"tasks": page, "next_offset": offset + len(page_ids)})
-            task = manager.task(run_id, parent) if manager is not None else None
+            found = manager.tasks_for(parent, run_id) if manager is not None else []
+            task = found[0] if found else None
             if task is None:
                 meta = store.task_metadata(parent, run_id)
                 if meta is None:
                     raise ToolException("Subagent log not found in this parent session")
                 item = _public_task(meta, with_result=True)
             else:
-                item = _task_fields(task, with_result=True)
+                item = _public_task(task, with_result=True)
             if include_logs:
                 item["logs"] = store.read(parent, run_id, offset, limit)
             return finish(item)

@@ -16,7 +16,8 @@ from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 from pydantic import Field
 
-from agent.companion.config import CompanionConfig, read_prompt
+from agent.companion.config import CompanionConfig
+from agent.prompts import read_prompt
 from agent.companion.session_inspector import diagnostic_error, format_inspect_response
 from agent.models.client import build_chat_model
 from agent.models.messages import StreamDeltaCallback, visible_text
@@ -75,8 +76,8 @@ def create_chat(model, query, *, persona=None, instructions=None):
         turn_id: Annotated[str | None, Field(description="Filter by a turn id returned in a previous result.")] = None,
         limit: Annotated[int | None, Field(description="Number of rows, from 1 to 20.")] = None,
         event_type: Annotated[
-            Literal["tool", "turn", "run", "analysis", "git"] | None,
-            Field(description="timeline only. Filter by event type. Defaults to tool and turn."),
+            Literal["tool", "turn", "run", "analysis", "git", "resources"] | None,
+            Field(description="timeline only. Filter by event type. Defaults to tool and turn. resources returns historical resource samples."),
         ] = None,
     ) -> str:
         """Read a bounded view of the current session. timeline and git cover at most the last 14 days, newest first. Other views ignore the time range."""
