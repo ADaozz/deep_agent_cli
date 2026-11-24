@@ -10,48 +10,36 @@ from agent.sessions.contracts import TranscriptBlock
 from agent.sessions.images import refs_from_message
 from agent.models.messages import message_text, reasoning_text, visible_text
 from agent.subagents.notifications import is_background_launch, parse_notification
+from agent.tools.catalog import ROOT_TASK_TOOLS
 
 
-def subagent_result_status(content: str, *, is_error: bool = False) -> str:
-    """Interpret the runtime's failure envelope, never text inside a child answer.
-
-    A delivered answer is prefixed with ``[subagent ``. Phrases inside that
-    answer, including ``cancelled by user``, are the subject of the work.
-    ``is_error`` only applies when the tool result itself is not that answer:
-    a generic flag computed from body text must not turn a finished review red.
-    """
-    text = content.lstrip().lower()
-    if text.startswith("[subagent "):
-        return "completed"
-    if text.startswith(("subagent cancelled:", "subagent cancelled (")):
-        return "cancelled"
-    if text.startswith(("subagent failed:", "subagent failed (")):
-        return "error"
-    if is_error:
-        return "error"
-    return "completed"
-
-
-_CARD_FROM_STATUS = {"completed": "completed", "failed": "error", "cancelled": "cancelled"}
-_TOOL_FROM_STATUS = {"completed": "success", "failed": "failed", "cancelled": "cancelled"}
+_CARD_FROM_STATUS = {
+    "running": "running",
+    "completed": "completed",
+    "failed": "error",
+    "cancelled": "cancelled",
+    "unconfirmed": "unconfirmed",
+}
+_TASK_STATUSES = frozenset({"running", "completed", "failed", "cancelled"})
 
 
 def subagent_card_status(
-    content: str,
+    content: str = "",
     *,
     is_error: bool = False,
     status: str | None = None,
     artifact: object = None,
 ) -> str:
-    """Card status from a recorded outcome, or from an old text envelope."""
-    recorded = None
-    if isinstance(artifact, dict):
-        recorded = artifact.get("subagent_status")
+    """Card status from a structured task record. Missing data stays unconfirmed."""
+    del content
+    recorded = artifact.get("status") if isinstance(artifact, dict) else None
     if recorded not in _CARD_FROM_STATUS and status in _CARD_FROM_STATUS:
         recorded = status
     if recorded in _CARD_FROM_STATUS:
         return _CARD_FROM_STATUS[recorded]
-    return subagent_result_status(content, is_error=is_error)
+    if is_error:
+        return "error"
+    return "unconfirmed"
 
 
 def classify_tool_result(
@@ -71,9 +59,11 @@ def classify_tool_result(
     status = str(status or "")
     text = content.lower() if isinstance(content, str) else ""
     payload = artifact if isinstance(artifact, dict) else {}
-    recorded = payload.get("subagent_status")
-    if recorded in _TOOL_FROM_STATUS:
-        return _TOOL_FROM_STATUS[recorded]
+    # A task payload reports the subagent. The tool call itself fails only
+    # when the message status is error.
+    task_payload = payload.get("mode") in {"sync", "background"} and payload.get("status") in _TASK_STATUSES
+    if name in ROOT_TASK_TOOLS or task_payload:
+        return "failed" if status == "error" else "success"
     termination = payload.get("termination_reason")
     # execute: structured artifact wins over free-text phrases in command output.
     if name == "execute":
@@ -86,10 +76,6 @@ def classify_tool_result(
             or (isinstance(exit_code, int) and exit_code != 0)
         ):
             return "failed"
-        return "success"
-    # A finished child answer often quotes the cancellation path it reviewed.
-    # That phrase is not this tool's own cancel envelope.
-    if text.lstrip().startswith("[subagent "):
         return "success"
     if termination == "cancelled" or "cancelled by user" in text:
         return "cancelled"
@@ -172,13 +158,16 @@ def messages_to_transcript(
                 else None
             )
             exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-            if block is not None and is_background_launch(block.name, block.arguments) and status == "completed":
-                # Only the launch returned. The card stays open until its
-                # notification arrives; without one it is settled as interrupted.
-                refused = subagent_card_status(content, is_error=is_error, artifact=artifact)
-                if refused == "completed":
+            if block is not None and is_background_launch(block.name, block.arguments):
+                # A running launch leaves the card open. A tool error settles it.
+                card = subagent_card_status(content, is_error=is_error, artifact=artifact)
+                if card == "running":
+                    block.content = content
+                    block.artifact = artifact
+                    block.status = "running"
+                    block.is_error = False
                     continue
-                status, is_error = refused, True
+                status, is_error = card, card in {"error", "cancelled"}
             if block is not None:
                 block.content = content
                 block.is_error = is_error

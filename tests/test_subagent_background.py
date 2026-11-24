@@ -2,7 +2,7 @@
 import asyncio
 from contextlib import closing
 from dataclasses import replace
-import re
+import json
 import threading
 import time
 from typing import Any
@@ -43,6 +43,10 @@ class GatedModel(ScriptedToolModel):
         assert self.gate.wait(10)
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        assert self.gate.wait(10)
+        yield from super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
+
 
 class ReactiveModel(ScriptedToolModel):
     """A parent model that decides from the conversation, e.g. to reuse a run ID."""
@@ -50,6 +54,16 @@ class ReactiveModel(ScriptedToolModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
         return ChatResult(generations=[ChatGeneration(message=self.respond(messages))])
+
+
+def launch_payload(content: str) -> dict | None:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict) and payload.get("mode") == "background" and payload.get("status") == "running":
+        return payload
+    return None
 
 
 def start_call(identifier='bg', description='child work'):
@@ -125,7 +139,8 @@ def test_start_returns_immediately_and_idle_delivery_wakes_parent(tmp_path, monk
         assert result.status == 'completed' and result.output == 'working meanwhile'
         assert harness.manager.background_count == 1 and runner.background_task_count() == 1
         launch = next(m for m in harness.messages() if isinstance(m, ToolMessage))
-        assert launch.content.startswith('Background subagent started (run_id=')
+        started = launch_payload(launch.content)
+        assert started is not None and started["run_id"]
         assert not harness.finished() and runner.control.pending_notification_count() == 0
         assert runner.deliver_notifications() is None
 
@@ -228,7 +243,7 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
     try:
         assert harness.runner.invoke('go').output == 'limit reported'
         results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
-        assert results['first'].startswith('Background subagent started')
+        assert launch_payload(results['first']) is not None
         assert 'concurrency limit (1)' in results['sync'] and results['sync'].startswith('Subagent failed:')
         assert harness.manager.background_count == 1
         cards = {b.tool_call_id: b for b in messages_to_transcript(harness.messages()) if b.kind == 'tool'}
@@ -262,10 +277,9 @@ def test_mixed_batch_starts_nothing(tmp_path, monkeypatch):
 def test_wait_returns_the_result_without_a_second_notification(tmp_path, monkeypatch):
     def respond(messages):
         last = messages[-1]
-        if isinstance(last, ToolMessage) and 'Background subagent started' in last.content:
-            run_id = re.search(r'run_id=([0-9a-f]{32})', last.content).group(1)
+        if isinstance(last, ToolMessage) and (started := launch_payload(last.content)):
             return AIMessage(content='', tool_calls=[
-                {'id': 'wait', 'name': 'wait_task', 'args': {'run_ids': [run_id]}},
+                {'id': 'wait', 'name': 'wait_task', 'args': {'run_ids': [started['run_id']]}},
             ])
         if isinstance(last, ToolMessage):
             return AIMessage(content='waited')
@@ -284,12 +298,20 @@ def test_wait_returns_the_result_without_a_second_notification(tmp_path, monkeyp
 
 
 def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path, monkeypatch):
+    # List before cancelling. The two tools otherwise run together, and a fast
+    # cancel can finish the child before read_task samples it.
+    run_id = ''
+
     def respond(messages):
+        nonlocal run_id
         last = messages[-1]
-        if isinstance(last, ToolMessage) and 'Background subagent started' in last.content:
-            run_id = re.search(r'run_id=([0-9a-f]{32})', last.content).group(1)
+        if isinstance(last, ToolMessage) and (started := launch_payload(last.content)):
+            run_id = started['run_id']
             return AIMessage(content='', tool_calls=[
                 {'id': 'list', 'name': 'read_task', 'args': {}},
+            ])
+        if isinstance(last, ToolMessage) and '"tasks"' in last.content:
+            return AIMessage(content='', tool_calls=[
                 {'id': 'stop', 'name': 'cancel_task', 'args': {'run_id': run_id}},
                 {'id': 'missing', 'name': 'cancel_task', 'args': {'run_id': 'f' * 32}},
             ])
@@ -302,7 +324,7 @@ def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path
         assert harness.runner.invoke('go').output == 'stopped it'
         results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
         assert '"status": "running"' in results['list'] and 'child work' in results['list']
-        assert results['stop'].startswith('Cancellation requested')
+        assert '"cancellation": "requested"' in results['stop']
         assert 'not found' in results['missing']
         harness.gate.set()
         wait_until(lambda: harness.finished())
@@ -452,8 +474,11 @@ def test_card_stays_running_after_launch_and_run_end_until_finished(finished_fir
     state = CliState()
     state.apply(RunEvent(type='run_started'))
     launch(state)
-    launched = RunEvent(type='tool_completed', name='start_task', tool_call_id='bg',
-                        content='Background subagent started (run_id=abc).')
+    launched = RunEvent(
+        type='tool_completed', name='start_task', tool_call_id='bg',
+        content='{"run_id": "abc", "mode": "background", "status": "running"}',
+        artifact={"run_id": "abc", "mode": "background", "status": "running"},
+    )
     if finished_first:
         # A fast child may report before the launch result reaches the view.
         finish(state)
@@ -480,7 +505,7 @@ def test_refused_launch_cancelled_task_and_parent_cancel_settle_cards():
     state = CliState()
     launch(state, 'refused')
     state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='refused',
-                         content='Subagent failed: Subagent concurrency limit (2) reached'))
+                         content='Subagent concurrency limit (2) reached', is_error=True))
     launch(state, 'stopped')
     finish(state, 'stopped', 'Subagent cancelled (run_id=abc): Cancelled by parent', status='cancelled')
     launch(state, 'failed')
@@ -498,10 +523,16 @@ def test_restore_pairs_notification_with_card_and_interrupts_unreported_tasks():
     calls = AIMessage(content='', tool_calls=[start_call('done', 'Finished one'), start_call('lost', 'Lost one')])
     messages = [
         HumanMessage(content='two background jobs'), calls,
-        ToolMessage(content='Background subagent started (run_id=a).', tool_call_id='done',
-                    name='start_task'),
-        ToolMessage(content='Background subagent started (run_id=b).', tool_call_id='lost',
-                    name='start_task'),
+        ToolMessage(
+            content='{"run_id": "a", "mode": "background", "status": "running"}',
+            artifact={"run_id": "a", "mode": "background", "status": "running"},
+            tool_call_id='done', name='start_task',
+        ),
+        ToolMessage(
+            content='{"run_id": "b", "mode": "background", "status": "running"}',
+            artifact={"run_id": "b", "mode": "background", "status": "running"},
+            tool_call_id='lost', name='start_task',
+        ),
         AIMessage(content='started both'),
         notification_message({'run_id': 'a', 'tool_call_id': 'done', 'status': 'failed',
                               'content': 'Subagent failed (run_id=a): boom\n\nsecond paragraph'}),
@@ -513,7 +544,8 @@ def test_restore_pairs_notification_with_card_and_interrupts_unreported_tasks():
     done, lost = [b for b in blocks if b.kind == 'tool']
     assert done.status == 'error' and done.is_error
     assert done.content == 'Subagent failed (run_id=a): boom\n\nsecond paragraph'
-    assert lost.status == 'interrupted' and lost.content == '' and lost.arguments['description'] == 'Lost one'
+    assert lost.status == 'interrupted' and '"status": "running"' in lost.content
+    assert lost.arguments['description'] == 'Lost one'
     state = CliState()
     state.load_transcript(blocks)
     assert state.subagent_count == 0

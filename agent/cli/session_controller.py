@@ -173,6 +173,9 @@ class SessionController:
         self.summaries().remember(snapshot.info)
         self.reset_session_view()
         self.state.load_transcript(snapshot.transcript)
+        store = self.runner.task_log_store()
+        if store is not None:
+            self.state.restore_task_tree(store, self.runner.thread_id)
         self.state.load_model_metrics(snapshot.model_metrics_history)
         for notice in snapshot.notices:
             self.state.add_system(notice)

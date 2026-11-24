@@ -664,7 +664,7 @@ def test_failed_human_input_summarizes_fields_without_schema_until_expanded() ->
         output=output, status="error", is_error=True,
     )])
     collapsed = _plain(render_transcript(state, 100))
-    assert "Failed (exit 1) ask 下一步怎么处理？" in collapsed
+    assert "Failed ask 下一步怎么处理？" in collapsed
     assert "fields: 收到 str" in collapsed
     assert "recommendation: 收到 str" in collapsed
     assert "schema" not in collapsed
@@ -683,7 +683,7 @@ def test_failed_mutation_shows_error_instead_of_unapplied_diff() -> None:
     for expanded in (False, True):
         state.tools_expanded = expanded
         rendered = _plain(render_transcript(state, 100))
-        assert "Failed (exit 1) write workspace/out.txt" in rendered
+        assert "Failed write workspace/out.txt" in rendered
         assert "permission denied" in rendered
         assert "+hello" not in rendered
 
@@ -777,11 +777,11 @@ def test_non_command_failure_preserves_wrapped_indentation(width, expanded) -> N
 
 
 @pytest.mark.parametrize("width", [20, 40, 80])
-@pytest.mark.parametrize("name", ["start_task", "start_background_task", "web_search"])
+@pytest.mark.parametrize("name", ["start_task", "web_search"])
 def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> None:
     """SubAgent and other generic cards share the same title wrap/indent path."""
     long = "x" * 180
-    if name in {"start_task", "start_background_task"}:
+    if name == "start_task":
         args = {"description": f"Do carefully: {long}"}
         marker = "SubAgent"
     else:
@@ -806,7 +806,7 @@ def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:
     assert "Explore 8 items · 1 failed" in rendered
     assert "… 3 more" in rendered
     assert "└ Read file-7.py" in rendered
-    assert "Failed (exit 1) Read file-0.py: Error: permission denied" in rendered
+    assert "Failed Read file-0.py: Error: permission denied" in rendered
     assert group.renderables[1].spans[0].style == "#888888"
 
 
@@ -818,7 +818,8 @@ def test_explore_group_caps_failure_preview_and_terminal_width() -> None:
     rendered = _plain(_capture(_explore_group(blocks, 80), 80))
     assert "Explore 10 items · 10 failed" in rendered
     assert "… 7 more failed" in rendered
-    assert rendered.count("Failed (exit 1)") == 3
+    assert rendered.count("Failed ") == 3
+    assert "Failed (exit" not in rendered
     assert all(len(line) < 80 for line in rendered.splitlines())
 
 
@@ -1909,7 +1910,7 @@ def test_unknown_tool_completion_freezes_status_transitions() -> None:
     assert failed.status == "error"
     assert failed.is_error
     rendered = _plain(render_transcript(state, 100))
-    assert "Failed (exit 1) custom_unknown_tool" in rendered
+    assert "Failed custom_unknown_tool" in rendered
     assert "boom" in rendered
 
 
@@ -2395,7 +2396,7 @@ def test_terminal_run_events_stop_every_tool_spinner() -> None:
         assert all(block.status == expected_status and block.revision == 1 for block in tools)
         assert all(block.is_error == (terminal_event.type == "run_failed") for block in tools)
         if terminal_event.type == "run_failed":
-            assert all(block.exit_code == 1 for block in tools)
+            assert all(block.exit_code is None for block in tools)
 
 
 def test_load_transcript_keeps_failed_execute_error() -> None:
@@ -2415,7 +2416,8 @@ def test_load_transcript_keeps_failed_execute_error() -> None:
     assert tool.is_error
     assert tool.status == "error"
     assert tool.exit_code is None
-    assert "Failed (exit 1)" in _plain(render_transcript(state, 100))
+    rendered = _plain(render_transcript(state, 100))
+    assert "Failed " in rendered and "Failed (exit" not in rendered
 
     state.load_transcript([TranscriptBlock(
         kind="tool", tool_call_id="new", name="execute", content="failed",

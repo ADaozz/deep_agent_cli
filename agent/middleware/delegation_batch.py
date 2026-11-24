@@ -12,6 +12,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.subagents.notifications import background_requested
+from agent.tools.catalog import TASK_TOOL
 
 MIXED_BATCH = (
     "Synchronous and background subagents cannot be launched in the same tool-call batch. "
@@ -32,7 +33,7 @@ def batch_is_mixed(state: Any) -> bool:
     modes = [
         background_requested(call.get("args"))
         for call in message.tool_calls
-        if call.get("name") == "start_task"
+        if call.get("name") == TASK_TOOL
     ]
     return any(modes) and not all(modes)
 
@@ -52,11 +53,11 @@ class DelegationBatchMiddleware(AgentMiddleware):
 
     def _reject(self, request: Any) -> ToolMessage | None:
         call = request.tool_call
-        if call.get("name") != "start_task" or not batch_is_mixed(request.state):
+        if call.get("name") != TASK_TOOL or not batch_is_mixed(request.state):
             return None
         return ToolMessage(
             content=MIXED_BATCH,
-            name="start_task",
+            name=TASK_TOOL,
             tool_call_id=str(call.get("id") or ""),
             status="error",
         )

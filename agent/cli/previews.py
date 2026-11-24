@@ -20,7 +20,7 @@ from typing import Any, Callable, Literal
 
 from agent.cli.state import ToolBlock
 from agent.cli.highlighting import code_renderer
-from agent.subagents.notifications import START_TOOL, is_background_launch, is_task_tool
+from agent.subagents.notifications import is_background_launch, is_task_tool
 from agent.execution.mutations import FileMutationOperation
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, UiDisplayLimits
 from agent.tools.catalog import is_mutation_tool as catalog_is_mutation_tool
@@ -768,19 +768,17 @@ def build_generic_preview(block: ToolBlock) -> ToolPreview:
 
 def build_task_preview(block: ToolBlock) -> ToolPreview:
     """A bounded single-line title; the actual delegation stays untouched."""
-    description = " ".join(str(block.arguments.get("description") or "Delegated task").split())
-    title = description if len(description) <= 120 else description[:119] + "…"
+    description = str(block.arguments.get("description") or "Delegated task")
     detail = "background" if is_background_launch(block.name, block.arguments) else ""
     return ToolPreview(
-        kind="task", verb="SubAgent", target=title,
+        kind="task", verb="SubAgent", target=description,
         detail=detail,
-        summary=f"SubAgent · {title}", action="expand",
+        summary=f"SubAgent · {description}", action="expand",
     )
 
 
 _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "start_task": build_task_preview,
-    START_TOOL: build_task_preview,
     "ls": build_ls_preview,
     "read": build_read_preview,
     "grep": build_grep_preview,

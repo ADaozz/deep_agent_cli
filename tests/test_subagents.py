@@ -81,7 +81,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         assert len([m for m in state['messages'] if isinstance(m, ToolMessage)]) == 1
         tool_result = next(m for m in state['messages'] if isinstance(m, ToolMessage))
         assert 'private child final' in tool_result.content
-        assert 'run_id=' in tool_result.content
+        assert '"run_id"' in tool_result.content
         cards = [block for block in messages_to_transcript(state['messages']) if block.kind == 'tool']
         assert len(cards) == 1 and cards[0].name == 'start_task'
         assert cards[0].arguments['description'] == 'Only delegated instructions'
@@ -151,9 +151,6 @@ def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
     assert 'read_task' in tools_at(1, 2)
     assert 'wait_task' not in tools_at(1, 2) and 'cancel_task' not in tools_at(1, 2)
     assert 'start_task' not in tools_at(2, 2) and 'read_task' not in tools_at(2, 2)
-    assert 'start_background_task' not in tools_at(0, 2)
-    assert 'start_background_task' not in tools_at(1, 2)
-
     # Live delegation with max_subagent_depth=1 still yields a leaf child.
     by_depth: dict[int, object] = {}
     original = factory.build_agent

@@ -523,7 +523,7 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 不装载 MCP、人工输入或 TUI 审批。同步子 Agent 在 `max_subagent_depth` 允许时可继续同步 `start_task`，并读取自己直接子任务的 `read_task`。
 后台子 Agent 不能再派发。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
-同步 `start_task` 等待任务实际完成后才返回。`run_in_background=true` 在提交成功后立即返回 `run_id`。
+同步 `start_task` 等待任务实际完成后返回 `run_id`、`status` 和 `result`。`run_in_background=true` 在提交成功后立即返回 `status: running`，这不是任务完成。
 
 ### 后台委派
 

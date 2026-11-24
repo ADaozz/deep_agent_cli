@@ -68,26 +68,17 @@ ASYNC_TOOLS = COMMON_TOOLS
 
 NodeKind = Literal["root", "sync", "async", "max_depth"]
 
-# 旧工具名只留给恢复的记录和 MCP 保留名，不再注册。
 TASK_TOOL = "start_task"
-HISTORICAL_BACKGROUND_START = "start_background_task"
-RETIRED_TASK_TOOLS = frozenset({
-    HISTORICAL_BACKGROUND_START,
-    "check_background_task",
-    "cancel_background_task",
-    "read_task_log",
-})
-# Names that launch a delegated task, including the historical background tool.
-DELEGATION_TOOLS = frozenset({TASK_TOOL, HISTORICAL_BACKGROUND_START})
-# Tool-usage tables skip live task tools and retired names still present in history.
-METRICS_EXCLUDED_TASK_TOOLS = ROOT_TASK_TOOLS | RETIRED_TASK_TOOLS
+# The only tool that launches a delegated task.
+DELEGATION_TOOLS = frozenset({TASK_TOOL})
+# Usage tables skip task tools. The names are the root task set.
+METRICS_EXCLUDED_TASK_TOOLS = ROOT_TASK_TOOLS
 
 # 模型可见但通常不走 Ask 闸门的内部/会话工具。
 INTERNAL_TOOLS = (
     ROOT_ONLY_TOOLS
     | {"compact_conversation"}
     | ROOT_TASK_TOOLS
-    | RETIRED_TASK_TOOLS
 )
 
 # MCP 别名不得占用的全部原生名（比 SIDE_EFFECT_TOOLS 更宽）。

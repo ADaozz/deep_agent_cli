@@ -25,14 +25,13 @@ from agent.models.messages import final_answer, visible_text
 from agent.runtime.graph_execution import run_segment
 from agent.sessions.transcript import classify_tool_result
 from agent.subagents.log_store import SubAgentLogStore
-from agent.subagents.manager import BackgroundTask, SubAgentManager
+from agent.subagents.manager import SubAgentManager, TaskRecord
 from agent.tools.catalog import DELEGATION_TOOLS
 
 
 SUMMARY_LIMIT = 1000
 COMMAND_LIMIT = 300
 ERROR_LIMIT = 240
-TITLE_LIMIT = 120
 REASON_LIMIT = 160
 AINVOKE_CANCEL_WAIT = 5.0
 
@@ -55,8 +54,12 @@ def _active_task_call_id() -> str:
     return context.tool_call_id or ""
 
 
-def _task_message(content: str, status: str) -> AIMessage:
-    return AIMessage(content=content, additional_kwargs={"subagent_status": status})
+def _task_message(content: str, status: str, *, run_id: str = "", result: str = "") -> AIMessage:
+    return AIMessage(content=content, additional_kwargs={
+        "status": status,
+        "run_id": run_id,
+        "result": result,
+    })
 
 
 def _error_category(text: str, exit_code: Any) -> str:
@@ -251,7 +254,7 @@ class SubAgentRuntime(Runnable):
                 pass
             raise
 
-    def start_background(self, description: str, parent: str, tool_call_id: str) -> BackgroundTask:
+    def start_background(self, description: str, parent: str, tool_call_id: str) -> TaskRecord:
         """Run one delegation on its own thread and report the outcome to the parent.
 
         Raises when no permit is available; nothing is started in that case.
@@ -260,8 +263,11 @@ class SubAgentRuntime(Runnable):
         # The child is a leaf: it gets no delegation tools and no delegation prompt.
         controller.background_leaf = True
         controller.approval_user_request = delegating_user_request.get()
-        task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
-                              description=description, controller=controller, mode="background")
+        task = TaskRecord(
+            run_id=run_id, parent_run_id=parent, tool_call_id=tool_call_id,
+            description=description, depth=self.child_depth, mode="background",
+            controller=controller,
+        )
 
         scope = observation_scope.get()
         def work() -> None:
@@ -274,7 +280,7 @@ class SubAgentRuntime(Runnable):
                 )
             except BaseException as exc:  # noqa: BLE001
                 state = "cancelled" if controller.cancel_requested else "failed"
-                content = f"Subagent {state} (run_id={run_id}): {_error_reason(exc, self.store._redact)}"
+                content = _error_reason(exc, self.store._redact)
                 if not task.done.is_set():
                     self.manager.record_terminal(run_id, state, content, None)
             status = task.status
@@ -286,7 +292,7 @@ class SubAgentRuntime(Runnable):
                     # The host notification, when one is due, was sent with the
                     # terminal record. This event only updates the card.
                     self.manager.parent._emit("subagent_finished", {
-                        "run_id": run_id, "tool_call_id": tool_call_id, "parent": parent,
+                        "run_id": run_id, "tool_call_id": tool_call_id, "parent_run_id": parent,
                         "status": status, "content": content,
                     })
 
@@ -307,9 +313,7 @@ class SubAgentRuntime(Runnable):
     ) -> dict:
         started = monotonic()
         description = visible_text(input["messages"][-1])
-        title = " ".join(self.store._redact(description).split())
-        if len(title) > TITLE_LIMIT:
-            title = title[: TITLE_LIMIT - 1] + "…"
+        redacted = self.store._redact(description)
         published = False
 
         def publish(status: str, *, reason: str = "", result: str = "") -> None:
@@ -319,7 +323,7 @@ class SubAgentRuntime(Runnable):
                 "run_id": run_id,
                 "parent_run_id": parent,
                 "depth": self.child_depth,
-                "description": title,
+                "description": redacted,
                 "status": status,
                 "tool_call_id": tool_call_id,
                 "elapsed_seconds": round(max(0.0, monotonic() - started), 3),
@@ -347,12 +351,14 @@ class SubAgentRuntime(Runnable):
             return _brief(self.store._redact(value), limit)
 
         record = self.manager.open_record(
-            run_id=run_id, parent=parent, description=description, tool_call_id=tool_call_id,
-            controller=controller, mode="sync",
+            run_id=run_id, parent_run_id=parent, description=description, tool_call_id=tool_call_id,
+            controller=controller, mode="sync", depth=self.child_depth,
         )
-        write("start", status="running", description=brief(description, SUMMARY_LIMIT),
-              description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
-              mode=record.mode)
+        write(
+            "start", status="running", description=brief(description, SUMMARY_LIMIT),
+            description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
+            mode=record.mode, parent_run_id=parent, tool_call_id=tool_call_id, depth=record.depth,
+        )
         publish("running")
         published = True
         set_stream_owner(controller)
@@ -412,15 +418,15 @@ class SubAgentRuntime(Runnable):
             summary = brief(answer, SUMMARY_LIMIT)
             summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
             # Return only the final response: no child messages or state channels.
-            outcome["content"] = f"[subagent run_id={run_id}]\n{answer}"
-            return {"messages": [_task_message(outcome["content"], status)]}
+            outcome["content"] = answer
+            return {"messages": [_task_message(answer, status, run_id=run_id, result=answer)]}
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
             summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
             answer_text = summary
             write("error", status=status, reason=summary)
-            outcome["content"] = f"Subagent {status} (run_id={run_id}): {summary}"
-            return {"messages": [_task_message(outcome["content"], status)]}
+            outcome["content"] = summary
+            return {"messages": [_task_message(summary, status, run_id=run_id, result=summary)]}
         finally:
             if env_token is not None:
                 from agent.execution.environment import reset_environment_cache
@@ -437,7 +443,7 @@ class SubAgentRuntime(Runnable):
             if status != "completed" and controller.cancel_requested:
                 status = "cancelled"
                 if not outcome["content"]:
-                    outcome["content"] = f"Subagent cancelled (run_id={run_id}): Cancelled by parent"
+                    outcome["content"] = "Cancelled by parent"
             elapsed = round(max(0.0, monotonic() - started), 3)
             publish(
                 status,
@@ -445,6 +451,20 @@ class SubAgentRuntime(Runnable):
                 result=answer_text,
             )
             published = False
-            write("finish", status=status, summary=summary, summary_truncated=summary_truncated,
-                  elapsed_seconds=elapsed, tool_count=callback.tool_count)
+            finish_fields: dict[str, Any] = {
+                "status": status,
+                "elapsed_seconds": elapsed,
+                "tool_count": callback.tool_count,
+                "mode": record.mode,
+                "parent_run_id": parent,
+                "tool_call_id": tool_call_id,
+                "depth": record.depth,
+                "description": brief(description, SUMMARY_LIMIT),
+            }
+            if summary_truncated:
+                finish_fields["result_summary"] = summary
+                finish_fields["summary_truncated"] = True
+            else:
+                finish_fields["result"] = outcome["content"]
+            write("finish", **finish_fields)
             self.manager.record_terminal(run_id, status, outcome["content"], elapsed)

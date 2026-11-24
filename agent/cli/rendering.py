@@ -318,7 +318,7 @@ def _next_unit(
                 break
             group.append(candidate)
         if len(group) > 1:
-            return _create_group_unit(
+            return _file_mutation_group_unit(
                 group, state.tools_expanded, width, limits=limits, after_user=after_user,
                 files_full=_files_expanded(state),
             ), index + len(group)
@@ -340,7 +340,7 @@ def _next_unit(
                 break
             group.append(candidate)
         if len(group) > 1:
-            return _modify_group_unit(
+            return _file_mutation_group_unit(
                 group, state.tools_expanded, width, limits=limits, after_user=after_user,
                 files_full=_files_expanded(state),
             ), index + len(group)
@@ -352,7 +352,7 @@ def _next_unit(
                 break
             group.append(candidate)
         if len(group) > 1:
-            return _modify_group_unit(
+            return _file_mutation_group_unit(
                 group, state.tools_expanded, width, limits=limits, after_user=after_user,
                 files_full=_files_expanded(state),
             ), index + len(group)
@@ -424,63 +424,35 @@ def _created_file_path(block: Any) -> str | None:
     return mutation.path if mutation and mutation.operation == "create" else None
 
 
-def _create_group_unit(
+def _file_mutation_group_unit(
     blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
     after_user: bool = False, files_full: bool = False,
 ) -> TranscriptUnit:
     members = tuple(blocks)
     return TranscriptUnit(
-        key=("create_group", id(members[0]), expanded, files_full),
+        key=("file_mutation_group", id(members[0]), expanded, files_full),
         fingerprint=tuple(block.revision for block in members) + (
             tuple(id(block) for block in members), expanded, files_full, limits, after_user,
         ),
-        build=lambda: _create_group(
+        build=lambda: _file_mutation_group(
             members, expanded, width, limits=limits, after_user=after_user, files_full=files_full,
         ),
         owner=members,
     )
 
 
-def _create_group(
+def _file_mutation_group(
     blocks: Sequence[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
     after_user: bool = False, files_full: bool = False,
 ) -> Any:
     full = expanded or files_full
     mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits, full=full)) is not None]
     mutation = aggregate_file_mutations(mutations, expanded=full, limits=limits)
-    if len(mutation.paths) == 1:
+    # A single created path stays one file card. Edit and overwrite keep the aggregate.
+    if len(mutation.paths) == 1 and mutation.operation == "create":
         return _tool(
             blocks[-1], expanded, width, limits=limits, after_user=after_user, files_full=files_full,
         )
-    preview = file_tool_preview(mutation)
-    return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
-
-
-def _modify_group_unit(
-    blocks: list[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
-    after_user: bool = False, files_full: bool = False,
-) -> TranscriptUnit:
-    members = tuple(blocks)
-    return TranscriptUnit(
-        key=("modify_group", id(members[0]), expanded, files_full),
-        fingerprint=tuple(block.revision for block in members) + (
-            tuple(id(block) for block in members), expanded, files_full, limits, after_user,
-        ),
-        build=lambda: _modify_group(
-            members, expanded, width, limits=limits, after_user=after_user, files_full=files_full,
-        ),
-        owner=members,
-    )
-
-
-def _modify_group(
-    blocks: Sequence[ToolBlock], expanded: bool, width: int, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
-    after_user: bool = False, files_full: bool = False,
-) -> Any:
-    full = expanded or files_full
-    mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits, full=full)) is not None]
-    mutation = aggregate_file_mutations(mutations, expanded=full, limits=limits)
-    # Single-path groups keep Edit N merge from aggregate; multi-file matches create.
     preview = file_tool_preview(mutation)
     return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
 
@@ -893,9 +865,9 @@ def _explore_group(
             rows.append(row)
         for block, preview in failed[-limits.explore_failure_items:]:
             reason = preview.detail
+            heading = _failure_title(_preview_label(preview), exit_code=block.exit_code)
             row = Text.assemble(
-                (f"  ├ Failed (exit {_failure_code(block)}) ", TREE_BRANCH_STYLE),
-                (_preview_label(preview), ""),
+                (f"  ├ {heading}", TREE_BRANCH_STYLE),
                 (f": {reason}" if reason else "", TREE_BRANCH_STYLE),
             )
             row.truncate(max(1, width - 1), overflow="ellipsis")
@@ -1011,12 +983,13 @@ def render_tool_preview(
 
 def _subagent_title(status: str, description: str, *, is_error: bool = False, background: bool = False) -> Text:
     """The one SubAgent title. Every depth uses it; only the tree prefix changes."""
-    failed = status not in {"cancelled", "interrupted", "waiting"} and (
+    description = " ".join(str(description or "").split()) or "Delegated task"
+    failed = status not in {"cancelled", "interrupted", "waiting", "unconfirmed"} and (
         is_error or status in {"failed", "error"}
     )
     symbol, color = _tool_status_marker("error" if failed else status, failed)
     label = "Running SubAgent" if status == "running" else "SubAgent"
-    summary = f"{label} · {description or 'Delegated task'}"
+    summary = f"{label} · {description}"
     if background:
         summary += " · background"
     title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
@@ -1075,7 +1048,8 @@ def _command_card(
     status = preview.status
     verb = {
         "running": "Running", "waiting": "execute", "interrupted": "execute",
-        "succeeded": "Ran", "failed": f"Failed (exit {preview.exit_code if preview.exit_code is not None else 1})",
+        "succeeded": "Ran",
+        "failed": _failure_title(preview.command, exit_code=preview.exit_code),
         "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
     }[status]
     suffix = _tool_status_suffix(status, cancelled=False)
@@ -1083,8 +1057,9 @@ def _command_card(
         "running": "running", "waiting": "waiting", "succeeded": "completed",
     }.get(status, "error")
     symbol, color = _tool_status_marker(marker_status)
+    heading = verb if status == "failed" else f"{verb} {preview.command}"
     title = Text.assemble(
-        (f"{symbol} ", color), (f"{verb} {preview.command}", "bold"), (suffix, "dim"),
+        (f"{symbol} ", color), (heading, "bold"), (suffix, "dim"),
     )
     console = Console(width=max(20, width))
     body: list[Any] = []
@@ -1222,8 +1197,7 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     symbol, color = _tool_status_marker("error")
     title = Text.assemble(
         (f"{symbol} ", color),
-        (f"Failed (exit {_failure_code(block)}) ", "bold"),
-        (preview.target, ""),
+        (f"{_failure_title(preview.target, exit_code=block.exit_code)} ", "bold"),
     )
     console = Console(width=max(20, width))
     body: list[Any] = [] if after_user else [Text("")]
@@ -1239,8 +1213,12 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
     return Group(*body)
 
 
-def _failure_code(block: ToolBlock) -> int:
-    return block.exit_code if isinstance(block.exit_code, int) and not isinstance(block.exit_code, bool) else 1
+def _failure_title(target: str, *, exit_code: object = None) -> str:
+    """Failed, plus an exit code only when the tool reported one."""
+    code = exit_code if type(exit_code) is int else None
+    head = f"Failed (exit {code})" if code is not None else "Failed"
+    text = str(target or "").strip()
+    return f"{head} {text}".strip() if text else head
 
 
 def _output_tail(
@@ -1319,6 +1297,8 @@ def _tool_status_suffix(status: str, *, failed: bool = False, cancelled: bool = 
         return " — waiting for input"
     if status == "interrupted":
         return " — interrupted (completion unconfirmed)"
+    if status == "unconfirmed":
+        return " — completion unconfirmed"
     if cancelled and status == "cancelled":
         return " — cancelled"
     if failed:
@@ -1333,7 +1313,7 @@ def _tool_status_marker(status: str, is_error: bool = False) -> tuple[str, str]:
         return _spinner(), "green"
     if status == "waiting":
         return dot, "yellow"
-    if status in {"error", "interrupted", "cancelled"} or is_error:
+    if status in {"error", "interrupted", "cancelled", "unconfirmed"} or is_error:
         return dot, "#888888"
     return dot, "green"
 

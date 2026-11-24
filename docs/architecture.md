@@ -113,7 +113,7 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
 `mode="isolated"` 仅接收委派描述，使用独立运行 ID、内存 checkpoint 和 RunController；
 执行前清空父级隐式回调与配置上下文。每个父 Agent 默认最多 4 个同时运行的直接子任务，全树累计默认最多 10 个（均与用户配置取最小、受宿主硬顶约束），超限立即返回错误；
-完成、失败和取消均释放许可；原生 `start_task` 在任务结束后返回最终结果或简短错误。
+完成、失败和取消均释放许可。同步 `start_task` 返回 `run_id`、`mode`、`status` 和 `result`。后台启动只返回 `running`，终态稍后写入同一条任务记录。
 主 Agent depth 为 0；每次 `start_task` 子代 depth = 父 depth + 1。默认与硬顶均为 `max_subagent_depth: 2`（与用户配置取最小）；达到上限后当前 Agent 仍执行任务但不能再委派。配额由 Root Manager 统一记账；子 Controller 注册到真实父 Agent，取消一级会递归二级。后台委派仅根可发起。日志仅直接父级可读；Flash 证据的 `user_messages` 沿树传递 Root 用户原文。
 
 ### 后台委派
@@ -156,7 +156,7 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 主上下文仅接收最终 task 结果，主动调用 `read_task` 才读取自己直接子任务的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。进度事件只带任务 ID、直接父节点、描述、深度、状态、耗时和最终结果或失败原因，不带 Token、TPS、TTFT 或压缩状态。思考、中间回答和内部工具调用不进入主界面。子图仍执行上下文压缩，但不记录或展示压缩过程。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
-实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
+实时与历史恢复复用同一套任务树。终态来自任务记录和日志里的 finish，不根据正文推断。没有 finish 且没有存活记录时显示未确认。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
 ### Middleware
 

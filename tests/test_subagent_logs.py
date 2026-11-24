@@ -2,6 +2,7 @@ import json
 from uuid import uuid4
 
 import pytest
+from langchain_core.tools import ToolException
 
 from agent.redaction import SecretRef
 from agent.subagents.log_store import MAX_EVENT_BYTES, MAX_PAGE_BYTES, SubAgentLogStore
@@ -47,7 +48,10 @@ def test_read_task_enforces_direct_parent_isolation(tmp_path):
 
     def read_as(parent: str, run_id: str | None = None, *, include_logs: bool = False) -> dict:
         runtime = SimpleNamespace(config={"configurable": {"thread_id": parent}}, tool_call_id="read")
-        return json.loads(tool.func(runtime, run_id=run_id, include_logs=include_logs))
+        value = tool.func(runtime, run_id=run_id, include_logs=include_logs)
+        if isinstance(value, tuple):
+            value = value[0]
+        return json.loads(value)
 
     # Direct parent A sees A1; listing is scoped to A.
     assert [item["run_id"] for item in read_as(agent_a)["tasks"]] == [a1]
@@ -57,12 +61,40 @@ def test_read_task_enforces_direct_parent_isolation(tmp_path):
 
     # Root cannot see or open A1 (grandchild / other parent's child).
     assert read_as(root)["tasks"] == []
-    assert "error" in read_as(root, a1)
+    with pytest.raises(ToolException, match="not found"):
+        read_as(root, a1)
 
     # A cannot open B's direct child even with a known run_id.
     assert [item["run_id"] for item in read_as(agent_a)["tasks"]] == [a1]
-    assert "error" in read_as(agent_a, b1)
+    with pytest.raises(ToolException, match="not found"):
+        read_as(agent_a, b1)
     assert read_as(agent_b, b1)["result"] == "b1-only"
+
+
+def test_metadata_reads_the_finish_past_the_first_page(tmp_path):
+    store = SubAgentLogStore(tmp_path)
+    run = uuid4().hex
+    store.append(
+        "parent", run, "start", status="running", description="work", mode="sync",
+        parent_run_id="parent", tool_call_id="call", depth=1,
+    )
+    for _ in range(120):
+        store.append("parent", run, "tool_finish", status="completed", note="x" * 800)
+    store.append(
+        "parent", run, "finish", status="failed", result="boom", elapsed_seconds=1.5,
+        mode="sync", parent_run_id="parent", tool_call_id="call", depth=1, description="work",
+    )
+    page = store.read("parent", run, 0, 100)
+    assert all(record.get("event") != "finish" for record in page["records"])
+    meta = store.task_metadata("parent", run)
+    assert meta["status"] == "failed" and meta["result"] == "boom"
+
+    orphan = uuid4().hex
+    store.append(
+        "parent", orphan, "start", status="running", description="gone", mode="background",
+        parent_run_id="parent", tool_call_id="lost", depth=1,
+    )
+    assert store.task_metadata("parent", orphan)["status"] == "unconfirmed"
 
 
 def test_log_bounds_and_crash_tail(tmp_path):
@@ -195,7 +227,7 @@ def test_runtime_logs_operations_without_model_trace_or_raw_tool_output(tmp_path
     assert records[6]['exit_code'] == 0 and records[6]['status'] == 'completed'
     assert records[6]['log_path'].endswith('execution.log')
     assert records[-1]['tool_count'] == 3 and records[-1]['status'] == 'completed'
-    assert records[-1]['summary_truncated'] and len(records[-1]['summary']) <= 1000
+    assert records[-1]['summary_truncated'] and len(records[-1]['result_summary']) <= 1000
     assert records[-1]['elapsed_seconds'] >= 0
     for start, finish in [(1, 2), (3, 4), (5, 6)]:
         assert records[start]['tool_run_id'] == records[finish]['tool_run_id']

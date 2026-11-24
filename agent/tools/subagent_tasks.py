@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import threading
+
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails
 
 from agent.subagents.log_store import SubAgentLogStore
-from agent.subagents.manager import BackgroundTask, SubAgentManager
+from agent.subagents.manager import SubAgentManager, TaskRecord
 from agent.subagents.runtime import SubAgentRuntime
 
 _INJECTED = frozenset({"runtime"})
@@ -190,37 +192,68 @@ def _dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _summary(task: BackgroundTask, *, with_result: bool) -> dict[str, Any]:
+def _task_fields(task: TaskRecord, *, with_result: bool) -> dict[str, Any]:
     item: dict[str, Any] = {
         "run_id": task.run_id,
+        "parent_run_id": task.parent_run_id,
+        "tool_call_id": task.tool_call_id,
+        "depth": task.depth,
         "description": _preview(task.description),
         "mode": task.mode,
         "status": task.status,
         "elapsed_seconds": task.elapsed_seconds,
     }
-    if with_result and task.status != "running":
+    if with_result and task.status != "running" and task.result is not None:
         item["result"] = task.result
     return item
 
 
-def _summary_from_log(store: SubAgentLogStore, parent: str, run_id: str) -> dict[str, Any]:
-    page = store.read(parent, run_id, 0, 100)
-    if "error" in page:
-        return {"run_id": run_id, "error": page["error"]}
-    records = page.get("records") or []
-    start = next((record for record in records if record.get("event") == "start"), {})
-    finish = next((record for record in reversed(records) if record.get("event") == "finish"), {})
-    status = str(finish.get("status") or start.get("status") or "unknown")
+def _log_fields(meta: dict[str, Any], *, with_result: bool) -> dict[str, Any]:
     item: dict[str, Any] = {
-        "run_id": run_id,
-        "description": _preview(str(start.get("description") or "")),
-        "mode": str(start.get("mode") or "sync"),
-        "status": status,
-        "elapsed_seconds": finish.get("elapsed_seconds"),
+        "run_id": meta["run_id"],
+        "parent_run_id": meta.get("parent_run_id") or "",
+        "tool_call_id": meta.get("tool_call_id") or "",
+        "depth": meta.get("depth") if type(meta.get("depth")) is int else 1,
+        "description": _preview(str(meta.get("description") or "")),
+        "mode": meta.get("mode") or "sync",
+        "status": meta.get("status") or "unconfirmed",
+        "elapsed_seconds": meta.get("elapsed_seconds"),
     }
-    if status != "running" and finish.get("summary"):
-        item["result"] = finish.get("summary")
+    if not with_result:
+        return item
+    if meta.get("summary_truncated"):
+        item["result_summary"] = meta.get("result_summary") or ""
+        item["summary_truncated"] = True
+    elif "result" in meta:
+        item["result"] = meta.get("result")
     return item
+
+
+def _pack(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    return _dump(payload), payload
+
+
+def _wait_for_terminal(tasks: list[TaskRecord], cancel_event: threading.Event) -> None:
+    """Block until every task is terminal, or the parent run is cancelled."""
+    if all(task.done.is_set() for task in tasks):
+        return
+    wake = threading.Event()
+
+    def watch(source: threading.Event) -> None:
+        source.wait()
+        wake.set()
+
+    watchers = [threading.Thread(target=watch, args=(task.done,), daemon=True) for task in tasks]
+    watchers.append(threading.Thread(target=watch, args=(cancel_event,), daemon=True))
+    for watcher in watchers:
+        watcher.start()
+    while True:
+        if all(task.done.is_set() for task in tasks):
+            return
+        if cancel_event.is_set():
+            raise ToolException("Parent run cancelled")
+        wake.wait()
+        wake.clear()
 
 
 class ReadTaskSchema(BaseModel):
@@ -326,32 +359,38 @@ def _start_tool(runtime_: SubAgentRuntime, *, allow_background: bool) -> Structu
         description: str,
         runtime: ToolRuntime,
         run_in_background: bool = False,
-    ) -> tuple[str, dict[str, str]]:
-        def pack(content: str, status: str) -> tuple[str, dict[str, str]]:
-            return content, {"subagent_status": status}
-
+    ) -> tuple[str, dict[str, Any]]:
         text = description.strip()
         if not text:
-            return pack("Subagent failed: description is required", "failed")
+            raise ToolException("description is required")
         if run_in_background and not allow_background:
-            return pack("Subagent failed: background delegation is not available to this agent", "failed")
+            raise ToolException("background delegation is not available to this agent")
         parent = _parent_id(runtime)
         if not parent:
-            return pack("Subagent failed: parent session ID unavailable", "failed")
+            raise ToolException("parent session ID unavailable")
         if run_in_background:
             try:
                 task = runtime_.start_background(text, parent, str(runtime.tool_call_id or ""))
             except Exception as exc:
-                return pack(f"Subagent failed: {exc}", "failed")
-            return pack(f"Background subagent started (run_id={task.run_id})", "completed")
+                raise ToolException(str(exc)) from exc
+            payload = {"run_id": task.run_id, "mode": "background", "status": "running"}
+            return _pack(payload)
         output = runtime_.invoke(
             {"messages": [HumanMessage(content=text)]},
             config=runtime.config,
         )
         message = output["messages"][-1]
-        recorded = message.additional_kwargs.get("subagent_status")
-        status = recorded if recorded in {"completed", "failed", "cancelled"} else "failed"
-        return pack(str(message.content), status)
+        recorded = message.additional_kwargs.get("status")
+        run_id = str(message.additional_kwargs.get("run_id") or "")
+        if recorded not in {"completed", "failed", "cancelled"} or not run_id:
+            raise ToolException(str(message.content))
+        payload = {
+            "run_id": run_id,
+            "mode": "sync",
+            "status": recorded,
+            "result": message.additional_kwargs.get("result", message.content),
+        }
+        return _pack(payload)
 
     schema = StartTaskSchema if allow_background else StartTaskSyncSchema
     return StructuredTool.from_function(
@@ -360,6 +399,7 @@ def _start_tool(runtime_: SubAgentRuntime, *, allow_background: bool) -> Structu
         description=description,
         args_schema=schema,
         response_format="content_and_artifact",
+        handle_tool_error=True,
     )
 
 
@@ -370,58 +410,72 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
         include_logs: bool = False,
         offset: int = 0,
         limit: int = 100,
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         parent = _parent_id(runtime)
         if not parent:
-            return _dump({"error": "Parent session ID unavailable"})
+            raise ToolException("Parent session ID unavailable")
         if include_logs and not run_id:
-            return _dump({"error": "include_logs requires run_id"})
+            raise ToolException("include_logs requires run_id")
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ToolException("offset must be non-negative and limit must be 1..100")
 
-        def finish(payload: dict[str, Any]) -> str:
+        def finish(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             if manager is not None:
                 payload["capacity"] = manager.capacity_snapshot(parent)
-            return _dump(payload)
+            return _pack(payload)
 
         try:
             if run_id is None:
-                page = store.read(parent, None, offset, limit)
+                runs = store.list_runs(parent)
+                page = runs[offset:offset + limit]
                 tasks = []
-                for child_id in page["runs"]:
+                for child_id in page:
                     task = manager.task(child_id, parent) if manager is not None else None
-                    tasks.append(_summary(task, with_result=False) if task is not None
-                                 else _summary_from_log(store, parent, child_id))
-                return finish({"tasks": tasks, "next_offset": offset + len(page["runs"])})
+                    if task is not None:
+                        tasks.append(_task_fields(task, with_result=False))
+                        continue
+                    meta = store.task_metadata(parent, child_id)
+                    if meta is not None:
+                        tasks.append(_log_fields(meta, with_result=False))
+                return finish({"tasks": tasks, "next_offset": offset + len(page)})
             task = manager.task(run_id, parent) if manager is not None else None
             if task is None:
-                item = _summary_from_log(store, parent, run_id)
+                meta = store.task_metadata(parent, run_id)
+                if meta is None:
+                    raise ToolException("Subagent log not found in this parent session")
+                item = _log_fields(meta, with_result=True)
             else:
-                item = _summary(task, with_result=True)
-            if include_logs and "error" not in item:
+                item = _task_fields(task, with_result=True)
+            if include_logs:
                 item["logs"] = store.read(parent, run_id, offset, limit)
             return finish(item)
+        except ToolException:
+            raise
         except (ValueError, OSError) as exc:
-            return _dump({"error": str(exc)})
+            raise ToolException(str(exc)) from exc
 
     return StructuredTool.from_function(
         read_task,
         name="read_task",
         description=READ_TASK_DESCRIPTION,
         args_schema=ReadTaskSchema,
+        response_format="content_and_artifact",
+        handle_tool_error=True,
     )
 
 
 def _wait_tool(manager: SubAgentManager | None) -> StructuredTool:
-    def wait_task(run_ids: list[str], runtime: ToolRuntime) -> str:
+    def wait_task(run_ids: list[str], runtime: ToolRuntime) -> tuple[str, dict[str, Any]]:
         parent = _parent_id(runtime)
         if not parent:
-            return _dump({"error": "Parent session ID unavailable"})
+            raise ToolException("Parent session ID unavailable")
         if manager is None:
-            return _dump({"error": "Background tasks not found for this agent", "run_ids": list(run_ids)})
+            raise ToolException("Background tasks not found for this agent")
         ordered: list[str] = []
         for run_id in run_ids:
             if run_id not in ordered:
                 ordered.append(run_id)
-        found: list[BackgroundTask] = []
+        found: list[TaskRecord] = []
         missing: list[str] = []
         for run_id in ordered:
             task = manager.task(run_id, parent)
@@ -430,34 +484,42 @@ def _wait_tool(manager: SubAgentManager | None) -> StructuredTool:
             else:
                 found.append(task)
         if missing:
-            return _dump({"error": "Background tasks not found for this agent", "run_ids": missing})
+            raise ToolException("Background tasks not found for this agent: " + ", ".join(missing))
+        _wait_for_terminal(found, manager.parent.current_cancel_event())
         manager.consume(found)
-        for task in found:
-            task.done.wait()
-        return _dump({"tasks": [_summary(task, with_result=True) for task in found]})
+        payload = {"tasks": [_task_fields(task, with_result=True) for task in found]}
+        return _pack(payload)
 
     return StructuredTool.from_function(
         wait_task,
         name="wait_task",
         description=WAIT_TASK_DESCRIPTION,
         args_schema=WaitTaskSchema,
+        response_format="content_and_artifact",
+        handle_tool_error=True,
     )
 
 
 def _cancel_tool(manager: SubAgentManager | None) -> StructuredTool:
-    def cancel_task(run_id: str, runtime: ToolRuntime) -> str:
+    def cancel_task(run_id: str, runtime: ToolRuntime) -> tuple[str, dict[str, Any]]:
         parent = _parent_id(runtime)
-        task = manager.task(run_id, parent) if manager is not None and parent else None
+        if not parent:
+            raise ToolException("Parent session ID unavailable")
+        task = manager.task(run_id, parent) if manager is not None else None
         if task is None or task.mode != "background":
-            return f"Error: background task {run_id} not found for this agent"
+            raise ToolException(f"background task {run_id} not found for this agent")
         if task.status != "running":
-            return f"Background task {run_id} already finished with status {task.status}."
+            payload = {"run_id": run_id, "status": task.status, "cancellation": "already_finished"}
+            return _pack(payload)
         manager.cancel(run_id, parent)
-        return f"Cancellation requested for background task {run_id}."
+        payload = {"run_id": run_id, "status": "running", "cancellation": "requested"}
+        return _pack(payload)
 
     return StructuredTool.from_function(
         cancel_task,
         name="cancel_task",
         description=CANCEL_TASK_DESCRIPTION,
         args_schema=CancelTaskSchema,
+        response_format="content_and_artifact",
+        handle_tool_error=True,
     )

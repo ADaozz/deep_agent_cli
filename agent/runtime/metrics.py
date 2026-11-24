@@ -115,9 +115,6 @@ class GenerationTiming:
         }
 
 
-_SUBAGENT_TOOLS = METRICS_EXCLUDED_TASK_TOOLS
-
-
 def tool_usage_by_model(history: list[dict[str, Any]]) -> tuple[list[str], list[tuple[str, dict[str, int]]]]:
     """Count requested built-in tools per model, merging reasoning efforts.
 
@@ -136,7 +133,7 @@ def tool_usage_by_model(history: list[dict[str, Any]]) -> tuple[list[str], list[
         model = str(metrics.get("model") or "unknown")
         for name in names:
             if (not isinstance(name, str) or not name or is_external_mcp_tool(name)
-                    or name in _SUBAGENT_TOOLS):
+                    or name in METRICS_EXCLUDED_TASK_TOOLS):
                 continue
             if model not in models:
                 models.append(model)

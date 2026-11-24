@@ -52,9 +52,18 @@ class SubAgentLogStore:
         record = self._sanitize(dict(timestamp=datetime.now(timezone.utc).isoformat(), run_id=run_id, event=event, **payload))
         encoded = json.dumps(record, ensure_ascii=False)
         if len(encoded.encode()) > MAX_EVENT_BYTES:
-            record = dict(timestamp=record["timestamp"], run_id=record["run_id"], event=record["event"],
-                          truncated=True, status=record.get("status"), model=record.get("model"),
-                          preview=encoded.encode()[:MAX_EVENT_BYTES // 4].decode(errors="ignore"))
+            kept = {
+                key: record[key]
+                for key in (
+                    "timestamp", "run_id", "event", "status", "mode", "parent_run_id",
+                    "tool_call_id", "depth", "elapsed_seconds", "description", "model",
+                )
+                if key in record
+            }
+            kept["truncated"] = True
+            kept["summary_truncated"] = True
+            kept["result_summary"] = encoded.encode()[:1000].decode(errors="ignore")
+            record = kept
             encoded = json.dumps(record, ensure_ascii=False)
         with self._lock:
             directory = self._directory(parent)
@@ -90,3 +99,66 @@ class SubAgentLogStore:
                     break  # A crash may leave a partial final line.
                 size += len(line.encode())
         return {"run_id": run_id, "records": records, "next_offset": offset + len(records)}
+
+    def list_runs(self, parent: str) -> list[str]:
+        """Every direct child run, newest first. Not limited to one page."""
+        directory = self._directory(parent)
+        if not directory.is_dir():
+            return []
+        paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return [path.stem for path in paths if _ID.fullmatch(path.stem)]
+
+    def task_metadata(self, parent: str, run_id: str) -> dict[str, Any] | None:
+        """The start record and the last finish record, ignoring page limits.
+
+        A start without a finish is ``unconfirmed``. It is not reported as running:
+        the process that wrote the start may already be gone.
+        """
+        if not _ID.fullmatch(run_id):
+            raise ValueError("Invalid subagent run ID")
+        try:
+            descriptor = os.open(self._directory(parent) / f"{run_id}.jsonl", os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None
+        start: dict[str, Any] | None = None
+        finish: dict[str, Any] | None = None
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(record, dict):
+                    continue
+                event = record.get("event")
+                if event == "start" and start is None:
+                    start = record
+                elif event == "finish":
+                    finish = record
+        if start is None and finish is None:
+            return None
+        start = start or {}
+        finish = finish or {}
+        recorded = str(finish.get("status") or "")
+        status = recorded if recorded in {"completed", "failed", "cancelled"} else "unconfirmed"
+        depth = start.get("depth")
+        item: dict[str, Any] = {
+            "run_id": run_id,
+            "parent_run_id": str(start.get("parent_run_id") or parent),
+            "tool_call_id": str(start.get("tool_call_id") or ""),
+            "depth": depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1,
+            "description": str(start.get("description") or ""),
+            "mode": str(start.get("mode") or "sync"),
+            "status": status,
+            "elapsed_seconds": finish.get("elapsed_seconds"),
+        }
+        if finish.get("summary_truncated"):
+            item["result_summary"] = str(finish.get("result_summary") or finish.get("summary") or "")
+            item["summary_truncated"] = True
+        elif isinstance(finish.get("result"), str):
+            item["result"] = finish.get("result")
+        elif isinstance(finish.get("summary"), str) and not finish.get("summary_truncated"):
+            item["result"] = finish.get("summary")
+        return item

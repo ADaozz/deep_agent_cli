@@ -4,11 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import ToolException
 
 from agent.runtime.control import RunController
 from agent.subagents.log_store import SubAgentLogStore
-from agent.subagents.manager import SubAgentManager
+from agent.subagents.manager import SubAgentManager, TaskRecord
 from agent.subagents.runtime import SubAgentRuntime
+from agent.tools.subagent_tasks import build_subagent_tools
 
 
 def test_capacity_snapshot_reads_limits_and_occupancy_together():
@@ -63,6 +65,29 @@ def test_atomic_limit_releases_on_success_failure_and_cancel():
     assert manager.active_count == 0
 
 
+def test_wait_does_not_consume_the_notification_when_the_parent_is_cancelled(tmp_path):
+    parent = RunController()
+    parent.begin_run()
+    manager = SubAgentManager(parent, max_concurrent=2, max_total=10)
+    run_id, controller = manager.admit("session", parent)
+    task = TaskRecord(
+        run_id=run_id, parent_run_id="session", tool_call_id="call",
+        description="work", depth=1, mode="background", controller=controller,
+    )
+    manager.track(task)
+    tool = next(item for item in build_subagent_tools(
+        None, manager, SubAgentLogStore(tmp_path),
+        names=frozenset({"wait_task"}), allow_background=True,
+    ) if item.name == "wait_task")
+    runtime = SimpleNamespace(config={"configurable": {"thread_id": "session"}}, tool_call_id="wait")
+    threading.Timer(0.05, parent.cancel).start()
+    with pytest.raises(ToolException, match="cancelled"):
+        tool.func([run_id], runtime)
+    assert task.consumed is False
+    assert manager.record_terminal(run_id, "completed", "later", 0.1) is True
+    assert parent.pending_notification_count() == 1
+
+
 def test_native_runtime_parallel_and_parent_cancel(tmp_path):
     parent = RunController()
     parent.begin_run()
@@ -92,7 +117,10 @@ def test_native_runtime_parallel_and_parent_cancel(tmp_path):
         third = run()
         assert 'concurrency limit' in third['messages'][0].content
         parent.cancel()
-        assert all('cancelled' in future.result(5)['messages'][0].content for future in futures)
+        assert all(
+            future.result(5)['messages'][0].additional_kwargs['status'] == 'cancelled'
+            for future in futures
+        )
     assert manager.active_count == 0
     assert len(controllers) == 2
     assert len(list(tmp_path.rglob('*.jsonl'))) == 2

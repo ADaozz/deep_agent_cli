@@ -352,6 +352,7 @@ def build_agent(
         )
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
         store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
+        manager.log_store = store
 
         def prepare_child(controller: RunController) -> PreparedAgent:
             if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:

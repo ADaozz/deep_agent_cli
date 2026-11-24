@@ -6,9 +6,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import threading
 import time
+from typing import Literal
 from uuid import uuid4
 
 from agent.runtime.control import RunController
+
+TaskStatus = Literal["running", "completed", "failed", "cancelled"]
+TaskMode = Literal["sync", "background"]
 
 
 FINISHED_TASK_LIMIT = 50
@@ -16,18 +20,18 @@ STREAM_CLOSE_WAIT = 5.0
 
 
 @dataclass(eq=False)
-class BackgroundTask:
-    """One delegation that outlives the tool call which started it."""
+class TaskRecord:
+    """One sync or background delegation. The runtime writes the terminal status."""
 
     run_id: str
+    parent_run_id: str
     tool_call_id: str
-    parent: str
     description: str
+    depth: int
+    mode: TaskMode
     controller: RunController
-    status: str = "running"  # running | completed | failed | cancelled
-    result: str = ""
-    # sync returns through the tool message; background returns through the host notification.
-    mode: str = "background"
+    status: TaskStatus = "running"
+    result: str | None = None
     elapsed_seconds: float | None = None
     # Set at a session boundary: the result no longer has a conversation to reach.
     discarded: bool = False
@@ -56,13 +60,14 @@ class SubAgentManager:
         self._closing: dict[str, RunController] = {}
         self._parents: dict[str, str] = {}
         self._owners: dict[str, RunController] = {}
-        self._tasks: dict[str, BackgroundTask] = {}
+        self._tasks: dict[str, TaskRecord] = {}
+        self.log_store: object | None = None
 
     @property
     def active_count(self) -> int:
         """Running plus still-closing tasks (both hold concurrency slots)."""
         with self._lock:
-            return len(self._active) + len(self._closing)
+            return self._occupied()
 
     def set_limits(self, *, max_concurrent: int, max_total: int) -> None:
         """Replace both caps under the same lock admit uses."""
@@ -73,10 +78,7 @@ class SubAgentManager:
     def capacity_snapshot(self, parent_id: str) -> dict:
         """One consistent reading of this parent's remaining capacity."""
         with self._lock:
-            direct_children = sum(
-                1 for parent in self._parents.values()
-                if parent == parent_id
-            )
+            direct_children = self._occupied_children(parent_id)
             tree_occupied = self._occupied()
             return {
                 "direct_children": direct_children,
@@ -94,10 +96,13 @@ class SubAgentManager:
 
     def active_children(self, parent_id: str) -> int:
         with self._lock:
-            return sum(1 for value in self._parents.values() if value == parent_id)
+            return self._occupied_children(parent_id)
 
     def _occupied(self) -> int:
         return len(self._active) + len(self._closing)
+
+    def _occupied_children(self, parent_id: str) -> int:
+        return sum(1 for value in self._parents.values() if value == parent_id)
 
     def reap_closed(self) -> int:
         """Finish unregistering closing tasks whose model streams have closed.
@@ -138,7 +143,7 @@ class SubAgentManager:
                 raise RuntimeError("Owning agent cancelled")
             if self._occupied() >= self.max_total:
                 raise RuntimeError(f"Subagent total concurrency limit ({self.max_total}) reached")
-            at_parent = sum(1 for value in self._parents.values() if value == parent_id)
+            at_parent = self._occupied_children(parent_id)
             if at_parent >= self.max_concurrent:
                 raise RuntimeError(
                     f"Subagent per-parent concurrency limit ({self.max_concurrent}) "
@@ -196,7 +201,8 @@ class SubAgentManager:
 
     # Background tasks -----------------------------------------------------
 
-    def track(self, task: BackgroundTask) -> None:
+    def track(self, task: TaskRecord) -> None:
+        """Register a background task before its thread starts. Does not set a terminal status."""
         with self._lock:
             self._tasks[task.run_id] = task
             self._prune_finished()
@@ -205,20 +211,21 @@ class SubAgentManager:
         self,
         *,
         run_id: str,
-        parent: str,
+        parent_run_id: str,
         description: str,
         tool_call_id: str,
         controller: RunController,
-        mode: str,
-    ) -> BackgroundTask:
+        mode: TaskMode,
+        depth: int,
+    ) -> TaskRecord:
         """Remember a direct child. A background launch already tracked this run."""
         with self._lock:
             existing = self._tasks.get(run_id)
             if existing is not None:
                 return existing
-            task = BackgroundTask(
-                run_id=run_id, tool_call_id=tool_call_id, parent=parent,
-                description=description, controller=controller, mode=mode,
+            task = TaskRecord(
+                run_id=run_id, parent_run_id=parent_run_id, tool_call_id=tool_call_id,
+                description=description, depth=depth, mode=mode, controller=controller,
             )
             self._tasks[run_id] = task
             self._prune_finished()
@@ -257,16 +264,13 @@ class SubAgentManager:
                 self.parent.notify({
                     "run_id": task.run_id,
                     "tool_call_id": task.tool_call_id,
-                    "parent": task.parent,
+                    "parent_run_id": task.parent_run_id,
                     "status": status,
                     "content": result,
                 })
             return notify
 
-    def finish(self, task: BackgroundTask, status: str, result: str) -> None:
-        self.record_terminal(task.run_id, status, result, task.elapsed_seconds)
-
-    def consume(self, tasks: list[BackgroundTask]) -> None:
+    def consume(self, tasks: list[TaskRecord]) -> None:
         """Give these results to wait_task and drop a notification already queued."""
         with self._lock:
             for task in tasks:
@@ -275,24 +279,24 @@ class SubAgentManager:
                     task.notified = False
                     self.parent.drop_notification(task.run_id)
 
-    def task(self, run_id: str, parent: str) -> BackgroundTask | None:
+    def task(self, run_id: str, parent: str) -> TaskRecord | None:
         with self._lock:
             found = self._tasks.get(run_id)
-        return found if found is not None and found.parent == parent else None
+        return found if found is not None and found.parent_run_id == parent else None
 
-    def tasks_for(self, parent: str) -> list[BackgroundTask]:
+    def tasks_for(self, parent: str) -> list[TaskRecord]:
         with self._lock:
-            return [task for task in self._tasks.values() if task.parent == parent]
+            return [task for task in self._tasks.values() if task.parent_run_id == parent]
 
-    def background_task(self, run_id: str, parent: str) -> BackgroundTask | None:
+    def background_task(self, run_id: str, parent: str) -> TaskRecord | None:
         found = self.task(run_id, parent)
         return found if found is not None and found.mode == "background" else None
 
-    def background_tasks(self, parent: str | None = None) -> list[BackgroundTask]:
+    def background_tasks(self, parent: str | None = None) -> list[TaskRecord]:
         with self._lock:
             return [
                 task for task in self._tasks.values()
-                if task.mode == "background" and (parent is None or task.parent == parent)
+                if task.mode == "background" and (parent is None or task.parent_run_id == parent)
             ]
 
     @property
@@ -303,7 +307,7 @@ class SubAgentManager:
                 for task in self._tasks.values()
             )
 
-    def cancel(self, run_id: str, parent: str) -> BackgroundTask | None:
+    def cancel(self, run_id: str, parent: str) -> TaskRecord | None:
         """Request one background task to stop. Its worker reports the outcome."""
         task = self.background_task(run_id, parent)
         if task is not None and task.status == "running":

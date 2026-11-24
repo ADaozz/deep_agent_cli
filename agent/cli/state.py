@@ -286,14 +286,23 @@ class CliState:
                 self.blocks.append(tool)
             touch(tool)
             if is_background_launch(tool.name, tool.arguments):
-                # The launch returned; the delegation itself is still running.
-                # Only subagent_finished ends the card, and it may already have.
-                refused = subagent_card_status(
+                # A running launch leaves the card open. The task's own event ends it.
+                # A finish that already arrived is not reopened by the launch result.
+                if tool.status not in {"running", "waiting"}:
+                    return
+                card = subagent_card_status(
                     event.content, is_error=event.is_error, artifact=event.artifact,
                 )
-                if tool.status == "running" and refused != "completed":
-                    tool.output, tool.status, tool.is_error = event.content, refused, True
-                    self._finish_task_card(tool)
+                if event.artifact is not None:
+                    tool.artifact = event.artifact
+                if card == "running" and not event.is_error:
+                    tool.status = "running"
+                    tool.is_error = False
+                    return
+                tool.output = event.content
+                tool.status = card
+                tool.is_error = card in {"error", "cancelled"}
+                self._finish_task_card(tool)
                 return
             completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
             had_tail_snapshot = (
@@ -366,7 +375,7 @@ class CliState:
                         and not is_background_launch(block.name, block.arguments)):
                     touch(block).status = "interrupted"
                     if is_task_tool(block.name):
-                        self._finish_task_card(block, fallback="cancelled")
+                        self._finish_task_card(block)
             if event.content and not self._has_assistant_text(event.content):
                 self.blocks.append(MessageBlock(kind="assistant", content=event.content))
             self.active_block = None
@@ -387,11 +396,10 @@ class CliState:
                     if is_task_tool(block.name):
                         block.status = "cancelled"
                         block.is_error = True
-                        self._finish_task_card(block, fallback="cancelled")
+                        self._finish_task_card(block)
                         continue
                     block.status = "error"
                     block.is_error = True
-                    block.exit_code = 1
                     if block.name == "execute":
                         artifact = block.artifact if isinstance(block.artifact, dict) else {}
                         block.artifact = {**artifact, "termination_reason": "cancelled"}
@@ -403,22 +411,20 @@ class CliState:
                         and not is_background_launch(block.name, block.arguments)):
                     touch(block).status = "error"
                     block.is_error = True
-                    block.exit_code = 1
                     if block.name == "start_task":
-                        self._finish_task_card(block, fallback="failed")
+                        self._finish_task_card(block)
             self.add_system(event.content or "Unknown error", error=True)
 
     def _apply_subagent_update(self, payload: dict[str, Any]) -> None:
         run_id = str(payload.get("run_id") or "")
         if not run_id:
             return
-        status = str(payload.get("status") or "running")
+        status = str(payload.get("status") or "")
         if status not in {"running", "completed", "failed", "cancelled"}:
-            status = "running"
+            return
         node = self.subagent_nodes.get(run_id)
-        # A child can emit a late progress tick while its finish event is applied.
-        # That tick must not reopen a task that has already ended.
-        if node is not None and node.status != "running" and status == "running":
+        # A late progress tick must not reopen a task that already ended.
+        if node is not None and node.status in {"completed", "failed", "cancelled"} and status == "running":
             return
         description = " ".join(str(payload.get("description") or "").split())
         depth = payload.get("depth")
@@ -451,30 +457,68 @@ class CliState:
             node.result = result_text
         self._refresh_owner(node)
 
-    def _finish_task_card(self, tool: ToolBlock, *, fallback: str = "") -> None:
-        """Stop counting this card's tree once the card itself has left `running`.
-
-        Child rows that already finished keep their own status. Only tasks still
-        marked running adopt the card's terminal status.
-        """
-        node = self._node_for_tool(tool.tool_call_id)
-        if node is None:
-            return
-        terminal = {"error": "failed", "interrupted": "cancelled", "cancelled": "cancelled", "completed": "completed"}.get(
-            tool.status, fallback or "failed",
-        )
-        if tool.status == "running":
-            terminal = fallback or "cancelled"
-        self._close_running(node.run_id, terminal)
-        if node.status == "running":
-            node.status = terminal
+    def _finish_task_card(self, tool: ToolBlock) -> None:
+        """Refresh this card from the nodes. A parent status does not rewrite children."""
         self._paint_task_card(tool)
 
-    def _close_running(self, run_id: str, status: str) -> None:
-        for node in self.subagent_nodes.values():
-            if node.parent_run_id == run_id and node.status == "running":
-                node.status = status
-                self._close_running(node.run_id, status)
+    def restore_task_tree(self, store: Any, root_id: str) -> None:
+        """Rebuild the task tree from persisted start and finish records."""
+        self.subagent_nodes.clear()
+
+        def absorb(parent_id: str) -> None:
+            for run_id in store.list_runs(parent_id):
+                if run_id in self.subagent_nodes:
+                    continue
+                meta = store.task_metadata(parent_id, run_id)
+                if meta is None:
+                    continue
+                status = str(meta.get("status") or "unconfirmed")
+                if status not in {"completed", "failed", "cancelled", "unconfirmed"}:
+                    status = "unconfirmed"
+                depth = meta.get("depth")
+                depth = depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1
+                elapsed = meta.get("elapsed_seconds")
+                result = ""
+                if meta.get("summary_truncated"):
+                    result = str(meta.get("result_summary") or "")
+                elif isinstance(meta.get("result"), str):
+                    result = meta["result"]
+                node = SubagentNode(
+                    run_id=run_id,
+                    parent_run_id=str(meta.get("parent_run_id") or parent_id),
+                    depth=depth,
+                    description=" ".join(str(meta.get("description") or "").split()) or "Delegated task",
+                    status=status,
+                    tool_call_id=str(meta.get("tool_call_id") or ""),
+                    elapsed_seconds=(
+                        float(elapsed)
+                        if type(elapsed) in {int, float} and not isinstance(elapsed, bool) and elapsed >= 0
+                        else None
+                    ),
+                    result=result,
+                )
+                self.subagent_nodes[run_id] = node
+                absorb(run_id)
+
+        absorb(root_id)
+        card_status = {
+            "completed": "completed", "failed": "error", "cancelled": "cancelled",
+            "unconfirmed": "unconfirmed",
+        }
+        for block in self.blocks:
+            if not isinstance(block, ToolBlock) or not is_task_tool(block.name):
+                continue
+            node = self._node_for_tool(block.tool_call_id)
+            if node is not None:
+                mapped = card_status.get(node.status, "unconfirmed")
+                if block.status in {"running", "interrupted", "waiting"} or not block.output:
+                    block.status = mapped
+                    if node.result:
+                        block.output = node.result
+                else:
+                    block.status = mapped
+                block.is_error = mapped in {"error", "cancelled"}
+            self._paint_task_card(block)
 
     def _refresh_owner(self, node: SubagentNode) -> None:
         tool = self._tool_by_id(self._owner_tool_id(node))

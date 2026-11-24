@@ -92,7 +92,7 @@ followup = runner.deliver_notifications()   # 没有可送达的结果或存在�
 
 `on_delta(kind, text)` 接收流式的思考与回答增量。`on_event(RunEvent)` 接收结构化事件，不含 ANSI 序列或终端宽度信息。
 
-原生 `start_task` 的开始和完成事件可用于构建独立任务卡片，最终结果保持完整；TUI 与历史恢复共用子任务失败/取消状态解析，避免把正常返回的失败摘要标成成功。
+原生 `start_task` 的开始和完成事件可用于构建独立任务卡片。同步结果和后台终态都带结构化 `status`。历史恢复读取任务日志里的 start 与 finish，不根据通知正文推断。
 
 `subagent_finished` 事件在后台任务结束时发出，可能发生在没有运行的空闲期间：`content` 是最终结果或失败/取消说明，
 `result` 包含 `run_id`、`tool_call_id`、`status`（`completed` / `failed` / `cancelled`）和父会话 ID。

@@ -86,7 +86,6 @@ from agent.runtime.permissions import (
     permission_mode_from_interrupt_on,
 )
 from agent.sessions.store import SessionStore, workspace_state_path
-from agent.sessions.transcript import subagent_card_status
 from agent.subagents.notifications import NOTIFICATION_KEY, notification_message
 from agent.sessions.contracts import SessionInfo, StopReason
 from agent.sessions.locks import SessionLockBusyError
@@ -746,6 +745,11 @@ class AgentRunner:
         """Background subagents of this runner that are still running."""
         manager = self._subagent_manager()
         return manager.background_count if manager is not None else 0
+
+    def task_log_store(self) -> Any:
+        """The tree's task log, or None when this runner has no subagent manager."""
+        manager = self._subagent_manager()
+        return getattr(manager, "log_store", None) if manager is not None else None
 
     def cancel_background_tasks(self) -> None:
         """Stop background subagents without cancelling the parent run."""
@@ -1643,11 +1647,6 @@ class AgentRunner:
             if event.type == "tool_started" and event.name == "start_task":
                 self._subagent_tool_ids.add(event.tool_call_id)
             elif event.type == "tool_completed" and event.tool_call_id in self._subagent_tool_ids:
-                # Native task returns an unnamed ToolMessage. Preserve the
-                # presentation identity even when resuming a saved tool step.
-                event = replace(event, name="start_task", is_error=(
-                    subagent_card_status(
-                        event.content, is_error=event.is_error, artifact=event.artifact,
-                    ) != "completed"
-                ))
+                # The tool node may omit the name. Task failure stays in the artifact.
+                event = replace(event, name="start_task")
             _emit(handler, event)

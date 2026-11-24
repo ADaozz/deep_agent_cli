@@ -1041,7 +1041,7 @@ class CliApplication:
             running=self.state.running,
             cancel_sent=self.run_view.cancel_sent,
             mcp_busy=self.mcp_controller.busy,
-            background_running=bool(self.state.subagent_count),
+            background_running=self.runner.background_task_count() > 0,
             buffer_empty=not text,
             exiting=self._exiting,
         )
