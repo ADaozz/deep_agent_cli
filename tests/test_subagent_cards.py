@@ -19,7 +19,7 @@ from tests.conftest import scripted_model
 
 def start(state, identifier, description):
     state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id=identifier,
-                         arguments={'description': description, 'subagent_type': 'general-purpose'}))
+                         arguments={'description': description}))
 
 
 @pytest.mark.parametrize('scheduler_first', [False, True])
@@ -117,7 +117,7 @@ def test_parallel_tasks_update_separately_and_keep_running_spinner(monkeypatch):
 ])
 def test_runner_and_unnamed_history_results_share_status(result, status):
     calls = [AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
-        'description': 'Fix median3', 'subagent_type': 'general-purpose'}}])]
+        'description': 'Fix median3'}}])]
     message = ToolMessage(content=result, tool_call_id='d')
     runner = AgentRunner(model=scripted_model([]), backend=StateBackend())
     state = CliState()
@@ -191,7 +191,7 @@ def test_title_is_bounded_and_does_not_modify_delegated_description():
 def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
     path = tmp_path / 'sessions.sqlite3'
     calls = AIMessage(content='', tool_calls=[{'id': name, 'name': 'start_task', 'args': {
-        'description': f'Fix {name}', 'subagent_type': 'general-purpose'}} for name in ['a', 'b']])
+        'description': f'Fix {name}'}} for name in ['a', 'b']])
     with closing(SessionStore(path)) as store:
         runner = AgentRunner(model=scripted_model([]), backend=StateBackend(), session_store=store)
         identifier = runner.thread_id
@@ -222,7 +222,7 @@ def test_child_internal_tools_and_thinking_do_not_create_main_cards(tmp_path, mo
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(backend, ExecutionMode.SANDBOXED))
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'delegate', 'args': {
-            'description': 'Inspect isolated file', 'subagent_type': 'general-purpose'}}]),
+            'description': 'Inspect isolated file'}}]),
         AIMessage(content='', additional_kwargs={'reasoning_content': 'private child thinking'},
                   tool_calls=[{'name': 'read', 'id': 'private-read', 'args': {'file_path': '/private-child.txt'}}]),
         AIMessage(content='Final child result'), AIMessage(content='Parent final answer'),
@@ -254,7 +254,6 @@ def _task_update(state, **fields):
     payload = {
         'run_id': 'a', 'parent_run_id': 'root', 'depth': 1, 'description': '执行与取消链路',
         'status': 'running', 'tool_call_id': 'card-a', 'elapsed_seconds': 1.2,
-        'input_tokens': 20, 'output_tokens': 8, 'tps': 12.5,
     }
     payload.update(fields)
     state.apply(RunEvent(type='subagent_update', result=payload))
@@ -268,11 +267,11 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     _task_update(state)
     _task_update(
         state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
-        tool_call_id='inner-1', elapsed_seconds=0.2, input_tokens=3, output_tokens=1, tps=8,
+        tool_call_id='inner-1', elapsed_seconds=0.2,
     )
     _task_update(
         state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
-        tool_call_id='inner-2', elapsed_seconds=0.1, input_tokens=0, output_tokens=0, tps=None,
+        tool_call_id='inner-2', elapsed_seconds=0.1,
     )
     # Two root cards plus two running children. A closing HTTP stream is not a third source.
     state.apply(RunEvent(type='subagents_changed', result={'count': 9}))
@@ -287,12 +286,13 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
     # Nested rows reuse the root title; only the tree prefix is added.
     assert child[child.index('Running SubAgent'):] == 'Running SubAgent · RunController 取消传播'
     assert parent[parent.index('Running SubAgent'):] == 'Running SubAgent · 执行与取消链路'
-    assert '├─' in child and child.index('Running SubAgent') > child.index('├─')
+    assert '├ ' in child and '├─' not in child
+    assert child.index('Running SubAgent') > child.index('├')
     assert '审批与权限链路' in text and 'RunController 取消传播' in text.split('审批与权限链路')[0]
 
     _task_update(
         state, run_id='a1', parent_run_id='a', depth=2, description='RunController 取消传播',
-        status='completed', elapsed_seconds=0.4, input_tokens=3, output_tokens=1, tps=8,
+        status='completed', elapsed_seconds=0.4,
         result='取消传播已核对',
     )
     assert state.blocks[0].status == 'running' and state.blocks[1].status == 'running'
@@ -306,7 +306,7 @@ def test_nested_tasks_update_in_place_and_do_not_finish_the_parent():
 
     _task_update(
         state, run_id='a2', parent_run_id='a', depth=2, description='异步调用与资源回收',
-        status='completed', elapsed_seconds=0.5, input_tokens=4, output_tokens=2, tps=11,
+        status='completed', elapsed_seconds=0.5,
     )
     assert state.blocks[0].status == 'running'
     assert state.subagent_count == 2

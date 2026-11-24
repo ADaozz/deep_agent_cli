@@ -38,7 +38,6 @@ from agent.cli.rendering import (
     _message,
     _tool,
     render_interaction,
-    render_review,
     render_transcript,
 )
 from agent.cli.state import CliState, MessageBlock, ToolBlock, TurnSummaryBlock
@@ -783,7 +782,7 @@ def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> N
     """SubAgent and other generic cards share the same title wrap/indent path."""
     long = "x" * 180
     if name in {"start_task", "start_background_task"}:
-        args = {"description": f"Do carefully: {long}", "subagent_type": "general-purpose"}
+        args = {"description": f"Do carefully: {long}"}
         marker = "SubAgent"
     else:
         args = {"query": long}
@@ -1100,11 +1099,13 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
     assert "- keep-0" in rendered
     assert "keep-15" not in rendered
     assert "Ctrl+R to review" in rendered
-    review = _plain(render_review([("edit", {
-        "file_path": "/workspace/tests/test_cache.py", "old_string": old, "new_string": new,
-    })], 80))
-    assert "keep-15" in review
-    assert "--- a/workspace/tests/test_cache.py" in review
+    for flag in ("diffs_expanded", "tools_expanded"):
+        expanded = _plain(render_transcript(CliState(blocks=state.blocks, **{flag: True}), 80))
+        assert "DeepAgentCLI" in expanded
+        assert "waiting for input" in expanded
+        assert "keep-15" in expanded
+        assert "hidden" not in expanded
+        assert "--- a/workspace/tests/test_cache.py" not in expanded
 
 
 def test_edit_preview_excludes_context_and_metadata_lines() -> None:
@@ -1145,9 +1146,9 @@ def test_edit_counts_are_colored_and_changed_lines_are_numbered(monkeypatch) -> 
     assert "2+ changed" in plain
     assert re.search(r"\x1b\[38;2;19;161;14m\+1\x1b\[0m", rendered)
     assert re.search(r"\x1b\[38;2;197;15;31m-1\x1b\[0m", rendered)
-    review = _plain(render_review([("edit", block.arguments)], 100))
-    assert "2- second" in review
-    assert "2+ changed" in review
+    expanded = _plain(render_transcript(CliState(blocks=[block], diffs_expanded=True), 100))
+    assert "2- second" in expanded
+    assert "2+ changed" in expanded
 
 
 def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
@@ -1165,16 +1166,12 @@ def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
         assert f"+ entry {index}" in rendered
     assert "+ entry 2" not in rendered
     assert "4 changed lines hidden" in rendered
-    app = CliApplication.__new__(CliApplication)
-    from agent.cli.view_state import DialogState
-    app.dialogs = DialogState()
-    app.state = state
-    app.dialogs.current = None
-    calls = app._review_calls()
-    assert len(calls) == 4
-    review = _plain(render_review(calls, 100))
+    expanded = _plain(render_transcript(CliState(blocks=blocks, diffs_expanded=True), 100))
+    assert "DeepAgentCLI" in expanded
+    assert expanded.count(f"Edited {path}") == 1
     for index in range(4):
-        assert f"+ entry {index}" in review
+        assert f"+ entry {index}" in expanded
+    assert "hidden" not in expanded
 
 
 def test_grouped_edits_identify_independent_snippet_line_numbers() -> None:
@@ -1194,28 +1191,87 @@ def test_grouped_edits_identify_independent_snippet_line_numbers() -> None:
     assert rendered.index("Edit 2 · snippet line numbers") < rendered.index("1+ new second")
     assert rendered.index("1+ new second") < rendered.index("1- old second")
     assert "(+2 -2)" in rendered
-    review = _plain(render_review([("edit", block.arguments) for block in blocks], 100))
-    assert review.count("edit /workspace/App.vue · snippet line numbers") == 2
+    expanded = _plain(render_transcript(CliState(blocks=blocks, tools_expanded=True), 100))
+    assert expanded.count("Edited /workspace/App.vue") == 1
+    assert expanded.count("snippet line numbers") == 2
 
 
 def test_edit_group_merges_across_files_until_message() -> None:
-    def edit(identifier: str, path: str) -> ToolBlock:
+    def edit(identifier: str, path: str, new: str = "y") -> ToolBlock:
         return ToolBlock(
             tool_call_id=identifier, name="edit",
-            arguments={"file_path": path, "old_string": "x", "new_string": "y"},
+            arguments={"file_path": path, "old_string": "x", "new_string": new},
             status="completed",
         )
 
     path = "/workspace/report.md"
     state = CliState(blocks=[
-        edit("one", path), edit("other", "/workspace/other.md"), edit("two", path),
+        edit("one", path, "first"), edit("other", "/workspace/other.md"), edit("two", path, "second"),
         MessageBlock(kind="assistant", content="done"), edit("three", path),
     ])
     rendered = _plain(render_transcript(state, 100))
     assert "Edited 2 files" in rendered
-    assert f"└ {path}" in rendered
+    assert f"├ {path}" in rendered
     assert "└ /workspace/other.md" in rendered
+    # Multi-file cards match create: latest edit per path, no Edit N headers.
+    assert "Edit 1 · snippet line numbers" not in rendered
+    assert "+ second" in rendered
+    assert "+ first" not in rendered
     assert rendered.count(f"Edited {path}") == 1
+
+
+def test_multi_file_edit_matches_create_latest_per_path() -> None:
+    """Same path twice inside a multi-file group: show latest only, like Created N files."""
+    edits = [
+        ToolBlock("e1", "edit", {
+            "file_path": "/workspace/a.md", "old_string": "x", "new_string": "first",
+        }, status="completed"),
+        ToolBlock("e2", "edit", {
+            "file_path": "/workspace/b.md", "old_string": "x", "new_string": "b",
+        }, status="completed"),
+        ToolBlock("e3", "edit", {
+            "file_path": "/workspace/a.md", "old_string": "y", "new_string": "second",
+        }, status="completed"),
+    ]
+    rendered = _plain(render_transcript(CliState(blocks=edits), 100))
+    assert "Edited 2 files (+2 -2)" in rendered
+    assert "├ /workspace/a.md (+1 -1)" in rendered
+    assert "└ /workspace/b.md (+1 -1)" in rendered
+    assert "+ second" in rendered
+    assert "+ first" not in rendered
+    assert "Edit 1 · snippet line numbers" not in rendered
+    assert "⋮" not in rendered
+
+
+def test_multi_file_tree_matches_subagent_frame_and_marks_only_omitted_files() -> None:
+    """├ / │ / └ stay gray; ⋮ only under a path that actually hid lines."""
+    short = "only"
+    long = "\n".join(f"line {index}" for index in range(6))
+    blocks = [
+        ToolBlock("c0", "write", {"file_path": "/workspace/short.md", "content": short},
+                  artifact={"operation": "create"}, status="completed"),
+        ToolBlock("c1", "write", {"file_path": "/workspace/long.md", "content": long},
+                  artifact={"operation": "create"}, status="completed"),
+        ToolBlock("c2", "write", {"file_path": "/workspace/last.md", "content": "tail"},
+                  artifact={"operation": "create"}, status="completed"),
+    ]
+    rendered = _plain(render_transcript(CliState(blocks=blocks), 100))
+    lines = [line.rstrip() for line in rendered.splitlines() if line.strip()]
+    short_at = next(i for i, line in enumerate(lines) if "├ /workspace/short.md" in line)
+    long_at = next(i for i, line in enumerate(lines) if "├ /workspace/long.md" in line)
+    last_at = next(i for i, line in enumerate(lines) if "└ /workspace/last.md" in line)
+    short_body = lines[short_at + 1:long_at]
+    long_body = lines[long_at + 1:last_at]
+    last_body = lines[last_at + 1:]
+    assert all("│" in line for line in short_body)
+    assert "⋮" not in "\n".join(short_body)
+    assert any("│" in line and "⋮" in line for line in long_body)
+    assert all("│" not in line for line in last_body)
+    assert "⋮" not in "\n".join(last_body)
+    assert "changed lines hidden" in rendered
+    # Single-file create does not grow a tree or a ⋮.
+    alone = _plain(render_transcript(CliState(blocks=[blocks[0]]), 100))
+    assert "├ " not in alone and "└ " not in alone and "⋮" not in alone
 
 
 def _diff_background_rows(rendered: str, color: str) -> list[str]:
@@ -1234,14 +1290,15 @@ def test_diff_background_covers_line_number_through_content_and_leaves_trail(mon
         },
         status="completed",
     )
+    write = ToolBlock(
+        tool_call_id="write-background", name="write",
+        arguments={"file_path": "/workspace/new.md", "content": "new"}, status="completed",
+    )
     for rendered, available in (
         (render_transcript(CliState(blocks=[block]), 40), 39),
-        (render_review([("edit", block.arguments)], 40), 39),
-        (render_transcript(CliState(blocks=[ToolBlock(
-            tool_call_id="write-background", name="write",
-            arguments={"file_path": "/workspace/new.md", "content": "new"}, status="completed",
-        )]), 40), 39),
-        (render_review([("write", {"file_path": "/workspace/new.md", "content": "new"})], 40), 39),
+        (render_transcript(CliState(blocks=[block], diffs_expanded=True), 40), 39),
+        (render_transcript(CliState(blocks=[write]), 40), 39),
+        (render_transcript(CliState(blocks=[write], tools_expanded=True), 40), 39),
     ):
         green = _diff_background_rows(rendered, "0;95;0")
         assert green
@@ -1271,30 +1328,30 @@ def test_large_write_preview_has_numbered_content_width_green_rows(monkeypatch) 
     assert all(len(row) < 59 for row in green_rows)
     assert _diff_background_rows(rendered, "12;12;12")
 
-    review = _plain(render_review([("write", block.arguments)], 60))
-    assert re.search(r"(?m)^\s+118\+ line 115", review)
+    expanded = _plain(render_transcript(CliState(blocks=[block], diffs_expanded=True), 60))
+    assert "DeepAgentCLI" in expanded
+    assert re.search(r"(?m)^\s+118\+ line 115", expanded)
+    assert "hidden" not in expanded
 
 
-def test_edit_context_stays_unhighlighted_while_changed_rows_use_content_width(monkeypatch) -> None:
+def test_edit_changed_rows_use_content_width_without_context(monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     args = {
         "file_path": "/workspace/example.py",
         "old_string": "keep\nold\nend",
         "new_string": "keep\nnew\nend",
     }
-    rendered = render_review([("edit", args)], 50)
+    block = ToolBlock("edit-width", "edit", args, status="completed")
+    rendered = render_transcript(CliState(blocks=[block], diffs_expanded=True), 50)
     plain = _plain(rendered)
     assert re.search(r"(?m)^\s+2- old", plain)
     assert re.search(r"(?m)^\s+2\+ new", plain)
-    assert re.search(r"(?m)^\s+1  keep", plain)
-    assert "\x1b[48;2;" not in next(
-        line for line in rendered.splitlines() if "keep" in line
-    )
+    assert "keep" not in plain
+    assert "end" not in plain
     red = _diff_background_rows(rendered, "95;0;0")
     green = _diff_background_rows(rendered, "0;95;0")
     assert green == ["2+ new"]
     assert red == ["2- old"]
-    # Same line number: add row appears before delete in the review body.
     assert plain.index("2+ new") < plain.index("2- old")
     assert _diff_background_rows(rendered, "12;12;12")
 
@@ -1306,11 +1363,10 @@ def test_python_diff_keeps_syntax_foreground_on_add_delete_background(monkeypatc
         "old_string": "def foo():\n    return 1\n",
         "new_string": "def foo():\n    return 2\n",
     }
+    block = ToolBlock("edit-syntax", "edit", args, status="completed")
     for rendered in (
-        render_review([("edit", args)], 80),
-        render_transcript(CliState(blocks=[ToolBlock(
-            "edit-syntax", "edit", args, status="completed",
-        )]), 80),
+        render_transcript(CliState(blocks=[block]), 80),
+        render_transcript(CliState(blocks=[block], tools_expanded=True), 80),
     ):
         assert "48;2;95;0;0" in rendered
         assert "48;2;0;95;0" in rendered
@@ -1321,7 +1377,7 @@ def test_python_diff_keeps_syntax_foreground_on_add_delete_background(monkeypatc
         )
 
 
-@pytest.mark.parametrize("view", ["preview", "review"])
+@pytest.mark.parametrize("view", ["preview", "expanded"])
 @pytest.mark.parametrize("depth,green,red", [
     ("DEPTH_4_BIT", "42", "41"),
     ("DEPTH_8_BIT", "48;5;22", "48;5;52"),
@@ -1329,9 +1385,7 @@ def test_python_diff_keeps_syntax_foreground_on_add_delete_background(monkeypatc
 ])
 def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, green, red) -> None:
     from io import StringIO
-    from prompt_toolkit import ANSI
     from prompt_toolkit.data_structures import Size
-    from prompt_toolkit.formatted_text import to_formatted_text
     from prompt_toolkit.output.color_depth import ColorDepth
     from prompt_toolkit.output.vt100 import Vt100_Output
     from prompt_toolkit.styles import Style
@@ -1339,10 +1393,8 @@ def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, gree
     block = ToolBlock("edit-colors", "edit", {
         "file_path": "/workspace/example.py", "old_string": "old", "new_string": "new",
     }, status="completed")
-    if view == "preview":
-        fragments, _ = TranscriptRenderer().render(CliState(blocks=[block]), 60)
-    else:
-        fragments = to_formatted_text(ANSI(render_review([("edit", block.arguments)], 60)))
+    state = CliState(blocks=[block], diffs_expanded=view == "expanded")
+    fragments, _ = TranscriptRenderer().render(state, 60)
     for marker, color in (("+", "00af00"), ("-", "af0000")):
         marked = "".join(text for style, text in fragments if color in style)
         assert marked == marker
@@ -1358,19 +1410,26 @@ def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, gree
         assert any(f";{expected};" in f";{sequence};" for sequence in sequences)
 
 
-def test_edit_review_keeps_context_headers_and_full_diff() -> None:
+def test_expanded_edit_keeps_changed_lines_on_the_original_card() -> None:
     args = {
         "file_path": "/workspace/notes.md",
         "old_string": "first\nsecond\nthird",
         "new_string": "first\nchanged\nthird",
     }
-    review = _plain(render_review([("edit", args)], 100))
-    assert "--- a/workspace/notes.md" in review
-    assert "+++ b/workspace/notes.md" in review
-    assert "@@" in review
-    assert " first" in review
-    assert "- second" in review
-    assert "+ changed" in review
+    state = CliState(blocks=[
+        MessageBlock(kind="user", content="nearby"),
+        ToolBlock("edit-expand", "edit", args, status="completed"),
+    ], diffs_expanded=True)
+    rendered = _plain(render_transcript(state, 100))
+    assert "DeepAgentCLI" in rendered
+    assert "nearby" in rendered
+    assert "Edited /workspace/notes.md" in rendered
+    assert "- second" in rendered
+    assert "+ changed" in rendered
+    assert "first" not in rendered
+    assert "third" not in rendered
+    for header in ("--- a/", "+++ b/", "@@"):
+        assert header not in rendered
 
 
 def test_edit_preview_pure_deletion_over_budget() -> None:
@@ -1405,9 +1464,11 @@ def test_edit_with_empty_old_string_stays_edited_and_keeps_review_diff() -> None
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
     assert "Edited /workspace/f.md (+10 -0)" in rendered
     assert "+ line-0" in rendered
-    review = _plain(render_review([("edit", block.arguments)], 100))
-    assert "+ line-0" in review
-    assert "+ line-9" in review
+    expanded = _plain(render_transcript(CliState(blocks=[block], tools_expanded=True), 100))
+    assert "Edited /workspace/f.md" in expanded
+    assert "+ line-0" in expanded
+    assert "+ line-9" in expanded
+    assert "hidden" not in expanded
 
 
 def test_consecutive_creates_list_each_file_with_counts_and_preview() -> None:
@@ -1425,19 +1486,47 @@ def test_consecutive_creates_list_each_file_with_counts_and_preview() -> None:
     rendered = _plain(colored)
     assert rendered.count("Created 4 files") == 1
     assert "Created 4 files (+4 -0)" in rendered
-    for index in range(4):
-        assert f"└ /workspace/file-{index}.md (+1 -0)" in rendered
+    for index in range(3):
+        assert f"├ /workspace/file-{index}.md (+1 -0)" in rendered
         assert f"+ content {index}" in rendered
+    assert "└ /workspace/file-3.md (+1 -0)" in rendered
+    assert "+ content 3" in rendered
+    assert "⋮" not in rendered
     assert re.search(r"\x1b\[38;2;19;161;14m\+1\x1b\[0m", colored)
     assert re.search(r"\x1b\[38;2;197;15;31m-0\x1b\[0m", colored)
-    app = CliApplication.__new__(CliApplication)
-    from agent.cli.view_state import DialogState
-    app.dialogs = DialogState()
-    app.state = state
-    app.dialogs.current = None
-    review = _plain(render_review(app._review_calls(), 100))
-    assert "+ content 0" in review
-    assert "+ content 3" in review
+    expanded = _plain(render_transcript(CliState(blocks=blocks, diffs_expanded=True), 100))
+    assert "DeepAgentCLI" in expanded
+    assert "Created 4 files" in expanded
+    assert "+ content 0" in expanded
+    assert "+ content 3" in expanded
+
+
+def test_file_expand_flags_share_in_place_full_body() -> None:
+    content = "\n".join(f"line-{index}" for index in range(6))
+    blocks = [
+        MessageBlock(kind="user", content="keep this message"),
+        *[ToolBlock(
+            f"create-{index}", "write",
+            {"file_path": f"/workspace/f{index}.py", "content": content},
+            artifact={"operation": "create"}, status="completed",
+        ) for index in range(2)],
+    ]
+    collapsed = _plain(render_transcript(CliState(blocks=blocks), 100))
+    assert "keep this message" in collapsed
+    assert "Created 2 files" in collapsed
+    assert "⋮" in collapsed
+    assert "line-5" not in collapsed
+    for flag in ("diffs_expanded", "tools_expanded"):
+        rendered = _plain(render_transcript(CliState(blocks=blocks, **{flag: True}), 100))
+        assert "DeepAgentCLI" in rendered
+        assert "keep this message" in rendered
+        assert "Created 2 files" in rendered
+        assert "├ /workspace/f0.py" in rendered
+        assert "└ /workspace/f1.py" in rendered
+        assert "line-5" in rendered
+        assert "⋮" not in rendered
+        assert "hidden" not in rendered
+        assert "@@" not in rendered
 
 
 def test_write_operation_artifact_controls_create_and_overwrite_titles() -> None:
@@ -1483,9 +1572,10 @@ def test_create_aggregation_consumes_semantics_without_tool_identity() -> None:
     mutations = [FileMutationPreview(f"/workspace/{index}.py", "create") for index in range(7)]
     grouped = aggregate_file_mutations(mutations)
     assert grouped.paths == tuple(mutation.path for mutation in mutations)
-    assert grouped.compact_lines[0].text == "└ /workspace/0.py"
-    assert grouped.compact_lines[-1].text == "└ /workspace/6.py"
-    assert len(grouped.compact_lines) == 7
+    assert grouped.sections[0].path == "/workspace/0.py"
+    assert grouped.sections[-1].path == "/workspace/6.py"
+    assert len(grouped.sections) == 7
+    assert grouped.compact_lines == ()
 
 
 def test_edit_preview_many_deletions_keep_one_addition() -> None:
@@ -1510,9 +1600,11 @@ def test_edit_preview_many_deletions_keep_one_addition() -> None:
         "… 13 changed lines hidden · Ctrl+R to review",
     ]
     assert "  ⋮" not in texts
-    review = _plain(render_review([("edit", block.arguments)], 100))
-    assert "- keep-15" in review
-    assert "+ replaced" in review
+    expanded = _plain(render_transcript(CliState(blocks=[block], diffs_expanded=True), 100))
+    assert "- keep-15" in expanded
+    assert "+ replaced" in expanded
+    assert "hidden" not in expanded
+    assert "⋮" not in expanded
 
 
 def test_edit_preview_many_additions_keep_one_deletion() -> None:
@@ -1584,7 +1676,7 @@ def test_edit_preview_pairs_same_number_add_before_delete() -> None:
     ]
 
 
-def test_edit_preview_marks_hunk_jumps_with_separator() -> None:
+def test_edit_preview_hunk_jumps_stay_unmarked() -> None:
     keep = "\n".join(f"M{index}" for index in range(7))
     block = ToolBlock(
         tool_call_id="edit-hunks",
@@ -1604,7 +1696,8 @@ def test_edit_preview_marks_hunk_jumps_with_separator() -> None:
     assert "+ new2" in rendered
     assert "changed lines hidden" not in rendered
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
-    assert texts == ["+ new1", "- old1", "  ⋮", "+ new2", "- old2"]
+    assert texts == ["+ new1", "- old1", "+ new2", "- old2"]
+    assert "⋮" not in rendered
 
 
 def test_edit_preview_single_hunk_never_shows_separator() -> None:
@@ -1618,7 +1711,7 @@ def test_edit_preview_single_hunk_never_shows_separator() -> None:
     assert texts == ["+ x", "- c"]
 
 
-def test_edit_preview_separator_does_not_consume_budget() -> None:
+def test_edit_preview_hunk_jumps_do_not_consume_budget() -> None:
     keep_p = "\n".join(f"P{index}" for index in range(7))
     keep_q = "\n".join(f"Q{index}" for index in range(7))
     block = ToolBlock(
@@ -1634,9 +1727,9 @@ def test_edit_preview_separator_does_not_consume_budget() -> None:
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     changed = [text for text in texts if text.startswith(("-", "+"))]
     assert len(changed) == 8
-    assert texts.count("  ⋮") == 2
+    assert "⋮" not in "".join(texts)
     assert texts == [
-        "+ A2", "- A", "  ⋮", "+ B", "- B1", "- B2", "  ⋮", "+ D1", "+ D2", "- D",
+        "+ A2", "- A", "+ B", "- B1", "- B2", "+ D1", "+ D2", "- D",
     ]
     assert "changed lines hidden" not in _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
 
@@ -1653,7 +1746,7 @@ def test_edit_preview_hidden_count_counts_only_changed_lines() -> None:
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
     changed = [text for text in texts if text.startswith(("-", "+"))]
     assert len(changed) == 8
-    assert texts.count("  ⋮") == 1
+    assert "⋮" not in "".join(texts)
     assert texts[-1] == "… 6 changed lines hidden · Ctrl+R to review"
 
 
@@ -1679,8 +1772,6 @@ def test_edit_preview_empty_new_string_still_shows_deletion() -> None:
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
     assert "- foo" in rendered
     assert "changed lines hidden" not in rendered
-    review = _plain(render_review([("edit", block.arguments)], 100))
-    assert "- foo" in review
 
 
 def test_edit_preview_empty_old_string_shows_addition() -> None:
@@ -1693,8 +1784,6 @@ def test_edit_preview_empty_old_string_shows_addition() -> None:
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
     assert "Edited /workspace/f.md (+1 -0)" in rendered
     assert "+ foo" in rendered
-    review = _plain(render_review([("edit", block.arguments)], 100))
-    assert "+ foo" in review
 
 
 def test_edit_preview_both_empty_strings_has_no_change() -> None:
@@ -1709,7 +1798,6 @@ def test_edit_preview_both_empty_strings_has_no_change() -> None:
     assert "(+" not in rendered
     assert " - " not in rendered
     assert " + " not in rendered
-    assert "Nothing to review." in _plain(render_review([("edit", args)], 100))
 
 
 def test_write_empty_file_has_no_fabricated_diff() -> None:
@@ -1722,8 +1810,6 @@ def test_write_empty_file_has_no_fabricated_diff() -> None:
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
     assert "write /workspace/empty.md" in rendered
     assert "+0 lines" not in rendered
-    review = _plain(render_review([("write", args)], 100))
-    assert "Nothing to review." in review
 
     created = ToolBlock(
         tool_call_id="write-empty-created", name="write", arguments=args,
@@ -1926,11 +2012,13 @@ def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
     assert "@@ -0,0" not in preview
     assert "line 296" not in preview
 
-    review = _plain(render_review([("write", args)], 100))
-    assert "+302 lines" in review or "(+302 -0)" in review
-    assert "+ line 296" in review
-    assert "--- /dev/null" not in review
-    assert "@@ -0,0" not in review
+    expanded = _plain(render_transcript(CliState(blocks=state.blocks, tools_expanded=True), 100))
+    assert "DeepAgentCLI" in expanded
+    assert "(+302 -0)" in expanded
+    assert "+ line 296" in expanded
+    assert "hidden" not in expanded
+    assert "--- /dev/null" not in expanded
+    assert "@@ -0,0" not in expanded
 
 
 def test_truncated_tool_completion_uses_final_tail_without_snapshot() -> None:

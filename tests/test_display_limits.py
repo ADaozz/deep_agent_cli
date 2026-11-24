@@ -149,7 +149,8 @@ def test_file_preview_and_create_list_limits() -> None:
     state = CliState(blocks=creates)
     text = plain(render_transcript(state, 100, limits=configured))
     assert "Created 5 files (+5 -0)" in text
-    assert all(f"└ file{i} (+1 -0)" in text for i in range(5))
+    assert all(f"├ file{i} (+1 -0)" in text for i in range(4))
+    assert "└ file4 (+1 -0)" in text
 
 
 def test_exploration_and_failure_summary_limits() -> None:

@@ -467,10 +467,10 @@ def test_grep_and_glob_are_not_registered(workspace, monkeypatch, permission):
     assert "grep" not in names
     assert "glob" not in names
     assert "write_todos" not in names
-    delegation = set() if permission is PermissionMode.ASK else {"start_task", "start_background_task"}
+    delegation = set() if permission is PermissionMode.ASK else {"start_task"}
     assert set(names) == delegation | {
         "ls", "read", "write", "edit", "delete", "execute", "request_human_input", "compact_conversation",
-        "read_task_log", "check_background_task", "cancel_background_task"}
+        "read_task", "wait_task", "cancel_task"}
     from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE
 
     execute = next(tool for tool in schemas[-1] if tool.name == "execute")

@@ -96,9 +96,9 @@ followup = runner.deliver_notifications()   # 没有可送达的结果或存在�
 
 `subagent_finished` 事件在后台任务结束时发出，可能发生在没有运行的空闲期间：`content` 是最终结果或失败/取消说明，
 `result` 包含 `run_id`、`tool_call_id`、`status`（`completed` / `failed` / `cancelled`）和父会话 ID。
-`start_background_task` 的 `tool_completed` 只表示启动成功，不代表任务完成。
+`start_task` 且 `run_in_background=true` 的 `tool_completed` 只表示启动成功，不代表任务完成。
 
-`subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
+`subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务不采集 Token、TPS、TTFT 或压缩状态，思考、中间回答和内部工具调用不进入主界面。模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
 `execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
 

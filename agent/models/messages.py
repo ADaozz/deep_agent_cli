@@ -17,11 +17,11 @@ from agent.execution.types import SKILLS_ROOT
 DeltaHandler = Callable[[str, str], None]
 
 
-def message_text(message: BaseMessage) -> str:
+def message_text(message: Any) -> str:
     text = getattr(message, "text", None)
     if isinstance(text, str) and text:
         return text
-    content = message.content
+    content = getattr(message, "content", "")
     if isinstance(content, str):
         return content
     parts: list[str] = []
@@ -93,6 +93,16 @@ def reasoning_text(message: BaseMessage) -> str:
 
 def visible_text(message: BaseMessage) -> str:
     return _split_think(message_text(message))[0]
+
+
+def final_answer(messages: Any) -> str:
+    """Text of the latest assistant message that is not still calling tools."""
+    from langchain_core.messages import AIMessage
+
+    for message in reversed(list(messages or [])):
+        if isinstance(message, AIMessage) and not message.tool_calls:
+            return visible_text(message) or message_text(message)
+    return ""
 
 
 def _chunk_message(chunk: Any) -> BaseMessage | None:
@@ -179,10 +189,8 @@ class StreamDeltaCallback(BaseCallbackHandler):
             self._message = message if self._message is None else self._message + message
             if self._on_usage and isinstance(message.usage_metadata, dict):
                 # A usage-only final chunk has no text, but must still reach TUI.
-                usage = self._message.usage_metadata or {}
-                self._on_usage({key: value for key, value in usage.items()
-                                if key in {"input_tokens", "output_tokens", "total_tokens"}
-                                and type(value) is int and value >= 0})
+                from agent.runtime.metrics import normalize_usage
+                self._on_usage(normalize_usage(self._message.usage_metadata or {}))
             visible = visible_text(self._message)
             reasoning = reasoning_text(self._message)
         else:

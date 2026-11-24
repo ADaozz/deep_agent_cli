@@ -162,7 +162,7 @@ def test_subagent_manual_decision_returns_to_parent_without_interrupt(tmp_path, 
     backend.calls = []
     model = scripted_model([
         AIMessage(content="", tool_calls=[{"name": "start_task", "id": "delegate", "args": {
-            "description": "inspect delegated item", "subagent_type": "general-purpose"}}]),
+            "description": "inspect delegated item"}}]),
         AIMessage(content="", tool_calls=[{"name": "execute", "id": "child-call",
                                           "args": {"command": "test", "network": True}}]),
         AIMessage(content="done"),
@@ -213,9 +213,9 @@ def test_depth2_flash_evidence_keeps_root_user_not_mid_task(tmp_path, monkeypatc
     backend.calls = []
     model = scripted_model([
         AIMessage(content="", tool_calls=[{"name": "start_task", "id": "mid", "args": {
-            "description": "expanded scope beyond user request", "subagent_type": "general-purpose"}}]),
+            "description": "expanded scope beyond user request"}}]),
         AIMessage(content="", tool_calls=[{"name": "start_task", "id": "leaf", "args": {
-            "description": "leaf delegated work", "subagent_type": "general-purpose"}}]),
+            "description": "leaf delegated work"}}]),
         AIMessage(content="", tool_calls=[{"name": "execute", "id": "leaf-call",
                                           "args": {"command": "test", "network": True}}]),
         AIMessage(content="mid done"),

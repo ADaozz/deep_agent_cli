@@ -71,7 +71,7 @@ flowchart TB
 
 - **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。
 - **等待与异常单独表达**：等待执行使用中性动作名和 `waiting for input`；完成未确认使用 `interrupted (completion unconfirmed)`。命令失败、超时、取消、启动失败分别显示 `Failed`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
-- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`，并在每文件下展示 compact diff。
+- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`。多文件树与嵌套 SubAgent 共用同一套灰色树干；文件行用短的 `├` / `│` / `└`，并在每文件下展示 compact diff。`Ctrl+R` 与 `Ctrl+O` 都在这张卡片上展开全部变更行。
 - **区分动作标签与状态标题**：工具名、审批动作和探索明细中的 `Read`、`Search`、`List` 等动作标签不承担完成状态；成功与否由状态标题、标记及异常提示表达。
 - **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
 
@@ -88,10 +88,9 @@ flowchart TB
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
 | `web_search`、`web_fetch` | 配置 `llm.models.deepseek.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
-| `start_task` | 主 Agent、`subagents.enabled: true` 且权限为 `auto` 或 `allow` | 同步等待子任务；子任务使用主 Agent 的权限模式 |
-| `read_task_log` | 主 Agent 且 `subagents.enabled: true` | 查询当前父会话的日志索引或有界日志页 |
-| `start_background_task` | 与 `start_task` 相同，且 `subagents.background: true` | 启动后立即返回；子任务在后台运行，完成后自动通知主 Agent |
-| `check_background_task`、`cancel_background_task` | 主 Agent、`subagents.enabled: true` 且 `subagents.background: true` | 查看或取消后台任务，`ask` 下同样可用 |
+| `start_task` | 能继续派发、且权限为 `auto` 或 `allow` | 任务正文是 `description`。Root 可传 `run_in_background`；同步子 Agent 只能同步派发 |
+| `read_task` | 能继续派发的 Agent，含 `ask` | 列出或查看自己的直接子任务；`include_logs=true` 读取一页日志 |
+| `wait_task`、`cancel_task` | 仅 Root，含 `ask` | 等待后台任务结束，或请求取消一个后台任务。取消请求不表示已经停止 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -101,14 +100,14 @@ flowchart TB
 
 文件工具由 `WorkspaceFilesystemMiddleware` 提供。它用相同中间件名称替换上游的 `FilesystemMiddleware`，修正 Composite Backend 的执行能力判断，使单独注册的 `execute` 仍对模型可见。注册给模型的文件工具只有 `ls`、`read`、`write`、`edit` 和 `delete`，不包含 `grep` 或 `glob`。
 
-`ls` 和 `read` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本，其余文件工具沿用上游说明。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`。调用方传入的 `custom_tool_descriptions` 优先于这两条默认值。
+`ls`、`read`、`write`、`edit`、`delete` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`；`write` / `edit` / `delete` 明确同一 `file_path` 不可同轮并发、不同路径可以并行。调用方传入的 `custom_tool_descriptions` 优先于这些默认值。
 
-Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，再通过 `create_deep_agent(subagents=[...])` 显式注册项目的 `CompiledSubAgent`，由原生 `SubAgentMiddleware` 提供 `start_task`。关闭 `subagents.enabled` 后不提供 `start_task` 或 `read_task_log`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项目不注册子 Agent 类型，`start_task` 由本地工具直接调用 `SubAgentRuntime`。关闭 `subagents.enabled` 后不提供 `start_task`、`read_task`、`wait_task` 或 `cancel_task`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
 ### SubAgent 委派边界
 
 只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
-这个条件通过 `general-purpose` 描述告知主模型，不负责检测文件冲突，也不构成沙箱安全边界。
+这个条件写在 `start_task` 的工具描述里，不负责检测文件冲突，也不构成沙箱安全边界。
 子任务共享工作区，依赖前一任务结果或会竞争修改同一文件的步骤应顺序执行。
 
 每次委派由轻量 Runnable 复用统一工厂的图，不创建新的 AgentRunner 或 SessionRuntime。
@@ -119,8 +118,8 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 
 ### 后台委派
 
-`start_background_task` 与同步 `start_task` 并存，由主模型按场景选择：需要等结果才能继续时用 `start_task`，
-子任务耗时较长且下一步不依赖其结果时用后台委派。没有使用上游 `AsyncSubAgentMiddleware`，
+同一个 `start_task` 同时承担同步和后台派发。需要结果才能继续时用 `run_in_background=false`，
+子任务可以独立进行时用 `run_in_background=true`。同一批次不能混用两种模式。没有使用上游 `AsyncSubAgentMiddleware`，
 它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
 
 - 启动：工具取得一个并发许可（与 `start_task` 共用每父节点 / 全树上限，超限立即返回错误）后启动线程并返回 `run_id`，
@@ -132,17 +131,17 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
   图返回后才到达的通知由 `AgentRunner` 的收尾循环作为新一轮继续。
 - 空闲唤醒：主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
   存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。
-- 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_background_task` 只停止指定任务。
+- 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_task` 只请求停止指定任务，并发名额要等任务真正结束才释放。
   被取消的子任务只更新卡片，不产生通知，也不唤醒主 Agent。
 - 会话边界：新建会话、切换到其他会话或关闭 Runner 时取消全部后台任务并丢弃未送达的通知，结果不会进入另一个会话。
 - 沙箱模式切换会丢弃沙箱内进程：空闲时若仍有后台任务，切换保持排队；在运行边界应用时，后台子任务正在执行的命令会失败并由子任务自行处理。
 
 主 Agent 与后台子任务同时使用共享工作区，文件冲突仍只靠工具说明约束。进程退出时未完成或未送达的结果不进入 checkpoint，
-恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task_log` 查看。
+恢复后对应卡片显示中断，JSONL 日志仍可通过 `read_task` 查看。
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以主任务的权限模式（`auto` 或 `allow`）执行文件工具、execute、
 已配置的网页工具和 Skills；不装载 MCP 或人工输入。在深度上限内可继续同步委派，并可读取自己直接子任务日志。
-子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task` 和 `start_background_task`；
+子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task`；`read_task`、`wait_task` 和 `cancel_task` 仍然保留。
 `auto` 和 `allow` 本身要求已验证沙箱，委派不会落到宿主上。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
 显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
@@ -154,8 +153,8 @@ Harness Profile 继续禁用自动创建的默认 general-purpose 子 Agent，�
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
 已知密钥精确替换集中在 `agent/redaction.py`：收集配置中的模型 `api_key`（替换为 `$llm.models.…` 路径名）以及顶层 `redaction.replacements` 中的字面量（按用户写的展示名原样替换，可不带 `$`）。沙箱 `env_set` / `env_allowlist` 与 MCP `env_passthrough` / bearer 环境值**不**自动登记。按长度降序替换；等长冲突保留先登记的名称。Auto 证据、MCP、子任务日志、审批卡与 Companion 走这一路径，不对自由文本中的 JWT / `sk-` 等形态做正则遮盖。会话标题同样只做命名精确替换，公开网址与本地路径保留。Auto 送 Flash 前对证据做只读疑似扫描（PEM、Authorization、token 赋值、URL userinfo 等），结果写入 `suspects` 供 Flash 参考，不改原文。历史数据中的 `[REDACTED]` / `[已隐藏]` 在读取与校验时仍兼容。
-主上下文仅接收最终 task 结果，主动调用 `read_task_log` 才读取本父会话的日志页。
-TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。
+主上下文仅接收最终 task 结果，主动调用 `read_task` 才读取自己直接子任务的日志页。
+TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。进度事件只带任务 ID、直接父节点、描述、深度、状态、耗时和最终结果或失败原因，不带 Token、TPS、TTFT 或压缩状态。思考、中间回答和内部工具调用不进入主界面。子图仍执行上下文压缩，但不记录或展示压缩过程。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。
 实时与历史恢复复用同一子任务状态解析，未完成调用显示中断状态；内部工具与思考仍隔离，checkpoint 保留合法消息。具体配置、日志大小和分页限制见 [SubAgent 委派](configuration.md#subagent-委派)。
 
@@ -372,7 +371,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 观察与验证
 
-主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏在本地聚合同类事实做失败率异常与轮次复盘，主动开口或用户提问时才调用 Companion 模型。
+主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏在本地聚合同类事实做失败率异常与轮次复盘，只有用户提问时才调用 Companion 模型。
 
 | 行为契约 | 相关测试 |
 |---|---|

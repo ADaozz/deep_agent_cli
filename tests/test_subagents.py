@@ -14,7 +14,8 @@ from agent.execution.types import ExecutionMode
 from agent.sessions.transcript import messages_to_transcript
 from tests.conftest import graph_tool_names, scripted_model
 
-START_TOOLS = {'start_task', 'start_background_task'}
+START_TOOLS = {'start_task'}
+QUERY_TOOLS = {'read_task', 'wait_task', 'cancel_task'}
 
 
 def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monkeypatch):
@@ -47,7 +48,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
     monkeypatch.setattr(factory, 'build_agent', capture)
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
-            'description': 'Only delegated instructions', 'subagent_type': 'general-purpose'}, 'id': 'delegate'}]),
+            'description': 'Only delegated instructions'}, 'id': 'delegate'}]),
         AIMessage(content='private child final'),
         AIMessage(content='public parent answer'),
     ])
@@ -63,10 +64,13 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         child = child_prepared[0]
         assert child.backend is runner.prepared.backend
         assert child.execution_mode is ExecutionMode.SANDBOXED
-        # Default max_subagent_depth=2: depth-1 may start_task and read its own children logs.
+        # Default max_subagent_depth=2: a sync child may start_task and read its own children.
         child_tools = graph_tool_names(child.graph)
-        assert 'start_task' in child_tools and 'read_task_log' in child_tools
-        assert not {'request_human_input', 'start_background_task'} & child_tools
+        assert 'start_task' in child_tools and 'read_task' in child_tools
+        assert not {'request_human_input', 'wait_task', 'cancel_task'} & child_tools
+        child_start = child.graph.nodes['tools'].bound.tools_by_name['start_task']
+        assert set(child_start.args) == {'description'}
+        assert 'run_in_background' not in child_start.description
         assert not any(name.startswith("mcp") for name in graph_tool_names(child.graph))
         assert "mcp__server__tool" in graph_tool_names(runner.prepared.graph)
         assert mcp.snapshots == 1
@@ -103,7 +107,7 @@ def test_subagent_model_requests_stay_out_of_parent_tool_metrics(tmp_path, monke
     cfg = Settings(config_dir=tmp_path / 'private')
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
-            'description': 'List files', 'subagent_type': 'general-purpose'}, 'id': 'delegate'}]),
+            'description': 'List files'}, 'id': 'delegate'}]),
         AIMessage(content='', tool_calls=[{'name': 'ls', 'args': {'path': '/'}, 'id': 'child-ls'}]),
         AIMessage(content='child final'),
         AIMessage(content='parent answer'),
@@ -141,12 +145,13 @@ def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
         )
         return graph_tool_names(prepared.graph)
 
-    assert 'start_task' in tools_at(0, 1) and 'read_task_log' in tools_at(0, 1)
-    assert 'start_task' not in tools_at(1, 1) and 'read_task_log' not in tools_at(1, 1)
+    assert 'start_task' in tools_at(0, 1) and 'read_task' in tools_at(0, 1)
+    assert 'start_task' not in tools_at(1, 1) and 'read_task' not in tools_at(1, 1)
     assert 'start_task' in tools_at(0, 2) and 'start_task' in tools_at(1, 2)
-    assert 'read_task_log' in tools_at(1, 2)
-    assert 'start_task' not in tools_at(2, 2) and 'read_task_log' not in tools_at(2, 2)
-    assert 'start_background_task' in tools_at(0, 2)
+    assert 'read_task' in tools_at(1, 2)
+    assert 'wait_task' not in tools_at(1, 2) and 'cancel_task' not in tools_at(1, 2)
+    assert 'start_task' not in tools_at(2, 2) and 'read_task' not in tools_at(2, 2)
+    assert 'start_background_task' not in tools_at(0, 2)
     assert 'start_background_task' not in tools_at(1, 2)
 
     # Live delegation with max_subagent_depth=1 still yields a leaf child.
@@ -162,7 +167,7 @@ def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
     cfg = Settings(config_dir=tmp_path / 'live', subagents=SubAgentConfig(max_subagent_depth=1))
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
-            'description': 'leaf', 'subagent_type': 'general-purpose'}, 'id': 'd'}]),
+            'description': 'leaf'}, 'id': 'd'}]),
         AIMessage(content='child done'),
         AIMessage(content='parent done'),
     ])
@@ -180,10 +185,10 @@ def test_disabled_task_and_unverified_backend_offer_no_delegation(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     prepared = create_agent(model=scripted_model([AIMessage(content='done')]), backend=StateBackend(),
                             skills=[], settings=replace(cfg, subagents=SubAgentConfig(enabled=False)))
-    assert not {'start_task', 'read_task_log'} & graph_tool_names(prepared.graph)
+    assert not {'start_task', 'read_task', 'wait_task', 'cancel_task'} & graph_tool_names(prepared.graph)
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
-            'description': 'do work', 'subagent_type': 'general-purpose'}, 'id': 'd'}]),
+            'description': 'do work'}, 'id': 'd'}]),
         AIMessage(content='reported refusal'),
     ])
     # An unverified backend can only run in ask, and ask does not delegate.
@@ -217,7 +222,7 @@ def test_delegation_and_child_permission_follow_the_parent_mode(tmp_path, monkey
     cfg = Settings(config_dir=tmp_path, resolved_deepseek_api_key='unit-key')
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
-            'description': 'do work', 'subagent_type': 'general-purpose'}}]),
+            'description': 'do work'}}]),
         AIMessage(content='child final'),
         AIMessage(content='parent final'),
     ])
@@ -227,7 +232,7 @@ def test_delegation_and_child_permission_follow_the_parent_mode(tmp_path, monkey
         names = graph_tool_names(runner.prepared.graph)
         assert (START_TOOLS <= names) if delegates else not (START_TOOLS & names)
         # Tasks started before a switch to ask can still be inspected and stopped.
-        assert {'read_task_log', 'check_background_task', 'cancel_background_task'} <= names
+        assert QUERY_TOOLS <= names
         assert runner.invoke('go').status == 'completed'
         assert [child.permission_mode for child in children] == ([mode] if delegates else [])
     finally:
@@ -264,7 +269,7 @@ def test_real_sandbox_native_concurrency_and_command_cancel(tmp_path):
                 names = ['child-cancel'] if human == 'cancel' else ['child-1', 'child-2', 'child-3']
                 answer = AIMessage(content='', tool_calls=[{
                     'name': 'start_task', 'id': name, 'args': {
-                        'description': name, 'subagent_type': 'general-purpose'}} for name in names])
+                        'description': name}} for name in names])
             return ChatResult(generations=[ChatGeneration(message=answer)])
 
     cfg = Settings(
@@ -311,7 +316,7 @@ def test_log_tool_reads_only_its_parent_after_restart(tmp_path):
     SubAgentLogStore(tmp_path / 'subagents').append('parent', run_id, 'finish', status='completed', output='saved event')
     cfg = Settings(config_dir=tmp_path)
     model = scripted_model([
-        AIMessage(content='', tool_calls=[{'name': 'read_task_log', 'id': 'log', 'args': {'run_id': run_id}}]),
+        AIMessage(content='', tool_calls=[{'name': 'read_task', 'id': 'log', 'args': {'run_id': run_id, 'include_logs': True}}]),
         AIMessage(content='read completed'),
     ])
     runner = AgentRunner(model=model, backend=StateBackend(), settings=cfg, thread_id='parent')
@@ -330,7 +335,7 @@ def test_subagent_model_inheritance_updates_after_main_rebuild(tmp_path, monkeyp
     def responses(label):
         return scripted_model([
             AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': label, 'args': {
-                'description': label, 'subagent_type': 'general-purpose'}}]),
+                'description': label}}]),
             AIMessage(content=f'child-{label}'), AIMessage(content=f'parent-{label}')])
     first, second = responses('first'), responses('second')
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('first', 'first'), ModelProfile('second', 'second')),
@@ -362,7 +367,7 @@ def test_subagent_model_and_effort_override(tmp_path, monkeypatch):
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     parent = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
-            'description': 'child', 'subagent_type': 'general-purpose'}}]), AIMessage(content='parent')])
+            'description': 'child'}}]), AIMessage(content='parent')])
     child = scripted_model([AIMessage(content='child')])
     cfg = Settings(config_dir=tmp_path, llm_profiles=(ModelProfile('default', 'parent'),
                    ModelProfile('other', 'child', reasoning_efforts=('low',))),
@@ -404,7 +409,7 @@ def test_resumed_pending_task_result_updates_original_card(tmp_path, monkeypatch
     try:
         messages = [HumanMessage(content='old parent input'), AIMessage(content='', tool_calls=[{
             'name': 'start_task', 'id': 'restored-task', 'args': {
-                'description': 'pending delegated task', 'subagent_type': 'general-purpose'}}])]
+                'description': 'pending delegated task'}}])]
         runner.prepared.graph.update_state(runner._thread_config(), {'messages': messages}, as_node='model')
         ui = CliState()
         ui.load_transcript(messages_to_transcript(messages))
@@ -436,7 +441,7 @@ def test_child_request_effort_is_independent_of_parent(
     from agent.models.stream_lifecycle import close_model_http_clients
     from tests.model_stream_server import ScriptedSSEServer, Turn
     call = {'name': 'start_task', 'id': 'delegate', 'args': {
-        'description': 'child-only task', 'subagent_type': 'general-purpose'}}
+        'description': 'child-only task'}}
     with ScriptedSSEServer(api, [Turn(tool_calls=[call]), Turn(text='child answer'), Turn(text='parent answer')]) as server:
         main = ModelProfile('main', 'main-model', api=api, base_url=server.base_url,
                             reasoning_efforts=('low', 'high'), max_retries=0)
@@ -491,7 +496,7 @@ def test_custom_injected_model_is_not_replaced_by_default_profile(tmp_path, monk
     monkeypatch.setattr(factory, 'build_chat_model', unexpected_build)
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
-            'description': 'custom task', 'subagent_type': 'general-purpose'}}]),
+            'description': 'custom task'}}]),
         AIMessage(content='custom child'), AIMessage(content='custom parent')])
     runner = AgentRunner(model=model, settings=Settings(config_dir=tmp_path))
     runner.set_permission_mode('allow')
@@ -509,7 +514,7 @@ def test_custom_model_requires_explicit_profile_for_effort_override(tmp_path, mo
                    subagents=SubAgentConfig(reasoning_effort='low'))
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
-            'description': 'custom task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported')])
+            'description': 'custom task'}}]), AIMessage(content='reported')])
     monkeypatch.setattr(factory, 'build_chat_model', lambda *args, **kwargs: pytest.fail('unexpected profile fallback'))
     runner = AgentRunner(model=model, settings=cfg)
     runner.set_permission_mode('allow')
@@ -533,7 +538,7 @@ def test_log_redacts_only_configured_model_and_deepseek_keys(tmp_path, monkeypat
     description = 'known-main-key known-unused-key known-deepseek-key password=unknown-output-key'
     parent = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'id': 'd', 'args': {
-            'description': description, 'subagent_type': 'general-purpose'}}]),
+            'description': description}}]),
         AIMessage(content='child result'), AIMessage(content='parent result')])
     runner = AgentRunner(model=parent, settings=cfg)
     runner.set_permission_mode('allow')

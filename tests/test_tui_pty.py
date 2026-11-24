@@ -684,7 +684,7 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
     from tests.model_stream_server import ScriptedSSEServer, Turn
     probe = _subagent_stream_probe()
     call = {'name': 'start_task', 'id': 'delegate', 'args': {
-        'description': 'private child task', 'subagent_type': 'general-purpose'}}
+        'description': 'private child task'}}
     with ScriptedSSEServer('chat_completions', [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
         tui = Tui(tmp_path, probe=probe, extra_args=(server.base_url, 'chat_completions'))
         try:
@@ -713,7 +713,7 @@ def test_real_pty_subagent_counter_and_cancel(tmp_path, cancel_key):
 def test_real_pty_parallel_subagent_cards_complete_independently(tmp_path):
     from tests.model_stream_server import ScriptedSSEServer, Turn
     calls = [{'name': 'start_task', 'id': identifier, 'args': {
-        'description': description, 'subagent_type': 'general-purpose'}}
+        'description': description}}
         for identifier, description in [('median', 'Fix median3'), ('date', 'Fix is_leap_year')]]
     with ScriptedSSEServer('chat_completions', [
         Turn(tool_calls=calls),

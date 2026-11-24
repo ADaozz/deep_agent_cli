@@ -1,4 +1,4 @@
-"""A CompiledSubAgent runnable around the existing graph factory.
+"""Run one delegated task. The child sees only the description.
 
 A fresh Context is deliberate: LangGraph otherwise inherits the parent's
 callbacks, checkpoint namespace, stream writer and configuration implicitly.
@@ -14,19 +14,19 @@ from contextvars import Context
 from typing import Any, Callable
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
 from agent.runtime.auto_approval import delegating_user_request
 from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import get_cancel_context, set_output_emitter
-from agent.runtime.metrics import GenerationTiming
 from agent.models.stream_lifecycle import set_stream_owner
-from agent.models.messages import _chunk_message, _split_think, reasoning_text, visible_text
+from agent.models.messages import final_answer, visible_text
+from agent.runtime.graph_execution import run_segment
 from agent.sessions.transcript import classify_tool_result
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import BackgroundTask, SubAgentManager
-from agent.subagents.notifications import START_TOOL
+from agent.tools.catalog import DELEGATION_TOOLS
 
 
 SUMMARY_LIMIT = 1000
@@ -35,7 +35,6 @@ ERROR_LIMIT = 240
 TITLE_LIMIT = 120
 REASON_LIMIT = 160
 AINVOKE_CANCEL_WAIT = 5.0
-_DELEGATION_TOOLS = frozenset({"start_task", START_TOOL})
 
 
 def _brief(value: str, limit: int) -> str:
@@ -51,165 +50,20 @@ def _error_reason(error: BaseException, redact: Callable[[str], str] | None = No
 def _active_task_call_id() -> str:
     """The start_task call that is running on this thread, if middleware set one."""
     context = get_cancel_context()
-    if context is None or context.tool_name not in _DELEGATION_TOOLS:
+    if context is None or context.tool_name not in DELEGATION_TOOLS:
         return ""
     return context.tool_call_id or ""
 
 
-def _usage_pair(usage: Any) -> tuple[int, int]:
-    if not isinstance(usage, dict):
-        return 0, 0
-    def count(key: str) -> int:
-        value = usage.get(key)
-        return value if type(value) is int and value >= 0 else 0
-    return count("input_tokens"), count("output_tokens")
+def _task_message(content: str, status: str) -> AIMessage:
+    return AIMessage(content=content, additional_kwargs={"subagent_status": status})
 
 
-class TaskMetrics(BaseCallbackHandler):
-    """Token and throughput totals for one subagent. Never forwards model text."""
+def _error_category(text: str, exit_code: Any) -> str:
+    from agent.companion.timeline import category
 
-    def __init__(self, on_update: Callable[[], None] | None = None) -> None:
-        super().__init__()
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self._rates: list[float] = []
-        self._timing: GenerationTiming | None = None
-        self._summary_runs: set[Any] = set()
-        self._message: AIMessageChunk | None = None
-        self._raw_text = ""
-        self._visible = ""
-        self._reasoning = ""
-        self.saw_llm = False
-        self._on_update = on_update
-
-    def on_chat_model_start(self, serialized: dict, messages: list, **kwargs: Any) -> None:
-        self.on_llm_start(serialized, [], **kwargs)
-
-    def on_llm_start(self, serialized: dict, prompts: list | None = None, **kwargs: Any) -> None:
-        invocation = kwargs.get("invocation_params") or {}
-        metadata = kwargs.get("metadata") or {}
-        if (metadata or {}).get("lc_source") == "summarization":
-            self._summary_runs.add(kwargs.get("run_id"))
-            return
-        self._reset_stream()
-        self._timing = GenerationTiming(
-            monotonic(),
-            str(invocation.get("model") or metadata.get("ls_model_name") or "unknown"),
-            str(invocation.get("reasoning_effort") or (invocation.get("reasoning") or {}).get("effort") or "default"),
-        )
-
-    def on_llm_new_token(self, token: str, *, chunk: Any = None, **kwargs: Any) -> None:
-        if kwargs.get("run_id") in self._summary_runs or self._timing is None:
-            return
-        message = _chunk_message(chunk)
-        if isinstance(message, AIMessageChunk):
-            self._message = message if self._message is None else self._message + message
-            visible = visible_text(self._message)
-            reasoning = reasoning_text(self._message)
-        else:
-            self._raw_text += token or ""
-            visible, reasoning = _split_think(self._raw_text)
-        chunks = getattr(message, "tool_call_chunks", None) or []
-        tool_output = isinstance(message, AIMessageChunk) and any(
-            isinstance(item, dict) and (item.get("args") or item.get("name")) for item in chunks
-        )
-        if (
-            reasoning
-            and reasoning != self._reasoning
-            and isinstance(message, AIMessageChunk)
-            and self._message is not None
-        ):
-            self._note_summarized_reasoning(message)
-        # Empty usage tails and other chunks with no new text are not answer output.
-        self._timing.mark(
-            monotonic(),
-            reasoning=bool(reasoning) and reasoning != self._reasoning,
-            answer=(bool(visible) and visible != self._visible) or tool_output,
-        )
-        self._reasoning = reasoning
-        self._visible = visible
-
-    def _note_summarized_reasoning(self, message: AIMessageChunk) -> None:
-        """Match StreamDeltaCallback: a summary is not the reasoning generation span."""
-        assert self._message is not None and self._timing is not None
-        kind = message.response_metadata.get("deep_agent_reasoning_kind") or {}
-        if not kind:
-            from agent.models.client import _STREAM_STATUS
-            status = _STREAM_STATUS.get()
-            if status is not None and status.reasoning_kind is not None:
-                kind = {status.reasoning_kind: True}
-        summary = any(isinstance(block, dict) and block.get("summary") for block in (
-            message.content if isinstance(message.content, list) else []
-        ))
-        extra = self._message.additional_kwargs
-        uses_summary = (
-            isinstance(extra.get("reasoning_summary"), str)
-            and bool(extra["reasoning_summary"])
-            and not any(
-                isinstance(extra.get(key), str) and extra[key]
-                for key in ("reasoning_content", "reasoning", "thinking")
-            )
-        )
-        if uses_summary or kind.get("summary") or (summary and not kind.get("full")):
-            self._timing.summarized_reasoning = True
-
-    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
-        if self._finish_summary(kwargs.get("run_id")):
-            return
-        timing = self._timing
-        usage = self._message.usage_metadata if self._message is not None else None
-        self._timing = None
-        self._reset_stream()
-        if timing is None:
-            return
-        generations = getattr(response, "generations", None) or []
-        if not isinstance(usage, dict) and generations and generations[0]:
-            message = getattr(generations[0][0], "message", None)
-            usage = getattr(message, "usage_metadata", None)
-        snapshot = timing.snapshot(usage if isinstance(usage, dict) else None)
-        self._add(snapshot.get("input_tokens"), snapshot.get("output_tokens"), snapshot.get("tps"))
-
-    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
-        if self._finish_summary(kwargs.get("run_id")):
-            return
-        self._timing = None
-        self._reset_stream()
-
-    def _finish_summary(self, run_id: Any) -> bool:
-        if run_id not in self._summary_runs:
-            return False
-        self._summary_runs.remove(run_id)
-        return True
-
-    def _reset_stream(self) -> None:
-        self._message = None
-        self._raw_text = ""
-        self._visible = ""
-        self._reasoning = ""
-
-    def add_messages(self, messages: list) -> None:
-        """Fallback when the graph never invoked the model callback."""
-        for message in messages:
-            incoming, outgoing = _usage_pair(getattr(message, "usage_metadata", None))
-            self.input_tokens += incoming
-            self.output_tokens += outgoing
-
-    def _add(self, incoming: Any, outgoing: Any, rate: Any) -> None:
-        self.saw_llm = True
-        if type(incoming) is int and incoming >= 0:
-            self.input_tokens += incoming
-        if type(outgoing) is int and outgoing >= 0:
-            self.output_tokens += outgoing
-        if type(rate) is float and rate >= 0:
-            self._rates.append(rate)
-        if self._on_update is not None:
-            self._on_update()
-
-    @property
-    def tps(self) -> float | None:
-        if not self._rates:
-            return None
-        return sum(self._rates) / len(self._rates)
+    code = exit_code if type(exit_code) is int else None
+    return category(text if isinstance(text, str) else "", code)
 
 
 class LogCallback(BaseCallbackHandler):
@@ -292,10 +146,15 @@ class LogCallback(BaseCallbackHandler):
             else:
                 reason = content.splitlines()[0] if content else "Tool returned an error"
             result["reason"] = self._brief(reason, ERROR_LIMIT)
+            result["error_category"] = _error_category(content, exit_code)
         self.write("tool_finish", **result)
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        self.write("tool_error", **self._finish_tool(kwargs), status="failed", reason=_error_reason(error, self._redact))
+        reason = _error_reason(error, self._redact)
+        self.write(
+            "tool_error", **self._finish_tool(kwargs), status="failed", reason=reason,
+            error_category=_error_category(reason, None),
+        )
 
 
 class SubAgentRuntime(Runnable):
@@ -317,6 +176,15 @@ class SubAgentRuntime(Runnable):
         # Agent that owns this runtime; children register here for cancel propagation.
         self.owner_controller = owner_controller if owner_controller is not None else manager.parent
 
+    def _borrow_environment(self) -> Any:
+        """Install the root's already-probed snapshot for this child context only."""
+        cache = getattr(self.manager.parent, "environment_cache", None)
+        snapshot = getattr(cache, "snapshot", None)
+        if snapshot is None:
+            return None
+        from agent.execution.environment import EnvironmentCache, set_environment_cache
+        return set_environment_cache(EnvironmentCache(snapshot=snapshot))
+
     def invoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         return self._invoke_tracked({"cancel": threading.Event()}, input, config, **kwargs)
 
@@ -334,7 +202,7 @@ class SubAgentRuntime(Runnable):
             from langgraph.config import get_config
             parent = str(get_config().get("configurable", {}).get("thread_id", ""))
         if not parent:
-            return {"messages": [AIMessage(content="Subagent failed: parent session ID unavailable")]}
+            return {"messages": [_task_message("Subagent failed: parent session ID unavailable", "failed")]}
         cancel = call.get("cancel")
         # Context().run below drops context vars. Capture the launching call first
         # so the root card binds by tool_call_id, not by start order.
@@ -352,7 +220,7 @@ class SubAgentRuntime(Runnable):
                 )
         except Exception as exc:
             reason = _error_reason(exc, self.store._redact)
-            return {"messages": [AIMessage(content=f"Subagent failed: {reason}")]}
+            return {"messages": [_task_message(f"Subagent failed: {reason}", "failed")]}
 
     async def ainvoke(self, input: dict, config: RunnableConfig | None = None, **kwargs: Any) -> dict:
         # Keep synchronous task completion semantics even when the caller is async.
@@ -389,44 +257,47 @@ class SubAgentRuntime(Runnable):
         Raises when no permit is available; nothing is started in that case.
         """
         run_id, controller = self.manager.admit(parent, self.owner_controller)
+        # The child is a leaf: it gets no delegation tools and no delegation prompt.
+        controller.background_leaf = True
         controller.approval_user_request = delegating_user_request.get()
         task = BackgroundTask(run_id=run_id, tool_call_id=tool_call_id, parent=parent,
-                              description=description, controller=controller)
+                              description=description, controller=controller, mode="background")
 
         scope = observation_scope.get()
         def work() -> None:
             try:
                 # Same clean context as the synchronous path: no parent
                 # callbacks, stream writer or checkpoint namespace.
-                output = Context().run(
+                Context().run(
                     self._run, {"messages": [HumanMessage(content=description)]}, parent, run_id, controller, scope,
                     tool_call_id,
                 )
-                content = str(output["messages"][-1].content)
             except BaseException as exc:  # noqa: BLE001
                 state = "cancelled" if controller.cancel_requested else "failed"
                 content = f"Subagent {state} (run_id={run_id}): {_error_reason(exc, self.store._redact)}"
-            status = ("cancelled" if content.startswith("Subagent cancelled")
-                      else "failed" if content.startswith("Subagent failed") else "completed")
+                if not task.done.is_set():
+                    self.manager.record_terminal(run_id, state, content, None)
+            status = task.status
+            content = task.result
             try:
                 self.manager.release(run_id)
             finally:
-                self.manager.finish(task, status, content)
                 if not task.discarded:
-                    payload = {"run_id": run_id, "tool_call_id": tool_call_id, "parent": parent,
-                               "status": status, "content": content}
-                    # A cancelled task was stopped on request: update its card only.
-                    if status != "cancelled":
-                        self.manager.parent.notify(payload)
-                    self.manager.parent._emit("subagent_finished", payload)
+                    # The host notification, when one is due, was sent with the
+                    # terminal record. This event only updates the card.
+                    self.manager.parent._emit("subagent_finished", {
+                        "run_id": run_id, "tool_call_id": tool_call_id, "parent": parent,
+                        "status": status, "content": content,
+                    })
 
         task.thread = threading.Thread(target=work, name=f"subagent-{run_id[:8]}", daemon=True)
         self.manager.track(task)
         try:
             task.thread.start()
         except BaseException:
+            task.discarded = True
             self.manager.release(run_id)
-            self.manager.finish(task, "failed", "Failed to start background thread")
+            self.manager.record_terminal(run_id, "failed", "Failed to start background thread", None)
             self.manager.drop_task(run_id)
             raise
         return task
@@ -434,7 +305,6 @@ class SubAgentRuntime(Runnable):
     def _run(
         self, input: dict, parent: str, run_id: str, controller: Any, scope=None, tool_call_id: str = "",
     ) -> dict:
-        metrics = TaskMetrics()
         started = monotonic()
         description = visible_text(input["messages"][-1])
         title = " ".join(self.store._redact(description).split())
@@ -453,11 +323,7 @@ class SubAgentRuntime(Runnable):
                 "status": status,
                 "tool_call_id": tool_call_id,
                 "elapsed_seconds": round(max(0.0, monotonic() - started), 3),
-                "input_tokens": metrics.input_tokens,
-                "output_tokens": metrics.output_tokens,
             }
-            if metrics.tps is not None:
-                payload["tps"] = round(metrics.tps, 1)
             if reason and status in {"failed", "cancelled"}:
                 payload["reason"] = _brief(self.store._redact(reason), REASON_LIMIT)
             if result and status in {"completed", "failed", "cancelled"}:
@@ -467,8 +333,9 @@ class SubAgentRuntime(Runnable):
         def write(event: str, **payload: Any) -> None:
             self.store.append(parent, run_id, event, model=self.model_name, **payload)
             if scope and event in {"tool_start", "tool_finish", "tool_error"}:
-                fields = {k:payload[k] for k in ("tool_name","tool_run_id","status","elapsed_seconds","exit_code")
-                          if k in payload}
+                fields = {k:payload[k] for k in (
+                    "tool_name", "tool_run_id", "status", "elapsed_seconds", "exit_code", "error_category",
+                ) if k in payload}
                 self.manager.parent._emit("companion_tool", dict(scope=scope, phase=event, agent=run_id,
                                                                model=self.model_name, effort=self.effort, **fields))
             if published and event in {"tool_start", "tool_finish", "tool_error"}:
@@ -479,16 +346,15 @@ class SubAgentRuntime(Runnable):
             # never leaves a partial API key that the store cannot match.
             return _brief(self.store._redact(value), limit)
 
+        record = self.manager.open_record(
+            run_id=run_id, parent=parent, description=description, tool_call_id=tool_call_id,
+            controller=controller, mode="sync",
+        )
         write("start", status="running", description=brief(description, SUMMARY_LIMIT),
-              description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT)
+              description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
+              mode=record.mode)
         publish("running")
         published = True
-
-        def on_metrics() -> None:
-            if published:
-                publish("running")
-
-        metrics._on_update = on_metrics
         set_stream_owner(controller)
         set_output_emitter(None)
         callback = LogCallback(write, self.store._redact)
@@ -496,6 +362,8 @@ class SubAgentRuntime(Runnable):
         status, summary, summary_truncated = "failed", "", False
         messages_seen: list = []
         answer_text = ""
+        outcome = {"content": ""}
+        env_token = None
         try:
             # Bail before prepare so a cancel-before-admit does not build model clients.
             if controller.cancel_requested:
@@ -503,13 +371,9 @@ class SubAgentRuntime(Runnable):
             prepared = self.prepare(controller)
             if controller.cancel_requested:
                 raise RuntimeError("Cancelled by parent")
-            final = {}
-            for final in prepared.graph.stream(
-                {"messages": input["messages"][-1:]},
-                {"configurable": {"thread_id": run_id, "checkpoint_ns": ""},
-                 "callbacks": [callback, metrics]},
-                stream_mode="values", control=controller.run_control,
-            ):
+            def on_chunk(final: Any) -> None:
+                if not isinstance(final, dict):
+                    return None
                 # Deliver a host decision to the parent even if the child
                 # model would omit the refusal from its final answer.
                 for message in reversed(final.get("messages", [])):
@@ -519,12 +383,28 @@ class SubAgentRuntime(Runnable):
                         raise RuntimeError(f"{message.name} ({message.tool_call_id}): {message.content}")
                 if final.get("__interrupt__"):
                     raise RuntimeError("Subagents cannot request user interaction")
-                messages_seen = list(final.get("messages") or [])
+                messages_seen[:] = list(final.get("messages") or [])
+                return None
+
+            env_token = self._borrow_environment()
+            stop = run_segment(
+                prepared.graph,
+                {"messages": input["messages"][-1:]},
+                {"configurable": {"thread_id": run_id, "checkpoint_ns": ""}, "callbacks": [callback]},
+                run_control=controller.run_control,
+                stream_mode="values",
+                durability=None,
+                on_chunk=on_chunk,
+                cancel_requested=lambda: controller.cancel_requested,
+            )
+            if stop.kind == "raised":
+                if stop.error is None or controller.cancel_requested:
+                    raise RuntimeError("Cancelled by parent")
+                raise stop.error
+            # A parent cancel wins over a drained or finished answer.
             if controller.cancel_requested:
                 raise RuntimeError("Cancelled by parent")
-            messages = messages_seen
-            answer = next((visible_text(m) for m in reversed(messages)
-                           if isinstance(m, AIMessage) and not m.tool_calls), "")
+            answer = final_answer(messages_seen)
             if not answer:
                 raise RuntimeError("Subagent did not produce a final answer")
             answer_text = answer
@@ -532,25 +412,33 @@ class SubAgentRuntime(Runnable):
             summary = brief(answer, SUMMARY_LIMIT)
             summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
             # Return only the final response: no child messages or state channels.
-            return {"messages": [AIMessage(content=f"[subagent run_id={run_id}]\n{answer}")]}
+            outcome["content"] = f"[subagent run_id={run_id}]\n{answer}"
+            return {"messages": [_task_message(outcome["content"], status)]}
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
             summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
             answer_text = summary
             write("error", status=status, reason=summary)
-            return {"messages": [AIMessage(content=f"Subagent {status} (run_id={run_id}): {summary}")]}
+            outcome["content"] = f"Subagent {status} (run_id={run_id}): {summary}"
+            return {"messages": [_task_message(outcome["content"], status)]}
         finally:
+            if env_token is not None:
+                from agent.execution.environment import reset_environment_cache
+                reset_environment_cache(env_token)
             if prepared is not None and getattr(prepared, "owns_model_clients", False):
                 from agent.models.stream_lifecycle import close_model_http_clients
                 try:
                     close_model_http_clients(prepared.model)
                 except Exception as exc:
                     write("error", phase="cleanup", reason=_error_reason(exc, self.store._redact))
-            if metrics.input_tokens == 0 and metrics.output_tokens == 0:
-                metrics.add_messages(messages_seen)
             # Terminal status is published before the concurrency slot moves to
             # "closing", so a stream that is still shutting down is not shown
             # as a running task.
+            if status != "completed" and controller.cancel_requested:
+                status = "cancelled"
+                if not outcome["content"]:
+                    outcome["content"] = f"Subagent cancelled (run_id={run_id}): Cancelled by parent"
+            elapsed = round(max(0.0, monotonic() - started), 3)
             publish(
                 status,
                 reason=summary if status in {"failed", "cancelled"} else "",
@@ -558,4 +446,5 @@ class SubAgentRuntime(Runnable):
             )
             published = False
             write("finish", status=status, summary=summary, summary_truncated=summary_truncated,
-                  elapsed_seconds=round(max(0.0, monotonic() - started), 3), tool_count=callback.tool_count)
+                  elapsed_seconds=elapsed, tool_count=callback.tool_count)
+            self.manager.record_terminal(run_id, status, outcome["content"], elapsed)

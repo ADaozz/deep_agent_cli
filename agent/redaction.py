@@ -11,6 +11,8 @@ from typing import Any
 REDACTED = "[REDACTED]"
 LEGACY_HIDDEN = "[已隐藏]"
 REDACTION_MARKERS = (REDACTED, LEGACY_HIDDEN)
+# Shared PEM header. Callers keep their own tails: evidence spans versus the source-open gate.
+PRIVATE_KEY_HEADER = r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"
 
 # Covers OSC/DCS/CSI and other C0 ESC forms used by untrusted tool/MCP text.
 _CONTROL_SEQUENCE = re.compile(

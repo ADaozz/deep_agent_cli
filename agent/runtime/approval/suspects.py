@@ -9,10 +9,12 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
+from agent.redaction import PRIVATE_KEY_HEADER
+
 _EXCERPT = 120
 
 _PRIVATE_KEY = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
+    PRIVATE_KEY_HEADER + r"[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
 )
 _AUTH_HEADER = re.compile(
     r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*(?:Bearer|Basic)[ \t]+[^\s,;]+", re.I,

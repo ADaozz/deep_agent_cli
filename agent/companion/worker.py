@@ -203,6 +203,7 @@ def create_chat(model, query, *, persona=None, instructions=None):
 
 
 async def serve(reader, send, *, build_chat, observe, config):
+    del observe  # Anomaly review stays on the host and does not call the model.
     async def receive():
         line = await reader.readline()
         if not line:
@@ -257,10 +258,11 @@ async def serve(reader, send, *, build_chat, observe, config):
         timeout = asyncio.timeout(config.question_timeout_seconds)
         try:
             async with timeout:
-                if "question" in snapshot:
-                    response = await chat(snapshot, on_chunk=publish)
-                else:
-                    response = await observe(snapshot)
+                if "question" not in snapshot:
+                    result["status"] = "skipped"
+                    send(result)
+                    continue
+                response = await chat(snapshot, on_chunk=publish)
             result.update(response, status="ok")
         except (APITimeoutError, httpx.TimeoutException, TimeoutError):
             result["status"] = "request_timeout" if timeout.expired() else "model_timeout"
@@ -296,7 +298,7 @@ async def main():
         except (OSError, UnicodeError):
             print(json.dumps({"status": "prompt error", "path": str(path)}), flush=True)
             return
-    persona, observation, chat_instructions = prompts
+    persona, _observation, chat_instructions = prompts
     model = build_chat_model(
         ModelProfile(
             id="deepseek/deepseek-flash",
@@ -314,7 +316,6 @@ async def main():
             rpc_timeout_seconds=float(sys.argv[5]),
             question_timeout_seconds=float(sys.argv[6]),
         )
-        respond = create_observer(model, persona=persona, instructions=observation)
         reader = asyncio.StreamReader(limit=65536)
         transport, _ = await asyncio.get_running_loop().connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer,
@@ -323,7 +324,7 @@ async def main():
             await serve(
                 reader, lambda message: print(json.dumps(message), flush=True),
                 build_chat=lambda query: create_chat(model, query, persona=persona, instructions=chat_instructions),
-                observe=respond, config=config,
+                observe=None, config=config,
             )
         finally:
             transport.close()

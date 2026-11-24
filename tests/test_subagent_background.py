@@ -32,7 +32,7 @@ from tests.cli_support import plain
 from tests.conftest import ScriptedToolModel, graph_tool_names, scripted_model
 
 
-BACKGROUND = {'start_background_task', 'check_background_task', 'cancel_background_task'}
+TASK_TOOLS = {'start_task', 'read_task', 'wait_task', 'cancel_task'}
 
 
 class GatedModel(ScriptedToolModel):
@@ -53,7 +53,8 @@ class ReactiveModel(ScriptedToolModel):
 
 
 def start_call(identifier='bg', description='child work'):
-    return {'id': identifier, 'name': 'start_background_task', 'args': {'description': description}}
+    return {'id': identifier, 'name': 'start_task',
+            'args': {'description': description, 'run_in_background': True}}
 
 
 def wait_until(predicate, timeout=5.0):
@@ -155,7 +156,8 @@ def test_start_returns_immediately_and_idle_delivery_wakes_parent(tmp_path, monk
         blocks = messages_to_transcript(harness.messages())
         assert [b.content for b in blocks if b.kind == 'user'] == ['parent private request']
         card = next(b for b in blocks if b.kind == 'tool')
-        assert card.name == 'start_background_task' and card.status == 'completed'
+        assert card.name == 'start_task' and card.arguments.get('run_in_background') is True
+        assert card.status == 'completed'
         assert 'child final' in card.content and not card.is_error
     finally:
         harness.close()
@@ -219,8 +221,7 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
     harness = Harness(tmp_path, monkeypatch, [
         AIMessage(content='', tool_calls=[start_call('first')]),
         AIMessage(content='', tool_calls=[
-            start_call('second'),
-            {'id': 'sync', 'name': 'start_task', 'args': {'description': 'x', 'subagent_type': 'general-purpose'}},
+            {'id': 'sync', 'name': 'start_task', 'args': {'description': 'x'}},
         ]),
         AIMessage(content='limit reported'),
     ], max_concurrent=1)
@@ -228,11 +229,56 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
         assert harness.runner.invoke('go').output == 'limit reported'
         results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
         assert results['first'].startswith('Background subagent started')
-        assert 'concurrency limit (1)' in results['second'] and results['second'].startswith('Subagent failed:')
-        assert 'concurrency limit (1)' in results['sync']
+        assert 'concurrency limit (1)' in results['sync'] and results['sync'].startswith('Subagent failed:')
         assert harness.manager.background_count == 1
         cards = {b.tool_call_id: b for b in messages_to_transcript(harness.messages()) if b.kind == 'tool'}
-        assert cards['second'].status == 'error' and cards['first'].status == 'running'
+        assert cards['sync'].status == 'error' and cards['first'].status == 'running'
+    finally:
+        harness.close()
+
+
+def test_mixed_batch_starts_nothing(tmp_path, monkeypatch):
+    from agent.middleware.delegation_batch import MIXED_BATCH
+
+    harness = Harness(tmp_path, monkeypatch, [
+        AIMessage(content='', tool_calls=[
+            start_call('bg', 'background work'),
+            {'id': 'sync', 'name': 'start_task', 'args': {'description': 'sync work'}},
+            {'id': 'listed', 'name': 'read_task', 'args': {}},
+        ]),
+        AIMessage(content='separated'),
+    ])
+    try:
+        assert harness.runner.invoke('go').output == 'separated'
+        results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
+        assert results['bg'] == MIXED_BATCH and results['sync'] == MIXED_BATCH
+        assert results['listed'].startswith('{')
+        assert harness.manager.background_count == 0 and harness.manager.active_count == 0
+        assert not list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
+    finally:
+        harness.close()
+
+
+def test_wait_returns_the_result_without_a_second_notification(tmp_path, monkeypatch):
+    def respond(messages):
+        last = messages[-1]
+        if isinstance(last, ToolMessage) and 'Background subagent started' in last.content:
+            run_id = re.search(r'run_id=([0-9a-f]{32})', last.content).group(1)
+            return AIMessage(content='', tool_calls=[
+                {'id': 'wait', 'name': 'wait_task', 'args': {'run_ids': [run_id]}},
+            ])
+        if isinstance(last, ToolMessage):
+            return AIMessage(content='waited')
+        return AIMessage(content='', tool_calls=[start_call()])
+
+    harness = Harness(tmp_path, monkeypatch, ReactiveModel(messages=iter([]), respond=respond))
+    harness.gate.set()
+    try:
+        assert harness.runner.invoke('go').output == 'waited'
+        results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
+        assert 'child final' in results['wait']
+        assert harness.runner.control.pending_notification_count() == 0
+        assert not any(parse_notification(message) for message in harness.messages())
     finally:
         harness.close()
 
@@ -240,12 +286,12 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
 def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path, monkeypatch):
     def respond(messages):
         last = messages[-1]
-        if isinstance(last, ToolMessage) and last.name == 'start_background_task':
+        if isinstance(last, ToolMessage) and 'Background subagent started' in last.content:
             run_id = re.search(r'run_id=([0-9a-f]{32})', last.content).group(1)
             return AIMessage(content='', tool_calls=[
-                {'id': 'list', 'name': 'check_background_task', 'args': {}},
-                {'id': 'stop', 'name': 'cancel_background_task', 'args': {'run_id': run_id}},
-                {'id': 'missing', 'name': 'cancel_background_task', 'args': {'run_id': 'f' * 32}},
+                {'id': 'list', 'name': 'read_task', 'args': {}},
+                {'id': 'stop', 'name': 'cancel_task', 'args': {'run_id': run_id}},
+                {'id': 'missing', 'name': 'cancel_task', 'args': {'run_id': 'f' * 32}},
             ])
         if isinstance(last, ToolMessage):
             return AIMessage(content='stopped it')
@@ -335,12 +381,19 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         return graph_tool_names(create_agent(model=model, skills=[], permission_mode=mode,
                                              settings=replace(cfg, subagents=subagents)).graph)
 
-    assert BACKGROUND <= names()
-    for subagents in (SubAgentConfig(background=False), SubAgentConfig(enabled=False)):
-        assert not BACKGROUND & names(subagents)
-    assert 'start_task' in names(SubAgentConfig(background=False))
-    # Ask cannot start a task but can still check and cancel ones that are already running.
-    assert BACKGROUND & names(mode='ask') == BACKGROUND - {'start_background_task'}
+    assert TASK_TOOLS <= names()
+    assert not TASK_TOOLS & names(SubAgentConfig(enabled=False))
+    assert TASK_TOOLS <= names(SubAgentConfig(background=False))
+    sync_only = create_agent(
+        model=model, skills=[], permission_mode='allow',
+        settings=replace(cfg, subagents=SubAgentConfig(background=False)),
+    )
+    sync_start = sync_only.graph.nodes['tools'].bound.tools_by_name['start_task']
+    assert set(sync_start.args) == {'description'}
+    assert 'run_in_background' not in sync_start.description
+    # Ask cannot start a task but can still query, wait, and cancel ones already running.
+    ask = names(mode='ask')
+    assert 'start_task' not in ask and {'read_task', 'wait_task', 'cancel_task'} <= ask
 
     children = []
     original = factory.build_agent
@@ -358,10 +411,9 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
         harness.runner.invoke('go')
         harness.gate.set()
         wait_until(lambda: harness.finished())
-        # Nested depth may keep sync start_task and direct-child logs; background stays root-only.
+        # A background child is a leaf: it cannot launch or inspect further tasks.
         child_tools = graph_tool_names(children[0].graph)
-        assert not BACKGROUND & child_tools
-        assert 'read_task_log' in child_tools
+        assert not TASK_TOOLS & child_tools
         assert children[0].spec.depth == 1
     finally:
         harness.close()
@@ -386,13 +438,13 @@ def test_unverified_backend_cannot_start_background_tasks(tmp_path):
 # Presentation ---------------------------------------------------------------
 
 def launch(state, identifier='bg', description='Index the docs'):
-    state.apply(RunEvent(type='tool_started', name='start_background_task', tool_call_id=identifier,
-                         arguments={'description': description}))
+    state.apply(RunEvent(type='tool_started', name='start_task', tool_call_id=identifier,
+                         arguments={'description': description, 'run_in_background': True}))
 
 
-def finish(state, identifier='bg', content='[subagent run_id=abc]\nIndexed 12 files'):
+def finish(state, identifier='bg', content='[subagent run_id=abc]\nIndexed 12 files', status='completed'):
     state.apply(RunEvent(type='subagent_finished', content=content,
-                         result={'tool_call_id': identifier, 'status': 'completed'}))
+                         result={'tool_call_id': identifier, 'status': status}))
 
 
 @pytest.mark.parametrize('finished_first', [False, True])
@@ -400,7 +452,7 @@ def test_card_stays_running_after_launch_and_run_end_until_finished(finished_fir
     state = CliState()
     state.apply(RunEvent(type='run_started'))
     launch(state)
-    launched = RunEvent(type='tool_completed', name='start_background_task', tool_call_id='bg',
+    launched = RunEvent(type='tool_completed', name='start_task', tool_call_id='bg',
                         content='Background subagent started (run_id=abc).')
     if finished_first:
         # A fast child may report before the launch result reaches the view.
@@ -427,12 +479,12 @@ def test_card_stays_running_after_launch_and_run_end_until_finished(finished_fir
 def test_refused_launch_cancelled_task_and_parent_cancel_settle_cards():
     state = CliState()
     launch(state, 'refused')
-    state.apply(RunEvent(type='tool_completed', name='start_background_task', tool_call_id='refused',
+    state.apply(RunEvent(type='tool_completed', name='start_task', tool_call_id='refused',
                          content='Subagent failed: Subagent concurrency limit (2) reached'))
     launch(state, 'stopped')
-    finish(state, 'stopped', 'Subagent cancelled (run_id=abc): Cancelled by parent')
+    finish(state, 'stopped', 'Subagent cancelled (run_id=abc): Cancelled by parent', status='cancelled')
     launch(state, 'failed')
-    finish(state, 'failed', 'Subagent failed (run_id=abc): model unavailable')
+    finish(state, 'failed', 'Subagent failed (run_id=abc): model unavailable', status='failed')
     launch(state, 'esc')
     finish(state, 'unknown')
     state.apply(RunEvent(type='run_cancelled'))
@@ -447,9 +499,9 @@ def test_restore_pairs_notification_with_card_and_interrupts_unreported_tasks():
     messages = [
         HumanMessage(content='two background jobs'), calls,
         ToolMessage(content='Background subagent started (run_id=a).', tool_call_id='done',
-                    name='start_background_task'),
+                    name='start_task'),
         ToolMessage(content='Background subagent started (run_id=b).', tool_call_id='lost',
-                    name='start_background_task'),
+                    name='start_task'),
         AIMessage(content='started both'),
         notification_message({'run_id': 'a', 'tool_call_id': 'done', 'status': 'failed',
                               'content': 'Subagent failed (run_id=a): boom\n\nsecond paragraph'}),

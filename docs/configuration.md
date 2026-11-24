@@ -33,7 +33,7 @@ companion:
 ```
 
 - `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
-- `observation_prompt` 定义如何分析异常摘要、何时主动开口。[`observation.md`](../agent/companion/observation.md)
+- `observation_prompt` 仍随 Worker 启动读取。异常检测不调用模型。[`observation.md`](../agent/companion/observation.md)
 - `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `rpc_timeout_seconds` 限制一次宿主只读查询。`question_timeout_seconds` 限制一轮问答。单次模型 HTTP 超时为 15 秒，源码搜索的扫描预算为 1.5 秒。
 - `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。
@@ -476,13 +476,12 @@ bailian:
 
 ## SubAgent 委派
 
-默认启用 Deep Agents 原生同步 `start_task`，注册 `general-purpose` 子 Agent，并同时提供后台委派工具。
-委派只在主 Agent 的权限模式为 `auto` 或 `allow` 时可用；`ask` 下不提供 `start_task` 和 `start_background_task`。
-只有当问题能够分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent。
-例如可分别调查不同模块，或处理修改范围互不重叠的任务；后一步依赖前一步结果、
-或多个任务会竞争修改同一文件时，应由主 Agent 按顺序处理。
-这一条件写入子 Agent 的描述，供主模型判断是否委派；`isolated` 隔离消息上下文，
-不隔离共享工作区中的文件修改，也不自动检测子任务之间的依赖或冲突。
+委派工具是 `start_task`。任务内容只有 `description`，没有子 Agent 类型。
+Root 在 `subagents.background: true` 时还可以传 `run_in_background`。
+委派只在主 Agent 的权限模式为 `auto` 或 `allow` 时可用；`ask` 下不提供 `start_task`。
+什么时候该派、怎么写任务，写在 `start_task` 的工具描述里，并按当前 Agent 的实际能力拼接。
+同步子 Agent 的描述不提后台参数。后台子 Agent 和已经到深度上限的节点不获得派发工具，也不获得这段描述。
+子任务只收到 `description`，不继承父对话。共享工作区里的文件修改不会自动隔离，也不会自动检测任务之间的依赖或冲突。
 
 配置位于顶层 `subagents`：
 
@@ -496,14 +495,15 @@ subagents:
   model: null
   # 使用子模型原生默认强度，不继承主 Agent，也不向 API 发送强度参数。
   reasoning_effort: default
-  # 同时提供 start/check/cancel_background_task；false 时只保留同步 start_task。
+  # false 时 Root 的 start_task 不再接受 run_in_background，描述改为同步派发。
   background: true
 ```
 
 `max_concurrent` 是**每个父 Agent** 的直接子同时执行上限，默认 `4`，与宿主硬顶取最小后最多 `4`。
 `max_total` 是**全树累计**（不含 Root）的同时存在上限，默认 `10`，与宿主硬顶取最小后最多 `10`。任一上限触达时新委派立即返回错误；任务结束后释放许可。
-`max_subagent_depth` 是允许的 **SubAgent 嵌套层数**，不是 Agent 总层数：主 Agent 为 depth `0`，其创建的 SubAgent 为 `1`，再下一层为 `2`。默认与宿主硬顶均为 `2`（用户配置与硬顶取最小）。创建条件为 `parent_depth < max_subagent_depth`；达到上限的 Agent 仍可执行任务，但不能再 `start_task`。嵌套 SubAgent 只提供同步 `start_task`（后台委派工具仅挂在主 Agent）。
-`read_task_log` 遵循直接父级可见：只能读自己创建的直接子任务日志，不可跨层；depth 到顶的叶子不注册该工具。Auto 证据中 `user_messages` 始终为 Root 真实用户请求，本层任务描述只出现在 `delegated_task`。
+当前还剩多少名额不写进 `start_task` 的描述。模型调用 `read_task` 读取同一把锁下的容量快照。
+`max_subagent_depth` 是允许的 **SubAgent 嵌套层数**，不是 Agent 总层数：主 Agent 为 depth `0`，其创建的 SubAgent 为 `1`，再下一层为 `2`。默认与宿主硬顶均为 `2`（用户配置与硬顶取最小）。创建条件为 `parent_depth < max_subagent_depth`；达到上限的 Agent 仍可执行任务，但不能再 `start_task`。只有 Root 能把 `run_in_background` 设为 true。同步子 Agent 只能再派同步任务。后台子 Agent 是叶子，不能再派发。
+`read_task` 遵循直接父级可见：只能读自己创建的直接子任务，不可跨层；`include_logs=true` 才返回该任务的日志页，并且必须带 `run_id`。depth 到顶的叶子和后台子 Agent 不注册该工具。Auto 证据中 `user_messages` 始终为 Root 真实用户请求，本层任务描述只出现在 `delegated_task`。
 `model` 必须是 `llm.models` 中的完整模型 ID；空值继承当前主模型的 Profile。
 `reasoning_effort` 默认 `default`，省略该项或旧配置 `null` 与它等价：使用子模型原生默认强度，
 不继承主 Agent 的实际强度。可显式设置目标模型支持的 `low` / `high` 等值，暂不支持 `auto`。
@@ -520,23 +520,23 @@ subagents:
 
 子 Agent 使用独立消息历史和内存 checkpoint，不继承主对话；共享主 Runner 的文件系统与
 SandboxPool。可使用文件工具、execute、已配置的网页工具、Skills 和 AGENTS.md，
-不装载 MCP、人工输入或 TUI 审批。在 `max_subagent_depth` 允许时可继续同步 `start_task` 并读取自己直接子任务的 `read_task_log`；
-后台委派工具仅主 Agent 可用。文件修改仍遵循原有沙箱边界。
+不装载 MCP、人工输入或 TUI 审批。同步子 Agent 在 `max_subagent_depth` 允许时可继续同步 `start_task`，并读取自己直接子任务的 `read_task`。
+后台子 Agent 不能再派发。文件修改仍遵循原有沙箱边界。
 父任务取消会取消所有关联任务、模型 HTTP 流及执行命令；单个任务结束不会关闭共享 Pool。
-`start_task` 等待任务实际完成后才返回。
+同步 `start_task` 等待任务实际完成后才返回。`run_in_background=true` 在提交成功后立即返回 `run_id`。
 
 ### 后台委派
 
-`subagents.background: true`（默认）时，主 Agent 另有三个工具，与同步 `start_task` 并存：
+`subagents.background: true`（默认）时，Root 的 `start_task` 接受 `run_in_background`。同一个 tool-call 批次不能同时包含同步和后台 `start_task`；混合时该批次里的每个 `start_task` 都失败，并且不会启动。Root 另外有三个工具：
 
 | 工具 | 作用 |
 |---|---|
-| `start_background_task(description)` | 启动隔离子任务并立即返回 `run_id`，主 Agent 继续工作 |
-| `check_background_task(run_id=null)` | 不传参列出当前会话的后台任务；指定 ID 返回状态，已结束时带结果 |
-| `cancel_background_task(run_id)` | 停止一个运行中的后台任务 |
+| `read_task` | 不传 `run_id` 时列出自己的直接子任务；传入后返回描述、执行模式、状态、耗时和结果。`include_logs=true` 同时返回一页日志 |
+| `wait_task(run_ids)` | 阻塞到这些后台任务结束并返回结果。已经结束的立即返回。同一结果不会再作为自动通知送进模型上下文 |
+| `cancel_task(run_id)` | 请求取消一个属于当前 Agent 的后台任务。请求成功不表示任务已经停止，也不提前释放并发名额 |
 
-后台子任务的模型、强度、权限、沙箱、工具集和执行摘要与同步子任务完全相同，并与 `start_task` 共用每深度 / 全树并发上限；
-`ask` 下只保留 `check_background_task` 和 `cancel_background_task`。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
+后台子任务的模型、强度、权限、沙箱和执行摘要与同步子任务相同，并共用每父节点 / 全树并发上限。后台子 Agent 不再获得派发工具。
+`ask` 下保留 `read_task`、`wait_task` 和 `cancel_task`。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
 主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
 新建或切换会话、退出程序会取消后台任务并丢弃未送达的结果；未完成的任务恢复后显示为中断。
@@ -575,6 +575,6 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 和 JSON 凭据字段会原样保存。这不保证所有敏感信息均已脱敏，是日志功能的明确边界。
 日志独立于 SQLite schema，重启后仍可查询，暂不自动清理。
 
-主 Agent 可按需调用 `read_task_log(run_id=null, offset=0, limit=100)` 查看当前会话的
-最近任务 ID；指定 ID 后分页读取事件。ID 不接受路径，查询限定父会话，单页最多 100 项、约 64 KB。
+主 Agent 可按需调用 `read_task(run_id=null, offset=0, limit=100)` 查看自己的直接子任务。
+指定 `run_id` 且 `include_logs=true` 后分页读取事件。ID 不接受路径，查询限定直接父级，单页最多 100 项、约 64 KB。
 常规 start_task 结果只包含 run ID、最终回答或简短错误，内部日志仅在显式查询时进入主上下文。

@@ -19,7 +19,6 @@ from agent.companion import STATES
 from agent.companion.config import CompanionConfig
 from agent.companion.diagnostic_io import QueryBudget
 from agent.companion.timeline import (
-    SESSION_RELIABILITY,
     Timeline,
     ToolObservation,
     category,
@@ -33,7 +32,7 @@ from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
     observation_views, result_status,
 )
-from agent.companion.diagnosis import InvalidObservation, interpret_turn, reply_text, validate_observation
+from agent.companion.diagnosis import interpret_turn, reply_text
 from agent.companion.monitor import Resources, services
 
 
@@ -166,6 +165,7 @@ class Companion:
         self.next_prune = 0
         self.starts = {}
         self.turn = self.run
+        self.turn_query = ""
         self.turn_start = None
         self.turn_profile = self.profile()
         self.last_profile = None
@@ -321,6 +321,7 @@ class Companion:
             self.batches.clear()
             self.run = uuid4().hex
             self.turn = self.run
+            self.turn_query = ""
             self.services = ()
 
     def close_call(self, obs, outcome, wall, tick, error="", exit_code=None):
@@ -378,6 +379,7 @@ class Companion:
         summary = dict(
             turn=self.turn,
             run=self.run,
+            query=self.turn_query,
             profile=self.turn_profile,
             outcome=outcome,
             duration_ms=elapsed,
@@ -410,6 +412,7 @@ class Companion:
         self.timeline.record("turn", summary, key=self.turn, stamp=wall, turn=self.turn)
         self.timeline.summaries.append(summary)
         self.calls.clear()
+        self.turn_query = ""
         self.turn_start = None
         self.turn_metrics = []
         self.turn_git = []
@@ -450,6 +453,7 @@ class Companion:
             self.close_turn("unknown", wall, tick)
             self.run = event.run_id or uuid4().hex
             self.turn = event.turn_id or turn_id or self.run
+            self.turn_query = redact_diagnostic_text(event.content or "", self.secrets)
             self.turn_start = tick
             self.turn_profile = (model, effort)
             self.last_profile = (model, effort)
@@ -458,7 +462,7 @@ class Companion:
             self.turn_git = [self.last_git] if self.last_git else []
             self.timeline.record(
                 "run",
-                dict(model=model, effort=effort, agent=agent, run=self.run),
+                dict(model=model, effort=effort, agent=agent, run=self.run, query=self.turn_query),
                 key=self.turn,
                 stamp=wall,
                 turn=self.turn,
@@ -622,7 +626,8 @@ class Companion:
                 "completed": "success",
             }.get(event["status"], "unknown")
             if obs.outcome == "failed":
-                obs.error_category = category("", obs.exit_code)
+                recorded = event.get("error_category")
+                obs.error_category = recorded if isinstance(recorded, str) and recorded else category("", obs.exit_code)
             self.timeline.completed(obs)
             if turn == self.turn and self.turn_start is not None:
                 self.calls[run, call] = obs
@@ -823,6 +828,7 @@ class Companion:
             return [
                 dict(
                     turn_id=summary["turn"],
+                    query=summary.get("query", ""),
                     outcome=summary["outcome"],
                     duration_ms=summary["duration_ms"],
                     previous_turn_ms=summary["previous_turn_ms"][-3:],
@@ -1015,7 +1021,7 @@ class Companion:
             self.connection = "CONNECTED"
             while True:
                 self.sync_session()
-                if not self.question and not self.timeline.queue:
+                if not self.question:
                     self.changed.clear()
                     try:
                         await asyncio.wait_for(self.changed.wait(), 1)
@@ -1026,54 +1032,15 @@ class Companion:
                 question = self.question
                 state = self.timeline
                 generation = self.session_generation
-                incident = None
-                if question:
-                    snapshot = dict(
-                        question=redact_diagnostic_text(question, self.secrets),
-                        snapshot_version=state.version,
-                        profile=self.profile(),
-                        tool_evidence=self.chat_tool_evidence(question),
-                        recent_errors=list(self.errors),
-                        latest_review=self.session_evidence("turns")[-1:],
-                        conversation=self.chat_history(question),
-                    )
-                elif state.queue:
-                    key, incident_id, version = state.queue.popleft()
-                    incident = state.incidents.get(key)
-                    if not incident or (
-                        incident["id"],
-                        incident["version"],
-                        incident["state"],
-                    ) != (incident_id, version, "open"):
-                        continue
-                    incident["requested"] = True
-                    state.record(
-                        "incident",
-                        incident.copy(),
-                        key=incident_id,
-                        turn=incident["turn"],
-                    )
-                    if (
-                        self.session() != self.thread
-                        or state is not self.timeline
-                        or state.incidents.get(key) is not incident
-                    ):
-                        continue
-                    snapshot = dict(
-                        incident=incident,
-                        snapshot_version=state.version,
-                        recent_failures=[
-                            f
-                            for f in state.failures
-                            if (
-                                key == SESSION_RELIABILITY
-                                or (f["model_id"], f["reasoning_effort"]) == key[:2]
-                            )
-                            and key[2] in ("*", f["tool_name"])
-                        ][-5:],
-                    )
-                else:
-                    continue
+                snapshot = dict(
+                    question=redact_diagnostic_text(question, self.secrets),
+                    snapshot_version=state.version,
+                    profile=self.profile(),
+                    tool_evidence=self.chat_tool_evidence(question),
+                    recent_errors=list(self.errors),
+                    latest_review=self.session_evidence("turns")[-1:],
+                    conversation=self.chat_history(question),
+                )
                 self.request_version += 1
                 identity = dict(
                     session=self.thread, seq=self.request_version, token=uuid4().hex
@@ -1083,7 +1050,6 @@ class Companion:
                     return (
                         self.session() == identity["session"]
                         and generation == self.session_generation
-                        and (not incident or self.timeline is state and state.incidents.get(key) is incident)
                     )
 
                 timeout = self.config.question_timeout_seconds
@@ -1110,55 +1076,11 @@ class Companion:
                 self.sync_session()
                 if not current():
                     continue
-                if question:
-                    stamp = self._clear_chat_reply()
-                    if reply.get("status") == "ok":
-                        self.log(reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets)), stamp=stamp)
-                    else:
-                        self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
+                stamp = self._clear_chat_reply()
+                if reply.get("status") == "ok":
+                    self.log(reply_text(redact_diagnostic_text(str(reply.get("message") or ""), self.secrets)), stamp=stamp)
                 else:
-                    status = reply.get("status")
-                    decision = None
-                    if status == "ok":
-                        try:
-                            decision = validate_observation({field: reply.get(field) for field in ("behavior", "message")})
-                        except InvalidObservation:
-                            status = "invalid_observation"
-                    message = reply_text(redact_diagnostic_text(decision["message"], self.secrets),
-                                         proactive=True) if decision else ""
-                    analysis = dict(
-                        incident=incident_id,
-                        version=version,
-                        turn=incident["turn"],
-                        status=status,
-                        message=message,
-                    )
-                    state.record(
-                        "analysis",
-                        analysis,
-                        key=f"{incident_id}/{version}",
-                        turn=incident["turn"],
-                    )
-                    incident["analysis"] = analysis
-                    for summary in state.summaries:
-                        if summary["turn"] == incident["turn"]:
-                            summary.setdefault("analyses", []).append(analysis)
-                            state.record(
-                                "turn",
-                                summary.copy(),
-                                key=summary["turn"],
-                                turn=summary["turn"],
-                            )
-                    state.record(
-                        "incident",
-                        incident.copy(),
-                        key=incident_id,
-                        turn=incident["turn"],
-                    )
-                    if decision:
-                        self.queue_behavior(decision["behavior"], temporary=True)
-                    if message:
-                        self.log(message)
+                    self.log(_REPLY_ERRORS.get(reply.get("status"), _REPLY_ERRORS["model_error"]), "Status")
         finally:
             if not restart:
                 if self.question:

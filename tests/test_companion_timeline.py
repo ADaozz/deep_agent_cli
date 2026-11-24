@@ -367,7 +367,7 @@ def test_distributed_decline_with_low_individual_rates_survives_resume(tmp_path)
     assert c.timeline.overall.rate == 10
     incident = c.timeline.incidents[SESSION_RELIABILITY]
     assert incident["state"] == "open" and incident["scope"] == "session"
-    assert sum(key == SESSION_RELIABILITY for key, _, _ in c.timeline.queue) == 1
+    assert not c.timeline.queue
     transact(c.database, c.timeline.pending)
     restored = restore_session(c.database, "s", 20)
     assert restored.overall.statistics() == c.timeline.overall.statistics()
@@ -379,7 +379,7 @@ def test_incident_recovers_only_after_clean_results(tmp_path):
     key = ("fixed model", "default", "probe")
     for i in range(3):
         _observe_tool(c.timeline, i, "probe", failed=True)
-    assert len(c.timeline.queue) == 1
+    assert not c.timeline.queue
     assert c.timeline.incidents[key]["state"] == "open"
     for i in range(3, 7):
         _observe_tool(c.timeline, i, "probe")
@@ -466,3 +466,41 @@ def test_diagnostic_window_filters_events_before_the_row_limit(tmp_path):
     assert incidents == {"records": [(2.0, "incident", {"state": "open"})], "truncated": False}
     git = timeline_window(path, "s", "git", 0, 30, limit=1)
     assert git["records"][0][1] == "git"
+
+
+def test_turn_payload_stores_the_user_query(tmp_path):
+    from zoneinfo import ZoneInfo
+
+    from agent.companion.controller import Companion
+    from agent.companion.timeline import timeline_window
+
+    async def run():
+        c = Companion(
+            workspace=tmp_path, config_dir=tmp_path, session=lambda: "s",
+            geometry=lambda: (64, 16), invalidate=lambda: None,
+            timezone=ZoneInfo("UTC"), secrets=("sk-live-value",),
+        )
+        c.event(RunEvent("run_started", run_id="r1", turn_id="t1", content="use sk-live-value please"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        c.event(RunEvent("turn_started", run_id="r1", turn_id="t2", content="follow up"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        c.event(RunEvent("run_started", run_id="r2", turn_id="t3"), "m")
+        c.event(RunEvent("turn_completed"), "m")
+        queries = [row["query"] for row in c.session_evidence("turns")]
+        assert queries == ["use $secret please", "follow up", ""]
+        assert "sk-live-value" not in "".join(queries)
+        await c.save_statistics()
+        stored = {
+            (kind, key): json.loads(payload)
+            for kind, key, payload in sqlite3.connect(c.database).execute(
+                "select kind, id, payload from timeline where kind in ('run','turn')"
+            )
+        }
+        assert "sk-live-value" not in json.dumps(list(stored.values()))
+        assert stored[("run", "t1")]["query"] == stored[("turn", "t1")]["query"] == "use $secret please"
+        assert stored[("run", "t2")]["query"] == "follow up"
+        assert stored[("turn", "t3")]["query"] == ""
+        window = timeline_window(c.database, "s", "timeline", 0, 10**12, event_type="turn", limit=10)
+        assert [row["query"] for _, _, row in window["records"]] == ["", "follow up", "use $secret please"]
+
+    asyncio.run(run())

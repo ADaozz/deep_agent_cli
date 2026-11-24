@@ -279,7 +279,6 @@ class Timeline:
                 category=obs.error_category,
                 **series.statistics(),
             )
-            self.queue.append((key, data["id"], data["version"]))
         elif (
             not elevated
             and previous
@@ -431,13 +430,6 @@ def transact(path, batch, session=None, prune=False):
 def restore_session(path, session, window):
     state = Timeline(session, window)
     state.restore(transact(path, [], session))
-    for key, incident in state.incidents.items():
-        if (
-            incident["state"] == "open"
-            and not incident.get("requested")
-            and time() - incident["opened"] < 120
-        ):
-            state.queue.append((key, incident["id"], incident["version"]))
     return state
 
 
@@ -468,7 +460,7 @@ def timeline_window(path, session, kind, start, end, budget=None, *,
         for stamp, kind, data in rows[:limit]:
             data = json.loads(data)
             if kind == "turn":
-                data = {key: data[key] for key in ("turn", "run", "outcome", "duration_ms", "findings") if key in data}
+                data = {key: data[key] for key in ("turn", "run", "query", "outcome", "duration_ms", "findings") if key in data}
             elif kind == "tool":
                 data.pop("session_id", None)
                 data.pop("message_id", None)

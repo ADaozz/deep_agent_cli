@@ -53,6 +53,8 @@ class RunController:
         # input: never reclaimed into the editor, never shown as pending input.
         self._notifications: deque[dict[str, Any]] = deque()
         self._pause_requested = False
+        # Root publishes its EnvironmentCache here. Children copy the snapshot.
+        self.environment_cache = None
         self._generations = count(1)
         self._active: _RunScope | None = None
         self._reserved: _RunScope | None = None
@@ -250,6 +252,13 @@ class RunController:
     def notify(self, item: dict[str, Any]) -> None:
         with self._lock:
             self._notifications.append(item)
+
+    def drop_notification(self, run_id: str) -> None:
+        """Remove a queued result that wait_task is about to return itself."""
+        with self._lock:
+            self._notifications = deque(
+                item for item in self._notifications if item.get("run_id") != run_id
+            )
 
     def pop_notifications(self) -> list[dict[str, Any]]:
         """Consume every queued notification at a model-safe boundary."""

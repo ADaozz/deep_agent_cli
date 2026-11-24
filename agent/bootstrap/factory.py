@@ -9,7 +9,6 @@ from deepagents import (
     register_harness_profile,
 )
 from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgentMiddleware
 from deepagents.middleware.skills import SKILLS_SYSTEM_PROMPT, SkillsMiddleware
 from deepagents.middleware.summarization import (
     SummarizationMiddleware,
@@ -30,6 +29,7 @@ from agent.runtime.control import RunController
 from agent.execution.environment import EnvironmentContextMiddleware
 from agent.models.client import ProtocolChatOpenAI, build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
+from agent.middleware.delegation_batch import DelegationBatchMiddleware
 from agent.middleware.current_time import CurrentTimeMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.payload_recovery import PayloadRecoveryMiddleware
@@ -48,7 +48,15 @@ from agent.runtime.permissions import (
     permission_mode_from_interrupt_on,
     permission_unavailable_reason,
 )
-from agent.tools.catalog import FILE_MUTATION_TOOLS, FILESYSTEM_TOOL_NAMES
+from agent.tools.catalog import (
+    FILE_MUTATION_TOOLS,
+    FILESYSTEM_TOOL_NAMES,
+    ROOT_TASK_TOOLS,
+    SYNC_TASK_TOOLS,
+    NodeKind,
+    apply_runtime_limits,
+    node_tools,
+)
 from agent.execution.backend import BackendSelection, sandbox_pool_of, select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.types import ExecutionMode, SKILLS_ROOT
@@ -95,22 +103,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
     "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
 )
-
-
-class StartTaskMiddleware(SubAgentMiddleware):
-    @property
-    def name(self) -> str:
-        return "SubAgentMiddleware"
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.tools[0].name = "start_task"
-
-    @SubAgentMiddleware.private_state_keys.setter
-    def private_state_keys(self, value: frozenset[str]) -> None:
-        # create_deep_agent rebuilds the native tool after collecting state keys.
-        SubAgentMiddleware.private_state_keys.fset(self, value)
-        self.tools[0].name = "start_task"
 
 
 class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
@@ -254,16 +246,29 @@ def build_agent(
     sandbox_pool = sandbox_pool_of(fs_backend)
     _disable_general_purpose_task(model)
     prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
-    tools = [*build_human_input_tools(), *spec.tools] if spec.role == "main" else []
+    cfg = settings or spec.settings or Settings()
+    kind = _node_kind(spec, run_controller, cfg)
+    allowed = apply_runtime_limits(
+        node_tools(kind),
+        subagents_enabled=cfg.subagents.enabled,
+        can_launch=permission is not PermissionMode.ASK,
+        hidden=spec.hidden_tools,
+    )
+    tools: list[Any] = []
+    if "request_human_input" in allowed:
+        tools.extend(build_human_input_tools())
+    tools.extend(tool for tool in spec.tools if tool.name not in spec.hidden_tools)
     if spec.deepseek_api_key:
-        tools.extend((
-            build_web_search_tool(spec.deepseek_api_key, trust_env=spec.trust_env),
-            build_web_fetch_tool(spec.deepseek_api_key, trust_env=spec.trust_env),
-        ))
+        if "web_search" in allowed:
+            tools.append(build_web_search_tool(spec.deepseek_api_key, trust_env=spec.trust_env))
+        if "web_fetch" in allowed:
+            tools.append(build_web_fetch_tool(spec.deepseek_api_key, trust_env=spec.trust_env))
     hitl = dict(interrupt_on_override) if interrupt_on_override is not None else (interrupt_on_for_mode(permission) or {})
+    # File tools are common to every node. The middleware requires the full list;
+    # hidden_tools removes names from the model after that.
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
-    if supports_execute:
+    if supports_execute and "execute" in allowed:
         tools.append(build_execute_tool(
             fs_backend,
             network_by_default=permission is PermissionMode.ALLOW,
@@ -271,9 +276,7 @@ def build_agent(
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )
-    tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     saver = checkpointer if checkpointer is not None else InMemorySaver()
-    cfg = settings or spec.settings or Settings()
     summary_defaults = compute_summarization_defaults(model)
     trigger = summary_defaults["trigger"]
     keep = summary_defaults["keep"]
@@ -290,7 +293,7 @@ def build_agent(
     mcp_revision: int | None = None
     mcp_tools: list[Any] = []
     include_mcp = False
-    if mcp is not None and spec.role == "main":
+    if mcp is not None and kind == "root":
         from agent.mcp.middleware import MCPMiddleware, MCP_HOST_PROMPT
         from agent.mcp.names import host_interrupt_on
 
@@ -321,16 +324,16 @@ def build_agent(
             gated=hitl if ask_only else {**(interrupt_on_for_mode(PermissionMode.ASK) or {}), **hitl},
             ask_only=ask_only,
         ))
-    subagents: list[CompiledSubAgent] = []
+    delegation_batch: list[AgentMiddleware] = []
     manager = None
-    # Root depth is 0. An agent may spawn children while depth < max_subagent_depth.
-    if cfg.subagents.may_create_subagent(spec.depth):
+    task_names = allowed & (ROOT_TASK_TOOLS | SYNC_TASK_TOOLS)
+    # Only a node whose set includes task tools gets a runtime. Async and
+    # max-depth nodes stay on the common tools.
+    if task_names:
         from agent.subagents.manager import SubAgentManager
         from agent.subagents.log_store import SubAgentLogStore
         from agent.subagents.runtime import SubAgentRuntime
-        from agent.subagents.notifications import BACKGROUND_TOOLS, START_TOOL
-        from agent.tools.background_tasks import build_background_task_tools
-        from agent.tools.subagent_logs import build_subagent_log_tool
+        from agent.tools.subagent_tasks import build_subagent_tools
         # Rebuilds occur at a safe boundary; keep lifetime accounting on the
         # parent controller, which survives model changes and session switches.
         # Nested agents reuse the root manager (set on the child controller in
@@ -343,13 +346,12 @@ def build_agent(
                 max_total=cfg.subagents.max_total,
             )
             run_controller.subagent_manager = manager
-        manager.max_concurrent = cfg.subagents.max_concurrent
-        manager.max_total = cfg.subagents.max_total
+        manager.set_limits(
+            max_concurrent=cfg.subagents.max_concurrent,
+            max_total=cfg.subagents.max_total,
+        )
         root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
         store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
-        # Direct-parent log visibility: any agent that can spawn children may
-        # read only its own children's logs via the runtime thread_id.
-        tools.append(build_subagent_log_tool(store))
 
         def prepare_child(controller: RunController) -> PreparedAgent:
             if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:
@@ -372,17 +374,10 @@ def build_agent(
                     raise ValueError("A custom BaseChatModel requires subagents.model to override reasoning_effort")
                 child_model = model
             child_depth = spec.depth + 1
-            # Always strip host-only tools. Background tools stay root-only
-            # (notifications target the manager parent). Do not hide
-            # read_task_log — a child that can still spawn will register it.
-            # Hide start_task when the child itself is already at max depth.
-            hide = set(spec.hidden_tools) | BACKGROUND_TOOLS | {"request_human_input"}
-            if child_depth >= cfg.subagents.max_subagent_depth:
-                hide.add("start_task")
             child_spec = replace(
                 spec, role="subagent", depth=child_depth, tools=(), backend=fs_backend,
                 skills=tuple(skill_sources or ()),
-                hidden_tools=tuple(hide),
+                hidden_tools=spec.hidden_tools,
             )
             # Share the tree's concurrency manager; cancel chains use owner controllers.
             controller.subagent_manager = manager
@@ -405,41 +400,21 @@ def build_agent(
             child_depth=spec.depth + 1,
             owner_controller=run_controller,
         )
-        # A child cannot ask the user, so Ask offers no way to delegate. Tasks started
-        # before a switch to Ask keep running and can still be checked, cancelled, and read.
-        # Auto and Allow only exist on a verified sandbox, so delegation never reaches the host.
-        can_delegate = permission is not PermissionMode.ASK
-        # Background notifications land on the manager's parent controller; only
-        # the root conversation consumes that queue, so nested agents stay sync-only.
-        if cfg.subagents.background and spec.depth == 0:
-            tools.extend(tool for tool in build_background_task_tools(runtime, manager)
-                         if can_delegate or tool.name != START_TOOL)
-        if can_delegate:
-            remaining = cfg.subagents.max_subagent_depth - spec.depth
-            subagents.append({
-                "name": "general-purpose",
-                "description": (
-                    "Only delegate when the problem can be decomposed into independent "
-                    "subproblems that do not interfere with one another. "
-                    "Complete an isolated coding or research task. "
-                    "Only the final result is returned. "
-                    "No MCP or user interaction. "
-                    f"SubAgent nesting remaining from this agent: {remaining} "
-                    f"(max_subagent_depth={cfg.subagents.max_subagent_depth}). "
-                    f"Per-parent concurrency cap {cfg.subagents.max_concurrent}; "
-                    f"tree-wide cap {cfg.subagents.max_total}."
-                ),
-                "runnable": runtime,
-                "mode": "isolated",
-            })
+        tools.extend(build_subagent_tools(
+            runtime, manager, store,
+            names=task_names,
+            allow_background=kind == "root" and bool(cfg.subagents.background),
+        ))
+        if "start_task" in task_names:
+            delegation_batch.append(DelegationBatchMiddleware())
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(
             model=model,
-            subagents=subagents,
             tools=tools,
             system_prompt=prompt,
             middleware=[
+                *delegation_batch,
                 *auto_middleware,
                 RuntimeConfigGateMiddleware(run_controller.has_pending_config),
                 PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),
@@ -454,7 +429,6 @@ def build_agent(
                 AttachmentMaterializationMiddleware(),
                 PayloadRecoveryMiddleware(),
                 WorkspaceFilesystemMiddleware(backend=fs_backend, tools=filesystem_tools),
-                *([StartTaskMiddleware(backend=fs_backend, subagents=subagents)] if subagents else []),
                 *([SkillsMiddleware(
                     backend=fs_backend, sources=skill_sources,
                     system_prompt=SKILLS_SYSTEM_PROMPT.replace("read_file", "read"),
@@ -575,6 +549,17 @@ def _default_skill_sources(backend: BackendProtocol) -> list[str] | None:
 
 
 _NO_GP = HarnessProfile(general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False))
+
+
+def _node_kind(spec: AgentSpec, controller: RunController, cfg: Settings) -> NodeKind:
+    """Which catalog set this agent is allowed to draw from."""
+    if getattr(controller, "background_leaf", False):
+        return "async"
+    if spec.role != "main" and not cfg.subagents.may_create_subagent(spec.depth):
+        return "max_depth"
+    if spec.role == "main":
+        return "root"
+    return "sync"
 
 
 def _disable_general_purpose_task(model: BaseChatModel) -> None:

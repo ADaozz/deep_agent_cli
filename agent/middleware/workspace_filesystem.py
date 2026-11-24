@@ -31,8 +31,8 @@ READ_FILE_DESCRIPTION = (
 )
 
 _SAME_PATH_SERIAL = (
-    "同一路径的 write / edit / delete 必须串行："
-    "同一轮回复中不要对同一 file_path 发出多次变更；"
+    "同一路径不允许并发变更："
+    "同一轮回复中不要对同一 file_path 发出多次 write / edit / delete；"
     "先完成一次并看到结果，再改同一文件。"
 )
 _MULTI_PATH_PARALLEL = (
@@ -54,7 +54,8 @@ EDIT_FILE_DESCRIPTION = (
     "- old_string / new_string 必须保留 read 结果中的原始缩进，不要包含 read 的 `@@ ... @@` 状态头。\n"
     "- 优先编辑已有文件，而不是新建。\n"
     "- 除非用户明确要求，不要使用 emoji。\n"
-    f"- {_SAME_PATH_SERIAL}\n"
+    "- 同一文件多处修改：合并为一次 edit，或等本轮结果返回后再发下一次；"
+    "同一轮不要对同一 file_path 并发多次 edit。\n"
     f"- {_MULTI_PATH_PARALLEL}"
 )
 

@@ -26,8 +26,15 @@ class BackgroundTask:
     controller: RunController
     status: str = "running"  # running | completed | failed | cancelled
     result: str = ""
+    # sync returns through the tool message; background returns through the host notification.
+    mode: str = "background"
+    elapsed_seconds: float | None = None
     # Set at a session boundary: the result no longer has a conversation to reach.
     discarded: bool = False
+    # wait_task claims the result so the host does not also deliver it.
+    consumed: bool = False
+    notified: bool = False
+    done: threading.Event = field(default_factory=threading.Event, repr=False)
     thread: threading.Thread | None = field(default=None, repr=False)
 
 
@@ -35,8 +42,9 @@ class SubAgentManager:
     def __init__(
         self,
         parent: RunController,
-        max_concurrent: int = 4,
-        max_total: int = 10,
+        *,
+        max_concurrent: int,
+        max_total: int,
     ) -> None:
         self.parent = parent
         # Per-parent simultaneous direct-child cap.
@@ -55,6 +63,34 @@ class SubAgentManager:
         """Running plus still-closing tasks (both hold concurrency slots)."""
         with self._lock:
             return len(self._active) + len(self._closing)
+
+    def set_limits(self, *, max_concurrent: int, max_total: int) -> None:
+        """Replace both caps under the same lock admit uses."""
+        with self._lock:
+            self.max_concurrent = max_concurrent
+            self.max_total = max_total
+
+    def capacity_snapshot(self, parent_id: str) -> dict:
+        """One consistent reading of this parent's remaining capacity."""
+        with self._lock:
+            direct_children = sum(
+                1 for parent in self._parents.values()
+                if parent == parent_id
+            )
+            tree_occupied = self._occupied()
+            return {
+                "direct_children": direct_children,
+                "max_concurrent": self.max_concurrent,
+                "tree_occupied": tree_occupied,
+                "max_total": self.max_total,
+                "available": max(
+                    0,
+                    min(
+                        self.max_concurrent - direct_children,
+                        self.max_total - tree_occupied,
+                    ),
+                ),
+            }
 
     def active_children(self, parent_id: str) -> int:
         with self._lock:
@@ -163,27 +199,109 @@ class SubAgentManager:
     def track(self, task: BackgroundTask) -> None:
         with self._lock:
             self._tasks[task.run_id] = task
-            finished = [item for item in self._tasks.values() if item.status != "running"]
-            for item in finished[:max(0, len(finished) - FINISHED_TASK_LIMIT)]:
-                del self._tasks[item.run_id]
+            self._prune_finished()
 
-    def finish(self, task: BackgroundTask, status: str, result: str) -> None:
+    def open_record(
+        self,
+        *,
+        run_id: str,
+        parent: str,
+        description: str,
+        tool_call_id: str,
+        controller: RunController,
+        mode: str,
+    ) -> BackgroundTask:
+        """Remember a direct child. A background launch already tracked this run."""
         with self._lock:
-            task.status, task.result = status, result
+            existing = self._tasks.get(run_id)
+            if existing is not None:
+                return existing
+            task = BackgroundTask(
+                run_id=run_id, tool_call_id=tool_call_id, parent=parent,
+                description=description, controller=controller, mode=mode,
+            )
+            self._tasks[run_id] = task
+            self._prune_finished()
+            return task
 
-    def background_task(self, run_id: str, parent: str) -> BackgroundTask | None:
+    def _prune_finished(self) -> None:
+        finished = [item for item in self._tasks.values() if item.status != "running"]
+        for item in finished[:max(0, len(finished) - FINISHED_TASK_LIMIT)]:
+            del self._tasks[item.run_id]
+
+    def record_terminal(
+        self, run_id: str, status: str, result: str, elapsed_seconds: float | None,
+    ) -> bool:
+        """Publish a structured outcome. Returns whether the parent was notified.
+
+        Notification happens under the same lock that ``consume`` uses, so a
+        wait cannot race a second delivery of the same result.
+        """
         with self._lock:
             task = self._tasks.get(run_id)
-        return task if task is not None and task.parent == parent else None
+            if task is None or task.done.is_set():
+                return False
+            task.status = status
+            task.result = result
+            if elapsed_seconds is not None:
+                task.elapsed_seconds = elapsed_seconds
+            notify = (
+                task.mode == "background"
+                and not task.consumed
+                and not task.discarded
+                and status != "cancelled"
+            )
+            task.notified = notify
+            task.done.set()
+            if notify:
+                self.parent.notify({
+                    "run_id": task.run_id,
+                    "tool_call_id": task.tool_call_id,
+                    "parent": task.parent,
+                    "status": status,
+                    "content": result,
+                })
+            return notify
+
+    def finish(self, task: BackgroundTask, status: str, result: str) -> None:
+        self.record_terminal(task.run_id, status, result, task.elapsed_seconds)
+
+    def consume(self, tasks: list[BackgroundTask]) -> None:
+        """Give these results to wait_task and drop a notification already queued."""
+        with self._lock:
+            for task in tasks:
+                task.consumed = True
+                if task.notified:
+                    task.notified = False
+                    self.parent.drop_notification(task.run_id)
+
+    def task(self, run_id: str, parent: str) -> BackgroundTask | None:
+        with self._lock:
+            found = self._tasks.get(run_id)
+        return found if found is not None and found.parent == parent else None
+
+    def tasks_for(self, parent: str) -> list[BackgroundTask]:
+        with self._lock:
+            return [task for task in self._tasks.values() if task.parent == parent]
+
+    def background_task(self, run_id: str, parent: str) -> BackgroundTask | None:
+        found = self.task(run_id, parent)
+        return found if found is not None and found.mode == "background" else None
 
     def background_tasks(self, parent: str | None = None) -> list[BackgroundTask]:
         with self._lock:
-            return [task for task in self._tasks.values() if parent is None or task.parent == parent]
+            return [
+                task for task in self._tasks.values()
+                if task.mode == "background" and (parent is None or task.parent == parent)
+            ]
 
     @property
     def background_count(self) -> int:
         with self._lock:
-            return sum(task.status == "running" for task in self._tasks.values())
+            return sum(
+                task.mode == "background" and task.status == "running"
+                for task in self._tasks.values()
+            )
 
     def cancel(self, run_id: str, parent: str) -> BackgroundTask | None:
         """Request one background task to stop. Its worker reports the outcome."""
@@ -199,11 +317,12 @@ class SubAgentManager:
         conversation the runner is leaving.
         """
         with self._lock:
-            tasks = list(self._tasks.values())
+            tasks = [task for task in self._tasks.values() if task.mode == "background"]
             if discard:
                 for task in tasks:
                     task.discarded = True
-                self._tasks.clear()
+                for task in tasks:
+                    self._tasks.pop(task.run_id, None)
         running = [task for task in tasks if task.status == "running"]
         for task in running:
             task.controller.cancel()

@@ -30,36 +30,39 @@ def test_log_restart_paging_ownership_and_redaction(tmp_path):
             restarted.read('parent-a', run, offset, limit)
 
 
-def test_read_task_log_enforces_direct_parent_isolation(tmp_path):
-    """Root cannot read A1; A can read A1; A cannot read B's child (via read_task_log)."""
+def test_read_task_enforces_direct_parent_isolation(tmp_path):
+    """Root cannot read A1; A can read A1; A cannot read B's child."""
     from types import SimpleNamespace
 
-    from agent.tools.subagent_logs import build_subagent_log_tool
+    from agent.tools.subagent_tasks import build_subagent_tools
 
     store = SubAgentLogStore(tmp_path)
     root, agent_a, agent_b = "root-session", "agent-a-run", "agent-b-run"
     a1, b1 = uuid4().hex, uuid4().hex
     store.append(agent_a, a1, "finish", status="completed", summary="a1-only")
     store.append(agent_b, b1, "finish", status="completed", summary="b1-only")
-    tool = build_subagent_log_tool(store)
+    tool = next(item for item in build_subagent_tools(
+        None, None, store, names=frozenset({"read_task"}), allow_background=False,
+    ) if item.name == "read_task")
 
-    def read_as(parent: str, run_id: str | None = None) -> dict:
-        runtime = SimpleNamespace(config={"configurable": {"thread_id": parent}})
-        return tool.func(runtime, run_id=run_id)
+    def read_as(parent: str, run_id: str | None = None, *, include_logs: bool = False) -> dict:
+        runtime = SimpleNamespace(config={"configurable": {"thread_id": parent}}, tool_call_id="read")
+        return json.loads(tool.func(runtime, run_id=run_id, include_logs=include_logs))
 
     # Direct parent A sees A1; listing is scoped to A.
-    assert read_as(agent_a)["runs"] == [a1]
-    page = read_as(agent_a, a1)
-    assert page["records"][0]["summary"] == "a1-only"
+    assert [item["run_id"] for item in read_as(agent_a)["tasks"]] == [a1]
+    page = read_as(agent_a, a1, include_logs=True)
+    assert page["logs"]["records"][0]["summary"] == "a1-only"
+    assert page["result"] == "a1-only"
 
     # Root cannot see or open A1 (grandchild / other parent's child).
-    assert read_as(root)["runs"] == []
+    assert read_as(root)["tasks"] == []
     assert "error" in read_as(root, a1)
 
     # A cannot open B's direct child even with a known run_id.
-    assert read_as(agent_a)["runs"] == [a1]
+    assert [item["run_id"] for item in read_as(agent_a)["tasks"]] == [a1]
     assert "error" in read_as(agent_a, b1)
-    assert read_as(agent_b, b1)["records"][0]["summary"] == "b1-only"
+    assert read_as(agent_b, b1)["result"] == "b1-only"
 
 
 def test_log_bounds_and_crash_tail(tmp_path):
@@ -169,7 +172,11 @@ def test_runtime_logs_operations_without_model_trace_or_raw_tool_output(tmp_path
     parent = RunController()
     parent.begin_run()
     store = SubAgentLogStore(tmp_path)
-    runtime = SubAgentRuntime(SubAgentManager(parent), store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model')
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    runtime = SubAgentRuntime(
+        SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL),
+        store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model',
+    )
     parent_output = []
     previous = get_output_emitter()
     set_output_emitter(lambda *args: parent_output.append(args))
@@ -247,6 +254,7 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
     from types import SimpleNamespace
     from langchain_core.messages import HumanMessage
     from agent.runtime.control import RunController
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
     from agent.subagents.manager import SubAgentManager
     from agent.subagents.runtime import SubAgentRuntime
     class Graph:
@@ -261,7 +269,7 @@ def test_failed_or_cancelled_task_keeps_last_tool_start_and_terminal_summary(tmp
     parent = RunController()
     parent.begin_run()
     store = SubAgentLogStore(tmp_path)
-    manager = SubAgentManager(parent)
+    manager = SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
     runtime = SubAgentRuntime(manager, store, lambda controller: SimpleNamespace(graph=Graph(controller)), 'test-model')
     runtime.invoke({'messages': [HumanMessage(content='start_task')]}, {'configurable': {'thread_id': 'parent'}})
     records = store.read('parent', store.read('parent')['runs'][0])['records']
@@ -293,7 +301,11 @@ def test_known_keys_are_replaced_before_summary_limits(tmp_path):
     parent = RunController()
     parent.begin_run()
     store = SubAgentLogStore(tmp_path, (SecretRef("KNOWN", key),))
-    runtime = SubAgentRuntime(SubAgentManager(parent), store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model')
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    runtime = SubAgentRuntime(
+        SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL),
+        store, lambda controller: SimpleNamespace(graph=Graph()), 'test-model',
+    )
     result = runtime.invoke({'messages': [HumanMessage(content=description)]},
                             {'configurable': {'thread_id': 'parent'}})
     assert result['messages'][0].content.endswith(answer)

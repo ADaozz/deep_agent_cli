@@ -16,21 +16,15 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 
-from agent.redaction import SecretRef, replace_known_secrets, strip_control_sequences
+from agent.redaction import PRIVATE_KEY_HEADER, SecretRef, replace_known_secrets, strip_control_sequences
 
 PRIVATE_KEY_MARKER = "PRIVATE KEY-----"
-_SOURCE_PRIVATE_KEY = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*(?:\r?\n|(?:\\r)?\\n)"
-)
+_SOURCE_PRIVATE_KEY = re.compile(PRIVATE_KEY_HEADER + r"[ \t]*(?:\r?\n|(?:\\r)?\\n)")
 
 Secrets = Iterable[SecretRef] | Mapping[str, str]
 
 
 def redact_diagnostic_text(text: str, secrets: Secrets = ()) -> str:
-    return replace_known_secrets(strip_control_sequences(text), secrets)
-
-
-def redact_source_text(text: str, secrets: Secrets = ()) -> str:
     return replace_known_secrets(strip_control_sequences(text), secrets)
 
 

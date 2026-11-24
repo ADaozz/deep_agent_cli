@@ -4,14 +4,14 @@ from agent.cli.input_actions import DOUBLE_PRESS_WINDOW_SECONDS, InputAction, In
 
 def test_interrupt_checks_follow_one_priority() -> None:
     router = InputActionRouter()
-    busy = dict(transcript_away=True, session_waiting=True, reviewing=True, running=True, mcp_busy=True)
+    busy = dict(transcript_away=True, session_waiting=True, running=True, mcp_busy=True)
     assert router.decide_interrupt(InputView(completion_open=True, slash_line=True, **busy)) is InputAction.DISMISS_COMPLETION
     assert router.decide_interrupt(InputView(slash_line=True, **busy)) is InputAction.CLEAR_SLASH_LINE
     assert router.decide_interrupt(InputView(**busy)) is InputAction.FOLLOW_TRANSCRIPT
     assert router.decide_interrupt(InputView(has_interaction=True, completion_open=True, transcript_away=True)) is InputAction.FOLLOW_TRANSCRIPT
     assert router.decide_interrupt(InputView(has_interaction=True, completion_open=True)) is InputAction.CANCEL_COMPLETION
-    assert router.decide_interrupt(InputView(session_waiting=True, reviewing=True, running=True)) is InputAction.CANCEL_SESSION_WAIT
-    assert router.decide_interrupt(InputView(reviewing=True, has_interaction=True, running=True)) is InputAction.CLOSE_REVIEW
+    assert router.decide_interrupt(InputView(session_waiting=True, running=True)) is InputAction.CANCEL_SESSION_WAIT
+    assert router.decide_interrupt(InputView(has_interaction=True, running=True)) is InputAction.CANCEL_INTERACTION
     assert router.decide_interrupt(InputView(has_interaction=True, custom_entry=True)) is InputAction.EXIT_CUSTOM_ENTRY
     assert router.decide_interrupt(InputView(has_interaction=True)) is InputAction.CANCEL_INTERACTION
     assert router.decide_interrupt(InputView(compacting=True, running=True)) is InputAction.WAIT_FOR_COMPACTION

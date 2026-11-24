@@ -86,12 +86,12 @@ from agent.runtime.permissions import (
     permission_mode_from_interrupt_on,
 )
 from agent.sessions.store import SessionStore, workspace_state_path
-from agent.sessions.transcript import subagent_result_status
-from agent.subagents.notifications import notification_message
+from agent.sessions.transcript import subagent_card_status
+from agent.subagents.notifications import NOTIFICATION_KEY, notification_message
 from agent.sessions.contracts import SessionInfo, StopReason
 from agent.sessions.locks import SessionLockBusyError
 from agent.sessions.lifecycle import RestorePlan, SessionLeaseLike, SessionRuntime
-from agent.models.messages import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks
+from agent.models.messages import DeltaHandler, StreamDeltaCallback, merge_stream_callbacks, message_text
 from agent.tools.human_interaction import validate_human_input_values
 
 # Stream the compiled graph and resume with Command.
@@ -128,6 +128,22 @@ def _exclusive_operation(method: Callable[..., Any]) -> Callable[..., Any]:
                 self.control.release_reservation(reservation)
             self._operation_lock.release()
     return guarded
+
+
+def _user_turn_text(graph_input: Any) -> str:
+    """User text that starts this run. Host notifications are not a query."""
+    if not isinstance(graph_input, dict):
+        return ""
+    texts = []
+    for message in graph_input.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        if NOTIFICATION_KEY in (getattr(message, "additional_kwargs", None) or {}):
+            continue
+        text = message_text(message).strip()
+        if text:
+            texts.append(text)
+    return "\n\n".join(texts)
 
 
 class AgentRunner:
@@ -179,6 +195,7 @@ class AgentRunner:
         self._context_usage_invalidated = False
         self._resume_context: RecoveryContext | None = None
         self._environment = EnvironmentCache()
+        self.control.environment_cache = self._environment
         self._closed = False
         self._close_completed = False
         self.mcp = mcp_manager
@@ -1409,7 +1426,10 @@ class AgentRunner:
         self._busy = True
         run_id, turn_id = uuid4().hex, uuid4().hex
         scope_token = observation_scope.set((self.thread_id, run_id, turn_id))
-        _emit(event_handler, RunEvent(type="run_started", run_id=run_id, turn_id=turn_id))
+        _emit(event_handler, RunEvent(
+            type="run_started", run_id=run_id, turn_id=turn_id,
+            content=_user_turn_text(graph_input),
+        ))
 
         result: RunResult | None = None
         turn_started = time.monotonic()
@@ -1453,7 +1473,9 @@ class AgentRunner:
                 turn_id = uuid4().hex
                 observation_scope.set((self.thread_id, run_id, turn_id))
                 self._apply_pending_runtime_config(event_handler)
-                _emit(event_handler, RunEvent(type="turn_started", run_id=run_id, turn_id=turn_id))
+                _emit(event_handler, RunEvent(
+                    type="turn_started", run_id=run_id, turn_id=turn_id, content=text or "",
+                ))
                 result = self._stream_once(
                     {"messages": [HumanMessage(content=text)] if text is not None
                      else [notification_message(item) for item in notices]},
@@ -1624,6 +1646,8 @@ class AgentRunner:
                 # Native task returns an unnamed ToolMessage. Preserve the
                 # presentation identity even when resuming a saved tool step.
                 event = replace(event, name="start_task", is_error=(
-                    subagent_result_status(event.content, is_error=event.is_error) != "completed"
+                    subagent_card_status(
+                        event.content, is_error=event.is_error, artifact=event.artifact,
+                    ) != "completed"
                 ))
             _emit(handler, event)

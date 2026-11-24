@@ -60,7 +60,7 @@ def create_bindings(
 
     completion_active = Condition(lambda: self.dialogs.current is None and self.buffer.complete_state is not None)
 
-    turn_navigation = Condition(lambda: not self.buffer.text and not self.state.attachments and not self.dialogs.reviewing)
+    turn_navigation = Condition(lambda: not self.buffer.text and not self.state.attachments)
 
     @kb.add("left", filter=turn_navigation & ~interaction_active & ~completion_active)
     def previous_turn(event) -> None:  # type: ignore[no-untyped-def]
@@ -226,7 +226,7 @@ def create_bindings(
 
     @bind("review_diff")
     def review_diff(event) -> None:  # type: ignore[no-untyped-def]
-        self._toggle_review()
+        self._toggle_file_changes()
 
     @bind("reopen_interaction")
     def reopen_interaction(event) -> None:  # type: ignore[no-untyped-def]

@@ -7,7 +7,7 @@ import stat
 from time import monotonic
 
 from agent.companion.config import SOURCE_READ_MAX_LINES
-from agent.companion.redaction import redact_source_text, source_contains_private_key
+from agent.companion.redaction import redact_diagnostic_text, source_contains_private_key
 from agent.redaction import secret_values
 
 SOURCE = {
@@ -148,7 +148,7 @@ class Repository:
                 "\n" in secret and secret in text for secret in self._secret_values
             ):
                 raise ValueError("private key material")
-            lines = redact_source_text(text, self.secrets).splitlines()
+            lines = redact_diagnostic_text(text, self.secrets).splitlines()
             if budget:
                 budget.check()
             return lines

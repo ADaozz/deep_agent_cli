@@ -25,7 +25,6 @@ class InputAction(Enum):
     FOLLOW_TRANSCRIPT = "follow_transcript"
     CANCEL_COMPLETION = "cancel_completion"
     CANCEL_SESSION_WAIT = "cancel_session_wait"
-    CLOSE_REVIEW = "close_review"
     EXIT_CUSTOM_ENTRY = "exit_custom_entry"
     CANCEL_INTERACTION = "cancel_interaction"
     WAIT_FOR_COMPACTION = "wait_for_compaction"
@@ -48,7 +47,6 @@ class InputView:
     slash_line: bool = False
     transcript_away: bool = False
     session_waiting: bool = False
-    reviewing: bool = False
     compacting: bool = False
     running: bool = False
     cancel_sent: bool = False
@@ -73,7 +71,7 @@ class InputActionRouter:
         # the same chain, so a run that is still marked active can be cancelled.
         if view.exiting and not any((
             view.has_interaction, view.completion_open, view.slash_line,
-            view.transcript_away, view.session_waiting, view.reviewing,
+            view.transcript_away, view.session_waiting,
             view.compacting, view.running, view.mcp_busy, view.background_running,
         )):
             return InputAction.NONE
@@ -87,8 +85,6 @@ class InputActionRouter:
             return InputAction.CANCEL_COMPLETION
         if view.session_waiting:
             return InputAction.CANCEL_SESSION_WAIT
-        if view.reviewing:
-            return InputAction.CLOSE_REVIEW
         if view.has_interaction and view.custom_entry:
             return InputAction.EXIT_CUSTOM_ENTRY
         if view.has_interaction:

@@ -145,7 +145,6 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
     from prompt_toolkit.output import DummyOutput
 
     from agent.cli.app import CliApplication
-    from agent.companion.timeline import SESSION_RELIABILITY
     from tests.conftest import scripted_model
 
     workspace = tmp_path / "workspace"
@@ -189,7 +188,6 @@ def test_lain_diagnoses_actual_execution_failures_through_worker_ipc(tmp_path, m
         *({"tool": "inspect_current_session", "id": "detail-" + case,
            "args": {"view": "tool_detail", "tool_call_id": case}} for case in cases),
         {"text": explanation},
-        {"text": '{"behavior":"curious","message":"错误类型发生了变化。"}'},
     ]
 
     async def scenario(endpoint, requests):
@@ -254,24 +252,16 @@ asyncio.run(worker.main())
                 assert [row["tool_call_id"] for row in rows] == list(cases)
                 assert [row["error_category"] for row in rows] == ["dependency", "assertion", "permission", ""]
                 await companion.save_statistics()
-                state = companion.timeline
-                state.queue.clear()
-                incident = dict(id="fixture-incident", version=1, state="open", scope="session",
-                                turn=rows[-1]["turn_id"])
-                state.incidents[SESSION_RELIABILITY] = incident
-                state.queue.append((SESSION_RELIABILITY, incident["id"], incident["version"]))
                 companion.ask("解释 execute 的失败变化。")
                 worker = asyncio.create_task(companion.worker_session())
                 try:
                     async with asyncio.timeout(15):
-                        while companion.question or "analysis" not in incident:
+                        while companion.question:
                             await asyncio.sleep(.02)
                 finally:
                     worker.cancel()
                     await asyncio.gather(worker, return_exceptions=True)
-                assert [message for _, role, message in companion.logs if role == "Lain"] == [
-                    explanation, "错误类型发生了变化。",
-                ]
+                assert [message for _, role, message in companion.logs if role == "Lain"] == [explanation]
                 runner.new_session()
                 missing = await inspect(view="tool_detail", tool_call_id="success")
                 assert missing["error"]["code"] == "tool_call_not_found"
@@ -281,10 +271,8 @@ asyncio.run(worker.main())
             runner.close()
             store.close()
 
-        final_request, observation = requests[-2:]
-        assert observation["response_format"] == {"type": "json_object"}
-        assert not observation.get("tools")
-        assert "fixture-incident" in observation["messages"][-1]["content"]
+        final_request = requests[-1]
+        assert all(item.get("tools") for item in requests)
         assert {item["function"]["name"] for item in final_request["tools"]} == {
             "session_evidence", "inspect_current_session", "search_workspace_text",
             "list_workspace_files", "read_workspace_file",

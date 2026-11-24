@@ -8,9 +8,25 @@ from math import isfinite
 from time import monotonic
 from typing import Any, Callable
 
+from agent.tools.catalog import METRICS_EXCLUDED_TASK_TOOLS
+
 
 def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens")
+
+
+def normalize_usage(usage: object) -> dict[str, int]:
+    """Keep only non-negative integer token counts from a usage dict."""
+    if not isinstance(usage, dict):
+        return {}
+    return {
+        key: value
+        for key in _USAGE_KEYS
+        if type(value := usage.get(key)) is int and value >= 0
+    }
 
 
 def _span(first: float | None, last: float | None) -> float | None:
@@ -99,10 +115,7 @@ class GenerationTiming:
         }
 
 
-_SUBAGENT_TOOLS = frozenset({
-    "start_task", "read_task_log",
-    "start_background_task", "check_background_task", "cancel_background_task",
-})
+_SUBAGENT_TOOLS = METRICS_EXCLUDED_TASK_TOOLS
 
 
 def tool_usage_by_model(history: list[dict[str, Any]]) -> tuple[list[str], list[tuple[str, dict[str, int]]]]:

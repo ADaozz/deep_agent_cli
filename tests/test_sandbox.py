@@ -367,9 +367,9 @@ def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.Monkey
         "delete",
         "execute",
         "compact_conversation",
-        "read_task_log",
-        "check_background_task",
-        "cancel_background_task",
+        "read_task",
+        "wait_task",
+        "cancel_task",
     }
     assert len(names) == 11
     assert "execute" not in prepared.filesystem_tools

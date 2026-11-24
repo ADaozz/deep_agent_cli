@@ -36,11 +36,11 @@
 
 | 主 Agent | 子任务 |
 |---|---|
-| `ask` | 不提供 `start_task` 和 `start_background_task`。子任务没有审批入口，无法逐项向你确认 |
+| `ask` | 不提供 `start_task`。子任务没有审批入口，无法逐项向你确认 |
 | `auto` | Auto，按命令的网络参数运行；需要人工决定时将拒绝原因返回父任务 |
 | `allow` | `allow` 的有网实例 |
 
-切换到 `ask` 之前启动的后台任务继续按启动时的权限运行，仍可用 `check_background_task`、`cancel_background_task` 和 `read_task_log` 查看或取消。
+切换到 `ask` 之前启动的后台任务继续按启动时的权限运行，仍可用 `read_task`、`wait_task` 和 `cancel_task` 查看、等待或取消。
 文件工具和命令仍受原有路径与挂载限制。子 Agent 不装载宿主 MCP 工具或人工输入；是否可继续委派由 `max_subagent_depth` 决定。
 `auto` 和 `allow` 只在经过验证的 `SANDBOXED` 身份下可用，因此委派不会退化到宿主免审批执行。
 

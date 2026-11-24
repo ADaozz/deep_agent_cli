@@ -47,7 +47,7 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     prepared = create_agent(model=fake_done, backend=StateBackend(), skills=[])
     # Ask offers no delegation; tasks from another mode can still be read, checked, and cancelled.
-    assert prepared.exposed_tool_names == ["read_task_log", "check_background_task", "cancel_background_task"]
+    assert prepared.exposed_tool_names == ["read_task", "wait_task", "cancel_task"]
     assert prepared.interrupt_on == ask_interrupt_on()
     assert prepared.system_prompt
     names = graph_tool_names(prepared.graph)
@@ -58,8 +58,8 @@ def test_factory_exposes_local_tools_and_marks_confirm(fake_done, monkeypatch) -
     assert "write_todos" not in names
     assert "compact_conversation" in names
     assert "execute" not in names
-    assert {"read_task_log", "check_background_task", "cancel_background_task"} <= names
-    assert not {"start_task", "start_background_task"} & names
+    assert {"read_task", "wait_task", "cancel_task"} <= names
+    assert "start_task" not in names
     assert {"read", "write", "edit"} <= names
     assert not {"task", "read_subagent_log", "read_file", "write_file", "edit_file"} & names
     assert len(names) == 10
@@ -828,3 +828,31 @@ def test_http_errors_stay_failures_and_respect_retry_budget(api) -> None:
     assert result.status == "failed"
     # One streaming budget: the original request plus five retries.
     assert len(server.errors) == 6
+
+
+def test_run_started_carries_the_user_question() -> None:
+    from langchain_core.messages import HumanMessage
+
+    from agent.runtime.runner import _user_turn_text
+    from agent.subagents.notifications import notification_message
+
+    events = []
+    runner = AgentRunner(
+        prepared=create_agent(
+            model=scripted_model([AIMessage(content="done")]),
+            backend=StateBackend(),
+            skills=[],
+        ),
+    )
+    try:
+        runner.invoke("fix the parser", on_event=events.append)
+    finally:
+        runner.close()
+    started = next(event for event in events if event.type == "run_started")
+    assert started.content == "fix the parser"
+    notice = notification_message({
+        "run_id": "r", "tool_call_id": "t", "status": "completed", "content": "background done",
+    })
+    assert _user_turn_text({"messages": [notice]}) == ""
+    assert _user_turn_text({"messages": [HumanMessage(content="hello"), notice]}) == "hello"
+    assert _user_turn_text(None) == ""

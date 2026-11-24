@@ -6,11 +6,37 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from agent.tools.catalog import HISTORICAL_BACKGROUND_START, TASK_TOOL
 
-START_TOOL = "start_background_task"
-CHECK_TOOL = "check_background_task"
-CANCEL_TOOL = "cancel_background_task"
-BACKGROUND_TOOLS = frozenset({START_TOOL, CHECK_TOOL, CANCEL_TOOL})
+# Historical launch name. Restored transcripts still use it; it is not registered.
+START_TOOL = HISTORICAL_BACKGROUND_START
+
+
+def background_requested(arguments: object) -> bool:
+    """True when a start_task call asked to run in the background."""
+    if not isinstance(arguments, dict):
+        return False
+    value = arguments.get("run_in_background", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def is_task_tool(name: str) -> bool:
+    return name in {TASK_TOOL, START_TOOL}
+
+
+def is_background_launch(name: str, arguments: object = None) -> bool:
+    """A launch whose card stays open until the task itself finishes.
+
+    The old ``start_background_task`` name is always a background launch.
+    ``start_task`` is one only when ``run_in_background`` is true.
+    """
+    if name == START_TOOL:
+        return True
+    return name == TASK_TOOL and background_requested(arguments)
 
 NOTIFICATION_KEY = "deep_agent_notification"
 _SEPARATOR = "\n\n"

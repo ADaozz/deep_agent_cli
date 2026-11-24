@@ -11,6 +11,23 @@ from agent.subagents.manager import SubAgentManager
 from agent.subagents.runtime import SubAgentRuntime
 
 
+def test_capacity_snapshot_reads_limits_and_occupancy_together():
+    parent = RunController()
+    manager = SubAgentManager(parent, max_concurrent=2, max_total=3)
+    assert manager.capacity_snapshot("parent") == {
+        "direct_children": 0, "max_concurrent": 2, "tree_occupied": 0, "max_total": 3, "available": 2,
+    }
+    manager.admit("parent", parent)
+    manager.admit("other", parent)
+    assert manager.capacity_snapshot("parent") == {
+        "direct_children": 1, "max_concurrent": 2, "tree_occupied": 2, "max_total": 3, "available": 1,
+    }
+    manager.set_limits(max_concurrent=1, max_total=2)
+    assert manager.capacity_snapshot("parent") == {
+        "direct_children": 1, "max_concurrent": 1, "tree_occupied": 2, "max_total": 2, "available": 0,
+    }
+
+
 def test_atomic_limit_releases_on_success_failure_and_cancel():
     parent = RunController()
     parent.begin_run()
@@ -217,7 +234,7 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
     from tests.model_stream_server import ScriptedSSEServer, Turn
     from tests.test_model_stream_cancel import Harness, settings_for
     call = {'id': 'delegate', 'name': 'start_task', 'args': {
-        'description': 'child-only instructions', 'subagent_type': 'general-purpose'}}
+        'description': 'child-only instructions'}}
     with ScriptedSSEServer(api, [Turn(tool_calls=[call]), Turn(mode='hang')]) as server:
         cfg = replace(settings_for(server), config_dir=tmp_path)
         backend = StateBackend()
@@ -237,8 +254,8 @@ def test_parent_cancel_closes_real_child_http_stream(api, tmp_path, monkeypatch)
             tools = {tool['function']['name'] if 'function' in tool else tool.get('name')
                      for tool in child_connection.body['tools']}
             # Default max_subagent_depth=2: depth-1 keeps start_task + direct-child log reader.
-            assert 'start_task' in tools and 'read_task_log' in tools
-            assert not {'request_human_input', 'start_background_task'} & tools
+            assert 'start_task' in tools and 'read_task' in tools
+            assert not {'request_human_input', 'wait_task', 'cancel_task'} & tools
             import json
             assert 'parent private history' not in json.dumps(child_connection.body)
             assert runner.prepared.subagent_manager.active_count == 1
@@ -289,7 +306,7 @@ def test_independent_child_clients_close_if_graph_assembly_fails(api, tmp_path, 
     monkeypatch.setattr(factory, 'select_backend', lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
     parent = scripted_model([
         AIMessage(content='', tool_calls=[{'id': 'd', 'name': 'start_task', 'args': {
-            'description': 'start_task', 'subagent_type': 'general-purpose'}}]), AIMessage(content='reported failure')])
+            'description': 'start_task'}}]), AIMessage(content='reported failure')])
     runner = AgentRunner(model=parent, settings=cfg)
     runner.set_permission_mode('allow')
     try:
@@ -510,7 +527,8 @@ def test_subagent_error_messages_redact_known_secrets(tmp_path):
     store = SubAgentLogStore(tmp_path, (SecretRef("llm.models.deepseek.api_key", secret),))
     root = RunController()
     root.begin_run()
-    manager = SubAgentManager(root)
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    manager = SubAgentManager(root, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
 
     def prepare(controller):
         raise RuntimeError(f"upstream failed with {secret}")
@@ -526,46 +544,6 @@ def test_subagent_error_messages_redact_known_secrets(tmp_path):
     root.end_run()
 
 
-def test_task_metrics_measure_streamed_reasoning_and_ignore_hidden_reasoning(monkeypatch):
-    """Full reasoning chunks count toward TPS; a usage tail is not answer text."""
-    from langchain_core.messages import AIMessageChunk
-
-    from agent.subagents.runtime import TaskMetrics
-
-    now = [0.0]
-    monkeypatch.setattr("agent.subagents.runtime.monotonic", lambda: now[0])
-    measured = TaskMetrics()
-    measured.on_llm_start({}, invocation_params={"model": "deepseek-flash"})
-    for timestamp, reasoning, answer in [(1, "think", ""), (31, " more", "begin"), (41, "", " end")]:
-        now[0] = timestamp
-        measured.on_llm_new_token(answer, chunk=AIMessageChunk(
-            content=answer, additional_kwargs={"reasoning_content": reasoning},
-        ))
-    now[0] = 100
-    measured.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
-        "input_tokens": 12, "output_tokens": 3000, "total_tokens": 3012,
-        "output_token_details": {"reasoning": 2000},
-    }))
-    measured.on_llm_end(None)
-    assert measured.input_tokens == 12 and measured.output_tokens == 3000
-    assert measured.tps == 75
-    assert measured._message is None and measured._reasoning == "" and measured._visible == ""
-
-    hidden = TaskMetrics()
-    hidden.on_llm_start({})
-    now[0] = 10
-    hidden.on_llm_new_token("answer", chunk=AIMessageChunk(content="answer"))
-    now[0] = 20
-    hidden.on_llm_new_token(" more", chunk=AIMessageChunk(content=" more"))
-    now[0] = 30
-    hidden.on_llm_new_token("", chunk=AIMessageChunk(content="", usage_metadata={
-        "input_tokens": 4, "output_tokens": 30, "total_tokens": 34,
-        "output_token_details": {"reasoning": 20},
-    }))
-    hidden.on_llm_end(None)
-    assert hidden.output_tokens == 30 and hidden.tps is None
-
-
 def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
     """Depth-2 progress names its parent run. Only the finished update carries the answer."""
     from agent.runtime.cancellation import ToolCancelContext, clear_cancel_context, set_cancel_context
@@ -579,10 +557,7 @@ def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
     def child_prepare(controller):
         class Graph:
             def stream(self, graph_input, config, **kwargs):
-                yield {"messages": [AIMessage(
-                    content="private depth-2 review of cancelled by user",
-                    usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-                )]}
+                yield {"messages": [AIMessage(content="private depth-2 review of cancelled by user")]}
         return SimpleNamespace(graph=Graph())
 
     child_runtime = SubAgentRuntime(manager, store, child_prepare, "fake", child_depth=2)
@@ -603,7 +578,6 @@ def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
                     clear_cancel_context()
                 yield {"messages": [AIMessage(
                     content="parent summary " + nested["messages"][0].content,
-                    usage_metadata={"input_tokens": 11, "output_tokens": 5, "total_tokens": 16},
                 )]}
         return SimpleNamespace(graph=Graph())
 
@@ -629,13 +603,14 @@ def test_nested_progress_is_metadata_and_binds_the_launching_call(tmp_path):
     assert parent_rows[0]["parent_run_id"] == "root-session"
     assert parent_rows[0]["description"] == "执行与取消链路"
     assert parent_rows[-1]["status"] == "completed"
-    assert parent_rows[-1]["input_tokens"] == 11 and parent_rows[-1]["output_tokens"] == 5
+    assert parent_rows[-1]["elapsed_seconds"] >= 0
+    assert {"input_tokens", "output_tokens", "tps", "ttft"} .isdisjoint(parent_rows[-1])
     assert child_rows[0]["status"] == "running"
     assert child_rows[0]["tool_call_id"] == "call-a1"
     assert child_rows[0]["parent_run_id"] == parent_rows[0]["run_id"]
     assert child_rows[0]["description"] == "审查取消传播"
     assert child_rows[-1]["status"] == "completed"
-    assert child_rows[-1]["input_tokens"] == 3 and child_rows[-1]["output_tokens"] == 2
+    assert {"input_tokens", "output_tokens", "tps", "ttft"} .isdisjoint(child_rows[-1])
     # Terminal status is published before the slot is only closing.
     assert child_rows[-1]["status"] == "completed"
     running = [payload for payload in updates if payload["status"] == "running"]

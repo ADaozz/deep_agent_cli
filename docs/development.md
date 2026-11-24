@@ -38,7 +38,7 @@ REQUIRE_BWRAP_TEST=1 pytest -q     # bwrap 不可用时让沙箱测试失败，�
 ## SubAgent 开发契约
 
 只有当问题能分解为多个独立、互不干扰的子问题时，主 Agent 才应派生 SubAgent；
-这条条件位于 `agent/bootstrap/factory.py` 中 `general-purpose` 的描述，由主模型判断，
+这条条件位于 `start_task` 的工具描述，由主模型判断，
 不增加原生 `start_task` 参数，也不自动检测共享文件的修改冲突。实现边界见 [架构](architecture.md#subagent-委派边界)。
 
 修改相关逻辑后运行现有回归：

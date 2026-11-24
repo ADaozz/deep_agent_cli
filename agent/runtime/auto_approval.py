@@ -306,7 +306,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
 
     @contextmanager
     def delegation_context(self, request):
-        if request.tool_call["name"] not in {"start_task", "start_background_task"}:
+        if request.tool_call["name"] != "start_task":
             yield
             return
         # Root harvests the real user turn. Nested agents must forward the Root

@@ -15,7 +15,6 @@ from agent.cli.skills import SkillDraft
 class DialogState:
     current: InteractionController | None = None
     deferred: InteractionController | None = None
-    reviewing: bool = False
     approval_draft: Any = None
     skill_picker_draft: tuple[str, int] | None = None
 

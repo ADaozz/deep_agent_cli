@@ -460,6 +460,8 @@ print(json.dumps(dict(session=r['session'],seq=r['seq'],token=r['token'],behavio
             c.event(RunEvent("tool_started",tool_call_id=str(i),name="write"),"a")
             c.event(RunEvent("tool_completed",tool_call_id=str(i),is_error=True),"a")
         c.event(RunEvent("run_completed"),"a")
+        assert not c.timeline.queue
+        assert c.ask("刚才的失败是什么") == "已发给玲音。"
         task = asyncio.create_task(c.worker_session())
         async with asyncio.timeout(5):
             while not signal_path.with_suffix(".waiting").exists():
