@@ -10,7 +10,8 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig
-from agent.bootstrap.factory import AgentSpec, _read_prompt, compose_system_prompt, create_agent
+from agent.bootstrap.factory import AgentSpec, compose_system_prompt, create_agent
+from agent.companion.config import read_prompt
 from agent.execution.backend import BackendSelection
 from agent.execution.types import ExecutionMode
 from tests.conftest import graph_tool_names, scripted_model
@@ -107,13 +108,10 @@ def test_system_prompt_composition_and_native_tool_schemas(tmp_path, with_skills
 
 
 def test_root_and_subagent_share_the_system_prompt(tmp_path):
-    model = scripted_model([AIMessage(content="unused")])
     (tmp_path / "AGENTS.md").write_text("保留项目约定。", encoding="utf-8")
-    root = compose_system_prompt(
-        AgentSpec(instructions="保留用户约定。"), model, tmp_path,
-    )
+    root = compose_system_prompt(AgentSpec(instructions="保留用户约定。"), tmp_path)
     child = compose_system_prompt(
-        AgentSpec(instructions="保留用户约定。", role="subagent"), model, tmp_path,
+        AgentSpec(instructions="保留用户约定。", role="subagent"), tmp_path,
     )
     shared = "You are a coding agent running in Deep Agent CLI."
     assert root.startswith(shared) and child.startswith(shared)
@@ -122,4 +120,4 @@ def test_root_and_subagent_share_the_system_prompt(tmp_path):
     assert root.split(shared, 1)[1].split("## User instructions", 1)[0] in child
     assert "保留用户约定。" in child and "保留项目约定。" in child
     with pytest.raises(FileNotFoundError, match="missing"):
-        _read_prompt(tmp_path / "missing.md")
+        read_prompt(tmp_path / "missing.md")

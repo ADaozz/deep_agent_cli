@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.bootstrap.config import Settings
+from agent.companion.config import read_prompt
 from agent.execution.policy import SandboxConfig
 from agent.redaction import known_secret_refs
 from agent.runtime.control import RunController
@@ -72,15 +73,6 @@ from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 DEFAULT_FS_TOOLS = list(FILESYSTEM_TOOL_NAMES)
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
-
-
-def _read_prompt(path: Path) -> str:
-    if not path.is_file():
-        raise FileNotFoundError(f"Required prompt file is missing: {path}")
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        raise FileNotFoundError(f"Required prompt file is empty: {path}")
-    return text
 
 
 class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
@@ -174,11 +166,10 @@ class PreparedAgent:
     approval_guard: bool = False
 
 
-def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
-    del model
-    sections = [_read_prompt(_PROMPT_DIR / "system.md")]
+def compose_system_prompt(spec: AgentSpec, workspace: Path) -> str:
+    sections = [read_prompt(_PROMPT_DIR / "system.md")]
     if spec.role == "subagent":
-        sections.append(_read_prompt(_PROMPT_DIR / "subagent.md"))
+        sections.append(read_prompt(_PROMPT_DIR / "subagent.md"))
     if spec.instructions and spec.instructions.strip():
         sections.append(f"## User instructions\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
@@ -225,7 +216,7 @@ def build_agent(
         raise ValueError(allow_mode_unavailable_reason(execution_mode))
     sandbox_pool = sandbox_pool_of(fs_backend)
     _disable_general_purpose_task(model)
-    prompt = compose_system_prompt(spec, model, sandbox_cfg.workspace)
+    prompt = compose_system_prompt(spec, sandbox_cfg.workspace)
     cfg = settings or spec.settings or Settings()
     kind = _node_kind(spec, run_controller, cfg)
     allowed = apply_runtime_limits(
@@ -249,11 +240,7 @@ def build_agent(
     filesystem_tools = list(DEFAULT_FS_TOOLS)
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     if supports_execute and "execute" in allowed:
-        tools.append(build_execute_tool(
-            fs_backend,
-            network_by_default=permission is PermissionMode.ALLOW,
-            permission=permission.value,
-        ))
+        tools.append(build_execute_tool(fs_backend, permission=permission))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )

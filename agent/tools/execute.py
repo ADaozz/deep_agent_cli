@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from pydantic import Field
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.execution.network import reset_execute_network, set_execute_network
+
+if TYPE_CHECKING:
+    from agent.runtime.permissions import PermissionMode
 
 
 _COMMON = (
@@ -48,13 +51,14 @@ _SEARCH_UNAVAILABLE = (
 
 
 def _execute_description(
-    *, network_by_default: bool, workspace_root: str = "/workspace", permission: str = "ask",
+    *, permission: PermissionMode, workspace_root: str = "/workspace",
 ) -> str:
+    from agent.runtime.permissions import PermissionMode
     from agent.tools.grep import resolve_rg
 
-    if permission == "allow" or network_by_default and permission not in {"ask", "auto"}:
+    if permission is PermissionMode.ALLOW:
         policy = _ALLOW_POLICY
-    elif permission == "auto":
+    elif permission is PermissionMode.AUTO:
         policy = _AUTO_POLICY
     else:
         policy = _ASK_POLICY
@@ -65,15 +69,19 @@ def _execute_description(
 def build_execute_tool(
     backend: SandboxBackendProtocol,
     *,
-    network_by_default: bool = False,
-    permission: str = "ask",
+    permission: PermissionMode | None = None,
 ) -> BaseTool:
     """绑定到沙箱 backend 的 shell execute。
 
     ``network=True`` 使本条命令共享宿主网络命名空间。
-    ``network_by_default=True``（权限模式 allow）为每次调用开放宿主网络；
-    单次调用的 ``network=false`` 无法关掉。
+    ``permission`` 为 allow 时每次调用都开放宿主网络；
+    省略时按 ask 处理。单次调用的 ``network=false`` 无法关掉。
     """
+    from agent.runtime.permissions import PermissionMode
+
+    if permission is None:
+        permission = PermissionMode.ASK
+    network_by_default = permission is PermissionMode.ALLOW
 
     def execute(
         command: Annotated[str, Field(description="Shell command to run.")],
@@ -113,8 +121,7 @@ def build_execute_tool(
         name="execute",
         response_format="content_and_artifact",
         description=_execute_description(
-            network_by_default=network_by_default,
+            permission=permission,
             workspace_root=getattr(backend, "workspace_root", "/workspace"),
-            permission="allow" if network_by_default else permission,
         ),
     )

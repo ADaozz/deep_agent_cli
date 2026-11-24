@@ -404,7 +404,6 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         self._mount_points = points
         self._file_mounts = files
         self._directory_roots = tuple(directories)
-        self.exact_file_mounts = frozenset(files)
         self._denied = getattr(default, "denied", CONFIG_DENIED)
 
     def _publish_route_state(self, state: _RouteState) -> None:
@@ -487,38 +486,6 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             hidden_roots=hidden_roots,
             install_roots=install_roots,
         )
-
-    @property
-    def supports_regex_search(self) -> bool:
-        return isinstance(getattr(self.executor, "config", None), SandboxConfig)
-
-    def regex_search_location(self, path: str | None) -> tuple[Path, str, str, int]:
-        """Validate a virtual mount path using the routed filesystem's checks.
-
-        Return the original relative path so the worker can reject symlinks
-        with descriptor-relative opens rather than trusting a resolved pathname.
-        """
-        if not self.supports_regex_search:
-            raise ValueError("Backend does not support local regex search")
-        virtual = path or self.workspace_root
-        if not virtual.startswith("/") or ".." in virtual.split("/") or "~" in virtual or "\x00" in virtual:
-            raise ValueError("Permission denied: invalid virtual search path")
-        for mount, backend in sorted(self.routes.items(), key=lambda item: len(item[0]), reverse=True):
-            prefix = mount.rstrip("/") or "/"
-            if not _component_within(virtual, prefix):
-                continue
-            if isinstance(backend, _ExactFileBackend):
-                if virtual.rstrip("/") != prefix:
-                    raise ValueError("Permission denied: search path escapes its authorized mount")
-                parent = PurePosixPath(prefix).parent.as_posix()
-                return backend.host_dir, backend.filename, parent, backend.max_file_size_bytes
-            relative = virtual[len(prefix):].lstrip("/") if prefix != "/" else virtual.lstrip("/")
-            try:
-                backend._resolve_path(relative or "/")
-            except (ValueError, OSError):
-                raise ValueError("Permission denied: search path escapes its authorized mount") from None
-            return backend.cwd, relative, prefix, backend.max_file_size_bytes
-        raise ValueError(self._denied)
 
     def _covered_by_directory(self, destination: str) -> bool:
         return any(_component_within(destination, root) and destination.rstrip("/") != root.rstrip("/")

@@ -3,14 +3,12 @@
 from bisect import insort_right
 from collections import Counter, deque
 from dataclasses import asdict, dataclass
-from math import sqrt
 import json
 import re
 import sqlite3
 from time import time
 from uuid import uuid4
 
-from agent.companion.diagnosis import interpret_turn
 from agent.companion.diagnostic_io import readonly_database
 
 
@@ -61,8 +59,6 @@ def category(text, exit_code):
     return "exit_code" if exit_code is not None else "tool_error"
 
 
-# A session-wide population, including calls from tools hidden in the panel.
-SESSION_RELIABILITY = ("", "", "*")
 TOOL_ACTIVITY_LIMIT = 60
 
 
@@ -76,9 +72,6 @@ class Series:
         self.counts = Counter()
         self.window_failed = 0
         self.points = deque(maxlen=180)
-        self.streak = 0
-        self.success_streak = 0
-        self.last_error = ""
         self.last_failed = None
 
     @property
@@ -95,13 +88,6 @@ class Series:
         self.recent.append(int(failed))
         self.window_failed += int(failed)
         self.points.append((obs.finished_at, self.rate))
-        self.streak = (
-            (self.streak + 1 if self.last_error == obs.error_category else 1)
-            if failed
-            else 0
-        )
-        self.success_streak = 0 if failed else self.success_streak + 1
-        self.last_error = obs.error_category
         self.last_failed = obs if failed else None
 
     def statistics(self):
@@ -112,28 +98,6 @@ class Series:
             n=len(self.recent),
             cumulative_pct=100 * self.counts["failed"] / known if known else None,
         )
-
-    def baseline(self):
-        n = self.counts["success"] + self.counts["failed"] - len(self.recent)
-        return (
-            100 * (self.counts["failed"] - self.window_failed) / n if n else None
-        ), n
-
-    def distributed_shift(self):
-        baseline, old_n = self.baseline()
-        n = len(self.recent)
-        if old_n < 40 or n < 40 or self.window_failed < 4 or self.rate - baseline < 5:
-            return False
-        pooled = self.counts["failed"] / (n + old_n)
-        se = 100 * sqrt(pooled * (1 - pooled) * (1 / n + 1 / old_n))
-        return self.rate - baseline >= 2 * se
-
-    def elevated(self):
-        old_n = self.counts["success"] + self.counts["failed"] - len(self.recent)
-        if old_n < 5 or len(self.recent) < 5:
-            return False
-        baseline = 100 * (self.counts["failed"] - self.window_failed) / old_n
-        return self.rate >= 25 and self.rate >= baseline + 20
 
 
 class Timeline:
@@ -147,7 +111,6 @@ class Timeline:
         self.series = {}
         self.models = {}
         self.overall = Series(200)
-        self.incidents = {}
         self.summaries = deque(maxlen=8)
         self.failures = deque(maxlen=32)
         self.samples = deque(maxlen=60)
@@ -247,61 +210,6 @@ class Timeline:
             stamp=obs.finished_at,
             turn=obs.turn_id,
         )
-        if obs.outcome not in ("success", "failed"):
-            return
-        self.detect(
-            SESSION_RELIABILITY, self.overall.distributed_shift(), obs, self.overall
-        )
-        self.detect(key, series.streak >= 3 or series.elevated(), obs, series)
-        self.detect((*group, "*"), aggregate.elevated(), obs, aggregate)
-
-    def detect(self, key, elevated, obs, series):
-        previous = self.incidents.get(key)
-        stamp = obs.finished_at
-        if elevated and (
-            not previous
-            or (previous["state"] == "resolved" and stamp >= previous["cooldown_until"])
-        ):
-            data = dict(
-                id=uuid4().hex,
-                key=key,
-                state="open",
-                version=1,
-                opened=stamp,
-                turn=obs.turn_id,
-                cooldown_until=stamp + 120,
-                scope="session"
-                if key == SESSION_RELIABILITY
-                else "model"
-                if key[-1] == "*"
-                else "tool",
-                baseline_pct=series.baseline()[0],
-                category=obs.error_category,
-                **series.statistics(),
-            )
-        elif (
-            not elevated
-            and previous
-            and previous["state"] == "open"
-            and series.success_streak >= 5
-            and (
-                previous.get("baseline_pct") is None
-                or series.rate <= previous["baseline_pct"] + 5
-            )
-        ):
-            data = dict(
-                previous,
-                state="resolved",
-                version=previous["version"] + 1,
-                resolved=stamp,
-                recovery_successes=series.success_streak,
-                recovery_pct=series.rate,
-                resolved_turn=obs.turn_id,
-            )
-        else:
-            return
-        self.incidents[key] = data
-        self.record("incident", data, key=data["id"], stamp=stamp, turn=obs.turn_id)
 
     def restore(self, rows):
         for kind, stamp, data in rows:
@@ -323,8 +231,6 @@ class Timeline:
                         ] += 1
                 else:
                     self.completed(obs, replay=True)
-            elif kind == "incident":
-                self.incidents[tuple(data["key"])] = data
             elif kind == "turn":
                 self.summaries.append(data)
             elif kind in ("resources", "git", "services", "profile"):
@@ -332,34 +238,15 @@ class Timeline:
 
     def merge_live_events(self, events):
         """Replay the small arrival batch against restored history before its first commit."""
-        starting_rates = {key: series.rate for key, series in self.series.items()}
         for row in events:
             _, kind, _, stamp, _, data = row
             if kind in ("window", "incident"):
-                # Recomputed below with the restored rolling window and cooldown.
+                # Window rows are statistics already stored on the series.
                 continue
             if kind == "tool" and data["finished_at"] is not None:
                 self.completed(ToolObservation(**data))
             elif kind == "turn":
-                for tool in data["tools"]:
-                    key = (tool["model"], tool["effort"], tool["tool"])
-                    tool["start_pct"] = starting_rates.get(key)
-                    tool["recent_pct"] = self.series[key].rate
-                data["previous_turn_ms"] = [
-                    r["duration_ms"]
-                    for r in self.summaries
-                    if r["duration_ms"] is not None
-                ][-3:]
-                data["incidents"] = [
-                    i.copy()
-                    for i in self.incidents.values()
-                    if data["turn"] in (i["turn"], i.get("resolved_turn"))
-                ]
-                data["findings"] = interpret_turn(data, self.failures, self.samples)
                 self.summaries.append(data)
-                starting_rates = {
-                    key: series.rate for key, series in self.series.items()
-                }
             elif kind != "tool":
                 self.restore([(kind, stamp, data)])
             self.pending.append(row)
@@ -443,12 +330,12 @@ def timeline_window(path, session, kind, start, end, budget=None, *,
         if kind == "git":
             query += " AND kind='git'"
         elif event_type is not None:
-            if event_type not in {"tool", "incident", "turn", "run", "analysis", "git"}:
+            if event_type not in {"tool", "turn", "run", "analysis", "git"}:
                 raise ValueError("Unsupported diagnostic event type")
             query += " AND kind=?"
             args.append(event_type)
         else:
-            query += " AND kind IN ('tool','incident','turn')"
+            query += " AND kind IN ('tool','turn')"
         if tool_name:
             query += " AND kind='tool' AND json_extract(payload,'$.tool_name')=?"
             args.append(tool_name)
@@ -460,7 +347,7 @@ def timeline_window(path, session, kind, start, end, budget=None, *,
         for stamp, kind, data in rows[:limit]:
             data = json.loads(data)
             if kind == "turn":
-                data = {key: data[key] for key in ("turn", "run", "query", "outcome", "duration_ms", "findings") if key in data}
+                data = {key: data[key] for key in ("turn", "run", "query", "outcome", "duration_ms") if key in data}
             elif kind == "tool":
                 data.pop("session_id", None)
                 data.pop("message_id", None)

@@ -198,7 +198,7 @@ Bubblewrap 为了运行命令而只读挂载的 `/usr`、`/bin`、`/lib`、`/lib
 
 CUSTOM backend 保留调用方自己的规则。
 
-`grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同，不再使用以前独立 `grep` 工具的免审批规则。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。未注册的搜索实现仍留在代码里，不会作为工具交给模型。
+`grep` 和 `glob` 不在模型工具表中。代码搜索和文件发现通过 `execute` 运行 `rg`：`rg -n 'pattern' path` 搜内容，`rg --files -g 'pattern' path` 找文件。宿主上的 `rg`（优先当前 Python 环境，其次系统 `PATH`）只读挂载为 `/run/deep-agent/rg`，并位于沙箱 `PATH` 的最前面，所以两个持久沙箱里都可以直接执行 `rg`。`rg` 保持自身默认行为，包括 Git 仓库内的 `.gitignore`、隐藏文件和符号链接。搜索的审批和网络与其他 `execute` 相同。宿主没有 `rg` 时，`execute` 的说明和沙箱启动日志都会写明搜索不可用。
 
 工作区内的所有内容对 Agent 都可读写，包括 `.git/`、`.env` 等。需要保护的文件不要放在工作区里。
 

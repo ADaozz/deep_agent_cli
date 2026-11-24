@@ -32,7 +32,7 @@ from agent.companion.session_inspector import (
     CALL_CACHE_LIMIT, CallDetails, call_arguments, call_result, diagnostic_error, format_inspect_response,
     observation_views, result_status,
 )
-from agent.companion.diagnosis import interpret_turn, reply_text
+from agent.companion.diagnosis import reply_text
 from agent.companion.monitor import Resources, services
 
 
@@ -168,7 +168,6 @@ class Companion:
         self.turn_start = None
         self.turn_profile = self.profile()
         self.last_profile = None
-        self.turn_rates = {}
         self.turn_metrics = []
         self.turn_git = []
         self.last_git = None
@@ -239,7 +238,7 @@ class Companion:
 
     def _update_chat_preview(self, text):
         text = redact_diagnostic_text(text, self.secrets)
-        text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"), partial=True)
+        text = reply_text("".join(c for c in text if c.isprintable() or c == "\n"))
         if self.reply_stamp is None:
             if not text:
                 return
@@ -370,11 +369,6 @@ class Companion:
             if self.turn_start is not None
             else None
         )
-        previous = [
-            r["duration_ms"]
-            for r in self.timeline.summaries
-            if r["duration_ms"] is not None
-        ]
         summary = dict(
             turn=self.turn,
             run=self.run,
@@ -382,31 +376,12 @@ class Companion:
             profile=self.turn_profile,
             outcome=outcome,
             duration_ms=elapsed,
-            previous_turn_ms=previous[-3:],
             git=self.turn_git,
             resources=self.turn_metrics,
             tools=[
-                dict(
-                    model=m,
-                    effort=e,
-                    tool=t,
-                    **d,
-                    recent_pct=self.timeline.series[m, e, t].rate,
-                    start_pct=self.turn_rates.get((m, e, t)),
-                )
+                dict(model=m, effort=e, tool=t, **d)
                 for (m, e, t), d in tools.items()
             ],
-            retry_chains=[
-                (o.tool_call_id, o.retry_of) for o in self.calls.values() if o.retry_of
-            ],
-            incidents=[
-                i.copy()
-                for i in self.timeline.incidents.values()
-                if self.turn in (i["turn"], i.get("resolved_turn"))
-            ],
-        )
-        summary["findings"] = interpret_turn(
-            summary, self.timeline.failures, self.timeline.samples
         )
         self.timeline.record("turn", summary, key=self.turn, stamp=wall, turn=self.turn)
         self.timeline.summaries.append(summary)
@@ -456,7 +431,6 @@ class Companion:
             self.turn_start = tick
             self.turn_profile = (model, effort)
             self.last_profile = (model, effort)
-            self.turn_rates = {k: s.rate for k, s in self.timeline.series.items()}
             self.turn_metrics = [self.metrics]
             self.turn_git = [self.last_git] if self.last_git else []
             self.timeline.record(
@@ -830,12 +804,10 @@ class Companion:
                     query=summary.get("query", ""),
                     outcome=summary["outcome"],
                     duration_ms=summary["duration_ms"],
-                    previous_turn_ms=summary["previous_turn_ms"][-3:],
-                    findings=(summary.get("findings") or interpret_turn(summary, state.failures, state.samples))[:8],
                 )
                 for summary in state.summaries
                 if (not turn_id or turn_id == summary["turn"])
-                and (not tool_name or any(row["tool"] == tool_name for row in summary["tools"]))
+                and (not tool_name or any(row["tool"] == tool_name for row in summary.get("tools") or ()))
             ]
 
         observations = observation_views(state, cache=self.call_cache)

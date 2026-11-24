@@ -428,7 +428,7 @@ class CliState:
         if status not in {"running", "completed", "failed", "cancelled", "unconfirmed"}:
             return None
         node = self.subagent_nodes.get(run_id)
-        if node is not None and node.status in {"completed", "failed", "cancelled"} and status == "running":
+        if node is not None and node.status in {"completed", "failed", "cancelled"} and status in {"running", "unconfirmed"}:
             return None
         depth = fields.get("depth")
         depth = depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1
@@ -457,7 +457,8 @@ class CliState:
         node.elapsed_seconds = elapsed_seconds
         node.reason = str(fields.get("reason") or "") if status in {"failed", "cancelled"} else ""
         if fields.get("summary_truncated") and isinstance(fields.get("result_summary"), str):
-            node.result = fields["result_summary"]
+            if not node.result:
+                node.result = fields["result_summary"]
         else:
             result_text = fields.get("result")
             if isinstance(result_text, str) and status in {"completed", "failed", "cancelled", "unconfirmed"}:
@@ -471,6 +472,7 @@ class CliState:
     def restore_task_tree(self, store: Any, root_id: str) -> None:
         """Rebuild the task tree from persisted start and finish records."""
         self.subagent_nodes.clear()
+        summaries: set[str] = set()
 
         def absorb(parent_id: str) -> None:
             records = []
@@ -485,20 +487,30 @@ class CliState:
                 status = str(meta.get("status") or "unconfirmed")
                 if status not in {"completed", "failed", "cancelled", "unconfirmed"}:
                     status = "unconfirmed"
+                if meta.get("summary_truncated"):
+                    summaries.add(str(meta.get("run_id") or ""))
                 self._upsert_task_node({**meta, "status": status})
                 absorb(str(meta.get("run_id") or ""))
 
         absorb(root_id)
+        confirmed = {"completed": "completed", "error": "failed", "cancelled": "cancelled"}
         for block in self.blocks:
             if not isinstance(block, ToolBlock) or not is_task_tool(block.name):
                 continue
             node = self._node_for_tool(block.tool_call_id)
             if node is not None:
-                mapped = subagent_card_status(status=node.status)
-                block.status = mapped
-                if node.result:
+                # A log that never finished must not replace a checkpoint terminal
+                # state, and a truncated log summary must not replace its result.
+                if node.status == "unconfirmed" and block.status in confirmed:
+                    node.status = confirmed[block.status]
+                else:
+                    mapped = subagent_card_status(status=node.status)
+                    block.status = mapped
+                    block.is_error = mapped in {"error", "cancelled"}
+                if node.run_id in summaries and block.output:
+                    node.result = block.output
+                elif node.result:
                     block.output = node.result
-                block.is_error = mapped in {"error", "cancelled"}
             self._paint_task_card(block)
 
     def _refresh_owner(self, node: SubagentNode) -> None:

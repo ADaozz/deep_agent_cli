@@ -53,7 +53,7 @@ flowchart TB
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
 | 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久进程、超时与清理 |
 | 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约、恢复与会话标题 |
-| Companion | `agent/companion/` | 侧栏监控、本地异常检测、独立对话 Worker 与宿主只读 RPC |
+| Companion | `agent/companion/` | 侧栏监控、原始事件与统计、独立对话 Worker 与宿主只读 RPC |
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
@@ -304,28 +304,13 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 ## grep 搜索
 
-`grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。代码里仍保留本地搜索实现，参数为 `pattern`、`path`、`glob`、`output_mode`、`max_count`、`fixed_string`。默认正则，`fixed_string=true` 时按字面量匹配；`glob` 支持单条或多条规则及否定规则。该实现没有 Shell 字符串或 `network` 参数，不调用 `execute` Tool 或 `backend.execute`。
+`grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。没有单独的本地搜索实现。
 
-```text
-参数与 Glob 校验
-  → WorkspaceCompositeBackend.regex_search_location() 按固定挂载表路由路径
-  → 宿主以 O_NOFOLLOW 和文件描述符校验挂载根、目标与文件限制
-  ├─ Bubblewrap 且有 rg
-  │    → SandboxPool → start_argv → 原 Worker → 单个 rg
-  └─ 无 rg，或执行器不是 Bubblewrap
-       → 独立宿主 Python Worker → 目录描述符遍历与 re 匹配
-  → 流式解析、计数、去重、截断 → 工具结果
-```
+`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 先找当前 Python 环境里的 `rg`，再找系统 `PATH`。定位与安装见 [search.md](search.md)。
 
-`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 与用户侧参数、Glob、ignore、结果限制见 [search.md](search.md)。
+沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志和 `execute` 说明中写明 `rg` 不可用。
 
-沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志中说明 `rg` 不可用。上面保留的搜索实现在没有 `rg` 或执行器不是 Bubblewrap 时使用宿主 Python worker；有 `rg` 时仍通过 `start_argv` 调用 `/run/deep-agent/rg`，与相同网络模式的 execute 共享 Worker，没有独立 grep 沙箱。
-
-`start_argv()` 使用现有控制管道和命令生命周期。Worker 通过 `Popen(argv, shell=False)` 启动 rg，分别转发 stdout/stderr；原 Shell 入口仍合并输出。Worker 再次以 `O_NOFOLLOW` 打开路径并核对挂载根 inode，单文件通过已打开的文件描述符交给 rg，防止校验后替换路径。
-
-**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消、超时或截断只清理本条 rg；Worker 失效则沿用 Pool 的丢失与替换机制。搜索总预算 10 秒，包含 Pool 等待和冷启动。
-
-Python 回退是独立、可强制终止的宿主进程，依靠描述符遍历限制文件访问，不具备 Bubblewrap 隔离。Python `re` 与 Rust Regex、ignore 解析的差异见 [search.md](search.md)；不通过静默字面量匹配掩盖。
+**常驻的是沙箱和 Worker，rg 每次搜索启动、结束后退出。** 搜索结束、取消或超时只清理本条命令；Worker 失效则沿用 Pool 的丢失与替换机制。
 
 ## 模型适配
 
@@ -371,12 +356,12 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 
 ## 观察与验证
 
-主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏在本地聚合同类事实做失败率异常与轮次复盘，只有用户提问时才调用 Companion 模型。
+主 Runner 的诊断以结构化运行事实为依据：Run 状态和终态、模型来源及实际 usage、tool call ID/参数/结果/artifact、审批快照与决定、命令退出原因、沙箱网络模式与 Worker 状态。超限 execute 输出另存 `<工作区真实路径>/.deep-agent/logs/exec/`，工具结果提供日志路径。工具输出是外部内容，不能改写审批或沙箱策略。Lain 侧栏保留原始工具事件、失败分类、资源采样、Git 记录和统计图表；不在本地生成诊断结论。只有用户提问时才调用 Companion 模型，由模型通过只读工具读取这些原始记录后自行分析。
 
 | 行为契约 | 相关测试 |
 |---|---|
 | 工具注册、审批、拒绝与权限切换 | `test_runner.py`、`test_permission.py`、`test_web_search.py` |
-| 正则、Glob、结果限制、回退、路径边界和搜索取消 | `test_grep.py` |
+| `rg` 定位，以及 grep、glob 不注册为模型工具 | `test_grep.py` |
 | 双沙箱复用、argv/Shell、网络模式、超时及 Worker 失效 | `test_sandbox.py`、`test_persistent_sandbox.py` |
 | 运行中消息与模型流取消 | `test_steering.py`、`test_model_stream_cancel.py`、`test_streaming_cancel.py` |
 | 会话持久化、租约与切换 | `test_session.py`、`test_session_lock.py`、`test_session_switch.py` |

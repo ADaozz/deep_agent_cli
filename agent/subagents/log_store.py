@@ -87,7 +87,7 @@ class SubAgentLogStore:
         except FileNotFoundError:
             return {"error": "Subagent log not found in this parent session"}
         records, size = [], 1024
-        with os.fdopen(descriptor, encoding="utf-8") as source:
+        with self._lock, os.fdopen(descriptor, encoding="utf-8") as source:
             for index, line in enumerate(source):
                 if index < offset:
                     continue
@@ -103,10 +103,11 @@ class SubAgentLogStore:
     def list_runs(self, parent: str) -> list[str]:
         """Every direct child run, newest first. Not limited to one page."""
         directory = self._directory(parent)
-        if not directory.is_dir():
-            return []
-        paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-        return [path.stem for path in paths if _ID.fullmatch(path.stem)]
+        with self._lock:
+            if not directory.is_dir():
+                return []
+            paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
+            return [path.stem for path in paths if _ID.fullmatch(path.stem)]
 
     def task_metadata(self, parent: str, run_id: str) -> dict[str, Any] | None:
         """The start record and the last finish record, ignoring page limits.
@@ -122,7 +123,7 @@ class SubAgentLogStore:
             return None
         start: dict[str, Any] | None = None
         finish: dict[str, Any] | None = None
-        with os.fdopen(descriptor, encoding="utf-8") as source:
+        with self._lock, os.fdopen(descriptor, encoding="utf-8") as source:
             for line in source:
                 if not line.strip():
                     continue
@@ -141,25 +142,37 @@ class SubAgentLogStore:
             return None
         start = start or {}
         finish = finish or {}
+
+        def text(*records: dict[str, Any], key: str) -> str:
+            for record in records:
+                value = record.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            return ""
+
+        def depth_of(*records: dict[str, Any]) -> int:
+            for record in records:
+                value = record.get("depth")
+                if type(value) is int and not isinstance(value, bool) and value > 0:
+                    return value
+            return 1
+
         recorded = str(finish.get("status") or "")
         status = recorded if recorded in {"completed", "failed", "cancelled"} else "unconfirmed"
-        depth = start.get("depth")
         item: dict[str, Any] = {
             "run_id": run_id,
-            "parent_run_id": str(start.get("parent_run_id") or parent),
-            "tool_call_id": str(start.get("tool_call_id") or ""),
-            "depth": depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1,
-            "description": str(start.get("description") or ""),
-            "mode": str(start.get("mode") or "sync"),
+            "parent_run_id": text(start, finish, key="parent_run_id") or parent,
+            "tool_call_id": text(start, finish, key="tool_call_id"),
+            "depth": depth_of(start, finish),
+            "description": text(start, finish, key="description"),
+            "mode": text(start, finish, key="mode") or "sync",
             "status": status,
             "elapsed_seconds": finish.get("elapsed_seconds"),
             "started_at": str(start.get("timestamp") or ""),
         }
-        if finish.get("summary_truncated"):
-            item["result_summary"] = str(finish.get("result_summary") or finish.get("summary") or "")
+        if finish.get("summary_truncated") and isinstance(finish.get("result_summary"), str):
+            item["result_summary"] = finish["result_summary"]
             item["summary_truncated"] = True
         elif isinstance(finish.get("result"), str):
-            item["result"] = finish.get("result")
-        elif isinstance(finish.get("summary"), str) and not finish.get("summary_truncated"):
-            item["result"] = finish.get("summary")
+            item["result"] = finish["result"]
         return item

@@ -23,7 +23,7 @@ CLI 按以下顺序查找主配置：
 ```yaml
 companion:
   persona_prompt: companion/prompts/persona.md
-  # 异常观察由宿主本地完成，不再读取模型观察提示词。
+  # 表情状态由宿主本地完成，不再读取模型观察提示词。
   chat_prompt: companion/prompts/chat.md
   rpc_timeout_seconds: 3
   question_timeout_seconds: 60
@@ -32,8 +32,8 @@ companion:
     idle: companion/gifs/lain_idle.gif
 ```
 
-- `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
-- 异常检测、主动观察和表情变化由宿主本地完成，不调用模型，也不再读取 `observation.md`。
+- `persona_prompt` 定义聊天使用的人设和语气。[`persona.md`](../agent/companion/persona.md)
+- 表情变化由宿主本地完成，不调用模型，也不再读取 `observation.md`。
 - `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `rpc_timeout_seconds` 限制一次宿主只读查询。`question_timeout_seconds` 限制一轮问答。单次模型 HTTP 超时为 15 秒，源码搜索的扫描预算为 1.5 秒。
 - `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。

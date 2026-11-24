@@ -171,7 +171,7 @@ def test_execute_tool_network_by_default_applies_without_declaration() -> None:
             seen.append(get_execute_network())
             return ExecuteResponse(command, 0, False)
 
-    execute = build_execute_tool(Backend(), network_by_default=True)  # type: ignore[arg-type]
+    execute = build_execute_tool(Backend(), permission=PermissionMode.ALLOW)  # type: ignore[arg-type]
     assert execute.invoke({"command": "one"}) == "one"
     assert execute.invoke({"command": "two", "network": False}) == "two"
     assert seen == [True, True]

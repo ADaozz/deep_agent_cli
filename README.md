@@ -152,9 +152,9 @@ python3.12 -m venv ~/.venvs/deep-agent
 
 - **Tool Health** 按完成顺序显示最近 60 次有明确结果的工具调用，每 3 次一列。颜色表示调用次数，出现失败时显示 `×`。
 - **Talk To Lain** 用 `Ctrl+→` 进入，`Enter` 发送，`Ctrl+←` 返回主输入框。回复流式显示并以 Markdown 渲染；聊天历史可用鼠标滚轮翻看。可只读检查当前会话的工具明细与近期消息。
-- **主动观察** 由本地工具统计触发。Lain 可根据当前会话的证据说明异常，也可应用户要求复盘。
+- 用户询问时，Lain 通过只读工具读取原始工具事件、失败记录、资源采样和 Git 记录后自行分析。本地不预生成诊断结论。
 
-Lain 使用 `llm.models.deepseek.api_key`，与 DeepSeek 模型、网页工具和 Auto 审批共用凭据。本地监控和动画无需模型凭据。人设、观察提示词、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
+Lain 使用 `llm.models.deepseek.api_key`，与 DeepSeek 模型、网页工具和 Auto 审批共用凭据。本地监控和动画无需模型凭据。人设、聊天提示词和各状态 GIF 可在 `config.yaml` 的 `companion` 段配置。详见 [Lain 侧栏配置](docs/configuration.md#lain-侧栏companion) 和 [统计口径](docs/companion-phase2.md)。
 
 ## 架构与安全
 

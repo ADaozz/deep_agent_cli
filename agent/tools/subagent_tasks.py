@@ -12,6 +12,7 @@ from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from pydantic_core import InitErrorDetails
 
+from agent.companion.config import read_prompt
 from agent.subagents.log_store import SubAgentLogStore
 from agent.subagents.manager import SubAgentManager, TaskRecord
 from agent.subagents.runtime import SubAgentRuntime
@@ -26,6 +27,9 @@ Omit run_id to list direct children.
 
 Set include_logs=true with a specific run_id to inspect
 its execution logs.
+
+Use offset and limit to paginate task lists
+or execution logs.
 
 Use this tool to inspect available capacity, investigate
 failures, review execution details, or retrieve
@@ -61,19 +65,10 @@ _BACKGROUND = (
 )
 
 
-def _read_prompt(path: Path) -> str:
-    if not path.is_file():
-        raise FileNotFoundError(f"Required prompt file is missing: {path}")
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        raise FileNotFoundError(f"Required prompt file is empty: {path}")
-    return text
-
-
 def start_task_description(*, allow_background: bool) -> str:
     """Shared delegation policy plus the execution mode this agent can actually use."""
     mode = "delegation_root.md" if allow_background else "delegation_sync.md"
-    return f"{_read_prompt(_PROMPT_DIR / 'delegation.md')}\n\n{_read_prompt(_PROMPT_DIR / mode)}\n\n{_CAPACITY}"
+    return f"{read_prompt(_PROMPT_DIR / 'delegation.md')}\n\n{read_prompt(_PROMPT_DIR / mode)}\n\n{_CAPACITY}"
 
 
 def _reject_unknown(cls: type[BaseModel], data: object, *, hint: str) -> object:
@@ -279,6 +274,28 @@ def _start_tool(runtime_: SubAgentRuntime, *, allow_background: bool) -> Structu
     )
 
 
+def _merged_tasks(
+    manager: SubAgentManager | None, store: SubAgentLogStore, parent: str,
+) -> list[dict[str, Any]]:
+    """Snapshot live tasks, then merge them with historical logs before paging."""
+    live = manager.tasks_for(parent) if manager is not None else []
+    by_id = {task.run_id: task for task in live}
+    logged = store.list_runs(parent)
+    logged_ids = set(logged)
+    ordered = [task.run_id for task in reversed(live) if task.run_id not in logged_ids]
+    ordered.extend(logged)
+    items: list[dict[str, Any]] = []
+    for run_id in ordered:
+        task = by_id.get(run_id)
+        if task is not None:
+            items.append(_task_fields(task, with_result=False))
+            continue
+        meta = store.task_metadata(parent, run_id)
+        if meta is not None:
+            items.append(_public_task(meta, with_result=False))
+    return items
+
+
 def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> StructuredTool:
     def read_task(
         runtime: ToolRuntime,
@@ -302,18 +319,9 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
 
         try:
             if run_id is None:
-                runs = store.list_runs(parent)
-                page = runs[offset:offset + limit]
-                tasks = []
-                for child_id in page:
-                    task = manager.task(child_id, parent) if manager is not None else None
-                    if task is not None:
-                        tasks.append(_task_fields(task, with_result=False))
-                        continue
-                    meta = store.task_metadata(parent, child_id)
-                    if meta is not None:
-                        tasks.append(_public_task(meta, with_result=False))
-                return finish({"tasks": tasks, "next_offset": offset + len(page)})
+                tasks = _merged_tasks(manager, store, parent)
+                page = tasks[offset:offset + limit]
+                return finish({"tasks": page, "next_offset": offset + len(page)})
             task = manager.task(run_id, parent) if manager is not None else None
             if task is None:
                 meta = store.task_metadata(parent, run_id)

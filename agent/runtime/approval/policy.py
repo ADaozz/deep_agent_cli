@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent.companion.config import read_prompt
 from agent.runtime.approval.types import Decision
 
 # Persisted and agent-visible reasons come only from this table, never from classifier text or tool arguments.
@@ -20,17 +21,8 @@ BLOCK_REASONS = tuple(key for key in REASONS if key != "authorized")
 ALLOW = Decision("allow", REASONS["authorized"])
 MANUAL = Decision("ask", REASONS["uncertain"])
 
-def _read_prompt(path: Path) -> str:
-    if not path.is_file():
-        raise FileNotFoundError(f"Required prompt file is missing: {path}")
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        raise FileNotFoundError(f"Required prompt file is empty: {path}")
-    return text
-
-
 INSTRUCTIONS = (
-    _read_prompt(Path(__file__).with_name("review.md"))
+    read_prompt(Path(__file__).with_name("review.md"))
     + "\n\nWhen decision is allow, reason must be authorized."
     + "\nWhen decision is block, reason must be one of: "
     + ", ".join(BLOCK_REASONS)

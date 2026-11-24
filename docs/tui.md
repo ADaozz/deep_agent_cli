@@ -209,7 +209,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 
 终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / DISK、Git、Services、Tool Health 工具调用热力图和聊天。DISK 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，显示分支与状态。Services 无服务时显示 `0 running`，有服务时显示名称、PID 和监听端口，`ns:` 标记沙箱内 PID。聊天区占据剩余高度，输入框固定在底部。可用鼠标左键拖选侧栏文字，松开时复制到剪贴板。
 
-按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。热力图按每 3 次完成调用分组，展示最近 60 次中的活跃度及失败位置。聊天问题最多 4,000 字。聊天气泡与主转录区共用 Rich Markdown → ANSI 渲染路径，列表、加粗等按 Markdown 显示。模型回复按原文展示（去掉控制字符后，普通回复最长 1600 字、主动观察最多 400 字），不再做句数或汉字过滤。对话侧可只读检查当前主会话：`inspect_current_session` 提供 `recent_tools` / `tool_detail` / `recent_messages`，与统计类 `session_evidence` 配合排查失败。日常采集、异常检测和每轮复盘在本地完成；只有用户提问才会调用独立的 `deepseek/deepseek-flash`。Lain Worker 使用启动时由主进程传入的 `llm.models.deepseek.api_key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
+按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。热力图按每 3 次完成调用分组，展示最近 60 次中的活跃度及失败位置。聊天问题最多 4,000 字。聊天气泡与主转录区共用 Rich Markdown → ANSI 渲染路径，列表、加粗等按 Markdown 显示。模型回复按原文展示（去掉控制字符后，最长 1600 字），不再做句数或汉字过滤。对话侧可只读检查当前主会话：`inspect_current_session` 提供 `recent_tools` / `tool_detail` / `recent_messages`，与统计类 `session_evidence` 配合排查失败。日常采集保留原始工具事件、失败分类、资源采样、Git 记录和统计图表，不在本地生成诊断结论；只有用户提问才会调用独立的 `deepseek/deepseek-flash`。Lain Worker 使用启动时由主进程传入的 `llm.models.deepseek.api_key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
 
 ### `/status details` 性能统计口径
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from time import monotonic
 from contextvars import Context
@@ -34,6 +35,7 @@ COMMAND_LIMIT = 300
 ERROR_LIMIT = 240
 REASON_LIMIT = 160
 AINVOKE_CANCEL_WAIT = 5.0
+LOG = logging.getLogger(__name__)
 
 
 def _brief(value: str, limit: int) -> str:
@@ -335,7 +337,10 @@ class SubAgentRuntime(Runnable):
             self.manager.parent._emit("subagent_update", payload)
 
         def write(event: str, **payload: Any) -> None:
-            self.store.append(parent, run_id, event, model=self.model_name, **payload)
+            try:
+                self.store.append(parent, run_id, event, model=self.model_name, **payload)
+            except Exception:
+                LOG.exception("Subagent log write failed")
             if scope and event in {"tool_start", "tool_finish", "tool_error"}:
                 fields = {k:payload[k] for k in (
                     "tool_name", "tool_run_id", "status", "elapsed_seconds", "exit_code", "error_category",
@@ -354,124 +359,126 @@ class SubAgentRuntime(Runnable):
             run_id=run_id, parent_run_id=parent, description=description, tool_call_id=tool_call_id,
             controller=controller, mode="sync", depth=self.child_depth,
         )
-        try:
-            write(
-                "start", status="running", description=brief(description, SUMMARY_LIMIT),
-                description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
-                mode=record.mode, parent_run_id=parent, tool_call_id=tool_call_id, depth=record.depth,
-            )
-        except Exception:
-            pass
-        publish("running")
-        published = True
         set_stream_owner(controller)
         set_output_emitter(None)
         callback = LogCallback(write, self.store._redact)
         prepared = None
+        env_token = None
         status, summary, summary_truncated = "failed", "", False
         content = ""
         saw_error = False
         messages_seen: list = []
-        env_token = None
         try:
-            # Bail before prepare so a cancel-before-admit does not build model clients.
-            if controller.cancel_requested:
-                raise RuntimeError("Cancelled by parent")
-            prepared = self.prepare(controller)
-            if controller.cancel_requested:
-                raise RuntimeError("Cancelled by parent")
-            def on_chunk(final: Any) -> None:
-                if not isinstance(final, dict):
-                    return None
-                # Deliver a host decision to the parent even if the child
-                # model would omit the refusal from its final answer.
-                for message in reversed(final.get("messages", [])):
-                    if not isinstance(message, ToolMessage):
-                        break
-                    if message.artifact == {"auto_approval": "requires_parent_approval"}:
-                        raise RuntimeError(f"{message.name} ({message.tool_call_id}): {message.content}")
-                if final.get("__interrupt__"):
-                    raise RuntimeError("Subagents cannot request user interaction")
-                messages_seen[:] = list(final.get("messages") or [])
-                return None
-
-            env_token = self._borrow_environment()
-            stop = run_segment(
-                prepared.graph,
-                {"messages": input["messages"][-1:]},
-                {"configurable": {"thread_id": run_id, "checkpoint_ns": ""}, "callbacks": [callback]},
-                run_control=controller.run_control,
-                stream_mode="values",
-                durability=None,
-                on_chunk=on_chunk,
-                cancel_requested=lambda: controller.cancel_requested,
-            )
-            if stop.kind == "raised":
-                if stop.error is None or controller.cancel_requested:
-                    raise RuntimeError("Cancelled by parent")
-                raise stop.error
-            # A parent cancel wins over a drained or finished answer.
-            if controller.cancel_requested:
-                raise RuntimeError("Cancelled by parent")
-            answer = final_answer(messages_seen)
-            if not answer:
-                raise RuntimeError("Subagent did not produce a final answer")
-            content = answer
-            status = "completed"
-            summary = brief(answer, SUMMARY_LIMIT)
-            summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
-        except Exception as exc:
-            status = "cancelled" if controller.cancel_requested else "failed"
-            content = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
-            summary = content
-            saw_error = True
-        if env_token is not None:
-            from agent.execution.environment import reset_environment_cache
-            reset_environment_cache(env_token)
-        if prepared is not None and getattr(prepared, "owns_model_clients", False):
-            from agent.models.stream_lifecycle import close_model_http_clients
             try:
-                close_model_http_clients(prepared.model)
+                write(
+                    "start", status="running", description=brief(description, SUMMARY_LIMIT),
+                    description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
+                    mode=record.mode, parent_run_id=parent, tool_call_id=tool_call_id, depth=record.depth,
+                )
+            except Exception:
+                LOG.exception("Subagent log write failed")
+            publish("running")
+            published = True
+            try:
+                # Bail before prepare so a cancel-before-admit does not build model clients.
+                if controller.cancel_requested:
+                    raise RuntimeError("Cancelled by parent")
+                prepared = self.prepare(controller)
+                if controller.cancel_requested:
+                    raise RuntimeError("Cancelled by parent")
+                def on_chunk(final: Any) -> None:
+                    if not isinstance(final, dict):
+                        return None
+                    # Deliver a host decision to the parent even if the child
+                    # model would omit the refusal from its final answer.
+                    for message in reversed(final.get("messages", [])):
+                        if not isinstance(message, ToolMessage):
+                            break
+                        if message.artifact == {"auto_approval": "requires_parent_approval"}:
+                            raise RuntimeError(f"{message.name} ({message.tool_call_id}): {message.content}")
+                    if final.get("__interrupt__"):
+                        raise RuntimeError("Subagents cannot request user interaction")
+                    messages_seen[:] = list(final.get("messages") or [])
+                    return None
+
+                env_token = self._borrow_environment()
+                stop = run_segment(
+                    prepared.graph,
+                    {"messages": input["messages"][-1:]},
+                    {"configurable": {"thread_id": run_id, "checkpoint_ns": ""}, "callbacks": [callback]},
+                    run_control=controller.run_control,
+                    stream_mode="values",
+                    durability=None,
+                    on_chunk=on_chunk,
+                    cancel_requested=lambda: controller.cancel_requested,
+                )
+                if stop.kind == "raised":
+                    if stop.error is None or controller.cancel_requested:
+                        raise RuntimeError("Cancelled by parent")
+                    raise stop.error
+                # A parent cancel wins over a drained or finished answer.
+                if controller.cancel_requested:
+                    raise RuntimeError("Cancelled by parent")
+                answer = final_answer(messages_seen)
+                if not answer:
+                    raise RuntimeError("Subagent did not produce a final answer")
+                content = answer
+                status = "completed"
+                summary = brief(answer, SUMMARY_LIMIT)
+                summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
             except Exception as exc:
-                try:
-                    write("error", phase="cleanup", reason=_error_reason(exc, self.store._redact))
-                except Exception:
-                    pass
-        if status != "completed" and controller.cancel_requested:
-            status = "cancelled"
-            if not content:
-                content = "Cancelled by parent"
+                status = "cancelled" if controller.cancel_requested else "failed"
+                content = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
                 summary = content
-        elapsed = round(max(0.0, monotonic() - started), 3)
-        self.manager.record_terminal(run_id, status, content, elapsed)
-        try:
-            if saw_error:
-                write("error", status=status, reason=summary)
-            finish_fields: dict[str, Any] = {
-                "status": status,
-                "elapsed_seconds": elapsed,
-                "tool_count": callback.tool_count,
-                "mode": record.mode,
-                "parent_run_id": parent,
-                "tool_call_id": tool_call_id,
-                "depth": record.depth,
-                "description": brief(description, SUMMARY_LIMIT),
-            }
-            if summary_truncated:
-                finish_fields["result_summary"] = summary
-                finish_fields["summary_truncated"] = True
-            else:
-                finish_fields["result"] = content
-            write("finish", **finish_fields)
-        except Exception:
-            pass
-        try:
-            publish(
-                status,
-                reason=summary if status in {"failed", "cancelled"} else "",
-                result=content,
-            )
-        except Exception:
-            pass
-        published = False
-        return {"messages": [_task_message(content, status, run_id=run_id, result=content)]}
+                saw_error = True
+            if status != "completed" and controller.cancel_requested:
+                status = "cancelled"
+                if not content:
+                    content = "Cancelled by parent"
+                    summary = content
+            elapsed = round(max(0.0, monotonic() - started), 3)
+            self.manager.record_terminal(run_id, status, content, elapsed)
+            try:
+                if saw_error:
+                    write("error", status=status, reason=summary)
+                finish_fields: dict[str, Any] = {
+                    "status": status,
+                    "elapsed_seconds": elapsed,
+                    "tool_count": callback.tool_count,
+                    "mode": record.mode,
+                    "parent_run_id": parent,
+                    "tool_call_id": tool_call_id,
+                    "depth": record.depth,
+                    "description": brief(description, SUMMARY_LIMIT),
+                }
+                if summary_truncated:
+                    finish_fields["result_summary"] = summary
+                    finish_fields["summary_truncated"] = True
+                else:
+                    finish_fields["result"] = content
+                write("finish", **finish_fields)
+            except Exception:
+                LOG.exception("Subagent log write failed")
+            try:
+                publish(
+                    status,
+                    reason=summary if status in {"failed", "cancelled"} else "",
+                    result=content,
+                )
+            except Exception:
+                LOG.exception("Subagent status publish failed")
+            published = False
+            return {"messages": [_task_message(content, status, run_id=run_id, result=content)]}
+        finally:
+            if env_token is not None:
+                from agent.execution.environment import reset_environment_cache
+                try:
+                    reset_environment_cache(env_token)
+                except Exception:
+                    LOG.exception("Subagent environment cleanup failed")
+            if prepared is not None and getattr(prepared, "owns_model_clients", False):
+                from agent.models.stream_lifecycle import close_model_http_clients
+                try:
+                    close_model_http_clients(prepared.model)
+                except Exception:
+                    LOG.exception("Subagent model client cleanup failed")

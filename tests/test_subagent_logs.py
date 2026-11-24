@@ -40,8 +40,8 @@ def test_read_task_enforces_direct_parent_isolation(tmp_path):
     store = SubAgentLogStore(tmp_path)
     root, agent_a, agent_b = "root-session", "agent-a-run", "agent-b-run"
     a1, b1 = uuid4().hex, uuid4().hex
-    store.append(agent_a, a1, "finish", status="completed", summary="a1-only")
-    store.append(agent_b, b1, "finish", status="completed", summary="b1-only")
+    store.append(agent_a, a1, "finish", status="completed", result="a1-only")
+    store.append(agent_b, b1, "finish", status="completed", result="b1-only")
     tool = next(item for item in build_subagent_tools(
         None, None, store, names=frozenset({"read_task"}), allow_background=False,
     ) if item.name == "read_task")
@@ -56,7 +56,7 @@ def test_read_task_enforces_direct_parent_isolation(tmp_path):
     # Direct parent A sees A1; listing is scoped to A.
     assert [item["run_id"] for item in read_as(agent_a)["tasks"]] == [a1]
     page = read_as(agent_a, a1, include_logs=True)
-    assert page["logs"]["records"][0]["summary"] == "a1-only"
+    assert page["logs"]["records"][0]["result"] == "a1-only"
     assert page["result"] == "a1-only"
 
     # Root cannot see or open A1 (grandchild / other parent's child).
@@ -344,3 +344,288 @@ def test_known_keys_are_replaced_before_summary_limits(tmp_path):
     raw = next(tmp_path.rglob('*.jsonl')).read_text()
     assert key not in raw
     assert '$KNOWN' in raw
+
+
+def test_runtime_cleans_up_when_log_writes_fail(tmp_path, monkeypatch, caplog):
+    import logging
+    from types import SimpleNamespace
+    from langchain_core.messages import AIMessage, HumanMessage
+    from agent.runtime.control import RunController
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    from agent.subagents.manager import SubAgentManager
+    from agent.subagents.runtime import SubAgentRuntime
+
+    store = SubAgentLogStore(tmp_path)
+
+    def fail_append(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "append", fail_append)
+    cleaned = []
+    monkeypatch.setattr(
+        "agent.execution.environment.reset_environment_cache",
+        lambda token: cleaned.append(("env", token)),
+    )
+
+    def fail_close(model):
+        cleaned.append(("http", model))
+        raise OSError("close failed")
+
+    monkeypatch.setattr("agent.models.stream_lifecycle.close_model_http_clients", fail_close)
+    model = object()
+
+    class Graph:
+        def stream(self, graph_input, config, **kwargs):
+            yield {"messages": [AIMessage(content="done")]}
+
+    parent = RunController()
+    manager = SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
+    runtime = SubAgentRuntime(
+        manager, store,
+        lambda controller: SimpleNamespace(graph=Graph(), owns_model_clients=True, model=model),
+        "test-model",
+    )
+    monkeypatch.setattr(runtime, "_borrow_environment", lambda: "env-token")
+    child = RunController()
+    child.begin_run()
+    with caplog.at_level(logging.ERROR, logger="agent.subagents.runtime"):
+        result = runtime._run(
+            {"messages": [HumanMessage(content="work")]},
+            "parent", uuid4().hex, child, tool_call_id="call",
+        )
+    assert result["messages"][0].additional_kwargs["status"] == "completed"
+    assert result["messages"][0].content == "done"
+    assert cleaned == [("env", "env-token"), ("http", model)]
+    assert "Subagent log write failed" in caplog.text
+    assert "Subagent model client cleanup failed" in caplog.text
+
+
+def test_runtime_releases_resources_when_the_task_is_interrupted(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from langchain_core.messages import HumanMessage
+    from agent.runtime.control import RunController
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    from agent.subagents.manager import SubAgentManager
+    from agent.subagents.runtime import SubAgentRuntime
+
+    cleaned = []
+    monkeypatch.setattr(
+        "agent.execution.environment.reset_environment_cache",
+        lambda token: cleaned.append(token),
+    )
+    monkeypatch.setattr(
+        "agent.models.stream_lifecycle.close_model_http_clients",
+        lambda model: cleaned.append(model),
+    )
+    model = object()
+
+    class Graph:
+        def stream(self, graph_input, config, **kwargs):
+            raise KeyboardInterrupt()
+            yield {}
+
+    parent = RunController()
+    manager = SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
+    store = SubAgentLogStore(tmp_path)
+    runtime = SubAgentRuntime(
+        manager, store,
+        lambda controller: SimpleNamespace(graph=Graph(), owns_model_clients=True, model=model),
+        "test-model",
+    )
+    monkeypatch.setattr(runtime, "_borrow_environment", lambda: "env-token")
+    child = RunController()
+    child.begin_run()
+    with pytest.raises(KeyboardInterrupt):
+        runtime._run(
+            {"messages": [HumanMessage(content="work")]},
+            "parent", uuid4().hex, child, tool_call_id="call",
+        )
+    assert cleaned == ["env-token", model]
+
+
+def test_task_metadata_recovers_public_fields_from_finish_only(tmp_path):
+    store = SubAgentLogStore(tmp_path)
+    run = uuid4().hex
+    store.append(
+        "parent", run, "finish", status="completed", result="from-finish",
+        mode="background", parent_run_id="owner", tool_call_id="tc", depth=2,
+        description="recovered", elapsed_seconds=3,
+    )
+    meta = store.task_metadata("parent", run)
+    assert meta["status"] == "completed"
+    assert meta["result"] == "from-finish"
+    assert meta["mode"] == "background"
+    assert meta["parent_run_id"] == "owner"
+    assert meta["tool_call_id"] == "tc"
+    assert meta["depth"] == 2
+    assert meta["description"] == "recovered"
+    assert meta["started_at"] == ""
+    assert meta["elapsed_seconds"] == 3
+
+    legacy = uuid4().hex
+    store.append(
+        "parent", legacy, "finish", status="completed", summary="legacy-only",
+        description="old", mode="sync", parent_run_id="parent", tool_call_id="x", depth=1,
+    )
+    legacy_meta = store.task_metadata("parent", legacy)
+    assert legacy_meta["status"] == "completed"
+    assert "result" not in legacy_meta
+    assert "result_summary" not in legacy_meta
+
+
+def test_read_task_merges_live_tasks_with_history_before_paging(tmp_path):
+    import os
+    from types import SimpleNamespace
+    from agent.runtime.control import RunController
+    from agent.subagents.configuration import DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_TOTAL
+    from agent.subagents.manager import SubAgentManager
+    from agent.tools.subagent_tasks import build_subagent_tools
+
+    store = SubAgentLogStore(tmp_path)
+    parent = RunController()
+    manager = SubAgentManager(parent, max_concurrent=DEFAULT_MAX_CONCURRENT, max_total=DEFAULT_MAX_TOTAL)
+    historical, logged, live_only = uuid4().hex, uuid4().hex, uuid4().hex
+    store.append(
+        "parent", historical, "finish", status="completed", result="history",
+        description="old", mode="sync", parent_run_id="parent", tool_call_id="h", depth=1,
+    )
+    store.append(
+        "parent", logged, "finish", status="completed", result="stale-log",
+        description="logged", mode="sync", parent_run_id="parent", tool_call_id="l", depth=1,
+    )
+    directory = next(tmp_path.rglob("*.jsonl")).parent
+    os.utime(directory / f"{historical}.jsonl", (1, 1))
+    os.utime(directory / f"{logged}.jsonl", (2, 2))
+    logged_task = manager.open_record(
+        run_id=logged, parent_run_id="parent", description="live", tool_call_id="l",
+        controller=RunController(), mode="sync", depth=1,
+    )
+    manager.record_terminal(logged, "completed", "live-result", 1.0)
+    manager.open_record(
+        run_id=live_only, parent_run_id="parent", description="only", tool_call_id="o",
+        controller=RunController(), mode="background", depth=1,
+    )
+    tool = next(item for item in build_subagent_tools(
+        None, manager, store, names=frozenset({"read_task"}), allow_background=False,
+    ) if item.name == "read_task")
+
+    def read(**kwargs):
+        runtime = SimpleNamespace(config={"configurable": {"thread_id": "parent"}}, tool_call_id="read")
+        value = tool.func(runtime, **kwargs)
+        if isinstance(value, tuple):
+            value = value[0]
+        return json.loads(value)
+
+    first = read(limit=1)
+    assert [item["run_id"] for item in first["tasks"]] == [live_only]
+    assert first["tasks"][0]["status"] == "running"
+    assert first["next_offset"] == 1
+    second = read(offset=1, limit=1)
+    assert second["tasks"][0]["run_id"] == logged
+    assert second["tasks"][0]["status"] == "completed"
+    assert second["next_offset"] == 2
+    third = read(offset=2, limit=1)
+    assert third["tasks"][0]["run_id"] == historical
+    assert read(run_id=logged)["result"] == "live-result"
+    assert logged_task.result == "live-result"
+
+
+def test_store_reads_stay_consistent_while_appends_continue(tmp_path):
+    import threading
+
+    store = SubAgentLogStore(tmp_path)
+    run = uuid4().hex
+    stop = threading.Event()
+    errors = []
+
+    def writer():
+        index = 0
+        while not stop.is_set():
+            store.append("parent", run, "tool", note=str(index))
+            index += 1
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        for _ in range(40):
+            listed = store.list_runs("parent")
+            meta = store.task_metadata("parent", run)
+            page = store.read("parent", run, 0, 10)
+            assert listed == [run]
+            assert meta is None or meta["run_id"] == run
+            assert all(record["run_id"] == run for record in page["records"])
+    except Exception as exc:  # noqa: BLE001
+        errors.append(exc)
+    finally:
+        stop.set()
+        thread.join()
+    assert errors == []
+
+
+def test_restore_keeps_checkpoint_result_and_confirmed_status(tmp_path):
+    from agent.cli.state import CliState, ToolBlock
+
+    store = SubAgentLogStore(tmp_path)
+    truncated, confirmed = uuid4().hex, uuid4().hex
+    store.append(
+        "root", truncated, "finish", result_summary="short summary", summary_truncated=True,
+        description="task", mode="sync", parent_run_id="root", tool_call_id="card", depth=1,
+    )
+    store.append(
+        "root", confirmed, "finish", status="completed", result="LOG RESULT",
+        description="other", mode="sync", parent_run_id="root", tool_call_id="other", depth=1,
+    )
+    state = CliState()
+    state.blocks.extend([
+        ToolBlock(
+            tool_call_id="card", name="start_task", arguments={"description": "task"},
+            output="FULL CHECKPOINT RESULT", status="completed",
+        ),
+        ToolBlock(
+            tool_call_id="other", name="start_task", arguments={"description": "other"},
+            output="CHECKPOINT", status="cancelled",
+        ),
+    ])
+    state.restore_task_tree(store, "root")
+    restored = state.subagent_nodes[truncated]
+    assert restored.status == "completed"
+    assert restored.result == "FULL CHECKPOINT RESULT"
+    assert state.blocks[0].output == "FULL CHECKPOINT RESULT"
+    assert state.blocks[0].status == "completed"
+    assert state.subagent_nodes[confirmed].status == "completed"
+    assert state.blocks[1].status == "completed"
+    assert state.blocks[1].output == "LOG RESULT"
+
+
+def test_cancelled_background_finish_wakes_an_idle_agent():
+    from types import SimpleNamespace
+    from agent.cli.run_events_controller import RunEventsController
+    from agent.cli.state import CliState
+    from agent.cli.view_state import DialogState, RunPresentation
+    from agent.runtime.contracts import RunEvent
+
+    woken = []
+    state = CliState()
+    controller = RunEventsController(
+        request_summary=lambda request: None,
+        _allow_confirm_open=lambda: False,
+        _announce_mcp_switch=lambda: None,
+        _note_interrupt_behind_allow_confirm=lambda status: None,
+        _reopen_pending_interaction=lambda: None,
+        _show_allow_confirm_status=lambda: None,
+        _start_queued_run=lambda: woken.append("wake"),
+        _working_messages=lambda: SimpleNamespace(reset=lambda: None),
+        buffer=SimpleNamespace(),
+        dialogs=DialogState(),
+        run_view=RunPresentation(),
+        runner=SimpleNamespace(),
+        set_status=lambda *args, **kwargs: None,
+        state=state,
+        invalidate=lambda: None,
+    )
+    event = RunEvent("subagent_finished", result={"status": "cancelled", "run_id": "child"})
+    controller._apply_event(event)
+    assert woken == ["wake"]
+    state.running = True
+    controller._apply_event(event)
+    assert woken == ["wake"]
