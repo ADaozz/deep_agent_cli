@@ -368,7 +368,7 @@ def test_real_pty_escape_cancels_silent_model_stream_then_accepts_next_task(tmp_
             assert state['summary'] == '修复会话恢复流程中的异常中断问题'
             assert len(server.summary_connections) == 1
             assert len(server.connections) == 2
-            assert '用户中止' in json.dumps(server.connections[1].body, ensure_ascii=False)
+            assert 'stopped by the user' in json.dumps(server.connections[1].body, ensure_ascii=False)
         finally:
             tui.close()
         assert server.open_connections() == []

@@ -204,7 +204,7 @@ asyncio.run(worker.main())
         async def start_worker(directory, config, api_key):
             return await asyncio.create_subprocess_exec(
                 sys.executable, "-c", launch, endpoint, str(directory),
-                str(config.persona_prompt), str(config.observation_prompt), str(config.chat_prompt),
+                str(config.persona_prompt), str(config.chat_prompt),
                 str(config.rpc_timeout_seconds), str(config.question_timeout_seconds),
                 env={"PATH": os.environ["PATH"], "DEEPSEEK_API_KEY": api_key},
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

@@ -807,14 +807,14 @@ def _failure_summary(output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     if not lines:
         return ""
-    if lines[0].startswith("参数校验失败"):
+    if lines[0].startswith("Argument validation failed"):
         return next((line.removeprefix("- ") for line in lines if line.startswith("- ")), lines[0])
     return next((line for line in lines if not line.startswith("Exit code:")), "")
 
 
 def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[str]:
     lines = block.output.strip().splitlines()
-    if lines and lines[0].startswith("参数校验失败"):
+    if lines and lines[0].startswith("Argument validation failed"):
         details = [line.strip().removeprefix("- ") for line in lines if line.startswith("- ")]
         shown = details[:limits.head_lines] or lines[:1]
         hidden = len(lines) - len(shown)

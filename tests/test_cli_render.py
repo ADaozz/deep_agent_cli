@@ -651,13 +651,13 @@ def test_failed_execute_shows_real_exit_code_command_and_compact_output() -> Non
 
 def test_failed_human_input_summarizes_fields_without_schema_until_expanded() -> None:
     output = (
-        "参数校验失败，`request_human_input` 没有执行，也没有产生任何副作用。\n"
-        "请按下面的说明修正参数后重新调用。\n\n错误：\n"
-        "- fields: 收到 str → 必须是原生 JSON 数组\n"
-        "  收到内容：[serialized fields]\n"
-        "- recommendation: 收到 str → 必须是 JSON 对象\n"
-        "  收到内容：{serialized recommendation}\n\n"
-        "`request_human_input` 的参数 schema：\n{large schema}"
+        "Argument validation failed. `request_human_input` did not run and produced no side effects.\n"
+        "Correct the arguments below and call the tool again.\n\nErrors:\n"
+        "- fields: received str -> must be a JSON array\n"
+        "  received: [serialized fields]\n"
+        "- recommendation: received str -> must be a JSON object\n"
+        "  received: {serialized recommendation}\n\n"
+        "`request_human_input` parameter schema:\n{large schema}"
     )
     state = CliState(blocks=[ToolBlock(
         "ask", "request_human_input", {"question": "下一步怎么处理？"},
@@ -665,8 +665,8 @@ def test_failed_human_input_summarizes_fields_without_schema_until_expanded() ->
     )])
     collapsed = _plain(render_transcript(state, 100))
     assert "Failed ask 下一步怎么处理？" in collapsed
-    assert "fields: 收到 str" in collapsed
-    assert "recommendation: 收到 str" in collapsed
+    assert "fields: received str" in collapsed
+    assert "recommendation: received str" in collapsed
     assert "schema" not in collapsed
     assert "serialized" not in collapsed
     state.tools_expanded = True

@@ -162,14 +162,6 @@ class RunController:
             scope = self._current_scope()
             return scope is not None and scope.cancel_event.is_set()
 
-    def current_cancel_event(self) -> threading.Event:
-        """The event that cancels the run in progress, or an unset event when idle."""
-        with self._lock:
-            scope = self._current_scope()
-            if scope is None:
-                return threading.Event()
-            return scope.cancel_event
-
     @property
     def pause_requested(self) -> bool:
         with self._lock:
@@ -260,13 +252,6 @@ class RunController:
     def notify(self, item: dict[str, Any]) -> None:
         with self._lock:
             self._notifications.append(item)
-
-    def drop_notification(self, run_id: str) -> None:
-        """Remove a queued result that wait_task is about to return itself."""
-        with self._lock:
-            self._notifications = deque(
-                item for item in self._notifications if item.get("run_id") != run_id
-            )
 
     def pop_notifications(self) -> list[dict[str, Any]]:
         """Consume every queued notification at a model-safe boundary."""

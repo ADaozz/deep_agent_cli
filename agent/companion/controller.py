@@ -84,7 +84,6 @@ async def start_worker(config_dir, config: CompanionConfig, api_key=None):
         root,
         str(config_dir),
         str(config.persona_prompt),
-        str(config.observation_prompt),
         str(config.chat_prompt),
         str(config.rpc_timeout_seconds),
         str(config.question_timeout_seconds),

@@ -23,15 +23,23 @@ _CARD_FROM_STATUS = {
 _TASK_STATUSES = frozenset({"running", "completed", "failed", "cancelled"})
 
 
+def task_result_text(*, artifact: object = None, content: str = "", status: str = "") -> str:
+    """The task body shown on a card. Launch JSON is not a result."""
+    if isinstance(artifact, dict) and isinstance(artifact.get("result"), str):
+        return artifact["result"]
+    recorded = artifact.get("status") if isinstance(artifact, dict) else None
+    if recorded == "running" or status == "running":
+        return ""
+    return content
+
+
 def subagent_card_status(
-    content: str = "",
     *,
     is_error: bool = False,
     status: str | None = None,
     artifact: object = None,
 ) -> str:
     """Card status from a structured task record. Missing data stays unconfirmed."""
-    del content
     recorded = artifact.get("status") if isinstance(artifact, dict) else None
     if recorded not in _CARD_FROM_STATUS and status in _CARD_FROM_STATUS:
         recorded = status
@@ -111,7 +119,7 @@ def messages_to_transcript(
                 block = tools.get(str(marker.get("tool_call_id") or ""))
                 if block is not None and is_background_launch(block.name, block.arguments):
                     block.content = result
-                    block.status = subagent_card_status(result, status=str(marker.get("status") or ""))
+                    block.status = subagent_card_status(status=str(marker.get("status") or ""))
                     block.is_error = block.status in {"error", "cancelled"}
                 continue
             blocks.append(TranscriptBlock(
@@ -148,7 +156,7 @@ def messages_to_transcript(
             is_task = message.name == "start_task" or (block is not None and block.name == "start_task")
             artifact = getattr(message, "artifact", None)
             status = (
-                subagent_card_status(content, is_error=is_error, artifact=artifact)
+                subagent_card_status(is_error=is_error, artifact=artifact)
                 if is_task else ("error" if is_error else "completed")
             )
             is_error = status in {"error", "cancelled"}
@@ -160,7 +168,7 @@ def messages_to_transcript(
             exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
             if block is not None and is_background_launch(block.name, block.arguments):
                 # A running launch leaves the card open. A tool error settles it.
-                card = subagent_card_status(content, is_error=is_error, artifact=artifact)
+                card = subagent_card_status(is_error=is_error, artifact=artifact)
                 if card == "running":
                     block.content = content
                     block.artifact = artifact

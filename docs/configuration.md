@@ -23,7 +23,7 @@ CLI 按以下顺序查找主配置：
 ```yaml
 companion:
   persona_prompt: companion/prompts/persona.md
-  observation_prompt: companion/prompts/observation.md
+  # 异常观察由宿主本地完成，不再读取模型观察提示词。
   chat_prompt: companion/prompts/chat.md
   rpc_timeout_seconds: 3
   question_timeout_seconds: 60
@@ -33,7 +33,7 @@ companion:
 ```
 
 - `persona_prompt` 定义聊天和主动观察共用的人设、语气。[`persona.md`](../agent/companion/persona.md)
-- `observation_prompt` 仍随 Worker 启动读取。异常检测不调用模型。[`observation.md`](../agent/companion/observation.md)
+- 异常检测、主动观察和表情变化由宿主本地完成，不调用模型，也不再读取 `observation.md`。
 - `chat_prompt` 定义聊天、回答项目问题和按用户要求复盘时的行为；内置约定可用 `inspect_current_session` 核对工具明细。[`chat.md`](../agent/companion/chat.md)
 - `rpc_timeout_seconds` 限制一次宿主只读查询。`question_timeout_seconds` 限制一轮问答。单次模型 HTTP 超时为 15 秒，源码搜索的扫描预算为 1.5 秒。
 - `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。
@@ -350,7 +350,7 @@ redaction:
 |---|---|---|
 | `replacements` | `{}` | 精确匹配的字面量 → 展示名；键与值均须非空。类型错误时启动失败 |
 
-沙箱 `env_set` / `env_allowlist`、MCP bearer / `env_passthrough` 的环境变量值**不会**自动加入替换表。需要遮盖时，把对应字面量写进 `replacements`。不对自由文本中的 JWT / `sk-` 等形态做正则猜测遮盖；Auto 送 Flash 前另有只读 `suspects` 扫描，不改原文。
+沙箱 `env_set` / `env_allowlist`、MCP bearer / `env_passthrough` 的环境变量值**不会**自动加入替换表。需要遮盖时，把对应字面量写进 `replacements`。不对自由文本中的 JWT / `sk-` 等形态做正则猜测遮盖。
 
 ## 界面（`ui`）
 
@@ -380,9 +380,10 @@ ui:
 例如，`ui.timezone: Asia/Shanghai` 对应的提示词片段为：
 
 ```text
-# 当前用户时间
-当前日期：2026-10-28
-用户时区：Asia/Shanghai
+## Current date and timezone
+
+Date: 2026-10-28
+Timezone: Asia/Shanghai
 ```
 
 ## 按键（`keybindings.json`）
@@ -527,17 +528,16 @@ SandboxPool。可使用文件工具、execute、已配置的网页工具、Skill
 
 ### 后台委派
 
-`subagents.background: true`（默认）时，Root 的 `start_task` 接受 `run_in_background`。同一个 tool-call 批次不能同时包含同步和后台 `start_task`；混合时该批次里的每个 `start_task` 都失败，并且不会启动。Root 另外有三个工具：
+`subagents.background: true`（默认）时，Root 的 `start_task` 接受 `run_in_background`。同一次模型响应可以同时派发同步和后台 `start_task`，它们并行执行。Root 另外有两个工具：
 
 | 工具 | 作用 |
 |---|---|
 | `read_task` | 不传 `run_id` 时列出自己的直接子任务；传入后返回描述、执行模式、状态、耗时和结果。`include_logs=true` 同时返回一页日志 |
-| `wait_task(run_ids)` | 阻塞到这些后台任务结束并返回结果。已经结束的立即返回。同一结果不会再作为自动通知送进模型上下文 |
 | `cancel_task(run_id)` | 请求取消一个属于当前 Agent 的后台任务。请求成功不表示任务已经停止，也不提前释放并发名额 |
 
 后台子任务的模型、强度、权限、沙箱和执行摘要与同步子任务相同，并共用每父节点 / 全树并发上限。后台子 Agent 不再获得派发工具。
-`ask` 下保留 `read_task`、`wait_task` 和 `cancel_task`。子任务完成或失败后，结果作为宿主通知自动送回主 Agent：
-主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已结束本轮时 TUI 自动发起新一轮，不需要用户再发消息，模型也不必轮询。
+`ask` 下保留 `read_task` 和 `cancel_task`。子任务完成或失败后，Runtime 自动把结果送回主 Agent：
+主 Agent 仍在运行时在下一个模型边界注入；主 Agent 已空闲时自动开始新一轮，不需要用户再发消息，模型也不能选择是否唤醒，也不必轮询。
 被取消的任务不发送通知。Esc 取消当前 Run 时同时取消全部后台任务，主 Agent 空闲时按 Esc 只取消后台任务。
 新建或切换会话、退出程序会取消后台任务并丢弃未送达的结果；未完成的任务恢复后显示为中断。
 存在后台任务时，空闲状态下的沙箱文件系统模式切换保持排队。

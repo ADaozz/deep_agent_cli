@@ -9,7 +9,6 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agent.redaction import SecretRef, replace_known_secrets
-from agent.runtime.approval.suspects import scan_suspects
 from agent.subagents.notifications import NOTIFICATION_KEY
 
 _EVIDENCE_LIMIT = 32000
@@ -99,10 +98,6 @@ def build_evidence(
     }
     while True:
         text = replace_known_secrets(json.dumps(payload, ensure_ascii=False, default=str), secrets)
-        suspects = scan_suspects(text)
-        if suspects:
-            annotated = {**payload, "suspects": suspects}
-            text = replace_known_secrets(json.dumps(annotated, ensure_ascii=False, default=str), secrets)
         if len(text) <= _EVIDENCE_LIMIT:
             return text
         if not history:

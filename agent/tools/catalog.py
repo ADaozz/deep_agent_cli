@@ -51,7 +51,6 @@ ROOT_ONLY_TOOLS = frozenset({
 ROOT_TASK_TOOLS = frozenset({
     "start_task",
     "read_task",
-    "wait_task",
     "cancel_task",
 })
 

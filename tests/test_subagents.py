@@ -15,7 +15,7 @@ from agent.sessions.transcript import messages_to_transcript
 from tests.conftest import graph_tool_names, scripted_model
 
 START_TOOLS = {'start_task'}
-QUERY_TOOLS = {'read_task', 'wait_task', 'cancel_task'}
+QUERY_TOOLS = {'read_task', 'cancel_task'}
 
 
 def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monkeypatch):
@@ -67,7 +67,7 @@ def test_native_task_returns_only_final_result_and_isolates_tools(tmp_path, monk
         # Default max_subagent_depth=2: a sync child may start_task and read its own children.
         child_tools = graph_tool_names(child.graph)
         assert 'start_task' in child_tools and 'read_task' in child_tools
-        assert not {'request_human_input', 'wait_task', 'cancel_task'} & child_tools
+        assert not {'request_human_input', 'cancel_task'} & child_tools
         child_start = child.graph.nodes['tools'].bound.tools_by_name['start_task']
         assert set(child_start.args) == {'description'}
         assert 'run_in_background' not in child_start.description
@@ -149,7 +149,7 @@ def test_subagent_depth_gates_nested_start_task(tmp_path, monkeypatch):
     assert 'start_task' not in tools_at(1, 1) and 'read_task' not in tools_at(1, 1)
     assert 'start_task' in tools_at(0, 2) and 'start_task' in tools_at(1, 2)
     assert 'read_task' in tools_at(1, 2)
-    assert 'wait_task' not in tools_at(1, 2) and 'cancel_task' not in tools_at(1, 2)
+    assert 'cancel_task' not in tools_at(1, 2)
     assert 'start_task' not in tools_at(2, 2) and 'read_task' not in tools_at(2, 2)
     # Live delegation with max_subagent_depth=1 still yields a leaf child.
     by_depth: dict[int, object] = {}
@@ -182,7 +182,7 @@ def test_disabled_task_and_unverified_backend_offer_no_delegation(tmp_path):
     cfg = Settings(config_dir=tmp_path)
     prepared = create_agent(model=scripted_model([AIMessage(content='done')]), backend=StateBackend(),
                             skills=[], settings=replace(cfg, subagents=SubAgentConfig(enabled=False)))
-    assert not {'start_task', 'read_task', 'wait_task', 'cancel_task'} & graph_tool_names(prepared.graph)
+    assert not {'start_task', 'read_task', 'cancel_task'} & graph_tool_names(prepared.graph)
     model = scripted_model([
         AIMessage(content='', tool_calls=[{'name': 'start_task', 'args': {
             'description': 'do work'}, 'id': 'd'}]),

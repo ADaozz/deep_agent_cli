@@ -24,7 +24,6 @@ from agent.companion.theme import ACCENT
 from agent.companion.animation import ASSETS, frames
 from agent.companion.controller import Companion
 from agent.companion.monitor import Service, services
-from agent.companion.worker import create_observer
 from agent.execution.process import _run_process
 from agent.runtime.contracts import RunEvent
 from agent.runtime.runner import AgentRunner
@@ -366,26 +365,7 @@ def test_statistics_idempotent_attributed_at_start_and_persisted(tmp_path):
     asyncio.run(run())
 
 
-def test_observer_makes_one_structured_decision_and_can_remain_silent():
-    from agent.companion.diagnosis import InvalidObservation
-
-    async def run():
-        longer = "更详细的观察。" * 50
-        respond = create_observer(scripted_model([
-            AIMessage(content='{"behavior":"curious","message":"看到变化了。"}'),
-            AIMessage(content='{"behavior":"idle","message":""}'),
-            AIMessage(content=json.dumps({"behavior": "focused", "message": longer, "extra": "ignored"})),
-            AIMessage(content='{"behavior":"busy","message":"Invalid"}'),
-        ]))
-        assert await respond({"windows": []}) == {"behavior":"curious","message":"看到变化了。"}
-        assert await respond({"windows": []}) == {"behavior": "idle", "message": ""}
-        assert await respond({"windows": []}) == {"behavior": "focused", "message": longer}
-        with pytest.raises(InvalidObservation):
-            await respond({"windows": []})
-    asyncio.run(run())
-
-
-def test_persona_is_shared_and_each_graph_gets_its_own_instructions(monkeypatch):
+def test_persona_is_shared_and_chat_uses_its_own_instructions(monkeypatch):
     from langchain_core.messages import AIMessageChunk
 
     from agent.companion.worker import create_chat
@@ -406,34 +386,18 @@ def test_persona_is_shared_and_each_graph_gets_its_own_instructions(monkeypatch)
                 callback.on_llm_new_token(text, chunk=AIMessageChunk(content=text))
             return {"messages": [AIMessage(content="我看到了一次超时。")]}
 
-    class ObserverModel:
-        def bind(self, **options):
-            assert options == {"response_format": {"type": "json_object"}}
-            return self
-
-        async def ainvoke(self, messages):
-            system, user = messages
-            prompts.append(system.content)
-            requests.append(user[1])
-            return AIMessage(content='{"behavior":"idle","message":""}')
-
     monkeypatch.setattr("agent.companion.worker.create_react_agent", lambda model, tools: Graph())
-    observer = create_observer(ObserverModel(), persona="Shared persona", instructions="Observe only")
     chat = create_chat(None, None, persona="Shared persona", instructions="Chat only")
-    assert asyncio.run(observer({"execute_environment": environment, "findings": ["timeout"]})) == {
-        "behavior": "idle", "message": "",
-    }
     snapshot = {"question": "为什么execute工具出错多", "tool_evidence": [], "execute_environment": environment}
     assert asyncio.run(chat(snapshot, on_chunk=chunks.append)) == {
         "message": "我看到了一次超时。",
     }
-    for prompt, instruction in zip(prompts, ("Observe only", "Chat only"), strict=True):
-        assert prompt.startswith("Shared persona") and instruction in prompt and prompt.endswith(environment)
-    assert json.loads(requests[0]) == {"findings": ["timeout"]}
+    prompt = prompts[0]
+    assert prompt.startswith("Shared persona") and "Chat only" in prompt and prompt.endswith(environment)
     assert chunks == ["我看到", "我看到了一次超时。"]
-    assert requests[1].endswith("\n为什么execute工具出错多")
-    assert '"tool_evidence": []' in requests[1]
-    assert '"execute_environment"' not in requests[1]
+    assert requests[0].endswith("\n为什么execute工具出错多")
+    assert '"tool_evidence": []' in requests[0]
+    assert '"execute_environment"' not in requests[0]
 
 
 def test_late_reply_from_old_session_and_worker_crash(tmp_path, monkeypatch):
@@ -976,11 +940,8 @@ def test_worker_ipc_recovers_after_tool_and_model_timeouts():
 
             return chat
 
-        async def observe(snapshot):
-            return {}
-
         task = asyncio.create_task(serve(
-            reader, outputs.put_nowait, build_chat=build_chat, observe=observe,
+            reader, outputs.put_nowait, build_chat=build_chat,
             config=CompanionConfig(rpc_timeout_seconds=.06, question_timeout_seconds=1),
         ))
 

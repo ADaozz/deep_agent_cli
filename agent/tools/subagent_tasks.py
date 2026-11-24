@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
-
-import threading
 
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage
@@ -21,132 +20,60 @@ _INJECTED = frozenset({"runtime"})
 _PREVIEW = 200
 
 READ_TASK_DESCRIPTION = """\
-List your direct child tasks or inspect a specific task's status, execution mode, final result, and optional paginated execution logs.
+List your direct child tasks or inspect a specific task.
 
-Omit `run_id` to list direct child tasks.
+Omit run_id to list direct children.
 
-Set `include_logs=true` with a specific `run_id` to inspect execution logs.
+Set include_logs=true with a specific run_id to inspect
+its execution logs.
 
-Use this tool to investigate task progress, failures, and execution details. Do not repeatedly poll running tasks.
+Use this tool to inspect available capacity, investigate
+failures, review execution details, or retrieve
+historical results.
 
-The response includes the current subagent capacity for this agent.
+The response includes the current subagent capacity.
 
-You cannot access tasks belonging to other agents or descendants beyond your direct children."""
+Background results are delivered automatically.
+Do not use this tool to poll or wait for completion.
 
-WAIT_TASK_DESCRIPTION = """\
-Wait for the specified background subagents to reach a terminal state and return their final results.
-
-Use this tool when further progress depends on unfinished background tasks.
-
-Already finished tasks return immediately.
-
-Do not use repeated status queries as a substitute for waiting."""
+Only your direct child tasks are accessible."""
 
 CANCEL_TASK_DESCRIPTION = """\
-Request cancellation of a specified background subagent that belongs to the current agent.
+Request cancellation of a background subagent belonging
+to the current agent.
 
 Cancellation does not affect other subagents.
 
-A successful cancellation request does not mean that the task has already stopped."""
+A successful cancellation request does not mean
+that the task has already stopped."""
 
-_COMMON = """\
-Subagents are autonomous agents that execute delegated tasks in independent contexts while sharing the workspace with their parent.
-
-#### When to delegate
-
-Proactively delegate when:
-
-- A task can be decomposed into independent workstreams that can execute concurrently.
-- Exploration or investigation spans multiple modules, files, or information sources.
-- A task produces substantial intermediate output that is unnecessary in the parent context.
-- Independent investigation, verification, or review would improve the quality of the result.
-- Multiple hypotheses or approaches can be investigated independently.
-
-Launch independent subagents concurrently whenever practical.
-
-#### When not to delegate
-
-Do not delegate when:
-
-- The task is simple, targeted, or requires only a few direct tool calls.
-- The target file, symbol, or required operation is already known and can be handled directly.
-- The work depends heavily on the current context or requires frequent coordination.
-- Delegation would duplicate work already performed or assigned.
-- The overhead of delegation outweighs its expected benefit.
-
-Do not create subagents merely because capacity is available.
-
-#### Writing delegation prompts
-
-Each delegated task must be self-contained. Subagents do not inherit the parent's conversation history.
-
-Provide the objective, relevant background, known findings, scope, constraints, and expected deliverables.
-
-Clearly distinguish investigation tasks from implementation tasks.
-
-Describe the problem to solve rather than prescribing every execution step. Allow the subagent to choose its own approach and tools.
-
-Assign non-overlapping responsibilities when multiple subagents work concurrently.
-
-#### Coordination
-
-Do not duplicate work assigned to active subagents.
-
-Do not concurrently modify files assigned to other active subagents.
-
-Only access tasks and execution logs belonging to your own direct children.
-
-The parent agent remains responsible for understanding, integrating, and validating all delegated results, resolving conflicts, and completing the original request."""
-
-_ROOT_EXECUTION = """\
-#### Execution mode
-
-Use `run_in_background=false` when the subagent's result is required before proceeding.
-
-Use `run_in_background=true` when the task can execute independently while you continue other useful work.
-
-Never mix synchronous and background subagent calls in the same tool-call batch.
-
-Launch independent synchronous subagents concurrently in a synchronous delegation batch.
-
-Launch independent background subagents concurrently in a separate background-only delegation batch.
-
-Background tasks return immediately after successful submission. Their final results are delivered automatically upon completion, including after the current turn ends.
-
-Continue useful independent work while background subagents execute.
-
-Use `wait_task` when further progress depends on unfinished background tasks. Do not repeatedly poll task status using `read_task`.
-
-#### Recursive delegation
-
-Only the root agent may launch background subagents.
-
-Synchronous subagents may recursively delegate synchronous tasks, subject to runtime limits.
-
-Background subagents are always leaf nodes and cannot delegate any further tasks.
-
-Each delegation increases the agent depth by one."""
-
-_SYNC_EXECUTION = """\
-#### Execution mode
-
-All delegated tasks execute synchronously. Each tool call returns after its delegated task has finished.
-
-Launch independent subagents concurrently whenever practical.
-
-#### Recursive delegation
-
-You may only delegate synchronous tasks, subject to runtime concurrency and depth limits.
-
-Each delegation increases the agent depth by one."""
-
+_PROMPT_DIR = Path(__file__).parent / "prompts"
 _CAPACITY = "Call `read_task()` to read the current subagent capacity."
+_DESCRIPTION = (
+    "A self-contained task description including the objective, "
+    "relevant context, constraints, and expected deliverables. "
+    "The subagent does not inherit your conversation history."
+)
+_BACKGROUND = (
+    "False: execute synchronously and return the final result. "
+    "True: execute independently in the background, return the run_id immediately, "
+    "and automatically deliver the final result upon completion."
+)
+
+
+def _read_prompt(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required prompt file is missing: {path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise FileNotFoundError(f"Required prompt file is empty: {path}")
+    return text
 
 
 def start_task_description(*, allow_background: bool) -> str:
-    """One shared prompt. Execution guidance is appended for the agent's real capability."""
-    guidance = _ROOT_EXECUTION if allow_background else _SYNC_EXECUTION
-    return f"{_COMMON}\n\n{guidance}\n\n{_CAPACITY}"
+    """Shared delegation policy plus the execution mode this agent can actually use."""
+    mode = "delegation_root.md" if allow_background else "delegation_sync.md"
+    return f"{_read_prompt(_PROMPT_DIR / 'delegation.md')}\n\n{_read_prompt(_PROMPT_DIR / mode)}\n\n{_CAPACITY}"
 
 
 def _reject_unknown(cls: type[BaseModel], data: object, *, hint: str) -> object:
@@ -192,68 +119,44 @@ def _dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _task_fields(task: TaskRecord, *, with_result: bool) -> dict[str, Any]:
+def _public_task(fields: dict[str, Any], *, with_result: bool) -> dict[str, Any]:
+    depth = fields.get("depth")
     item: dict[str, Any] = {
+        "run_id": fields.get("run_id") or "",
+        "parent_run_id": fields.get("parent_run_id") or "",
+        "tool_call_id": fields.get("tool_call_id") or "",
+        "depth": depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1,
+        "description": _preview(str(fields.get("description") or "")),
+        "mode": fields.get("mode") or "sync",
+        "status": fields.get("status") or "unconfirmed",
+        "elapsed_seconds": fields.get("elapsed_seconds"),
+    }
+    if not with_result:
+        return item
+    if fields.get("summary_truncated"):
+        item["result_summary"] = fields.get("result_summary") or ""
+        item["summary_truncated"] = True
+    elif fields.get("status") != "running" and fields.get("result") is not None:
+        item["result"] = fields.get("result")
+    return item
+
+
+def _task_fields(task: TaskRecord, *, with_result: bool) -> dict[str, Any]:
+    return _public_task({
         "run_id": task.run_id,
         "parent_run_id": task.parent_run_id,
         "tool_call_id": task.tool_call_id,
         "depth": task.depth,
-        "description": _preview(task.description),
+        "description": task.description,
         "mode": task.mode,
         "status": task.status,
         "elapsed_seconds": task.elapsed_seconds,
-    }
-    if with_result and task.status != "running" and task.result is not None:
-        item["result"] = task.result
-    return item
-
-
-def _log_fields(meta: dict[str, Any], *, with_result: bool) -> dict[str, Any]:
-    item: dict[str, Any] = {
-        "run_id": meta["run_id"],
-        "parent_run_id": meta.get("parent_run_id") or "",
-        "tool_call_id": meta.get("tool_call_id") or "",
-        "depth": meta.get("depth") if type(meta.get("depth")) is int else 1,
-        "description": _preview(str(meta.get("description") or "")),
-        "mode": meta.get("mode") or "sync",
-        "status": meta.get("status") or "unconfirmed",
-        "elapsed_seconds": meta.get("elapsed_seconds"),
-    }
-    if not with_result:
-        return item
-    if meta.get("summary_truncated"):
-        item["result_summary"] = meta.get("result_summary") or ""
-        item["summary_truncated"] = True
-    elif "result" in meta:
-        item["result"] = meta.get("result")
-    return item
+        "result": task.result,
+    }, with_result=with_result)
 
 
 def _pack(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return _dump(payload), payload
-
-
-def _wait_for_terminal(tasks: list[TaskRecord], cancel_event: threading.Event) -> None:
-    """Block until every task is terminal, or the parent run is cancelled."""
-    if all(task.done.is_set() for task in tasks):
-        return
-    wake = threading.Event()
-
-    def watch(source: threading.Event) -> None:
-        source.wait()
-        wake.set()
-
-    watchers = [threading.Thread(target=watch, args=(task.done,), daemon=True) for task in tasks]
-    watchers.append(threading.Thread(target=watch, args=(cancel_event,), daemon=True))
-    for watcher in watchers:
-        watcher.start()
-    while True:
-        if all(task.done.is_set() for task in tasks):
-            return
-        if cancel_event.is_set():
-            raise ToolException("Parent run cancelled")
-        wake.wait()
-        wake.clear()
 
 
 class ReadTaskSchema(BaseModel):
@@ -276,15 +179,6 @@ class ReadTaskSchema(BaseModel):
         )
 
 
-class WaitTaskSchema(BaseModel):
-    run_ids: list[str] = Field(min_length=1, description="Background run ids belonging to this agent.")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _unknown(cls, data: object) -> object:
-        return _reject_unknown(cls, data, hint="only run_ids is accepted.")
-
-
 class CancelTaskSchema(BaseModel):
     run_id: str = Field(description="Background run id belonging to this agent.")
 
@@ -295,19 +189,8 @@ class CancelTaskSchema(BaseModel):
 
 
 class StartTaskSchema(BaseModel):
-    description: str = Field(
-        description=(
-            "The complete task for the subagent. Include the objective, context, "
-            "constraints, and expected deliverable. The subagent sees only this text."
-        ),
-    )
-    run_in_background: bool = Field(
-        default=False,
-        description=(
-            "When false, wait and return the result. When true, return the run_id "
-            "immediately and deliver the result later."
-        ),
-    )
+    description: str = Field(description=_DESCRIPTION)
+    run_in_background: bool = Field(default=False, description=_BACKGROUND)
 
     @model_validator(mode="before")
     @classmethod
@@ -316,12 +199,7 @@ class StartTaskSchema(BaseModel):
 
 
 class StartTaskSyncSchema(BaseModel):
-    description: str = Field(
-        description=(
-            "The complete task for the subagent. Include the objective, context, "
-            "constraints, and expected deliverable. The subagent sees only this text."
-        ),
-    )
+    description: str = Field(description=_DESCRIPTION)
 
     @model_validator(mode="before")
     @classmethod
@@ -341,8 +219,6 @@ def build_subagent_tools(
     tools: list[StructuredTool] = []
     if "read_task" in names:
         tools.append(_read_tool(manager, store))
-    if "wait_task" in names:
-        tools.append(_wait_tool(manager))
     if "cancel_task" in names:
         tools.append(_cancel_tool(manager))
     if "start_task" in names:
@@ -436,14 +312,14 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
                         continue
                     meta = store.task_metadata(parent, child_id)
                     if meta is not None:
-                        tasks.append(_log_fields(meta, with_result=False))
+                        tasks.append(_public_task(meta, with_result=False))
                 return finish({"tasks": tasks, "next_offset": offset + len(page)})
             task = manager.task(run_id, parent) if manager is not None else None
             if task is None:
                 meta = store.task_metadata(parent, run_id)
                 if meta is None:
                     raise ToolException("Subagent log not found in this parent session")
-                item = _log_fields(meta, with_result=True)
+                item = _public_task(meta, with_result=True)
             else:
                 item = _task_fields(task, with_result=True)
             if include_logs:
@@ -459,42 +335,6 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
         name="read_task",
         description=READ_TASK_DESCRIPTION,
         args_schema=ReadTaskSchema,
-        response_format="content_and_artifact",
-        handle_tool_error=True,
-    )
-
-
-def _wait_tool(manager: SubAgentManager | None) -> StructuredTool:
-    def wait_task(run_ids: list[str], runtime: ToolRuntime) -> tuple[str, dict[str, Any]]:
-        parent = _parent_id(runtime)
-        if not parent:
-            raise ToolException("Parent session ID unavailable")
-        if manager is None:
-            raise ToolException("Background tasks not found for this agent")
-        ordered: list[str] = []
-        for run_id in run_ids:
-            if run_id not in ordered:
-                ordered.append(run_id)
-        found: list[TaskRecord] = []
-        missing: list[str] = []
-        for run_id in ordered:
-            task = manager.task(run_id, parent)
-            if task is None or task.mode != "background":
-                missing.append(run_id)
-            else:
-                found.append(task)
-        if missing:
-            raise ToolException("Background tasks not found for this agent: " + ", ".join(missing))
-        _wait_for_terminal(found, manager.parent.current_cancel_event())
-        manager.consume(found)
-        payload = {"tasks": [_task_fields(task, with_result=True) for task in found]}
-        return _pack(payload)
-
-    return StructuredTool.from_function(
-        wait_task,
-        name="wait_task",
-        description=WAIT_TASK_DESCRIPTION,
-        args_schema=WaitTaskSchema,
         response_format="content_and_artifact",
         handle_tool_error=True,
     )

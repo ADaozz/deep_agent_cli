@@ -65,7 +65,7 @@ def _rule(name, args=None, *, mode="restricted", gated=None, **kwargs):
 
 def test_static_rules_follow_the_ask_gate():
     # Whatever Ask does not gate, Auto does not gate either.
-    for name in ("ls", "read", "mcp_list", "start_task", "read_task", "wait_task", "cancel_task", "request_human_input"):
+    for name in ("ls", "read", "mcp_list", "start_task", "read_task", "cancel_task", "request_human_input"):
         assert _rule(name).decision == "allow"
     for name in ("web_search", "web_fetch"):
         assert _rule(name, {"query": "JWT Bearer api_key Cookie"}).decision == "allow"

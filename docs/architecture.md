@@ -90,7 +90,7 @@ flowchart TB
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
 | `start_task` | 能继续派发、且权限为 `auto` 或 `allow` | 任务正文是 `description`。Root 可传 `run_in_background`；同步子 Agent 只能同步派发 |
 | `read_task` | 能继续派发的 Agent，含 `ask` | 列出或查看自己的直接子任务；`include_logs=true` 读取一页日志 |
-| `wait_task`、`cancel_task` | 仅 Root，含 `ask` | 等待后台任务结束，或请求取消一个后台任务。取消请求不表示已经停止 |
+| `cancel_task` | 仅 Root，含 `ask` | 请求取消一个后台任务。取消请求不表示已经停止 |
 | `compact_conversation` | `SummarizationToolMiddleware` | 上下文压缩工具 |
 | `mcp_list` | 传入已 load 且全局开启的 `MCPManager` 时由 `MCPMiddleware` 注入 | 免审批 |
 | `mcp_add`、`mcp_remove`、外部 MCP 工具 | 同上；外部工具名为 `mcp__<服务器>__<远程工具>` | 每次审批 |
@@ -102,7 +102,7 @@ flowchart TB
 
 `ls`、`read`、`write`、`edit`、`delete` 的说明通过上游的 `custom_tool_descriptions` 替换为本地中文版本。上游 `ls` 要求读写文件前几乎总是先列目录，`read` 默认只读 100 行，两者都会让模型多出不必要的调用轮次。本地版本改为：已知路径直接读取，查找文件用 `rg --files`，阅读代码时按需传更大的 `limit`；`write` / `edit` / `delete` 明确同一 `file_path` 不可同轮并发、不同路径可以并行。调用方传入的 `custom_tool_descriptions` 优先于这些默认值。
 
-Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项目不注册子 Agent 类型，`start_task` 由本地工具直接调用 `SubAgentRuntime`。关闭 `subagents.enabled` 后不提供 `start_task`、`read_task`、`wait_task` 或 `cancel_task`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
+Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项目不注册子 Agent 类型，`start_task` 由本地工具直接调用 `SubAgentRuntime`。关闭 `subagents.enabled` 后不提供 `start_task`、`read_task` 或 `cancel_task`。Todo 工具及配套状态、事件、Plan 展示已移除，没有 `write_todos`。
 
 ### SubAgent 委派边界
 
@@ -119,7 +119,7 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 ### 后台委派
 
 同一个 `start_task` 同时承担同步和后台派发。需要结果才能继续时用 `run_in_background=false`，
-子任务可以独立进行时用 `run_in_background=true`。同一批次不能混用两种模式。没有使用上游 `AsyncSubAgentMiddleware`，
+子任务可以独立进行时用 `run_in_background=true`。同一次模型响应可以同时派发这两种任务，它们并行执行。没有使用上游 `AsyncSubAgentMiddleware`，
 它依赖 Agent Protocol 服务器；这里复用同一个 `SubAgentRuntime` 和 `SubAgentManager`，在本进程的后台线程中执行。
 
 - 启动：工具取得一个并发许可（与 `start_task` 共用每父节点 / 全树上限，超限立即返回错误）后启动线程并返回 `run_id`，
@@ -129,8 +129,8 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 - 注入：`SteeringMiddleware` 在 `before_model` 和 `after_agent` 先处理用户 steering，再把通知作为带
   `additional_kwargs["deep_agent_notification"]` 标记的 `HumanMessage` 写入对话；通知不会撤销模型已提议的工具调用。
   图返回后才到达的通知由 `AgentRunner` 的收尾循环作为新一轮继续。
-- 空闲唤醒：主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
-  存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。
+- 空闲唤醒：这是 Runtime 的确定行为。主 Agent 已结束本轮时，TUI 收到 `subagent_finished` 后调用 `AgentRunner.deliver_notifications()` 自动发起新一轮；
+  存在待审批或对话框时通知留在队列里，随恢复后的运行在下一个模型边界注入。模型不能选择是否唤醒，也不能通过工具等待结果。
 - 取消：父任务取消（Esc）传播到全部后台子任务，主 Agent 空闲时 Esc 也会停止它们；`cancel_task` 只请求停止指定任务，并发名额要等任务真正结束才释放。
   被取消的子任务只更新卡片，不产生通知，也不唤醒主 Agent。
 - 会话边界：新建会话、切换到其他会话或关闭 Runner 时取消全部后台任务并丢弃未送达的通知，结果不会进入另一个会话。
@@ -141,7 +141,7 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 
 子任务使用已验证的 `SANDBOXED` Backend 和共享 Pool，以主任务的权限模式（`auto` 或 `allow`）执行文件工具、execute、
 已配置的网页工具和 Skills；不装载 MCP 或人工输入。在深度上限内可继续同步委派，并可读取自己直接子任务日志。
-子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task`；`read_task`、`wait_task` 和 `cancel_task` 仍然保留。
+子任务没有审批入口，所以主 Agent 处于 `ask` 时工厂不注册 `start_task`；`read_task` 和 `cancel_task` 仍然保留。
 `auto` 和 `allow` 本身要求已验证沙箱，委派不会落到宿主上。
 常规路径独立构造模型客户端，模型 Profile 可继承当前主模型，强度 `default/null` 使用模型原生默认，
 显式强度按目标模型校验；关闭子客户端不影响主客户端。自定义注入模型的兼容路径见 [配置参考](configuration.md#subagent-委派)。
@@ -152,7 +152,7 @@ Harness Profile 禁用上游自动插入的 general-purpose 子 Agent。本项�
 操作描述由结构化参数直接生成，不额外调用模型；文件工具仅记录路径，execute 保留有界命令、
 状态、退出码和已有命令日志路径。finish 记录调用数量、总耗时及最多 1,000 字符的最终回答摘要。
 正常 task 向主 Agent 返回的最终结果保持完整，失败和取消保留最后的 tool_start 与终态。
-已知密钥精确替换集中在 `agent/redaction.py`：收集配置中的模型 `api_key`（替换为 `$llm.models.…` 路径名）以及顶层 `redaction.replacements` 中的字面量（按用户写的展示名原样替换，可不带 `$`）。沙箱 `env_set` / `env_allowlist` 与 MCP `env_passthrough` / bearer 环境值**不**自动登记。按长度降序替换；等长冲突保留先登记的名称。Auto 证据、MCP、子任务日志、审批卡与 Companion 走这一路径，不对自由文本中的 JWT / `sk-` 等形态做正则遮盖。会话标题同样只做命名精确替换，公开网址与本地路径保留。Auto 送 Flash 前对证据做只读疑似扫描（PEM、Authorization、token 赋值、URL userinfo 等），结果写入 `suspects` 供 Flash 参考，不改原文。历史数据中的 `[REDACTED]` / `[已隐藏]` 在读取与校验时仍兼容。
+已知密钥精确替换集中在 `agent/redaction.py`：收集配置中的模型 `api_key`（替换为 `$llm.models.…` 路径名）以及顶层 `redaction.replacements` 中的字面量（按用户写的展示名原样替换，可不带 `$`）。沙箱 `env_set` / `env_allowlist` 与 MCP `env_passthrough` / bearer 环境值**不**自动登记。按长度降序替换；等长冲突保留先登记的名称。Auto 证据、MCP、子任务日志、审批卡与 Companion 走这一路径，不对自由文本中的 JWT / `sk-` 等形态做正则遮盖。会话标题同样只做命名精确替换，公开网址与本地路径保留。历史数据中的 `[REDACTED]` / `[已隐藏]` 在读取与校验时仍兼容。
 主上下文仅接收最终 task 结果，主动调用 `read_task` 才读取自己直接子任务的日志页。
 TUI 将运行数量显示在 `Working…` 所在状态行，每个 task 显示独立卡片，按 tool_call_id 关联描述与最终返回结果。进度事件只带任务 ID、直接父节点、描述、深度、状态、耗时和最终结果或失败原因，不带 Token、TPS、TTFT 或压缩状态。思考、中间回答和内部工具调用不进入主界面。子图仍执行上下文压缩，但不记录或展示压缩过程。
 后台任务使用同一种卡片：启动工具返回后保持运行状态，由 `subagent_finished` 事件结束；历史恢复时由通知消息回填结果，通知本身不显示为用户消息。

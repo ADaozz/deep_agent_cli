@@ -11,7 +11,7 @@
 ### 动画与提示词
 
 - 五个非待机动画以 `assets/lain-sprites/gifs/` 为事实源，打包进 `agent/companion/assets/`（体积约数十 KB，替代原先数 MB 的旧 GIF）。
-- 内置 `persona.md` 精简为核心设定；`observation.md` / `chat.md` 约定观察与对话边界。
+- 内置 `persona.md` 保留中文人格；`chat.md` 约定用户主动对话的边界。异常观察由宿主本地完成，不再调用模型。
 
 ### 发布前修复与后续修补
 

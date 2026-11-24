@@ -15,7 +15,7 @@ class CurrentTimeMiddleware(AgentMiddleware):
 
     def _with_current_time(self, request: Any) -> Any:
         date = datetime.now(self._timezone).strftime("%Y-%m-%d")
-        text = f"# 当前用户时间\n当前日期：{date}\n用户时区：{self._timezone.key}"
+        text = f"## Current date and timezone\nDate: {date}\nTimezone: {self._timezone.key}"
         original = request.system_message
         if original is None:
             message = SystemMessage(content=text)

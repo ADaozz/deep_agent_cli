@@ -32,7 +32,7 @@ from tests.cli_support import plain
 from tests.conftest import ScriptedToolModel, graph_tool_names, scripted_model
 
 
-TASK_TOOLS = {'start_task', 'read_task', 'wait_task', 'cancel_task'}
+TASK_TOOLS = {'start_task', 'read_task', 'cancel_task'}
 
 
 class GatedModel(ScriptedToolModel):
@@ -252,47 +252,25 @@ def test_background_and_synchronous_tasks_share_the_concurrency_limit(tmp_path, 
         harness.close()
 
 
-def test_mixed_batch_starts_nothing(tmp_path, monkeypatch):
-    from agent.middleware.delegation_batch import MIXED_BATCH
-
+def test_sync_and_background_start_in_the_same_response(tmp_path, monkeypatch):
     harness = Harness(tmp_path, monkeypatch, [
         AIMessage(content='', tool_calls=[
             start_call('bg', 'background work'),
             {'id': 'sync', 'name': 'start_task', 'args': {'description': 'sync work'}},
             {'id': 'listed', 'name': 'read_task', 'args': {}},
         ]),
-        AIMessage(content='separated'),
-    ])
-    try:
-        assert harness.runner.invoke('go').output == 'separated'
-        results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
-        assert results['bg'] == MIXED_BATCH and results['sync'] == MIXED_BATCH
-        assert results['listed'].startswith('{')
-        assert harness.manager.background_count == 0 and harness.manager.active_count == 0
-        assert not list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
-    finally:
-        harness.close()
-
-
-def test_wait_returns_the_result_without_a_second_notification(tmp_path, monkeypatch):
-    def respond(messages):
-        last = messages[-1]
-        if isinstance(last, ToolMessage) and (started := launch_payload(last.content)):
-            return AIMessage(content='', tool_calls=[
-                {'id': 'wait', 'name': 'wait_task', 'args': {'run_ids': [started['run_id']]}},
-            ])
-        if isinstance(last, ToolMessage):
-            return AIMessage(content='waited')
-        return AIMessage(content='', tool_calls=[start_call()])
-
-    harness = Harness(tmp_path, monkeypatch, ReactiveModel(messages=iter([]), respond=respond))
+        AIMessage(content='both started'),
+    ], answers=('sync done', 'background done'))
     harness.gate.set()
     try:
-        assert harness.runner.invoke('go').output == 'waited'
+        assert harness.runner.invoke('go').output == 'both started'
         results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
-        assert 'child final' in results['wait']
-        assert harness.runner.control.pending_notification_count() == 0
-        assert not any(parse_notification(message) for message in harness.messages())
+        assert launch_payload(results['bg']) is not None
+        sync = json.loads(results['sync'])
+        assert sync['mode'] == 'sync' and sync['status'] == 'completed'
+        assert results['listed'].startswith('{')
+        assert harness.manager.background_count == 0 and harness.manager.active_count == 0
+        assert list((tmp_path / 'private' / 'subagents').rglob('*.jsonl'))
     finally:
         harness.close()
 
@@ -329,7 +307,9 @@ def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path
         harness.gate.set()
         wait_until(lambda: harness.finished())
         assert harness.finished()[0].result['status'] == 'cancelled'
-        assert harness.runner.control.pending_notification_count() == 0
+        assert harness.runner.control.pending_notification_count() == 1
+        notice = harness.runner.control.pop_notifications()
+        assert notice[0]["status"] == "cancelled"
         assert harness.manager.active_count == 0
         task = harness.manager.background_tasks()[0]
         assert task.status == 'cancelled' and harness.manager.background_task(task.run_id, 'other') is None
@@ -415,7 +395,7 @@ def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
     assert 'run_in_background' not in sync_start.description
     # Ask cannot start a task but can still query, wait, and cancel ones already running.
     ask = names(mode='ask')
-    assert 'start_task' not in ask and {'read_task', 'wait_task', 'cancel_task'} <= ask
+    assert 'start_task' not in ask and {'read_task', 'cancel_task'} <= ask
 
     children = []
     original = factory.build_agent

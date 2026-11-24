@@ -45,7 +45,7 @@ def initialize_companion_files(config_dir: Path) -> None:
         if directory.is_symlink():
             raise ValueError(f"Companion directory must not be a symlink: {directory}")
         directory.mkdir(mode=0o700, exist_ok=True)
-    for name in ("persona.md", "observation.md", "chat.md"):
+    for name in ("persona.md", "chat.md"):
         _write_default(prompts / name, source.joinpath(name))
     for state in STATES:
         name = f"lain_{state}.gif"

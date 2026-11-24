@@ -29,7 +29,6 @@ from agent.runtime.control import RunController
 from agent.execution.environment import EnvironmentContextMiddleware
 from agent.models.client import ProtocolChatOpenAI, build_chat_model
 from agent.middleware.cancel_tools import ToolCancelMiddleware
-from agent.middleware.delegation_batch import DelegationBatchMiddleware
 from agent.middleware.current_time import CurrentTimeMiddleware
 from agent.middleware.attachments import AttachmentMaterializationMiddleware
 from agent.middleware.payload_recovery import PayloadRecoveryMiddleware
@@ -72,37 +71,16 @@ from agent.tools.web import build_web_fetch_tool, build_web_search_tool
 
 DEFAULT_FS_TOOLS = list(FILESYSTEM_TOOL_NAMES)
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是运行在 Deep Agent CLI 中、使用 {model_name} 的编程智能体。"
-    "你的职责是理解用户需求、检查相关代码、完成任务、验证结果并准确汇报。\n\n"
+_PROMPT_DIR = Path(__file__).parent / "prompts"
 
-    "# 任务执行\n"
-    "- 优先自主完成用户请求，不要只停留在分析或建议阶段。\n"
-    "- 简单任务直接执行；复杂任务先明确实施顺序，再逐步推进。\n"
-    "- 充分利用现有上下文和工具，不要反复询问能够自行确定的信息。\n"
-    "- 遇到失败时分析原因并调整方法，不要无意义地重复相同操作。\n"
-    "- 不猜测文件内容、工具结果或执行状态；无法完成时明确说明原因。\n\n"
 
-    "# 代码修改\n"
-    "- 修改前先理解相关实现、依赖关系和项目约定。\n"
-    "- 优先修复根本原因，保持改动最小、聚焦且符合现有代码风格。\n"
-    "- 不进行无关重构，不修复无关问题，不引入不必要的依赖或抽象。\n"
-    "- 遵循适用的 AGENTS.md 项目规则，目录越深的规则在其作用域内越优先。\n"
-    "- 遵守沙箱限制、文件访问权限和审批机制。\n"
-    "- 未经用户明确要求，不创建 Git 分支、不提交或推送代码。\n"
-    "- 必要时同步更新相关测试和文档。\n\n"
-
-    "# 验证\n"
-    "- 修改代码后尽可能进行验证，从与改动直接相关的测试开始。\n"
-    "- 根据风险和执行成本决定是否扩大测试范围。\n"
-    "- 区分本次修改引入的错误与项目原有问题，不擅自修改无关测试。\n"
-    "- 无法运行测试时说明限制，不声称未经验证的结果已经通过。\n\n"
-
-    "# 沟通与结果\n"
-    "- 长任务在关键阶段简要报告进度，避免逐条复述工具调用。\n"
-    "- 任务结束后简洁说明完成内容、验证结果和剩余问题。\n"
-    "- 优先提供明确、可操作的信息，避免冗长解释和无意义的总结。"
-)
+def _read_prompt(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required prompt file is missing: {path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise FileNotFoundError(f"Required prompt file is empty: {path}")
+    return text
 
 
 class WorkspaceSummarizationMiddleware(SummarizationMiddleware):
@@ -197,13 +175,15 @@ class PreparedAgent:
 
 
 def compose_system_prompt(spec: AgentSpec, model: BaseChatModel, workspace: Path) -> str:
-    model_name = str(getattr(model, "model_name", None) or get_model_identifier(model) or type(model).__name__)
-    sections = [DEFAULT_SYSTEM_PROMPT.format(model_name=model_name)]
+    del model
+    sections = [_read_prompt(_PROMPT_DIR / "system.md")]
+    if spec.role == "subagent":
+        sections.append(_read_prompt(_PROMPT_DIR / "subagent.md"))
     if spec.instructions and spec.instructions.strip():
-        sections.append(f"# 用户指令\n{spec.instructions.strip()}")
+        sections.append(f"## User instructions\n{spec.instructions.strip()}")
     project_instructions = workspace.expanduser().resolve() / "AGENTS.md"
     if project_instructions.is_file():
-        sections.append(f"# 项目指令\n{project_instructions.read_text(encoding='utf-8')}")
+        sections.append(f"## Project instructions\n{project_instructions.read_text(encoding='utf-8')}")
     return "\n\n".join(sections)
 
 
@@ -272,6 +252,7 @@ def build_agent(
         tools.append(build_execute_tool(
             fs_backend,
             network_by_default=permission is PermissionMode.ALLOW,
+            permission=permission.value,
         ))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
@@ -324,7 +305,6 @@ def build_agent(
             gated=hitl if ask_only else {**(interrupt_on_for_mode(PermissionMode.ASK) or {}), **hitl},
             ask_only=ask_only,
         ))
-    delegation_batch: list[AgentMiddleware] = []
     manager = None
     task_names = allowed & (ROOT_TASK_TOOLS | SYNC_TASK_TOOLS)
     # Only a node whose set includes task tools gets a runtime. Async and
@@ -350,9 +330,10 @@ def build_agent(
             max_concurrent=cfg.subagents.max_concurrent,
             max_total=cfg.subagents.max_total,
         )
-        root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-        store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
-        manager.log_store = store
+        if manager.log_store is None:
+            root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
+            manager.log_store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
+        store = manager.log_store
 
         def prepare_child(controller: RunController) -> PreparedAgent:
             if execution_mode is not ExecutionMode.SANDBOXED or permission is PermissionMode.ASK:
@@ -406,8 +387,6 @@ def build_agent(
             names=task_names,
             allow_background=kind == "root" and bool(cfg.subagents.background),
         ))
-        if "start_task" in task_names:
-            delegation_batch.append(DelegationBatchMiddleware())
     tools = [tool for tool in tools if tool.name not in spec.hidden_tools]
     try:
         graph = create_deep_agent(
@@ -415,7 +394,6 @@ def build_agent(
             tools=tools,
             system_prompt=prompt,
             middleware=[
-                *delegation_batch,
                 *auto_middleware,
                 RuntimeConfigGateMiddleware(run_controller.has_pending_config),
                 PauseGateMiddleware(lambda: run_controller.pause_requested or should_pause()),

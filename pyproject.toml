@@ -45,6 +45,7 @@ deep-agent = "agent.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]
+artifacts = ["agent/**/*.md"]
 core-metadata-version = "2.4"
 
 [tool.hatch.build.targets.sdist]

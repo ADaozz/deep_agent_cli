@@ -8,7 +8,7 @@ from uuid import uuid4
 from agent.sessions.images import ImageAttachmentRef
 from agent.runtime.contracts import RunEvent, TurnTiming
 from agent.runtime.metrics import normalize_usage
-from agent.sessions.transcript import subagent_card_status
+from agent.sessions.transcript import subagent_card_status, task_result_text
 from agent.sessions.contracts import TranscriptBlock
 from agent.subagents.notifications import is_background_launch, is_task_tool
 
@@ -203,7 +203,10 @@ class CliState:
                     tool_call_id=item.tool_call_id,
                     name=item.name or "tool",
                     arguments=item.arguments or {},
-                    output=item.content,
+                    output=(
+                        task_result_text(artifact=item.artifact, content=item.content, status=item.status or "")
+                        if item.name == "start_task" else item.content
+                    ),
                     artifact=item.artifact,
                     status=item.status or ("error" if item.is_error else "completed"),
                     is_error=item.is_error,
@@ -290,16 +293,14 @@ class CliState:
                 # A finish that already arrived is not reopened by the launch result.
                 if tool.status not in {"running", "waiting"}:
                     return
-                card = subagent_card_status(
-                    event.content, is_error=event.is_error, artifact=event.artifact,
-                )
+                card = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
                 if event.artifact is not None:
                     tool.artifact = event.artifact
                 if card == "running" and not event.is_error:
                     tool.status = "running"
                     tool.is_error = False
                     return
-                tool.output = event.content
+                tool.output = task_result_text(artifact=event.artifact, content=event.content)
                 tool.status = card
                 tool.is_error = card in {"error", "cancelled"}
                 self._finish_task_card(tool)
@@ -322,10 +323,10 @@ class CliState:
             tool.is_error = event.is_error
             tool.status = "error" if event.is_error else "completed"
             if is_task_tool(tool.name):
-                tool.output = event.content
-                tool.status = subagent_card_status(
-                    event.content, is_error=event.is_error, artifact=event.artifact,
+                tool.output = task_result_text(
+                    artifact=event.artifact, content=event.content, status="",
                 )
+                tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
                 tool.is_error = tool.status in {"error", "cancelled"}
                 self._finish_task_card(tool)
             if event.name == "execute" and completed_artifact is not None:
@@ -335,11 +336,9 @@ class CliState:
             tool = self._tool_by_id(str(event.result.get("tool_call_id") or ""))
             if tool is not None and is_background_launch(tool.name, tool.arguments):
                 touch(tool)
-                tool.output = event.content
                 recorded = event.result.get("status")
-                tool.status = subagent_card_status(
-                    event.content, status=recorded if isinstance(recorded, str) else None,
-                )
+                tool.output = task_result_text(content=event.content, status=recorded if isinstance(recorded, str) else "")
+                tool.status = subagent_card_status(status=recorded if isinstance(recorded, str) else None)
                 tool.is_error = tool.status in {"error", "cancelled"}
                 self._finish_task_card(tool)
         elif event.type == "steering_queued":
@@ -416,46 +415,54 @@ class CliState:
             self.add_system(event.content or "Unknown error", error=True)
 
     def _apply_subagent_update(self, payload: dict[str, Any]) -> None:
-        run_id = str(payload.get("run_id") or "")
+        node = self._upsert_task_node(payload)
+        if node is not None:
+            self._refresh_owner(node)
+
+    def _upsert_task_node(self, fields: dict[str, Any]) -> SubagentNode | None:
+        """Insert or update one task node. Live events and restored logs share this."""
+        run_id = str(fields.get("run_id") or "")
         if not run_id:
-            return
-        status = str(payload.get("status") or "")
-        if status not in {"running", "completed", "failed", "cancelled"}:
-            return
+            return None
+        status = str(fields.get("status") or "")
+        if status not in {"running", "completed", "failed", "cancelled", "unconfirmed"}:
+            return None
         node = self.subagent_nodes.get(run_id)
-        # A late progress tick must not reopen a task that already ended.
         if node is not None and node.status in {"completed", "failed", "cancelled"} and status == "running":
-            return
-        description = " ".join(str(payload.get("description") or "").split())
-        depth = payload.get("depth")
+            return None
+        depth = fields.get("depth")
         depth = depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1
-        elapsed = payload.get("elapsed_seconds")
+        elapsed = fields.get("elapsed_seconds")
         elapsed_seconds = (
             float(elapsed) if type(elapsed) in {int, float} and not isinstance(elapsed, bool) and elapsed >= 0
             else None
         )
+        description = str(fields.get("description") or "")
         if node is None:
             node = SubagentNode(
                 run_id=run_id,
-                parent_run_id=str(payload.get("parent_run_id") or ""),
+                parent_run_id=str(fields.get("parent_run_id") or ""),
                 depth=depth,
-                description=description or "Delegated task",
+                description=description,
             )
             self.subagent_nodes[run_id] = node
-        node.parent_run_id = str(payload.get("parent_run_id") or node.parent_run_id)
+        node.parent_run_id = str(fields.get("parent_run_id") or node.parent_run_id)
         node.depth = depth
         if description:
             node.description = description
         node.status = status
-        tool_call_id = str(payload.get("tool_call_id") or "")
+        tool_call_id = str(fields.get("tool_call_id") or "")
         if tool_call_id:
             node.tool_call_id = tool_call_id
         node.elapsed_seconds = elapsed_seconds
-        node.reason = str(payload.get("reason") or "") if status in {"failed", "cancelled"} else ""
-        result_text = payload.get("result")
-        if isinstance(result_text, str) and status in {"completed", "failed", "cancelled"}:
-            node.result = result_text
-        self._refresh_owner(node)
+        node.reason = str(fields.get("reason") or "") if status in {"failed", "cancelled"} else ""
+        if fields.get("summary_truncated") and isinstance(fields.get("result_summary"), str):
+            node.result = fields["result_summary"]
+        else:
+            result_text = fields.get("result")
+            if isinstance(result_text, str) and status in {"completed", "failed", "cancelled", "unconfirmed"}:
+                node.result = result_text
+        return node
 
     def _finish_task_card(self, tool: ToolBlock) -> None:
         """Refresh this card from the nodes. A parent status does not rewrite children."""
@@ -466,57 +473,31 @@ class CliState:
         self.subagent_nodes.clear()
 
         def absorb(parent_id: str) -> None:
+            records = []
             for run_id in store.list_runs(parent_id):
                 if run_id in self.subagent_nodes:
                     continue
                 meta = store.task_metadata(parent_id, run_id)
-                if meta is None:
-                    continue
+                if meta is not None:
+                    records.append(meta)
+            records.sort(key=lambda item: (str(item.get("started_at") or ""), str(item.get("run_id") or "")))
+            for meta in records:
                 status = str(meta.get("status") or "unconfirmed")
                 if status not in {"completed", "failed", "cancelled", "unconfirmed"}:
                     status = "unconfirmed"
-                depth = meta.get("depth")
-                depth = depth if type(depth) is int and not isinstance(depth, bool) and depth > 0 else 1
-                elapsed = meta.get("elapsed_seconds")
-                result = ""
-                if meta.get("summary_truncated"):
-                    result = str(meta.get("result_summary") or "")
-                elif isinstance(meta.get("result"), str):
-                    result = meta["result"]
-                node = SubagentNode(
-                    run_id=run_id,
-                    parent_run_id=str(meta.get("parent_run_id") or parent_id),
-                    depth=depth,
-                    description=" ".join(str(meta.get("description") or "").split()) or "Delegated task",
-                    status=status,
-                    tool_call_id=str(meta.get("tool_call_id") or ""),
-                    elapsed_seconds=(
-                        float(elapsed)
-                        if type(elapsed) in {int, float} and not isinstance(elapsed, bool) and elapsed >= 0
-                        else None
-                    ),
-                    result=result,
-                )
-                self.subagent_nodes[run_id] = node
-                absorb(run_id)
+                self._upsert_task_node({**meta, "status": status})
+                absorb(str(meta.get("run_id") or ""))
 
         absorb(root_id)
-        card_status = {
-            "completed": "completed", "failed": "error", "cancelled": "cancelled",
-            "unconfirmed": "unconfirmed",
-        }
         for block in self.blocks:
             if not isinstance(block, ToolBlock) or not is_task_tool(block.name):
                 continue
             node = self._node_for_tool(block.tool_call_id)
             if node is not None:
-                mapped = card_status.get(node.status, "unconfirmed")
-                if block.status in {"running", "interrupted", "waiting"} or not block.output:
-                    block.status = mapped
-                    if node.result:
-                        block.output = node.result
-                else:
-                    block.status = mapped
+                mapped = subagent_card_status(status=node.status)
+                block.status = mapped
+                if node.result:
+                    block.output = node.result
                 block.is_error = mapped in {"error", "cancelled"}
             self._paint_task_card(block)
 
@@ -567,6 +548,8 @@ class CliState:
                 touch(tool)
             return
         tool.subtasks = self._views_under(node.run_id)
+        if node.result and node.status in {"completed", "failed", "cancelled", "unconfirmed"}:
+            tool.output = node.result
         touch(tool)
 
     def _assistant_block(self) -> MessageBlock:

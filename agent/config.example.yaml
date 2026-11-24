@@ -68,7 +68,6 @@ ui:
 # 路径相对于本配置文件，也可填写绝对路径。null 使用内置文件。
 companion:
   persona_prompt: companion/prompts/persona.md
-  observation_prompt: companion/prompts/observation.md
   chat_prompt: companion/prompts/chat.md
   gifs:
     idle: companion/gifs/lain_idle.gif

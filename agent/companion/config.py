@@ -11,7 +11,6 @@ SOURCE_READ_MAX_LINES = 200
 @dataclass(frozen=True)
 class CompanionConfig:
     persona_prompt: Path = Path(__file__).with_name("persona.md")
-    observation_prompt: Path = Path(__file__).with_name("observation.md")
     chat_prompt: Path = Path(__file__).with_name("chat.md")
     gifs: Mapping[str, Path] = field(default_factory=dict)
     rpc_timeout_seconds: float = 3.0

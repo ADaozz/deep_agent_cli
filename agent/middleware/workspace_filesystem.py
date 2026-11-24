@@ -15,56 +15,47 @@ from agent.tools.catalog import FILE_MUTATION_TOOLS
 
 
 LS_DESCRIPTION = (
-    "列出目录中的文件和子目录。path 必须是绝对路径。\n"
-    "已知文件路径时直接用 read，不必先 ls；按名称查找文件用 execute 运行 rg --files。"
+    "List files and directories at the specified absolute path.\n"
+    "If the file path is already known, use read directly.\n"
+    "Use rg --files to locate files by name when available."
 )
 
 READ_FILE_DESCRIPTION = (
-    "读取文件。file_path 必须是绝对路径；文件不存在时返回错误。\n"
-    "- 默认从开头读 100 行。阅读代码时按需传更大的 limit（如 500）一次读够上下文，"
-    "避免逐页翻读；超大文件再用 offset/limit 分段。\n"
-    "- 内容上方有一行 `@@ ... @@` 状态头，之后每行都是文件原文；编辑时不要包含状态头。\n"
-    "- 需要多个文件时，在同一轮回复中并行调用。\n"
-    "- 被转存到文件的大工具结果，按消息中给出的路径用本工具分页读取。\n"
-    "- 图片、PDF、音视频返回多模态内容，只传 file_path；视频的 offset/limit 按秒计。\n"
-    "- 编辑文件前必须先读取。"
-)
-
-_SAME_PATH_SERIAL = (
-    "同一路径不允许并发变更："
-    "同一轮回复中不要对同一 file_path 发出多次 write / edit / delete；"
-    "先完成一次并看到结果，再改同一文件。"
-)
-_MULTI_PATH_PARALLEL = (
-    "可以对多个不同路径并发：同一轮回复中可并行调用多个 write / edit / delete，"
-    "只要各自的 file_path 互不相同。"
+    "Read the file at the specified absolute path.\n"
+    "By default, read the first 100 lines.\n"
+    "Use an appropriately larger limit when more context is needed.\n"
+    "Read independent files concurrently when practical.\n"
+    "Read an existing file before editing it.\n"
+    "Do not include the read-result status header in edit arguments.\n"
+    "Large tool results saved to a file are read from the path given in the message.\n"
+    "Images, PDFs, and audio or video return multimodal content; pass only file_path. "
+    "For video, offset and limit are in seconds."
 )
 
 WRITE_FILE_DESCRIPTION = (
-    "写入文件。file_path 必须是绝对路径；文件不存在则创建，已存在则整文件替换。\n"
-    "- 打算新建或整文件覆盖时用本工具；不必先 read。\n"
-    "- 修改已有文件时优先用 edit，而不是 write 整文件重写。\n"
-    f"- {_SAME_PATH_SERIAL}\n"
-    f"- {_MULTI_PATH_PARALLEL}"
+    "Create a new file or replace the entire contents of an existing file.\n"
+    "Confirm that existing content can be replaced before overwriting a file.\n"
+    "Prefer edit for targeted modifications.\n"
+    "Do not issue concurrent write, edit, or delete calls for the same file_path. "
+    "Independent files may be modified concurrently."
 )
 
 EDIT_FILE_DESCRIPTION = (
-    "对文件做精确字符串替换。file_path 必须是绝对路径。\n"
-    "- 编辑前必须先 read。\n"
-    "- old_string / new_string 必须保留 read 结果中的原始缩进，不要包含 read 的 `@@ ... @@` 状态头。\n"
-    "- 优先编辑已有文件，而不是新建。\n"
-    "- 除非用户明确要求，不要使用 emoji。\n"
-    "- 同一文件多处修改：合并为一次 edit，或等本轮结果返回后再发下一次；"
-    "同一轮不要对同一 file_path 并发多次 edit。\n"
-    f"- {_MULTI_PATH_PARALLEL}"
+    "Modify a file through exact string replacement.\n"
+    "Read the file before editing it.\n"
+    "Preserve the original indentation and whitespace.\n"
+    "Apply related changes together when appropriate.\n"
+    "Perform separate modifications to the same file sequentially.\n"
+    "Independent files may be modified concurrently.\n"
+    "Do not include the read-result status header in edit arguments."
 )
 
 DELETE_FILE_DESCRIPTION = (
-    "删除文件或目录。file_path 必须是绝对路径。\n"
-    "- 删除目录会递归移除其下全部内容；优先一次删除整个目录，而不是逐个删文件。\n"
-    "- 不可撤销，只删除确认不再需要的路径。\n"
-    f"- {_SAME_PATH_SERIAL}\n"
-    f"- {_MULTI_PATH_PARALLEL}"
+    "Delete the specified file or directory.\n"
+    "Deleting a directory recursively removes its contents.\n"
+    "Only delete paths within the authorized task scope that are no longer needed.\n"
+    "Do not issue concurrent write, edit, or delete calls for the same file_path. "
+    "Independent files may be modified concurrently."
 )
 
 TOOL_DESCRIPTIONS = {

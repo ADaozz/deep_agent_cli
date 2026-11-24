@@ -11,44 +11,62 @@ from langchain_core.tools import BaseTool, StructuredTool
 from agent.execution.network import reset_execute_network, set_execute_network
 
 
-_PERSISTENCE = (
-    "每次调用启动新的 Shell，cd 和 Shell 变量不会保留；沙箱环境在会话内复用。"
-    "/tmp、/home 中的文件和后台进程（例如 nohup cmd > log 2>&1 &）在调用之间及沙箱重启后保留。"
-    "restricted 模式下系统目录只读；full-access 模式可写入真实文件系统，但智能体安装目录和配置目录受保护。"
+_COMMON = (
+    "Execute a shell command in the sandbox working directory ({workspace_root}). "
+    "Each call starts a new shell. Working-directory changes and shell variables do not persist between calls. "
+    "The sandbox environment is reused for the session. Files in /tmp and /home, and background processes, "
+    "persist across calls and sandbox restarts. "
+    "In restricted mode system directories are read-only. In full-access mode the real filesystem is writable, "
+    "except the agent install and configuration directories. "
+    "Networked and offline commands run in separate sandboxes that share the workspace ({workspace_root}) "
+    "and declared extra mounts. Commands that depend on each other's /tmp files or background processes "
+    "must use the same network value."
 )
-_ASK_DESCRIPTION = (
-    "在沙箱当前工作目录（{workspace_root}）执行 Shell 命令。默认无网络；ask 模式下每次 execute 都需审批。"
-    "network=true 使用有网沙箱，可访问互联网、宿主 localhost 和局域网；启动的后台进程在后续调用之间保留网络能力。"
-    + _PERSISTENCE
-    + "有网与无网命令在两个独立沙箱中运行，共享工作区（{workspace_root}）和声明的额外挂载。"
-    "依赖彼此 /tmp 文件或后台进程的命令应使用相同的 network 值。"
+_ASK_POLICY = (
+    " Ask mode requires approval before each execute. "
+    "The sandbox has no network unless network=true, which can reach the internet, host localhost, and the LAN."
 )
-_ALLOW_DESCRIPTION = (
-    "在沙箱当前工作目录（{workspace_root}）执行 Shell 命令。"
-    "allow 模式下无需审批，每次调用均可访问互联网、宿主 localhost 和局域网。" + _PERSISTENCE
+_AUTO_POLICY = (
+    " Auto mode reviews each execute under the current approval policy. "
+    "It does not ask a person to approve every command. "
+    "The sandbox has no network unless network=true, which can reach the internet, host localhost, and the LAN."
+)
+_ALLOW_POLICY = (
+    " Allow mode runs execute without approval. "
+    "Every call can reach the internet, host localhost, and the LAN."
 )
 _SEARCH_GUIDANCE = (
-    "使用 rg -n 'pattern' path 搜索文件内容，使用 rg --files -g 'pattern' path 查找文件，并尽量缩小范围。"
-    "已知文件用 read 阅读，文件修改使用 edit 或 write。"
-    "沙箱 PATH 已包含 rg，无需安装或下载。"
+    " Use rg to locate files and search source code. "
+    "Use read to inspect known files, edit to modify existing files, and write to create or replace files. "
+    "rg is already on the sandbox PATH. Do not install or download it."
 )
-_SEARCH_UNAVAILABLE = "宿主未安装 ripgrep（rg），无法使用 rg 搜索；不要声称搜索可用，也不要安装或下载 rg。"
+_SEARCH_UNAVAILABLE = (
+    " ripgrep (rg) is not installed on the host. Do not claim that rg search is available, "
+    "and do not install or download rg. "
+    "Use read to inspect known files, edit to modify existing files, and write to create or replace files."
+)
 
 
 def _execute_description(
-    *, network_by_default: bool, workspace_root: str = "/workspace",
+    *, network_by_default: bool, workspace_root: str = "/workspace", permission: str = "ask",
 ) -> str:
     from agent.tools.grep import resolve_rg
 
-    base = _ALLOW_DESCRIPTION if network_by_default else _ASK_DESCRIPTION
+    if permission == "allow" or network_by_default and permission not in {"ask", "auto"}:
+        policy = _ALLOW_POLICY
+    elif permission == "auto":
+        policy = _AUTO_POLICY
+    else:
+        policy = _ASK_POLICY
     guidance = _SEARCH_GUIDANCE if resolve_rg() else _SEARCH_UNAVAILABLE
-    return base.replace("{workspace_root}", workspace_root) + guidance
+    return (_COMMON + policy + guidance).replace("{workspace_root}", workspace_root)
 
 
 def build_execute_tool(
     backend: SandboxBackendProtocol,
     *,
     network_by_default: bool = False,
+    permission: str = "ask",
 ) -> BaseTool:
     """绑定到沙箱 backend 的 shell execute。
 
@@ -58,9 +76,9 @@ def build_execute_tool(
     """
 
     def execute(
-        command: Annotated[str, Field(description="要执行的 Shell 命令。")],
-        timeout: Annotated[int | None, Field(description="本次执行超时秒数；显式传入时覆盖 sandbox.timeout_seconds，省略时使用该配置默认值。")] = None,
-        network: Annotated[bool, Field(description="是否使用有网沙箱；allow 模式下始终有网。")] = False,
+        command: Annotated[str, Field(description="Shell command to run.")],
+        timeout: Annotated[int | None, Field(description="Timeout in seconds for this call. Overrides sandbox.timeout_seconds when set.")] = None,
+        network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)
         try:
@@ -97,5 +115,6 @@ def build_execute_tool(
         description=_execute_description(
             network_by_default=network_by_default,
             workspace_root=getattr(backend, "workspace_root", "/workspace"),
+            permission="allow" if network_by_default else permission,
         ),
     )

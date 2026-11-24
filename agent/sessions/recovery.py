@@ -15,17 +15,20 @@ class RecoveryContext:
     @classmethod
     def for_stop_reason(cls, reason: StopReason) -> "RecoveryContext | None":
         descriptions = {
-            StopReason.PENDING: "上一轮未记录正常结束状态，可能已异常退出。",
-            StopReason.ABORTED: "上一轮已被用户中止。",
-            StopReason.ERROR: "上一轮因执行错误结束。",
+            StopReason.PENDING: "The previous run may have ended before completion.",
+            StopReason.ABORTED: "The previous run was stopped by the user.",
+            StopReason.ERROR: "The previous run ended because of an execution error.",
         }
         description = descriptions.get(reason)
         if description is None:
             return None
         return cls(
-            text="[上一轮运行状态]\n"
-            f"{description} 部分操作可能已经产生副作用。"
-            "继续前先检查会话检查点和工作区现状。"
-            "不要假定未完成的操作已经成功或失败。"
-            "遵循用户当前的指令。"
+            text=(
+                "## Recovery\n"
+                f"{description}\n"
+                "Some operations may already have produced side effects.\n"
+                "Inspect the relevant checkpoint and workspace state before continuing.\n"
+                "Do not assume that unfinished operations succeeded or failed.\n"
+                "Follow the user's current instructions."
+            )
         )

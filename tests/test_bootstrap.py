@@ -35,7 +35,7 @@ def test_first_launch_creates_config_skills_and_companion_assets(
     assert loaded.active_profile.api == "chat_completions"
     companion = loaded.companion
     assert companion.persona_prompt == path.parent / "companion/prompts/persona.md"
-    for prompt in (companion.persona_prompt, companion.observation_prompt, companion.chat_prompt):
+    for prompt in (companion.persona_prompt, companion.chat_prompt):
         assert prompt.is_relative_to(path.parent)
         assert prompt.read_text(encoding="utf-8").strip()
     assert set(companion.gifs) == set(STATES)
@@ -79,7 +79,7 @@ def test_existing_config_backfills_missing_companion_assets(
     assert config.read_text() == "{}\n"
     assert (root / "skills").is_dir()
     assert custom.read_text(encoding="utf-8") == "kept persona\n"
-    for name in ("observation.md", "chat.md"):
+    for name in ("chat.md",):
         assert (prompts / name).is_file()
         assert (prompts / name).read_text(encoding="utf-8").strip()
     for state in STATES:

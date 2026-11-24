@@ -1,12 +1,8 @@
-"""Model-visible subagent schemas and the batch mutex."""
-
-from types import SimpleNamespace
+"""Model-visible subagent schemas."""
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import ValidationError
 
-from agent.middleware.delegation_batch import MIXED_BATCH, DelegationBatchMiddleware
 from agent.tools.catalog import (
     ASYNC_TOOLS,
     COMMON_TOOLS,
@@ -27,8 +23,13 @@ def test_start_task_description_points_at_read_task_for_capacity():
     for background in (True, False):
         text = start_task_description(allow_background=background)
         assert "Call `read_task()` to read the current subagent capacity." in text
+        assert "wait_task" not in text
         assert "Maximum concurrent" not in text
         assert "Remaining delegation depth" not in text
+    background = start_task_description(allow_background=True)
+    assert "If the parent agent is idle, the result automatically starts a new agent turn." in background
+    assert "Do not poll or wait for background tasks." in background
+    assert "may be launched in the same response" in background
 
 
 def test_node_sets_are_common_tools_plus_the_node_specific_ones():
@@ -40,7 +41,7 @@ def test_node_sets_are_common_tools_plus_the_node_specific_ones():
     assert SYNC_TASK_TOOLS < ROOT_TASK_TOOLS
     ask = apply_runtime_limits(ROOT_TOOLS, subagents_enabled=True, can_launch=False)
     assert "start_task" not in ask
-    assert {"read_task", "wait_task", "cancel_task", "request_human_input"} <= ask
+    assert {"read_task", "cancel_task", "request_human_input"} <= ask
     disabled = apply_runtime_limits(ROOT_TOOLS, subagents_enabled=False, can_launch=True)
     assert not ROOT_TASK_TOOLS & disabled
     assert "ls" in disabled and "request_human_input" in disabled
@@ -58,26 +59,3 @@ def test_start_schemas_reject_undeclared_arguments():
     StartTaskSyncSchema.model_validate({"description": "do the work", "runtime": object()})
     with pytest.raises(ValidationError, match="run_in_background"):
         StartTaskSyncSchema.model_validate({"description": "do the work", "run_in_background": True})
-
-
-def test_mixed_batch_rejects_only_start_task_before_the_handler():
-    state = {"messages": [AIMessage(content="", tool_calls=[
-        {"name": "start_task", "id": "sync", "args": {"description": "sync"}},
-        {"name": "start_task", "id": "bg", "args": {"description": "bg", "run_in_background": True}},
-        {"name": "read_task", "id": "read", "args": {}},
-    ])]}
-    called: list[str] = []
-
-    def handler(request):
-        called.append(request.tool_call["id"])
-        return ToolMessage(content="ran", tool_call_id=request.tool_call["id"], name=request.tool_call["name"])
-
-    middleware = DelegationBatchMiddleware()
-    results = [
-        middleware.wrap_tool_call(SimpleNamespace(tool_call=call, state=state), handler)
-        for call in state["messages"][0].tool_calls
-    ]
-    assert called == ["read"]
-    assert results[0].content == MIXED_BATCH and results[0].status == "error"
-    assert results[1].content == MIXED_BATCH and results[1].tool_call_id == "bg"
-    assert results[2].content == "ran"

@@ -319,7 +319,6 @@ def _companion_from_mapping(data: Mapping[str, Any], *, base_dir: Path) -> Compa
     defaults = CompanionConfig()
     return CompanionConfig(
         persona_prompt=path(data.get("persona_prompt"), "persona_prompt") or defaults.persona_prompt,
-        observation_prompt=path(data.get("observation_prompt"), "observation_prompt") or defaults.observation_prompt,
         chat_prompt=path(data.get("chat_prompt"), "chat_prompt") or defaults.chat_prompt,
         gifs=gifs,
         rpc_timeout_seconds=data.get("rpc_timeout_seconds", defaults.rpc_timeout_seconds),

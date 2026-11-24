@@ -78,8 +78,8 @@ class SubAgentLogStore:
             raise ValueError("offset must be non-negative and limit must be 1..100")
         directory = self._directory(parent)
         if run_id is None:
-            paths = sorted(directory.glob("*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-            return {"runs": [path.stem for path in paths[offset:offset + limit] if _ID.fullmatch(path.stem)]}
+            runs = self.list_runs(parent)
+            return {"runs": runs[offset:offset + limit]}
         if not _ID.fullmatch(run_id):
             raise ValueError("Invalid subagent run ID")
         try:
@@ -153,6 +153,7 @@ class SubAgentLogStore:
             "mode": str(start.get("mode") or "sync"),
             "status": status,
             "elapsed_seconds": finish.get("elapsed_seconds"),
+            "started_at": str(start.get("timestamp") or ""),
         }
         if finish.get("summary_truncated"):
             item["result_summary"] = str(finish.get("result_summary") or finish.get("summary") or "")

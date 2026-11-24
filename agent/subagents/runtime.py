@@ -354,11 +354,14 @@ class SubAgentRuntime(Runnable):
             run_id=run_id, parent_run_id=parent, description=description, tool_call_id=tool_call_id,
             controller=controller, mode="sync", depth=self.child_depth,
         )
-        write(
-            "start", status="running", description=brief(description, SUMMARY_LIMIT),
-            description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
-            mode=record.mode, parent_run_id=parent, tool_call_id=tool_call_id, depth=record.depth,
-        )
+        try:
+            write(
+                "start", status="running", description=brief(description, SUMMARY_LIMIT),
+                description_truncated=len(" ".join(description.split())) > SUMMARY_LIMIT,
+                mode=record.mode, parent_run_id=parent, tool_call_id=tool_call_id, depth=record.depth,
+            )
+        except Exception:
+            pass
         publish("running")
         published = True
         set_stream_owner(controller)
@@ -366,9 +369,9 @@ class SubAgentRuntime(Runnable):
         callback = LogCallback(write, self.store._redact)
         prepared = None
         status, summary, summary_truncated = "failed", "", False
+        content = ""
+        saw_error = False
         messages_seen: list = []
-        answer_text = ""
-        outcome = {"content": ""}
         env_token = None
         try:
             # Bail before prepare so a cancel-before-admit does not build model clients.
@@ -413,44 +416,37 @@ class SubAgentRuntime(Runnable):
             answer = final_answer(messages_seen)
             if not answer:
                 raise RuntimeError("Subagent did not produce a final answer")
-            answer_text = answer
+            content = answer
             status = "completed"
             summary = brief(answer, SUMMARY_LIMIT)
             summary_truncated = len(" ".join(answer.split())) > SUMMARY_LIMIT
-            # Return only the final response: no child messages or state channels.
-            outcome["content"] = answer
-            return {"messages": [_task_message(answer, status, run_id=run_id, result=answer)]}
         except Exception as exc:
             status = "cancelled" if controller.cancel_requested else "failed"
-            summary = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
-            answer_text = summary
-            write("error", status=status, reason=summary)
-            outcome["content"] = summary
-            return {"messages": [_task_message(summary, status, run_id=run_id, result=summary)]}
-        finally:
-            if env_token is not None:
-                from agent.execution.environment import reset_environment_cache
-                reset_environment_cache(env_token)
-            if prepared is not None and getattr(prepared, "owns_model_clients", False):
-                from agent.models.stream_lifecycle import close_model_http_clients
+            content = "Cancelled by parent" if controller.cancel_requested else _error_reason(exc, self.store._redact)
+            summary = content
+            saw_error = True
+        if env_token is not None:
+            from agent.execution.environment import reset_environment_cache
+            reset_environment_cache(env_token)
+        if prepared is not None and getattr(prepared, "owns_model_clients", False):
+            from agent.models.stream_lifecycle import close_model_http_clients
+            try:
+                close_model_http_clients(prepared.model)
+            except Exception as exc:
                 try:
-                    close_model_http_clients(prepared.model)
-                except Exception as exc:
                     write("error", phase="cleanup", reason=_error_reason(exc, self.store._redact))
-            # Terminal status is published before the concurrency slot moves to
-            # "closing", so a stream that is still shutting down is not shown
-            # as a running task.
-            if status != "completed" and controller.cancel_requested:
-                status = "cancelled"
-                if not outcome["content"]:
-                    outcome["content"] = "Cancelled by parent"
-            elapsed = round(max(0.0, monotonic() - started), 3)
-            publish(
-                status,
-                reason=summary if status in {"failed", "cancelled"} else "",
-                result=answer_text,
-            )
-            published = False
+                except Exception:
+                    pass
+        if status != "completed" and controller.cancel_requested:
+            status = "cancelled"
+            if not content:
+                content = "Cancelled by parent"
+                summary = content
+        elapsed = round(max(0.0, monotonic() - started), 3)
+        self.manager.record_terminal(run_id, status, content, elapsed)
+        try:
+            if saw_error:
+                write("error", status=status, reason=summary)
             finish_fields: dict[str, Any] = {
                 "status": status,
                 "elapsed_seconds": elapsed,
@@ -465,6 +461,17 @@ class SubAgentRuntime(Runnable):
                 finish_fields["result_summary"] = summary
                 finish_fields["summary_truncated"] = True
             else:
-                finish_fields["result"] = outcome["content"]
+                finish_fields["result"] = content
             write("finish", **finish_fields)
-            self.manager.record_terminal(run_id, status, outcome["content"], elapsed)
+        except Exception:
+            pass
+        try:
+            publish(
+                status,
+                reason=summary if status in {"failed", "cancelled"} else "",
+                result=content,
+            )
+        except Exception:
+            pass
+        published = False
+        return {"messages": [_task_message(content, status, run_id=run_id, result=content)]}

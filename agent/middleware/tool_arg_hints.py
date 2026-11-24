@@ -21,20 +21,20 @@ _MAX_INPUT_CHARS = 160
 _MAX_SCHEMA_CHARS = 2500
 
 _EXPECTATIONS = {
-    "list_type": "必须是原生 JSON 数组，不要把结构序列化成字符串",
-    "dict_type": "必须是原生 JSON 对象，不要把结构序列化成字符串",
-    "string_type": "必须是字符串",
-    "bool_type": "必须是布尔值 true / false",
-    "int_type": "必须是整数",
-    "float_type": "必须是数字",
-    "missing": "必填参数，不能省略",
-    "literal_error": "取值不在允许的枚举内，见下方 schema",
-    "enum": "取值不在允许的枚举内，见下方 schema",
-    "string_pattern_mismatch": "字符串格式不符合要求，见下方 schema",
-    "too_short": "长度不足，见下方 schema",
-    "too_long": "长度超过上限，按下方 schema 的 maxItems 或 maxLength 精简后重新调用",
-    "model_attributes_type": "结构不符合该参数的 schema，见下方 schema",
-    "model_type": "必须是 JSON 对象，见下方 schema",
+    "list_type": "must be a JSON array, not a serialized string",
+    "dict_type": "must be a JSON object, not a serialized string",
+    "string_type": "must be a string",
+    "bool_type": "must be a boolean true or false",
+    "int_type": "must be an integer",
+    "float_type": "must be a number",
+    "missing": "required; do not omit it",
+    "literal_error": "value is outside the allowed enum; see the schema below",
+    "enum": "value is outside the allowed enum; see the schema below",
+    "string_pattern_mismatch": "string format does not match the schema below",
+    "too_short": "value is too short; see the schema below",
+    "too_long": "value exceeds the schema maxItems or maxLength; shorten it and call again",
+    "model_attributes_type": "structure does not match the parameter schema below",
+    "model_type": "must be a JSON object; see the schema below",
 }
 
 
@@ -75,23 +75,23 @@ def _rewrite(request: Any, result: Any) -> Any:
 
 def _describe(tool_name: str, exc: ValidationError, schema: type[BaseModel]) -> str:
     lines = [
-        f"参数校验失败，`{tool_name}` 没有执行，也没有产生任何副作用。",
-        "请按下面的说明修正参数后重新调用，不要原样重发同一份参数。",
+        f"Argument validation failed. `{tool_name}` did not run and produced no side effects.",
+        "Correct the arguments below and call the tool again. Do not resend the same arguments.",
         "",
-        "错误：",
+        "Errors:",
     ]
     for error in exc.errors():
         loc = ".".join(str(part) for part in error.get("loc") or ()) or "(root)"
         value = error.get("input")
         expectation = _EXPECTATIONS.get(str(error.get("type") or ""))
-        detail = f"- {loc}: 收到 {type(value).__name__}（{error.get('msg')}）"
+        detail = f"- {loc}: received {type(value).__name__} ({error.get('msg')})"
         if expectation:
-            detail += f" → {expectation}"
+            detail += f" -> {expectation}"
         lines.append(detail)
         preview = _preview(value)
         if preview:
-            lines.append(f"  收到内容：{preview}")
-    lines.extend(["", f"`{tool_name}` 的参数 schema：", _schema_text(schema)])
+            lines.append(f"  received: {preview}")
+    lines.extend(["", f"`{tool_name}` parameter schema:", _schema_text(schema)])
     return "\n".join(lines)
 
 
@@ -111,7 +111,7 @@ def _schema_text(schema: type[BaseModel]) -> str:
     doc.pop("description", None)
     text = json.dumps(_without_titles(doc), ensure_ascii=False, separators=(",", ":"))
     if len(text) > _MAX_SCHEMA_CHARS:
-        return f"{text[:_MAX_SCHEMA_CHARS]}…（schema 已截断）"
+        return f"{text[:_MAX_SCHEMA_CHARS]}… (schema truncated)"
     return text
 
 

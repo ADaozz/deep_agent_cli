@@ -35,9 +35,8 @@ class TaskRecord:
     elapsed_seconds: float | None = None
     # Set at a session boundary: the result no longer has a conversation to reach.
     discarded: bool = False
-    # wait_task claims the result so the host does not also deliver it.
-    consumed: bool = False
-    notified: bool = False
+    # Set only by cancel_task. User stop and session leave clear it.
+    report_cancel: bool = False
     done: threading.Event = field(default_factory=threading.Event, repr=False)
     thread: threading.Thread | None = field(default=None, repr=False)
 
@@ -239,11 +238,7 @@ class SubAgentManager:
     def record_terminal(
         self, run_id: str, status: str, result: str, elapsed_seconds: float | None,
     ) -> bool:
-        """Publish a structured outcome. Returns whether the parent was notified.
-
-        Notification happens under the same lock that ``consume`` uses, so a
-        wait cannot race a second delivery of the same result.
-        """
+        """Publish a structured outcome. Returns whether the parent was notified."""
         with self._lock:
             task = self._tasks.get(run_id)
             if task is None or task.done.is_set():
@@ -254,11 +249,9 @@ class SubAgentManager:
                 task.elapsed_seconds = elapsed_seconds
             notify = (
                 task.mode == "background"
-                and not task.consumed
                 and not task.discarded
-                and status != "cancelled"
+                and (status != "cancelled" or task.report_cancel)
             )
-            task.notified = notify
             task.done.set()
             if notify:
                 self.parent.notify({
@@ -269,15 +262,6 @@ class SubAgentManager:
                     "content": result,
                 })
             return notify
-
-    def consume(self, tasks: list[TaskRecord]) -> None:
-        """Give these results to wait_task and drop a notification already queued."""
-        with self._lock:
-            for task in tasks:
-                task.consumed = True
-                if task.notified:
-                    task.notified = False
-                    self.parent.drop_notification(task.run_id)
 
     def task(self, run_id: str, parent: str) -> TaskRecord | None:
         with self._lock:
@@ -311,6 +295,7 @@ class SubAgentManager:
         """Request one background task to stop. Its worker reports the outcome."""
         task = self.background_task(run_id, parent)
         if task is not None and task.status == "running":
+            task.report_cancel = True
             task.controller.cancel()
         return task
 
@@ -322,9 +307,11 @@ class SubAgentManager:
         """
         with self._lock:
             tasks = [task for task in self._tasks.values() if task.mode == "background"]
-            if discard:
-                for task in tasks:
+            for task in tasks:
+                task.report_cancel = False
+                if discard:
                     task.discarded = True
+            if discard:
                 for task in tasks:
                     self._tasks.pop(task.run_id, None)
         running = [task for task in tasks if task.status == "running"]
