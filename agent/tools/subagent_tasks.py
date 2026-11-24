@@ -274,18 +274,28 @@ def _start_tool(runtime_: SubAgentRuntime, *, allow_background: bool) -> Structu
     )
 
 
-def _merged_tasks(
+def _merged_task_ids(
     manager: SubAgentManager | None, store: SubAgentLogStore, parent: str,
-) -> list[dict[str, Any]]:
-    """Snapshot live tasks, then merge them with historical logs before paging."""
+) -> tuple[list[str], dict[str, TaskRecord]]:
+    """Snapshot live tasks, then merge their IDs with historical runs.
+
+    The result is the paging order. Historical files are not opened here.
+    """
     live = manager.tasks_for(parent) if manager is not None else []
     by_id = {task.run_id: task for task in live}
     logged = store.list_runs(parent)
     logged_ids = set(logged)
     ordered = [task.run_id for task in reversed(live) if task.run_id not in logged_ids]
     ordered.extend(logged)
+    return ordered, by_id
+
+
+def _tasks_for_ids(
+    store: SubAgentLogStore, parent: str, run_ids: list[str], by_id: dict[str, TaskRecord],
+) -> list[dict[str, Any]]:
+    """Materialize one page. Live records win; only historical IDs open a log."""
     items: list[dict[str, Any]] = []
-    for run_id in ordered:
+    for run_id in run_ids:
         task = by_id.get(run_id)
         if task is not None:
             items.append(_task_fields(task, with_result=False))
@@ -319,9 +329,10 @@ def _read_tool(manager: SubAgentManager | None, store: SubAgentLogStore) -> Stru
 
         try:
             if run_id is None:
-                tasks = _merged_tasks(manager, store, parent)
-                page = tasks[offset:offset + limit]
-                return finish({"tasks": page, "next_offset": offset + len(page)})
+                ordered, by_id = _merged_task_ids(manager, store, parent)
+                page_ids = ordered[offset:offset + limit]
+                page = _tasks_for_ids(store, parent, page_ids, by_id)
+                return finish({"tasks": page, "next_offset": offset + len(page_ids)})
             task = manager.task(run_id, parent) if manager is not None else None
             if task is None:
                 meta = store.task_metadata(parent, run_id)

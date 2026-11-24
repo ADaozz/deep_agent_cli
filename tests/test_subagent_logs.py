@@ -508,6 +508,14 @@ def test_read_task_merges_live_tasks_with_history_before_paging(tmp_path):
     tool = next(item for item in build_subagent_tools(
         None, manager, store, names=frozenset({"read_task"}), allow_background=False,
     ) if item.name == "read_task")
+    opened = []
+    original = store.task_metadata
+
+    def tracking(parent_id, run_id):
+        opened.append(run_id)
+        return original(parent_id, run_id)
+
+    store.task_metadata = tracking
 
     def read(**kwargs):
         runtime = SimpleNamespace(config={"configurable": {"thread_id": "parent"}}, tool_call_id="read")
@@ -520,12 +528,15 @@ def test_read_task_merges_live_tasks_with_history_before_paging(tmp_path):
     assert [item["run_id"] for item in first["tasks"]] == [live_only]
     assert first["tasks"][0]["status"] == "running"
     assert first["next_offset"] == 1
+    assert opened == []
     second = read(offset=1, limit=1)
     assert second["tasks"][0]["run_id"] == logged
     assert second["tasks"][0]["status"] == "completed"
     assert second["next_offset"] == 2
+    assert opened == []
     third = read(offset=2, limit=1)
     assert third["tasks"][0]["run_id"] == historical
+    assert opened == [historical]
     assert read(run_id=logged)["result"] == "live-result"
     assert logged_task.result == "live-result"
 
