@@ -33,6 +33,8 @@ class ConfigError(ValueError):
 
 
 _INPUT_KINDS = frozenset({"text", "image"})
+_REASONING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_REASONING_EFFORT_RANK = {name: index for index, name in enumerate(_REASONING_EFFORT_ORDER)}
 
 
 def _default_profiles() -> tuple[ModelProfile, ...]:
@@ -630,7 +632,14 @@ def _model_reasoning_efforts(value: Any, *, field_name: str) -> tuple[str, ...]:
         raise ValueError(f"{field_name} must be a list of non-empty strings excluding default")
     if len(set(value)) != len(value):
         raise ValueError(f"{field_name} contains duplicate reasoning efforts")
-    return tuple(value)
+    unknown_rank = len(_REASONING_EFFORT_ORDER)
+    return tuple(
+        item
+        for _, item in sorted(
+            enumerate(value),
+            key=lambda pair: (_REASONING_EFFORT_RANK.get(pair[1], unknown_rank), pair[0]),
+        )
+    )
 
 
 def _model_context_window(value: Any, *, field_name: str) -> int:

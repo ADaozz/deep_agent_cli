@@ -686,6 +686,19 @@ def test_reasoning_efforts_inherit_replace_and_clear() -> None:
         assert settings.get_profile(name).reasoning_efforts == ()
 
 
+def test_reasoning_efforts_sorted_low_to_high() -> None:
+    settings = Settings.from_mapping({"llm": {"default": "local/a", "models": {
+        "local": {"models": {
+            "a": {"reasoning_efforts": ["max", "none", "high"]},
+            "b": {"reasoning_efforts": ["xhigh", "minimal", "medium", "low"]},
+            "c": {"reasoning_efforts": ["high", "custom-b", "low", "custom-a"]},
+        }},
+    }}})
+    assert settings.get_profile("local/a").reasoning_efforts == ("none", "high", "max")
+    assert settings.get_profile("local/b").reasoning_efforts == ("minimal", "low", "medium", "xhigh")
+    assert settings.get_profile("local/c").reasoning_efforts == ("low", "high", "custom-b", "custom-a")
+
+
 @pytest.mark.parametrize("value", ["low", True, [""], [1], ["default"], ["low", "low"], [" low "]])
 def test_invalid_reasoning_efforts(value) -> None:
     with pytest.raises(ValueError, match="reasoning_efforts"):
