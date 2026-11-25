@@ -85,8 +85,9 @@ class _InputQueue:
 
     def __init__(self, stdin_mode: str) -> None:
         self.stdin_mode = stdin_mode
-        # Elements: ("write", write_id, payload_bytes) | ("eof", None, b"")
-        self.items: deque[tuple[str, str | None, bytes]] = deque()
+        # Elements: ("write", write_id, remaining_bytes, written_bytes) | ("eof", None, b"", 0)
+        self.items: deque[tuple[str, str | None, bytes, int]] = deque()
+        # Includes both queued items and remaining unwritten bytes of the active write.
         self.queued_bytes = 0
         self.eof_enqueued = False
         self.closed_for_new = False
@@ -147,14 +148,17 @@ def _send(message):
             os._exit(0)
 
 
-def _write_ack(request_id, write_id, *, ok, error=""):
-    _send({
+def _write_ack(request_id, write_id, *, ok, error="", written=0):
+    payload = {
         "op": "write_status",
         "id": request_id,
         "write_id": "" if write_id is None else str(write_id),
         "ok": bool(ok),
         "error": error,
-    })
+    }
+    if written:
+        payload["written"] = int(written)
+    _send(payload)
 
 
 def _kill_group(pid):
@@ -212,9 +216,9 @@ def _fail_queue_items(request_id: int, state: _InputQueue, error: str, *, remove
         if remove:
             if _inputs.get(request_id) is state:
                 _inputs.pop(request_id, None)
-    for kind, write_id, _payload in pending:
+    for kind, write_id, _payload, written in pending:
         if kind == "write":
-            _write_ack(request_id, write_id, ok=False, error=error)
+            _write_ack(request_id, write_id, ok=False, error=error, written=written)
 
 
 def _run(
@@ -427,15 +431,13 @@ def _run(
                 else:
                     killed = False
                     item = state.items.popleft() if state.items else None
-                    if item is not None and item[0] == "write":
-                        state.queued_bytes -= len(item[2])
             if killed:
                 set_write_watch(False)
                 _fail_queue_items(request_id, state, "process killed")
                 return False
             if item is None:
                 return False
-            kind, write_id, payload = item
+            kind, write_id, payload, already_written = item
             if kind == "eof":
                 if stdin_mode == "pipe" and process.stdin is not None and not stdin_closed:
                     set_write_watch(False)
@@ -445,18 +447,25 @@ def _run(
                         pass
                     stdin_closed = True
                 continue
+            active_unwritten = len(payload)
             if stdin_broken_error is not None:
-                _write_ack(request_id, write_id, ok=False, error=stdin_broken_error)
+                with _running_lock:
+                    state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
+                _write_ack(request_id, write_id, ok=False, error=stdin_broken_error, written=already_written)
                 continue
             if stdin_closed:
-                _write_ack(request_id, write_id, ok=False, error="stdin already closed")
+                with _running_lock:
+                    state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
+                _write_ack(request_id, write_id, ok=False, error="stdin already closed", written=already_written)
                 continue
             if stdin_mode == "pty" and master_fd is not None:
                 target_fd = master_fd
             elif stdin_mode == "pipe" and process.stdin is not None:
                 target_fd = process.stdin.fileno()
             else:
-                _write_ack(request_id, write_id, ok=False, error="stdin not available")
+                with _running_lock:
+                    state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
+                _write_ack(request_id, write_id, ok=False, error="stdin not available", written=already_written)
                 continue
             view = memoryview(payload)
             blocked = False
@@ -469,12 +478,15 @@ def _run(
                         with _running_lock:
                             if state.killed:
                                 killed_during_write = True
+                                state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
                             else:
                                 killed_during_write = False
-                                state.items.appendleft(("write", write_id, remainder))
-                                state.queued_bytes += len(remainder)
+                                # active_unwritten == len(remainder) is still included in state.queued_bytes.
+                                state.items.appendleft(("write", write_id, remainder, already_written))
                         if killed_during_write:
-                            _write_ack(request_id, write_id, ok=False, error="process killed")
+                            _write_ack(
+                                request_id, write_id, ok=False, error="process killed", written=already_written,
+                            )
                             set_write_watch(False)
                             _fail_queue_items(request_id, state, "process killed")
                             return False
@@ -482,15 +494,21 @@ def _run(
                         break
                     if written <= 0:
                         raise OSError("short write")
+                    already_written += written
+                    active_unwritten -= written
+                    with _running_lock:
+                        state.queued_bytes = max(0, state.queued_bytes - written)
                     view = view[written:]
             except OSError as exc:
+                with _running_lock:
+                    state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
                 err = str(exc.strerror or exc)
                 stdin_broken_error = err
-                _write_ack(request_id, write_id, ok=False, error=err)
+                _write_ack(request_id, write_id, ok=False, error=err, written=already_written)
                 continue
             if blocked:
                 return True
-            _write_ack(request_id, write_id, ok=True)
+            _write_ack(request_id, write_id, ok=True, written=already_written)
 
     # 后台子进程可能持续写管道；shell 退出后只排空一次固定窗口。
     drain_deadline = None
@@ -595,7 +613,7 @@ def _write(request_id, write_id, data_b64):
         elif state.queued_bytes + len(payload) > MAX_INPUT_BYTES:
             reject_error = "stdin input buffer full"
         else:
-            state.items.append(("write", wid, payload))
+            state.items.append(("write", wid, payload, 0))
             state.queued_bytes += len(payload)
             state.wake()
     if reject_error is not None:
@@ -609,7 +627,7 @@ def _close_stdin(request_id):
         if state is None or state.closed_for_new or state.stdin_mode != "pipe" or state.eof_enqueued:
             return
         state.eof_enqueued = True
-        state.items.append(("eof", None, b""))
+        state.items.append(("eof", None, b"", 0))
         state.wake()
 
 

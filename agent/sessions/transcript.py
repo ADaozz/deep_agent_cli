@@ -102,6 +102,57 @@ def classify_tool_result(
     return "success"
 
 
+def _strip_running_marker(text: str, execution_id: str) -> str:
+    """Extract pure command output from a running execute/write_stdin ToolMessage."""
+    if not text:
+        return ""
+    marker = f"[running execution_id={execution_id}]"
+    cleaned = text
+    if cleaned.endswith(marker):
+        cleaned = cleaned[:-len(marker)].rstrip("\n")
+    else:
+        cleaned = cleaned.replace(f"\n\n{marker}", "").replace(marker, "").rstrip("\n")
+    if cleaned.strip() == "<no new output>":
+        return ""
+    return cleaned
+
+
+def _strip_terminal_empty_marker(text: str) -> str:
+    """Strip ``<no new output>`` placeholder from an incremental terminal write_stdin result."""
+    if not text:
+        return ""
+    stripped = text.strip()
+    if stripped in {"<no new output>", "<no output>"}:
+        return ""
+    for prefix in ("<no new output>\n\n", "<no output>\n\n"):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def _append_bounded_execution_output(
+    existing: str,
+    delta: str,
+    *,
+    max_output_bytes: int | None,
+) -> tuple[str, bool]:
+    """Append ``delta`` onto ``existing`` while honoring UTF-8 ``max_output_bytes``."""
+    if not delta:
+        return existing, False
+    combined = f"{existing}\n{delta}" if existing else delta
+    if max_output_bytes is None or max_output_bytes <= 0:
+        return combined, False
+    raw = bytearray(combined.encode("utf-8"))
+    if len(raw) <= max_output_bytes:
+        return combined, False
+    del raw[:-max_output_bytes]
+    head = 0
+    while head < len(raw) and (raw[head] & 0xC0) == 0x80:
+        head += 1
+    del raw[:head]
+    return bytes(raw).decode("utf-8", errors="replace"), True
+
+
 def tool_message_is_error(message: ToolMessage) -> bool:
     """Match live tool_completed error classification, including execute artifacts."""
     return classify_tool_result(
@@ -167,26 +218,35 @@ def messages_to_transcript(
             artifact = getattr(message, "artifact", None)
             if getattr(message, "name", None) == "write_stdin":
                 if isinstance(artifact, dict) and artifact.get("execution_id"):
-                    owner = executions.get(str(artifact["execution_id"]))
+                    exec_id = str(artifact["execution_id"])
+                    owner = executions.get(exec_id)
                     if owner is not None and not artifact.get("stdin_error") and not tool_message_is_error(message):
                         existing = owner.artifact if isinstance(owner.artifact, dict) else {}
                         merged = {**existing, **artifact}
+                        cap_raw = merged.get("max_output_bytes")
+                        cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
+                        raw_text = message_text(message)
                         if artifact.get("running") is False:
                             merged["running"] = False
+                            delta = _strip_terminal_empty_marker(raw_text)
+                            owner.content, clipped = _append_bounded_execution_output(
+                                owner.content, delta, max_output_bytes=cap,
+                            )
+                            if clipped:
+                                merged["truncated"] = True
                             owner.artifact = merged
                             outcome = classify_tool_result(name="execute", artifact=merged)
                             owner.is_error = outcome != "success"
                             owner.status = "error" if owner.is_error else "completed"
                             code = merged.get("exit_code")
                             owner.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-                            delta = message_text(message)
-                            if delta and delta.strip() != "<no new output>":
-                                marker = f"[running execution_id={artifact['execution_id']}]"
-                                base = owner.content.replace(marker, "").rstrip()
-                                if base == "<no new output>":
-                                    base = ""
-                                owner.content = f"{base}\n{delta}".strip() if base else delta
                         else:
+                            delta = _strip_running_marker(raw_text, exec_id)
+                            owner.content, clipped = _append_bounded_execution_output(
+                                owner.content, delta, max_output_bytes=cap,
+                            )
+                            if clipped:
+                                merged["truncated"] = True
                             owner.artifact = merged
                 continue
             content = message_text(message)
@@ -200,13 +260,20 @@ def messages_to_transcript(
                 and artifact.get("running") is True
             ):
                 if block is not None:
-                    block.content = content
-                    block.artifact = artifact
+                    exec_id = str(artifact.get("execution_id") or "")
+                    cap_raw = artifact.get("max_output_bytes")
+                    cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
+                    cleaned = _strip_running_marker(content, exec_id)
+                    bounded, clipped = _append_bounded_execution_output(
+                        "", cleaned, max_output_bytes=cap,
+                    )
+                    block.content = bounded
+                    block.artifact = {**artifact, "truncated": True} if clipped else dict(artifact)
                     block.status = "running"
                     block.is_error = False
                     block.exit_code = None
-                    if artifact.get("execution_id"):
-                        executions[str(artifact["execution_id"])] = block
+                    if exec_id:
+                        executions[exec_id] = block
                 continue
             status = (
                 subagent_card_status(is_error=is_error, artifact=artifact)

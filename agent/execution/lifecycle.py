@@ -69,6 +69,7 @@ class CommandSession:
     _registry: ExecutionRegistry | None = field(default=None, repr=False)
     _finish_emitted: bool = field(default=False, repr=False)
     _resources_released: bool = field(default=False, repr=False)
+    _terminal_confirmed: bool = field(default=False, repr=False)
     _yielded: bool = False
     _result_consumed: bool = False
     _terminal: dict[str, Any] | None = field(default=None, repr=False)
@@ -130,15 +131,67 @@ class CommandSession:
                     break
         except Exception as exc:  # noqa: BLE001
             with self._cv:
-                if not self._done and self._failure is None and self._spawn_error is None:
+                confirmed = self._terminal_confirmed
+                if not self._done and self._failure is None and self._spawn_error is None and not confirmed:
                     self._failure = f"Execution pump error ({type(exc).__name__}): {exc}"
+            if not confirmed:
+                self._terminate_unconfirmed_process()
         finally:
-            self._release_resources()
-            self.detach_cancel_context()
-            self._finalize_terminal()
-            if self._registry is not None:
-                self._registry.on_finished(self)
-            self._emit_finished()
+            try:
+                self._release_resources()
+            finally:
+                self.detach_cancel_context()
+                self._finalize_terminal()
+                if self._registry is not None:
+                    self._registry.on_finished(self)
+                try:
+                    self._emit_finished()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _terminate_unconfirmed_process(self) -> None:
+        """Kill and confirm termination before releasing handle when pump fails mid-run."""
+        with self._cv:
+            handle = self.handle
+            if handle is None or self._terminal_confirmed:
+                return
+            if self._kill_sent_at is None:
+                self._kill_sent_at = time.monotonic()
+            deadline = self._kill_sent_at + KILL_CONFIRM_SECONDS
+        try:
+            handle.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        confirmed = False
+        lost_reason: str | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                event = handle.next_event(min(0.1, remaining))
+            except Exception:  # noqa: BLE001
+                break
+            if event is None:
+                continue
+            kind, payload = event
+            if kind in {"out", "err"}:
+                continue
+            if kind in {"exit", "spawn_error"}:
+                confirmed = True
+                break
+            lost_reason = str(payload or "sandbox worker lost after pump failure")
+            break
+        if confirmed:
+            with self._cv:
+                self._terminal_confirmed = True
+            return
+        reason = lost_reason or "sandbox worker did not confirm a command kill"
+        try:
+            self.pool.discard(handle.sandbox, reason)
+        finally:
+            with self._cv:
+                self._terminal_confirmed = True
 
     def join_pump(self, timeout: float | None = 2.0) -> None:
         pump = self._pump
@@ -243,35 +296,44 @@ class CommandSession:
             if self._kill_sent_at is None and self.deadline is not None:
                 wait = max(0.0, min(wait, self.deadline - now))
         if discard_sandbox is not None:
-            self.pool.discard(discard_sandbox, "sandbox worker did not confirm a command kill")
+            try:
+                self.pool.discard(discard_sandbox, "sandbox worker did not confirm a command kill")
+            finally:
+                with self._cv:
+                    self._terminal_confirmed = True
             return True
         assert handle is not None
         event = handle.next_event(wait)
         if event is None:
             return False
         kind, payload = event
-        if kind == "out":
+        if kind in {"out", "err"}:
             self.collector.append(payload)
             with self._cv:
                 self._cv.notify_all()
             return False
         if kind == "exit":
-            self.collector.flush()
             with self._cv:
                 self._exit_code = int(payload)
+                self._terminal_confirmed = True
+            self.collector.flush()
             return True
         if kind == "spawn_error":
             with self._cv:
                 self._spawn_error = str(payload)
+                self._terminal_confirmed = True
             return True
-        self.collector.flush()
-        self.pool.discard(handle.sandbox, str(payload))
         with self._cv:
             self._failure = (
                 f"Sandbox worker stopped while this command was running ({payload}). "
                 "The command was not retried; the next execute starts a fresh sandbox."
             )
             self._exit_code = 125
+            self._terminal_confirmed = True
+        try:
+            self.collector.flush()
+        finally:
+            self.pool.discard(handle.sandbox, str(payload))
         return True
 
     def _release_resources(self) -> None:

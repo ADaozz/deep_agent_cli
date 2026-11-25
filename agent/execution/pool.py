@@ -47,11 +47,18 @@ class SandboxLostError(RuntimeError):
 
 
 class StdinWriteUncertainError(TimeoutError):
-    """等待 stdin ACK 超时：数据可能已部分或全部写入，结果未知且不得自动重试。"""
+    """stdin 写入结果不确定（ACK 超时、部分写入后失败或进程/沙箱中断）；不得自动重试。"""
 
-    def __init__(self, write_id: str, message: str) -> None:
+    def __init__(
+        self,
+        write_id: str,
+        message: str,
+        *,
+        written_bytes: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.write_id = write_id
+        self.written_bytes = written_bytes
 
 
 @dataclass
@@ -59,6 +66,8 @@ class _PendingWriteAck:
     event: threading.Event = field(default_factory=threading.Event)
     ok: bool = False
     error: str = ""
+    written: int = 0
+    uncertain: bool = False
 
 
 class _Launcher:
@@ -164,6 +173,8 @@ class RemoteCommand:
                 completed = completed or pending.event.is_set()
                 ok = pending.ok
                 error = pending.error
+                written = pending.written
+                uncertain = pending.uncertain
             if not completed:
                 raise StdinWriteUncertainError(
                     write_id,
@@ -171,9 +182,29 @@ class RemoteCommand:
                     "outcome is unknown (bytes may have been partially or fully written and were not retried)",
                 )
             if not ok:
+                if written > 0:
+                    raise StdinWriteUncertainError(
+                        write_id,
+                        f"stdin write {write_id} partially wrote {written} of {len(data)} bytes before "
+                        f"failing ({error or 'stdin write failed'}); outcome is uncertain and was not retried",
+                        written_bytes=written,
+                    )
+                if uncertain:
+                    raise StdinWriteUncertainError(
+                        write_id,
+                        f"stdin write {write_id} interrupted before worker acknowledgment "
+                        f"({error or 'execution ended'}); outcome is unknown and was not retried",
+                    )
                 raise OSError(error or "stdin write failed")
 
-    def _complete_write(self, *, write_id: str, ok: bool, error: str = "") -> None:
+    def _complete_write(
+        self,
+        *,
+        write_id: str,
+        ok: bool,
+        error: str = "",
+        written: int = 0,
+    ) -> None:
         if not write_id:
             return
         with self._ack_lock:
@@ -182,6 +213,8 @@ class RemoteCommand:
                 return
             pending.ok = ok
             pending.error = error
+            pending.written = max(0, int(written))
+            pending.uncertain = (not ok) and pending.written > 0
             pending.event.set()
 
     def _fail_pending_writes(self, reason: str) -> None:
@@ -191,6 +224,8 @@ class RemoteCommand:
                 if not pending.event.is_set():
                     pending.ok = False
                     pending.error = reason
+                    # Request already left the host; without worker ACK we cannot assume 0 bytes written.
+                    pending.uncertain = True
                     pending.event.set()
 
     def close_stdin(self) -> None:
@@ -418,6 +453,7 @@ class PersistentSandbox:
                         write_id="" if write_id is None else str(write_id),
                         ok=bool(message.get("ok")),
                         error=str(message.get("error") or ""),
+                        written=int(message.get("written") or 0),
                     )
         except OSError:
             pass

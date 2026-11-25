@@ -684,9 +684,6 @@ class CliState:
             execution_id = str(artifact.get("execution_id") or "")
             if not execution_id:
                 continue
-            already_terminal = artifact.get("running") is False and block.status in {"completed", "error"}
-            if already_terminal:
-                continue
             snap = snapshots.get(execution_id) if isinstance(snapshots, dict) else None
             if snap is not None:
                 if snap["running"]:
@@ -694,14 +691,16 @@ class CliState:
                     block.status = "running"
                     block.is_error = False
                     block.exit_code = None
-                    if snap["output"]:
-                        block.output = snap["output"]
+                    block.output = snap["output"]
                 else:
-                    if snap["output"]:
-                        block.output = snap["output"]
+                    block.output = snap["output"]
                     _apply_execution_terminal(block, snap["artifact"])
                 touch(block)
-            elif block.status == "running" or artifact.get("running") is True:
+                continue
+            already_terminal = artifact.get("running") is False and block.status in {"completed", "error"}
+            if already_terminal:
+                continue
+            if block.status == "running" or artifact.get("running") is True:
                 # Execution no longer exists (e.g. after CLI restart): never remain Running.
                 block.artifact = {**artifact, "running": False}
                 block.status = "interrupted"

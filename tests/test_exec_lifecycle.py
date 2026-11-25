@@ -1126,3 +1126,275 @@ def test_custom_backend_capability_and_pool_turn_isolation(
     pool = backend.executor.pool
     assert not hasattr(pool, "output_emitter")
     assert not hasattr(pool, "output_emitter_thread_id")
+
+
+def _host_pids_with_marker(marker: str) -> list[int]:
+    pids: list[int] = []
+    needle = marker.encode("utf-8")
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if needle in cmdline:
+            pids.append(int(entry.name))
+    return pids
+
+
+def test_pump_exception_kills_real_process_and_wakes_waiters(backend: WorkspaceCompositeBackend) -> None:
+    marker = f"pump-orphan-guard-{os.getpid()}-{time.monotonic_ns()}"
+    boom_on_second = {"count": 0}
+
+    def broken_emitter(
+        _tool_call_id: str,
+        content: str = "",
+        stream: str = "merged",
+        **_kw: Any,
+    ) -> None:
+        if stream == "merged" and "PUMP-READY" in content:
+            boom_on_second["count"] += 1
+            raise RuntimeError("simulated emitter failure inside pump")
+
+    execute = build_execute_tool(backend)
+    write = build_write_stdin_tool(backend)
+    set_output_emitter(broken_emitter)
+    try:
+        out, art = execute.func(
+            command=f"python3 -c 'import time; print(\"PUMP-READY\", flush=True); time.sleep(30)' {marker}",
+            network=False,
+            yield_time=0.05,
+            timeout=20,
+        )
+        # Either execute observed the pump failure immediately or yielded right before PUMP-READY.
+        if art["running"] is True:
+            eid = str(art["execution_id"])
+            out, art = write.func(execution_id=eid, chars="", yield_time=3.0)
+        assert art["running"] is False
+        assert art["exit_code"] == 125
+        assert art["termination_reason"] == "sandbox_lost"
+        assert "Execution pump error" in out
+        assert boom_on_second["count"] == 1
+        # Real child process in the sandbox MUST be terminated — zero orphans left behind.
+        _wait_until(lambda: not _host_pids_with_marker(marker), timeout=3.0)
+        assert _host_pids_with_marker(marker) == []
+    finally:
+        set_output_emitter(None)
+
+
+def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_bytes() -> None:
+    exec_id = "bwrap-offline-1:0:9"
+    messages = [
+        AIMessage(
+            id="ai-1",
+            content="",
+            tool_calls=[{
+                "id": "call-exec",
+                "name": "execute",
+                "args": {"command": "interactive job", "yield_time": 0.1, "interactive": True},
+            }],
+        ),
+        ToolMessage(
+            content=f"chunk-A\n\n[running execution_id={exec_id}]",
+            tool_call_id="call-exec",
+            name="execute",
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+        ),
+        AIMessage(
+            id="ai-2",
+            content="",
+            tool_calls=[
+                {"id": "ws-1", "name": "write_stdin", "args": {"execution_id": exec_id, "chars": "1\n"}},
+                {"id": "ws-empty", "name": "write_stdin", "args": {"execution_id": exec_id, "chars": ""}},
+                {"id": "ws-2", "name": "write_stdin", "args": {"execution_id": exec_id, "chars": "2\n"}},
+                {"id": "ws-3", "name": "write_stdin", "args": {"execution_id": exec_id, "chars": "end\n"}},
+            ],
+        ),
+        ToolMessage(
+            content=f"chunk-B\n\n[running execution_id={exec_id}]",
+            tool_call_id="ws-1",
+            name="write_stdin",
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+        ),
+        ToolMessage(
+            content=f"<no new output>\n\n[running execution_id={exec_id}]",
+            tool_call_id="ws-empty",
+            name="write_stdin",
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+        ),
+        ToolMessage(
+            content=f"chunk-C\n\n[running execution_id={exec_id}]",
+            tool_call_id="ws-2",
+            name="write_stdin",
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+        ),
+        ToolMessage(
+            content="chunk-D",
+            tool_call_id="ws-3",
+            name="write_stdin",
+            artifact={
+                "execution_id": exec_id,
+                "running": False,
+                "exit_code": 0,
+                "termination_reason": None,
+                "truncated": False,
+                "max_output_bytes": 1000,
+            },
+        ),
+    ]
+    blocks = messages_to_transcript(messages)
+    settle_restored_tools(blocks)
+    tool_blocks = [b for b in blocks if b.kind == "tool"]
+    assert len(tool_blocks) == 1
+    restored = tool_blocks[0]
+    assert restored.content == "chunk-A\nchunk-B\nchunk-C\nchunk-D"
+    assert "[running" not in restored.content
+    assert "<no new output>" not in restored.content
+    assert restored.status == "completed"
+    assert restored.is_error is False
+
+    # Without live Registry, completed command stays completed (never turned into interrupted).
+    state = CliState()
+    state.load_transcript(blocks)
+    state.restore_executions(None, "sess-1")
+    card = next(b for b in state.blocks if isinstance(b, ToolBlock))
+    assert card.status == "completed"
+    assert card.output == "chunk-A\nchunk-B\nchunk-C\nchunk-D"
+
+    # With live Registry snapshot, snapshot wins cleanly without duplicating already-merged output.
+    live_state = CliState()
+    live_state.load_transcript(blocks)
+    live_state.restore_executions(
+        {
+            exec_id: {
+                "running": False,
+                "output": "chunk-A\nchunk-B\nchunk-C\nchunk-D\n",
+                "artifact": {
+                    "execution_id": exec_id,
+                    "running": False,
+                    "exit_code": 0,
+                    "termination_reason": None,
+                    "truncated": False,
+                    "max_output_bytes": 1000,
+                },
+            },
+        },
+        "sess-1",
+    )
+    live_card = next(b for b in live_state.blocks if isinstance(b, ToolBlock))
+    assert live_card.output.count("chunk-A") == 1
+    assert live_card.output.count("chunk-D") == 1
+
+    # CJK output exceeding max_output_bytes during historical rebuild is UTF-8 byte-bounded without U+FFFD.
+    capped = messages_to_transcript([
+        AIMessage(id="ai-c", content="", tool_calls=[{"id": "c1", "name": "execute", "args": {"command": "x"}}]),
+        ToolMessage(
+            content=f"{'甲乙丙丁戊' * 4}\n\n[running execution_id=cap-1]",
+            tool_call_id="c1",
+            name="execute",
+            artifact={"execution_id": "cap-1", "running": True, "max_output_bytes": 20},
+        ),
+        ToolMessage(
+            content="己庚辛壬癸",
+            tool_call_id="w1",
+            name="write_stdin",
+            artifact={"execution_id": "cap-1", "running": False, "exit_code": 0, "max_output_bytes": 20},
+        ),
+    ])
+    capped_block = capped[0]
+    assert "\ufffd" not in capped_block.content
+    assert len(capped_block.content.encode("utf-8")) <= 20
+    assert capped_block.artifact["truncated"] is True
+
+
+def test_partial_stdin_write_before_process_exit_and_sandbox_lost_report_uncertain(
+    backend: WorkspaceCompositeBackend,
+) -> None:
+    execute = build_execute_tool(backend)
+    write = build_write_stdin_tool(backend)
+    # Child reads 4096 bytes then closes stdin and exits while host sends 512 KiB (> pipe buffer).
+    first, artifact = execute.func(
+        command=(
+            "python3 -c '"
+            "import os, sys, time; "
+            "print(\"READY\", flush=True); "
+            "time.sleep(0.15); "
+            "os.read(0, 4096); "
+            "os._exit(0)"
+            "'"
+        ),
+        network=False,
+        yield_time=0.4,
+        interactive=True,
+        timeout=15,
+    )
+    assert artifact["running"] is True
+    execution_id = str(artifact["execution_id"])
+    seen = first
+    deadline = time.monotonic() + 5.0
+    while "READY" not in seen and time.monotonic() < deadline:
+        chunk, _art = write.func(execution_id=execution_id, chars="", yield_time=0.1)
+        seen += chunk
+    assert "READY" in seen
+
+    out, err_art = write.func(execution_id=execution_id, chars="P" * (512 * 1024), yield_time=0.5)
+    assert out.startswith("Error: Uncertain stdin write outcome:")
+    assert err_art["stdin_error"] == "uncertain"
+    assert "partially wrote" in out or "interrupted" in out
+
+    # Also verify active unwritten remainder counts against MAX_INPUT_BYTES (1 MiB).
+    first2, art2 = execute.func(
+        command="python3 -c 'import time; print(\"HOLD\", flush=True); time.sleep(20)'",
+        network=False,
+        yield_time=0.4,
+        interactive=True,
+        timeout=20,
+    )
+    eid2 = str(art2["execution_id"])
+    session2 = backend.executor.pool.executions.get(eid2)
+    assert session2 is not None and session2.handle is not None
+    # Fill ~900 KiB into the 1 MiB queue; ~64 KiB drains into kernel pipe, ~836 KiB remains unwritten in-flight.
+    with pytest.raises(StdinWriteUncertainError):
+        session2.handle.write_stdin(b"Q" * (900 * 1024), timeout=0.2)
+    # Trying to enqueue another 300 KiB must fail immediately with OSError("stdin input buffer full") (0 bytes written).
+    with pytest.raises(OSError, match="stdin input buffer full"):
+        session2.handle.write_stdin(b"R" * (300 * 1024), timeout=2.0)
+    _c_out, cancel_art = write.func(execution_id=eid2, chars="", yield_time=2.0, action="cancel")
+    assert cancel_art["exit_code"] == 130
+
+
+def test_output_collector_pending_enforces_utf8_byte_limit_for_multibyte_chars(tmp_path: Path) -> None:
+    from agent.execution.process import _OutputCollector
+
+    collector = _OutputCollector(
+        tool_call_id="cjk-cap",
+        max_output_bytes=30,
+        workspace_root=tmp_path,
+    )
+    try:
+        # 20 Chinese characters = 60 UTF-8 bytes (> 30 byte limit); split mid-character across chunks.
+        raw1 = ("中文字符输出测试一二" * 2).encode("utf-8")
+        collector.append(raw1[:17])
+        collector.append(raw1[17:])
+        first_pending = collector.take_pending()
+        assert "\ufffd" not in first_pending
+        assert len(first_pending.encode("utf-8")) <= 30
+        assert first_pending.endswith("测试一二")
+
+        # Subsequent multi-byte output after truncation still enters bounded _pending_bytes.
+        raw2 = ("后续增量输出甲乙丙丁戊己庚辛").encode("utf-8")  # 42 bytes
+        collector.append(raw2[:10])
+        collector.append(raw2[10:])
+        collector.flush()
+        second_pending = collector.take_pending()
+        assert "\ufffd" not in second_pending
+        assert len(second_pending.encode("utf-8")) <= 30
+        assert second_pending.endswith("戊己庚辛")
+
+        tail = collector.tail_text()
+        assert "\ufffd" not in tail
+        assert len(tail.encode("utf-8")) <= 30
+        assert collector.truncated is True
+    finally:
+        collector.close()

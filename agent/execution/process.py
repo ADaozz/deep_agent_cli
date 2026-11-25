@@ -134,7 +134,7 @@ class _OutputCollector:
         self.tail_bytes = bytearray()
         self.total_bytes = 0
         self.truncated = False
-        self._pending = ""
+        self._pending_bytes = bytearray()
         self._lock = threading.RLock()
         self.log_fd: int | None = None
         self.log_directory_fd: int | None = None
@@ -178,10 +178,17 @@ class _OutputCollector:
             except OSError:
                 pass
 
-    def _bound_pending(self) -> None:
+    def _append_pending_text(self, text: str) -> None:
+        if not text:
+            return
         max_output_bytes = self.max_output_bytes
-        if len(self._pending) > max_output_bytes:
-            self._pending = self._pending[-max_output_bytes:]
+        if max_output_bytes <= 0:
+            self._pending_bytes.clear()
+            return
+        self._pending_bytes.extend(text.encode("utf-8"))
+        if len(self._pending_bytes) > max_output_bytes:
+            del self._pending_bytes[:-max_output_bytes]
+            _drop_partial_character_head(self._pending_bytes)
 
     def append(self, raw: bytes) -> None:
         if not raw:
@@ -205,24 +212,24 @@ class _OutputCollector:
                     _write_all(self.log_fd, raw)
                 except OSError as exc:
                     self._discard_log(exc)
-            # Always decode new bytes into the unread window, even after truncation.
+            # Always decode new bytes into the unread UTF-8 byte window, even after truncation.
             # Emit only the pre-truncation prefix on "merged" before switching to snapshots.
-            if accepted:
-                accepted_text = self.decoder.decode(accepted)
-                if accepted_text:
-                    self._pending += accepted_text
-                    self._bound_pending()
-                    self._emit_output(accepted_text, stream="merged")
-            if overflow:
-                overflow_text = self.decoder.decode(overflow)
-                if overflow_text:
-                    self._pending += overflow_text
-                    self._bound_pending()
+            accepted_text = self.decoder.decode(accepted) if accepted else ""
+            if accepted_text:
+                self._append_pending_text(accepted_text)
+            overflow_text = self.decoder.decode(overflow) if overflow else ""
+            if overflow_text:
+                self._append_pending_text(overflow_text)
             self.total_bytes += len(raw)
-            self.tail_bytes.extend(raw)
-            if len(self.tail_bytes) > max_output_bytes:
-                del self.tail_bytes[:-max_output_bytes]
-                _drop_partial_character_head(self.tail_bytes)
+            if max_output_bytes <= 0:
+                self.tail_bytes.clear()
+            else:
+                self.tail_bytes.extend(raw)
+                if len(self.tail_bytes) > max_output_bytes:
+                    del self.tail_bytes[:-max_output_bytes]
+                    _drop_partial_character_head(self.tail_bytes)
+            if accepted_text:
+                self._emit_output(accepted_text, stream="merged")
             if self.truncated:
                 current_tail = _decode_tail_snapshot(bytes(self.tail_bytes))
                 self._emit_output(current_tail, stream="tail_snapshot")
@@ -233,16 +240,17 @@ class _OutputCollector:
             tail = self.decoder.decode(b"", final=True)
             if not tail:
                 return
-            self._pending += tail
-            self._bound_pending()
+            self._append_pending_text(tail)
             if not self.truncated:
                 self._emit_output(tail, stream="merged")
 
     def take_pending(self) -> str:
-        """Return and clear decoded text produced since the previous take."""
+        """Return and clear decoded text produced since the previous take (UTF-8 byte bounded)."""
         with self._lock:
-            text = self._pending
-            self._pending = ""
+            if not self._pending_bytes:
+                return ""
+            text = bytes(self._pending_bytes).decode("utf-8", errors="replace")
+            self._pending_bytes.clear()
             return text
 
     def tail_text(self) -> str:
