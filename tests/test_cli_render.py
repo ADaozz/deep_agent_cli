@@ -765,16 +765,12 @@ def test_non_command_failure_preserves_wrapped_indentation(width, expanded) -> N
 
 
 @pytest.mark.parametrize("width", [20, 40, 80])
-@pytest.mark.parametrize("name", ["start_task", "web_search"])
+@pytest.mark.parametrize("name", ["web_search"])
 def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> None:
-    """SubAgent and other generic cards share the same title wrap/indent path."""
+    """Non-SubAgent generic cards keep the shared multi-line title wrap/indent path."""
     long = "x" * 180
-    if name == "start_task":
-        args = {"description": f"Do carefully: {long}"}
-        marker = "SubAgent"
-    else:
-        args = {"query": long}
-        marker = "Searching"
+    args = {"query": long}
+    marker = "Searching"
     block = ToolBlock("wrap", name, args, status="running")
     lines = [line.rstrip() for line in _plain(_capture(_tool(block, False, width), width)).splitlines() if line.strip()]
     assert any(marker in line for line in lines)
@@ -782,6 +778,20 @@ def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> N
     assert wrapped, lines
     assert all(cell_len(line) < width for line in lines)
     assert "xxxx" in "".join(line.strip() for line in lines)
+
+
+@pytest.mark.parametrize("width", [20, 40, 80])
+def test_subagent_card_title_stays_single_line_across_widths(width) -> None:
+    """SubAgent cards truncate long descriptions to a single bounded line."""
+    long = "x" * 180
+    block = ToolBlock("wrap", "start_task", {"description": f"Do carefully: {long}"}, status="running")
+    lines = [line.rstrip() for line in _plain(_capture(_tool(block, False, width), width)).splitlines() if line.strip()]
+    assert len(lines) == 1, lines
+    assert "SubAgent" in lines[0]
+    assert cell_len(lines[0]) < width
+    if width >= 40:
+        assert lines[0].endswith("…")
+        assert "Do carefully:" in lines[0]
 
 
 def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:

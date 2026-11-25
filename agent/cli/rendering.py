@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from prompt_toolkit import ANSI
 from prompt_toolkit.formatted_text import FormattedText, StyleAndTextTuples, to_formatted_text
 from prompt_toolkit.formatted_text.utils import split_lines
+from prompt_toolkit.utils import get_cwidth
 from rich.console import Console, ConsoleOptions, Group, RenderResult
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -44,6 +45,7 @@ from agent.cli.state import CliState, MessageBlock, SubtaskView, ToolBlock, Turn
 from agent.subagents.notifications import is_background_launch
 from agent.cli.skills import skill_message_display
 from agent.cli.display import DEFAULT_UI_DISPLAY_LIMITS, DEFAULT_UI_TIMEZONE, UiDisplayLimits
+from agent.cli.formatting import _truncate_cells
 from agent.version import package_version
 
 
@@ -917,6 +919,7 @@ def render_tool_preview(
         title = _subagent_title(
             block.status, preview.target, is_error=block.is_error,
             background=is_background_launch(block.name, block.arguments),
+            max_width=max(1, width - 2),
         )
     else:
         symbol, color = _tool_status_marker(block.status, block.is_error)
@@ -976,19 +979,45 @@ def render_tool_preview(
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
-def _subagent_title(status: str, description: str, *, is_error: bool = False, background: bool = False) -> Text:
+def _subagent_title(
+    status: str,
+    description: str,
+    *,
+    is_error: bool = False,
+    background: bool = False,
+    max_width: int | None = None,
+) -> Text:
     """The one SubAgent title. Every depth uses it; only the tree prefix changes."""
     description = " ".join(str(description or "").split()) or "Delegated task"
     failed = status not in {"cancelled", "interrupted", "waiting", "unconfirmed"} and (
         is_error or status in {"failed", "error"}
     )
     symbol, color = _tool_status_marker("error" if failed else status, failed)
+    marker = f"{symbol} "
     label = "Running SubAgent" if status == "running" else "SubAgent"
-    summary = f"{label} · {description}"
-    if background:
-        summary += " · background"
-    title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
-    title.append(_tool_status_suffix(status, failed=failed), style="dim")
+    prefix = f"{label} · "
+    bg_suffix = " · background" if background else ""
+    status_suffix = _tool_status_suffix(status, failed=failed)
+    if max_width is not None:
+        fixed_width = (
+            get_cwidth(marker)
+            + get_cwidth(prefix)
+            + get_cwidth(bg_suffix)
+            + get_cwidth(status_suffix)
+        )
+        desc_budget = max_width - fixed_width
+        if desc_budget > 0:
+            description = _truncate_cells(description, desc_budget)
+            summary = f"{prefix}{description}{bg_suffix}"
+        else:
+            summary_budget = max(0, max_width - get_cwidth(marker) - get_cwidth(status_suffix))
+            summary = _truncate_cells(f"{label}{bg_suffix}", summary_budget)
+    else:
+        summary = f"{prefix}{description}{bg_suffix}"
+    title = Text.assemble((marker, color), (summary, "bold"))
+    if max_width is not None and get_cwidth(title.plain) + get_cwidth(status_suffix) > max_width:
+        status_suffix = _truncate_cells(status_suffix, max(0, max_width - get_cwidth(title.plain)))
+    title.append(status_suffix, style="dim")
     return title
 
 
@@ -1019,7 +1048,13 @@ def _subagent_tree(
         last_sibling = index == last
         branch, spine, text_at = _tree_frame(last=last_sibling, pad=pad)
         failed = node.status in {"failed", "error"}
-        title = Text.assemble((branch, TREE_BRANCH_STYLE), _subagent_title(node.status, node.description, is_error=failed))
+        title = Text.assemble(
+            (branch, TREE_BRANCH_STYLE),
+            _subagent_title(
+                node.status, node.description, is_error=failed,
+                max_width=max(1, width - 2 - get_cwidth(branch)),
+            ),
+        )
         lines.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
         body = (node.result or node.reason).strip()
         if body:

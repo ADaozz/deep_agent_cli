@@ -52,11 +52,9 @@ class ActivityHeatmap:
         success = total - failed
         rate = f"{100 * success / total:.1f}".rstrip("0").rstrip(".")
         title, gap, percent = _fit_footer_parts("Tool Health", f"{rate}% success", width)
-        name_width = max(1, min(24, width // 2))
-        columns = max(1, (width - name_width - 1) // 2)
+        max_name_width = max(1, min(24, width // 2))
+        columns = max(1, (width - max_name_width - 1) // 2)
         groups = [calls[i:i + CALLS_PER_GROUP] for i in range(0, total, CALLS_PER_GROUP)][-columns:]
-        matrix_width = name_width + 2 + 2 * len(groups) - 1
-        margin = " " * max(0, (width - matrix_width) // 2)
         shown = sum(map(len, groups))
         calls_label = "call" if total == 1 else "calls"
         window_label = f"Last {total} {calls_label}"
@@ -70,7 +68,20 @@ class ActivityHeatmap:
         frequency = Counter(obs.tool_name for obs in calls)
         top = sorted(frequency, key=lambda name: (-frequency[name], name))[:TOOL_ROWS]
         has_other = len(frequency) > len(top)
-        labels = tool_health_labels(calls, name_width, artifacts)
+        labels = tool_health_labels(calls, max_name_width, artifacts)
+        row_names = [*top, None] if has_other else top
+        row_labels: list[tuple[str | None, str]] = []
+        for name in row_names:
+            if name is None:
+                label = _truncate_cells("other", max_name_width)
+            elif name == "other" and has_other:
+                label = _truncate_cells("other tool", max_name_width)
+            else:
+                label = labels.get(name, _truncate_cells(name, max_name_width))
+            row_labels.append((name, label))
+        label_width = max((get_cwidth(label) for _, label in row_labels), default=1)
+        matrix_width = label_width + 2 + 2 * len(groups) - 1
+        margin = " " * max(0, (width - matrix_width) // 2)
         counts = []
         for group in groups:
             buckets = [(obs.tool_name if obs.tool_name in top else None, obs.outcome) for obs in group]
@@ -78,13 +89,9 @@ class ActivityHeatmap:
                 Counter(name for name, _ in buckets),
                 {name for name, outcome in buckets if outcome == "failed"},
             ))
-        for name in [*top, None] if has_other else top:
-            label = "other" if name is None else labels.get(name, name)
-            if name == "other" and has_other:
-                label = "other tool"
-            if name is None:
-                label = _truncate_cells(label, name_width)
-            row = [(TEXT, margin + label + " " * (name_width - get_cwidth(label) + 2))]
+        for name, label in row_labels:
+            pad = " " * (label_width - get_cwidth(label))
+            row = [(TEXT, f"{margin}{pad}{label}  ")]
             for i, (activity, failures) in enumerate(counts):
                 if i:
                     row.append(("", " "))

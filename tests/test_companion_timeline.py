@@ -143,11 +143,21 @@ def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
     assert [row[0][1].strip() for row in matrix] == ["read", "甲乙丙工具执行…", "shell", "other"]
     assert len({get_cwidth(row[0][1]) for row in matrix}) == 1
     for width in (30, 47, 64):
-        for row in chart.draw(width, 8)[2:6]:
-            label = row[0][1]
-            left = len(label) - len(label.lstrip())
-            right = width - sum(get_cwidth(text) for _, text in row)
-            assert abs(right - left) <= 1
+        rendered_rows = chart.draw(width, 8)
+        assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rendered_rows)
+        rendered_matrix = rendered_rows[2:6]
+        # Labels are right-aligned with exactly two spaces before the left-aligned matrix.
+        matrix_starts = {get_cwidth(row[0][1]) for row in rendered_matrix}
+        assert len(matrix_starts) == 1
+        for row in rendered_matrix:
+            prefix = row[0][1]
+            assert prefix.endswith("  ") and not prefix.endswith("   ")
+        # The combined (label column + 2-space gap + heatmap matrix) block is centered.
+        block_left = min(len(row[0][1]) - len(row[0][1].lstrip()) for row in rendered_matrix)
+        block_widths = {sum(get_cwidth(text) for _, text in row) for row in rendered_matrix}
+        assert len(block_widths) == 1
+        block_right = width - next(iter(block_widths))
+        assert abs(block_right - block_left) <= 1
     cells = [row[1::2] for row in matrix]
     assert cells[0][:3] == [ACTIVITY_CELLS[3], FAILED_CELL, ACTIVITY_CELLS[1]]
     assert cells[2][:2] == [ACTIVITY_CELLS[0], ACTIVITY_CELLS[1]]
@@ -291,6 +301,71 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     ])
     assert blocks[0].name == ambiguous
     assert blocks[0].artifact == recorded["0"]
+
+
+def test_heatmap_layout_right_aligns_labels_tightly_and_centers_whole_block(tmp_path):
+    from prompt_toolkit.utils import get_cwidth
+
+    from agent.companion.chart import ActivityHeatmap
+
+    # 1) All short tool names: effective label column shrinks to longest actual label ("execute" = 7),
+    # leaving no extra empty gap between label and heatmap matrix, and centering the whole block.
+    c_short = companion(tmp_path / "short", lambda: "s")
+    for i, name in enumerate(["execute", "execute", "execute", "read", "edit", "read"]):
+        _observe_tool(c_short.timeline, i, name)
+    short_chart = ActivityHeatmap(c_short)
+    for width in (26, 34, 46, 64):
+        rows = short_chart.draw(width, 9)
+        assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rows)
+        matrix = rows[2:5]
+        labels = [row[0][1].strip() for row in matrix]
+        assert labels == ["execute", "read", "edit"]
+        # Effective label width is 7 ("execute"), matrix has 2 columns -> 2*2 - 1 = 3 cells.
+        expected_block_width = 7 + 2 + 3
+        expected_margin = max(0, (width - expected_block_width) // 2)
+        for row, expected_label in zip(matrix, labels, strict=True):
+            prefix = row[0][1]
+            assert prefix == " " * expected_margin + " " * (7 - get_cwidth(expected_label)) + expected_label + "  "
+            assert get_cwidth(prefix) == expected_margin + 7 + 2
+        block_left = min(len(row[0][1]) - len(row[0][1].lstrip()) for row in matrix)
+        block_right = width - sum(get_cwidth(text) for _, text in matrix[0])
+        assert block_left == expected_margin
+        assert abs(block_right - block_left) <= 1
+
+    # 2) Mixed short, CJK wide, and long MCP titles: all right-aligned, matrix left-aligned at one column,
+    # centered as a whole without overflowing across narrow/medium/wide viewports.
+    c_mix = companion(tmp_path / "mix", lambda: "s")
+    mcp_tool = "mcp__parallel__very_long_search_endpoint"
+    cjk_tool = "中文超长工具名称测试显示对齐"
+    recorded = {
+        "0": {"mcp_server_name": "Parallel", "mcp_tool_name": "very_long_search_endpoint"},
+        "1": {"mcp_server_name": "Parallel", "mcp_tool_name": "very_long_search_endpoint"},
+        "2": {"mcp_server_name": "Parallel", "mcp_tool_name": "very_long_search_endpoint"},
+    }
+    for i, name in enumerate([mcp_tool, mcp_tool, mcp_tool, cjk_tool, cjk_tool, "ls"]):
+        _observe_tool(c_mix.timeline, i, name)
+    mix_chart = ActivityHeatmap(c_mix, lambda: recorded)
+    for width in (26, 40, 64):
+        rows = mix_chart.draw(width, 9)
+        assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rows)
+        matrix = rows[2:5]
+        # Every row's matrix starts at the exact same column and has exactly a 2-space gap after its label.
+        starts = {get_cwidth(row[0][1]) for row in matrix}
+        assert len(starts) == 1
+        label_end_cols = []
+        for row in matrix:
+            prefix = row[0][1]
+            assert prefix.endswith("  ") and not prefix.endswith("   ")
+            label_end_cols.append(get_cwidth(prefix[:-2]))
+        assert len(set(label_end_cols)) == 1
+        # Whole block (label col + 2-space gap + heatmap) is horizontally centered.
+        block_left = min(len(row[0][1]) - len(row[0][1].lstrip()) for row in matrix)
+        block_right = width - sum(get_cwidth(text) for _, text in matrix[0])
+        assert abs(block_right - block_left) <= 1
+        # Preserves MCP preview title semantics and counts.
+        top_label = matrix[0][0][1].strip()
+        assert top_label.startswith("MCP · Parallel" if width >= 30 else "MCP · ")
+        assert rows[-1][0][1].startswith("6 calls")
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):

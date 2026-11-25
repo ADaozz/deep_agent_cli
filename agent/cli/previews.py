@@ -945,13 +945,14 @@ def build_generic_preview(block: ToolBlock) -> ToolPreview:
 
 
 def build_task_preview(block: ToolBlock) -> ToolPreview:
-    """A bounded single-line title; the actual delegation stays untouched."""
+    """Single-line task preview; display width truncation lives in _subagent_title()."""
     description = str(block.arguments.get("description") or "Delegated task")
+    compact = " ".join(description.split()) or "Delegated task"
     detail = "background" if is_background_launch(block.name, block.arguments) else ""
     return ToolPreview(
         kind="task", verb="SubAgent", target=description,
         detail=detail,
-        summary=f"SubAgent · {description}", action="expand",
+        summary=f"SubAgent · {compact}", action="expand",
     )
 
 

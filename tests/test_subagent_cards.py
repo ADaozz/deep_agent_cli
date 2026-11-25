@@ -189,16 +189,95 @@ def test_unfinished_tasks_keep_description_without_fabricating_results(event, st
         assert 'cancelled' in text
 
 
-def test_title_collapses_whitespace_without_changing_the_delegation():
+def test_title_is_bounded_single_line_and_preserves_delegation():
+    from prompt_toolkit.utils import get_cwidth
     from agent.cli.rendering import _subagent_title
 
     description = 'Fix\n  median3\t' + 'details ' * 40
     block = ToolBlock('d', 'start_task', {'description': description})
     preview = build_task_preview(block)
     assert preview.target == description
-    title = _subagent_title('running', preview.target).plain
-    assert 'Fix median3' in title and '\n' not in title
+    assert '\n' not in preview.summary
     assert block.arguments['description'] == description
+
+    # Direct shared renderer keeps bounded single line within max_width.
+    for max_width in (44, 64, 96):
+        title = _subagent_title('running', preview.target, max_width=max_width).plain
+        assert '\n' not in title
+        assert title[1] == ' '
+        assert title[2:].startswith('Running SubAgent · Fix median3 ')
+        assert title.endswith('…')
+        assert get_cwidth(title) <= max_width
+
+    # Rendered root card stays strictly single-line with long description across widths.
+    for width in (48, 64, 100):
+        state = CliState()
+        start(state, 'd', description)
+        all_lines = [line.rstrip() for line in plain(render_transcript(state, width)).splitlines() if line.strip()]
+        assert all_lines[0].startswith('DeepAgentCLI') and set(all_lines[1]) == {'─'}
+        lines = all_lines[2:]
+        assert len(lines) == 1
+        assert lines[0].endswith('…')
+        assert get_cwidth(lines[0]) <= width - 2
+        assert state.blocks[0].arguments['description'] == description
+
+    # Short description renders in full without ellipsis.
+    short_state = CliState()
+    start(short_state, 's', 'Fix median3')
+    short_lines = [line.rstrip() for line in plain(render_transcript(short_state, 80)).splitlines() if line.strip()][2:]
+    assert len(short_lines) == 1
+    assert short_lines[0].endswith('Running SubAgent · Fix median3')
+    assert '…' not in short_lines[0]
+
+
+def test_subagent_title_cjk_status_suffixes_and_nested_tree_stay_single_line():
+    from prompt_toolkit.utils import get_cwidth
+
+    mixed = '分析并修复中文长任务描述与 English mixed tokens ' * 6
+    # Background + terminal suffixes keep markers, prefix, background tag, and status suffix intact.
+    for width in (56, 80, 120):
+        for status, is_error, bg, expected_suffix in (
+            ('running', False, True, ' · background'),
+            ('error', True, True, ' · background — failed'),
+            ('cancelled', True, False, ' — cancelled'),
+            ('interrupted', False, False, ' — interrupted (completion unconfirmed)'),
+        ):
+            state = CliState()
+            args = {'description': mixed, 'run_in_background': bg} if bg else {'description': mixed}
+            state.blocks.append(ToolBlock(
+                tool_call_id='bg-long', name='start_task', arguments=args,
+                status=status, is_error=is_error,
+            ))
+            lines = [line.rstrip() for line in plain(render_transcript(state, width)).splitlines() if line.strip()][2:]
+            assert len(lines) == 1, f'expected single line for width={width} status={status}: {lines}'
+            line = lines[0]
+            assert get_cwidth(line) <= width - 2
+            assert ('Running SubAgent · ' if status == 'running' else 'SubAgent · ') in line
+            assert line.endswith(expected_suffix)
+            assert '…' in line
+
+    # Root and recursive nested subtasks use the exact same single-line truncation behavior.
+    state = CliState()
+    start(state, 'root-call', mixed)
+    _task_update(state, run_id='r1', parent_run_id='root', depth=1, description=mixed, tool_call_id='root-call')
+    _task_update(
+        state, run_id='r2', parent_run_id='r1', depth=2,
+        description='二级中文子任务：' + mixed, tool_call_id='c2', status='failed',
+    )
+    _task_update(
+        state, run_id='r3', parent_run_id='r2', depth=3,
+        description='三级递归子任务：' + mixed, tool_call_id='c3', status='running',
+    )
+    for width in (60, 90):
+        lines = [line.rstrip() for line in plain(render_transcript(state, width)).splitlines() if line.strip()][2:]
+        assert len(lines) == 3, f'root + 2 nested subtasks must render as 3 lines at width={width}: {lines}'
+        assert all(get_cwidth(line) <= width - 2 for line in lines)
+        assert 'Running SubAgent · ' in lines[0] and lines[0].endswith('…')
+        assert '└ ' in lines[1] and 'SubAgent · 二级中文子任务' in lines[1] and lines[1].endswith('… — failed')
+        assert '└ ' in lines[2] and 'Running SubAgent · 三级递归子任务' in lines[2] and lines[2].endswith('…')
+        # Deeper child starts further right due to tree indentation.
+        assert lines[2].index('Running SubAgent') > lines[1].index('SubAgent') > lines[0].index('Running SubAgent')
+        assert state.blocks[0].arguments['description'] == mixed
 
 
 def test_resume_persists_independent_tasks_and_unfinished_description(tmp_path):
