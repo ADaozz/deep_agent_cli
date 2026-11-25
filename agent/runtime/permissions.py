@@ -12,6 +12,7 @@ from agent.tools.catalog import (
     FILE_MUTATION_TOOLS,
     WEB_TOOLS,
     WRITE_STDIN_TOOL,
+    write_stdin_is_side_effect,
 )
 
 
@@ -34,8 +35,6 @@ def host_decision_rule() -> dict[str, list[str]]:
 
 def write_stdin_requires_approval(request: Any) -> bool:
     """Ask/HITL ``when`` predicate: empty output polls skip approval."""
-    from agent.execution.lifecycle import write_stdin_is_side_effect
-
     args = getattr(request, "tool_call", None) or {}
     payload = args.get("args") if isinstance(args, dict) else {}
     return write_stdin_is_side_effect(payload if isinstance(payload, dict) else {})

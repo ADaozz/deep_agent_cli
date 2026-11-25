@@ -58,6 +58,8 @@ class BackendSelection:
 class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecutor):
     """文件系统 backend，命令执行由 Bubblewrap 隔离。"""
 
+    supports_interactive_execution = True
+
     def __init__(self, config: SandboxConfig, *, executable: str) -> None:
         workspace = _validate_config(config)
         super().__init__(root_dir=workspace, virtual_mode=True, max_file_size_mb=10)
@@ -186,6 +188,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
                 yield_time=yield_time,
                 stdin_mode=stdin_mode,
                 network=network,
+                sandbox_mode=self.config.mode,
             ))
         except SandboxStartError as exc:
             return LocalExecuteResponse(
@@ -193,6 +196,82 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
             )
         except ValueError as exc:
             return LocalExecuteResponse(f"Error: {exc}", 1, False, termination_reason="spawn_error")
+
+    def write_stdin(
+        self,
+        execution_id: str,
+        *,
+        chars: str = "",
+        yield_time: float = 1.0,
+        action: str = "write",
+        write_timeout: float = 15.0,
+        thread_id: str | None = None,
+    ) -> LocalExecuteResponse:
+        from agent.execution.lifecycle import StdinAction, interact
+        from typing import cast
+
+        if yield_time < 0:
+            raise ValueError("yield_time must be non-negative")
+        if action in {"close", "cancel"} and chars:
+            raise ValueError(f"{action} cannot include chars")
+        session = self.pool.executions.require(execution_id, thread_id=thread_id)
+        return interact(
+            session,
+            chars=chars,
+            yield_time=yield_time,
+            action=cast(StdinAction, action),
+            write_timeout=write_timeout,
+        )
+
+    def execution_info(
+        self,
+        execution_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, object] | None:
+        """Return owned execution attributes without leaking other sessions' records."""
+        from agent.execution.ownership import execution_thread_id
+
+        if not execution_id:
+            return None
+        owner = execution_thread_id() if thread_id is None else thread_id
+        session = self.pool.executions.get(execution_id)
+        if session is None or not session.owns(owner):
+            return None
+        return {
+            "execution_id": session.execution_id,
+            "running": not session.is_done,
+            "network": bool(session.network),
+            "sandbox_mode": session.sandbox_mode,
+            "stdin_mode": session.stdin_mode,
+        }
+
+    def execution_metadata(
+        self,
+        execution_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, object] | None:
+        from agent.execution.ownership import execution_thread_id
+
+        if not execution_id:
+            return None
+        owner = execution_thread_id() if thread_id is None else thread_id
+        session = self.pool.executions.get(execution_id)
+        if session is None or not session.owns(owner):
+            return None
+        return session.execution_metadata()
+
+    def execution_snapshots(self, thread_id: str) -> dict[str, dict[str, object]]:
+        if not thread_id:
+            return {}
+        return {
+            session.execution_id: session.restore_snapshot()
+            for session in self.pool.executions.list_for_thread(thread_id)
+        }
+
+    def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int:
+        return self.pool.executions.cleanup_owner(thread_id, join_timeout=join_timeout)
 
 
 def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelection:

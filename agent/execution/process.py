@@ -20,10 +20,10 @@ from deepagents.backends.protocol import ExecuteResponse
 
 from agent.runtime.cancellation import (
     ToolOutputEmitter,
+    emit_output_with,
     emit_tool_output,
     get_cancel_context,
     get_output_emitter,
-    invoke_output_emitter,
 )
 from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxPool
 from agent.execution.policy import sandbox_workspace_root
@@ -145,7 +145,7 @@ class _OutputCollector:
         if not content:
             return
         if self._emit is not None:
-            invoke_output_emitter(
+            emit_output_with(
                 self._emit,
                 self.tool_call_id,
                 content,
@@ -481,6 +481,7 @@ def _run_in_sandbox(
     yield_time: float | None = None,
     stdin_mode: str = "none",
     network: bool = False,
+    sandbox_mode: str = "restricted",
 ) -> ExecuteResponse:
     """在持久沙箱里为一条命令启动新的 shell。
 
@@ -499,11 +500,7 @@ def _run_in_sandbox(
     thread_id = execution_thread_id()
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
-    # Prefer the ContextVar emitter; only fall back to the pool's root-run emitter
-    # when the active thread_id matches it so SubAgent output never leaks to root TUI.
     emit = get_output_emitter()
-    if emit is None and getattr(pool, "output_emitter_thread_id", None) == thread_id:
-        emit = getattr(pool, "output_emitter", None)
     try:
         handle = sandbox.start_command(command, stdin_mode=mode)
     except SandboxLostError as exc:
@@ -530,6 +527,7 @@ def _run_in_sandbox(
         deadline=time.monotonic() + timeout if timeout is not None else None,
         network=network,
         tool_call_id=tool_call_id,
+        sandbox_mode=sandbox_mode,
         emit=emit,
         cancel_context=ctx,
     )

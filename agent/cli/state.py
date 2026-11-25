@@ -668,8 +668,12 @@ class CliState:
         self.active_block = block
         return block
 
-    def restore_executions(self, registry: Any | None, thread_id: str) -> None:
-        """Reconcile restored execute cards against live ExecutionRegistry state."""
+    def restore_executions(
+        self,
+        snapshots: dict[str, dict[str, Any]] | None,
+        thread_id: str,
+    ) -> None:
+        """Reconcile restored execute cards against owned execution snapshots."""
         self.session_id = thread_id
         for block in self.blocks:
             if not isinstance(block, ToolBlock) or block.name != "execute":
@@ -683,9 +687,8 @@ class CliState:
             already_terminal = artifact.get("running") is False and block.status in {"completed", "error"}
             if already_terminal:
                 continue
-            session = registry.get(execution_id) if registry is not None else None
-            if session is not None and session.owns(thread_id):
-                snap = session.restore_snapshot()
+            snap = snapshots.get(execution_id) if isinstance(snapshots, dict) else None
+            if snap is not None:
                 if snap["running"]:
                     block.artifact = {**artifact, **snap["artifact"], "running": True}
                     block.status = "running"

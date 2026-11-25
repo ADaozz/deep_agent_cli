@@ -709,6 +709,12 @@ class AgentRunner:
         """本 Runner 跨会话复用的持久沙箱。"""
         return self.prepared.sandbox_pool
 
+    def execution_snapshots(self, thread_id: str | None = None) -> dict[str, dict[str, Any]]:
+        """Read-only snapshots of active or unconsumed executions owned by ``thread_id``."""
+        owner = self.thread_id if thread_id is None else thread_id
+        fn = getattr(self.prepared.backend, "execution_snapshots", None)
+        return fn(owner) if callable(fn) and owner else {}
+
     def _end_sandbox_session(self, reason: str) -> None:
         pool = self.sandbox_pool
         if pool is not None:
@@ -1465,10 +1471,6 @@ class AgentRunner:
             ))
 
         set_output_emitter(emit_tool_output_event)
-        backend = bubblewrap_backend(self.prepared.backend)
-        if backend is not None:
-            backend.pool.output_emitter = emit_tool_output_event
-            backend.pool.output_emitter_thread_id = origin_thread_id
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         environment_token = set_environment_cache(self._environment)
@@ -1544,10 +1546,6 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
-            backend = bubblewrap_backend(self.prepared.backend)
-            if backend is not None:
-                backend.pool.output_emitter = None
-                backend.pool.output_emitter_thread_id = None
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)

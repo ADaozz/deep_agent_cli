@@ -25,7 +25,7 @@ def _host(tmp_path: Path, **kwargs) -> HostCommandBackend:
 
 def test_execute_streams_chunks_before_exit(tmp_path: Path) -> None:
     chunks: list[str] = []
-    set_output_emitter(lambda _id, text, _stream: chunks.append(text))
+    set_output_emitter(lambda _id, text, _stream, **_kw: chunks.append(text))
     ctx = ToolCancelContext(tool_name="execute", tool_call_id="t1", cancel_event=threading.Event())
     set_cancel_context(ctx)
     try:
@@ -86,7 +86,7 @@ def test_post_exit_output_resets_idle_grace(tmp_path: Path) -> None:
 
 def test_unicode_split_across_chunks(tmp_path: Path) -> None:
     chunks: list[str] = []
-    set_output_emitter(lambda _id, text, _stream: chunks.append(text))
+    set_output_emitter(lambda _id, text, _stream, **_kw: chunks.append(text))
     # Write a multi-byte UTF-8 character in two writes via python.
     script = (
         "import sys; "
@@ -109,7 +109,7 @@ def test_unicode_split_across_chunks(tmp_path: Path) -> None:
 
 def test_truncated_rolling_tail_never_splits_utf8_characters(tmp_path: Path) -> None:
     chunks: list[tuple[str, str]] = []
-    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
+    set_output_emitter(lambda _id, text, stream, **_kw: chunks.append((stream, text)))
     # 4800 bytes of 3-byte CJK characters under a 50-byte cap: the window trim
     # lands mid-character at the head, and pipe chunk boundaries split them.
     script = "import sys; sys.stdout.buffer.write(b'\\xe4\\xb8\\xad' * 1600)"
@@ -136,7 +136,7 @@ def test_truncation_keeps_draining(tmp_path: Path) -> None:
 
 def test_truncation_also_caps_streamed_output(tmp_path: Path) -> None:
     chunks: list[tuple[str, str]] = []
-    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
+    set_output_emitter(lambda _id, text, stream, **_kw: chunks.append((stream, text)))
     try:
         result = _host(tmp_path, max_output_bytes=16).execute("printf '%020000d' 0")
     finally:
@@ -163,7 +163,7 @@ def test_short_and_exact_limit_output_do_not_create_log(tmp_path: Path) -> None:
 
 def test_truncated_result_has_tail_and_complete_workspace_log(tmp_path: Path) -> None:
     chunks: list[tuple[str, str]] = []
-    set_output_emitter(lambda _id, text, stream: chunks.append((stream, text)))
+    set_output_emitter(lambda _id, text, stream, **_kw: chunks.append((stream, text)))
     try:
         backend = _host(tmp_path, max_output_bytes=8)
         result = backend.execute("printf ABCD; sleep 0.05; printf efgh >&2; sleep 0.05; printf 1234")
@@ -206,7 +206,7 @@ def test_truncated_process_keeps_cli_tail_live_after_limit(tmp_path: Path) -> No
     ))
     snapshots: list[str] = []
 
-    def on_output(tool_call_id: str, content: str, stream: str) -> None:
+    def on_output(tool_call_id: str, content: str, stream: str, **_kw) -> None:
         state.apply(RunEvent(
             type="tool_output_delta", tool_call_id=tool_call_id,
             content=content, stream=stream,
@@ -297,7 +297,7 @@ def test_cancel_drains_already_produced_pipe_output(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(subprocess, "Popen", prefilled_process)
 
-    def emit(_id: str, text: str, _stream: str) -> None:
+    def emit(_id: str, text: str, _stream: str, **_kw) -> None:
         chunks.append(text)
         if "PREFIX" in "".join(chunks):
             controller.cancel()

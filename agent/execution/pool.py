@@ -455,10 +455,6 @@ class SandboxPool:
         self._lock = threading.RLock()
         self._sandboxes: dict[bool, PersistentSandbox] = {}
         self.executions = ExecutionRegistry()
-        # Set by Runner for the active root run so background pumps outlive ContextVar
-        # without leaking into SubAgent threads.
-        self.output_emitter: Callable[..., None] | None = None
-        self.output_emitter_thread_id: str | None = None
         _POOLS.add(self)
 
     def sandbox(self, network: bool) -> PersistentSandbox | None:

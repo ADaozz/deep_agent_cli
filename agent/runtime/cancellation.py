@@ -4,15 +4,26 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-import inspect
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 
 CancelCallback = Callable[[], None]
-# tool_call_id, content, stream, optional structured result / name for RunEvent.
-ToolOutputEmitter = Callable[..., None]
+
+
+class ToolOutputEmitter(Protocol):
+    def __call__(
+        self,
+        tool_call_id: str,
+        content: str = "",
+        stream: str = "merged",
+        *,
+        result: Any = None,
+        name: str = "",
+        thread_id: str = "",
+        execution_id: str = "",
+    ) -> None: ...
 
 
 @dataclass
@@ -91,7 +102,7 @@ def get_output_emitter() -> ToolOutputEmitter | None:
     return _OUTPUT_EMITTER.get()
 
 
-def invoke_output_emitter(
+def emit_output_with(
     emitter: ToolOutputEmitter | None,
     tool_call_id: str,
     content: str = "",
@@ -106,22 +117,15 @@ def invoke_output_emitter(
         return
     if not content and result is None:
         return
-    extra = {
-        "result": result,
-        "name": name,
-        "thread_id": thread_id,
-        "execution_id": execution_id,
-    }
-    try:
-        params = inspect.signature(emitter).parameters
-    except (TypeError, ValueError):
-        emitter(tool_call_id, content, stream)
-        return
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        emitter(tool_call_id, content, stream, **extra)
-        return
-    accepted = {key: value for key, value in extra.items() if key in params}
-    emitter(tool_call_id, content, stream, **accepted)
+    emitter(
+        tool_call_id,
+        content,
+        stream,
+        result=result,
+        name=name,
+        thread_id=thread_id,
+        execution_id=execution_id,
+    )
 
 
 def emit_tool_output(
@@ -134,7 +138,7 @@ def emit_tool_output(
     thread_id: str = "",
     execution_id: str = "",
 ) -> None:
-    invoke_output_emitter(
+    emit_output_with(
         get_output_emitter(),
         tool_call_id,
         content,

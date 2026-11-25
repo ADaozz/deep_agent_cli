@@ -18,10 +18,11 @@ from agent.bootstrap.factory import create_agent
 from agent.cli.state import CliState, ToolBlock
 from agent.execution.backend import select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
-from agent.execution.lifecycle import ExecutionRegistry, write_stdin_is_side_effect
+from agent.execution.lifecycle import ExecutionRegistry
 from agent.execution.ownership import reset_execution_thread_id, set_execution_thread_id
 from agent.execution.policy import SandboxConfig
 from agent.execution.pool import StdinWriteUncertainError
+from agent.execution.ports import supports_interactive_execution
 from agent.execution.types import SandboxUnavailableError
 from agent.models.profile import ModelProfile
 from agent.runtime.approval.rules import static_rule
@@ -37,8 +38,8 @@ from agent.runtime.runner import AgentRunner
 from agent.sessions.store import SessionStore
 from agent.sessions.transcript import messages_to_transcript, settle_restored_tools
 from agent.subagents.configuration import SubAgentConfig
-from agent.tools.catalog import WRITE_STDIN_TOOL, node_tools
-from agent.tools.execute import build_execute_tool, build_write_stdin_tool, lookup_execution_network
+from agent.tools.catalog import WRITE_STDIN_TOOL, node_tools, write_stdin_is_side_effect
+from agent.tools.execute import build_execute_tool, build_write_stdin_tool
 from tests.conftest import ScriptedToolModel, scripted_model
 
 
@@ -800,7 +801,17 @@ def test_write_stdin_approval_shared_semantics(backend: WorkspaceCompositeBacken
     write = build_write_stdin_tool(backend)
     _content, artifact = execute.func(command="sleep 10", network=False, yield_time=0.2)
     execution_id = str(artifact["execution_id"])
-    assert lookup_execution_network(backend, execution_id) is False
+    info = backend.execution_info(execution_id)
+    assert info is not None and info["network"] is False and info["sandbox_mode"] == "restricted"
+    # Cross-session query through Backend must NOT leak another session's execution info.
+    assert backend.execution_info(execution_id, thread_id="unrelated-session") is None
+    assert static_rule(
+        {"name": "write_stdin", "args": {"execution_id": execution_id, "chars": "x\n"}},
+        gated=ask_interrupt_on(),
+        backend=backend,
+        sandbox_mode="restricted",
+        thread_id="unrelated-session",
+    ) is None
     allowed = static_rule(
         {"name": "write_stdin", "args": {"execution_id": execution_id, "chars": "x\n"}},
         gated=ask_interrupt_on(),
@@ -808,6 +819,13 @@ def test_write_stdin_approval_shared_semantics(backend: WorkspaceCompositeBacken
         sandbox_mode="restricted",
     )
     assert allowed is not None and allowed.decision == "allow"
+    # Sandbox mode change from restricted -> full-access revokes auto-allow on old execution.
+    assert static_rule(
+        {"name": "write_stdin", "args": {"execution_id": execution_id, "chars": "x\n"}},
+        gated=ask_interrupt_on(),
+        backend=backend,
+        sandbox_mode="full-access",
+    ) is None
     _out, cancel_art = write.func(execution_id=execution_id, chars="", yield_time=2.0, action="cancel")
     assert cancel_art["exit_code"] == 130
 
@@ -1031,10 +1049,10 @@ def test_session_switch_isolates_background_output_and_restores_state(
         assert "ONLY-IN-SESSION-A" not in card_b.output
         assert [b.tool_call_id for b in state.blocks if isinstance(b, ToolBlock)] == ["call-sess-b"]
 
-        # Switch back to Session A and reconcile against live ExecutionRegistry.
+        # Switch back to Session A and reconcile against owned execution snapshots.
         snap_a = runner.switch_session(session_a)
         state.load_transcript(snap_a.transcript)
-        state.restore_executions(backend.executor.pool.executions, session_a)
+        state.restore_executions(runner.execution_snapshots(session_a), session_a)
         restored_a = next(
             b for b in state.blocks if isinstance(b, ToolBlock) and b.tool_call_id == "call-sess-a"
         )
@@ -1055,3 +1073,56 @@ def test_session_switch_isolates_background_output_and_restores_state(
     finally:
         runner.close()
         store.close()
+
+
+def test_custom_backend_capability_and_pool_turn_isolation(
+    backend: WorkspaceCompositeBackend, tmp_path: Path,
+) -> None:
+    from deepagents.backends import FilesystemBackend
+    from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
+
+    class CustomSyncBackend(FilesystemBackend, SandboxBackendProtocol):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root_dir=root, virtual_mode=True)
+
+        @property
+        def id(self) -> str:
+            return "custom-sync"
+
+        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+            return ExecuteResponse(output=f"sync:{command}:{timeout}", exit_code=0, truncated=False)
+
+    custom = CustomSyncBackend(tmp_path)
+    assert supports_interactive_execution(custom) is False
+    assert supports_interactive_execution(backend) is True
+
+    prepared = create_agent(
+        model=scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "name": "execute",
+                "id": "custom-1",
+                "args": {"command": "echo hi", "timeout": 5},
+            }]),
+            AIMessage(content="done"),
+        ]),
+        backend=custom,
+        skills=[],
+        permission_mode=PermissionMode.ASK,
+    )
+    assert "execute" in prepared.exposed_tool_names
+    assert "write_stdin" not in prepared.exposed_tool_names
+
+    custom_exec = build_execute_tool(custom)
+    schema_props = custom_exec.args_schema.model_json_schema().get("properties", {})
+    assert set(schema_props) == {"command", "timeout", "network"}
+    assert "yield_time" not in custom_exec.description
+    assert "write_stdin" not in custom_exec.description
+    out, art = custom_exec.func(command="echo ok", timeout=3)
+    assert out == "sync:echo ok:3" and art["exit_code"] == 0 and art["running"] is False
+    with pytest.raises(ValueError, match="interactive execution"):
+        build_write_stdin_tool(custom)
+
+    # SandboxPool must not hold temporary per-turn emitter attributes.
+    pool = backend.executor.pool
+    assert not hasattr(pool, "output_emitter")
+    assert not hasattr(pool, "output_emitter_thread_id")

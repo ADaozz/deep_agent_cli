@@ -24,8 +24,7 @@ from agent.execution.process import (
 from agent.runtime.cancellation import (
     ToolCancelContext,
     ToolOutputEmitter,
-    get_output_emitter,
-    invoke_output_emitter,
+    emit_output_with,
 )
 
 
@@ -40,14 +39,6 @@ def format_running_content(output: str, execution_id: str) -> str:
     return f"{body}\n\n[running execution_id={execution_id}]"
 
 
-def write_stdin_is_side_effect(args: dict[str, Any] | None) -> bool:
-    """Shared Ask/Auto predicate: empty write polls are not side effects."""
-    payload = args or {}
-    action = str(payload.get("action") or "write")
-    chars = str(payload.get("chars") or "")
-    return not (action == "write" and chars == "")
-
-
 @dataclass
 class CommandSession:
     """One RemoteCommand with a single pump-owned event loop and terminal state."""
@@ -60,9 +51,11 @@ class CommandSession:
     deadline: float | None
     network: bool
     tool_call_id: str
+    sandbox_mode: str = "restricted"
     emit: ToolOutputEmitter | None = None
     cancel_context: ToolCancelContext | None = field(default=None, repr=False)
     _execution_id: str = field(init=False, default="")
+    _stdin_mode: str = field(init=False, default="none")
     _cv: threading.Condition = field(default_factory=threading.Condition, repr=False)
     _done: bool = False
     _exit_code: int | None = None
@@ -84,12 +77,17 @@ class CommandSession:
         if self.handle is None:
             raise ValueError("CommandSession requires an active RemoteCommand handle")
         self._execution_id = self.handle.execution_id
+        self._stdin_mode = self.handle.stdin_mode
         if self.cancel_context is not None:
             self.cancel_context.register_process(self)
 
     @property
     def execution_id(self) -> str:
         return self._execution_id
+
+    @property
+    def stdin_mode(self) -> str:
+        return self._stdin_mode
 
     @property
     def is_done(self) -> bool:
@@ -117,8 +115,6 @@ class CommandSession:
             self._registry = registry
         if self._pump is not None:
             return
-        if self.emit is None:
-            self.emit = get_output_emitter()
         self._pump = threading.Thread(
             target=self._pump_loop, name=f"exec-pump-{self.execution_id}", daemon=True,
         )
@@ -150,7 +146,7 @@ class CommandSession:
             pump.join(timeout=timeout)
 
     def _emit_output(self, content: str = "", *, stream: str, result: Any = None) -> None:
-        invoke_output_emitter(
+        emit_output_with(
             self.emit,
             self.tool_call_id,
             content,
@@ -361,6 +357,20 @@ class CommandSession:
             self._result_consumed = True
         if self._registry is not None:
             self._registry.discard(self.execution_id)
+
+    def execution_metadata(self) -> dict[str, Any]:
+        """Unified execution state metadata from CommandSession (running or terminal)."""
+        with self._cv:
+            if self._done:
+                return self._compute_terminal_locked()
+            meta = self.collector.log_metadata()
+            return {
+                "execution_id": self.execution_id,
+                "running": True,
+                "exit_code": None,
+                "termination_reason": None,
+                **meta,
+            }
 
     def restore_snapshot(self) -> dict[str, Any]:
         """Read-only state snapshot for TUI session restore (never consumes unread output)."""

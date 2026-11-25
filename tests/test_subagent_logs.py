@@ -211,7 +211,7 @@ def test_runtime_logs_operations_without_model_trace_or_raw_tool_output(tmp_path
     )
     parent_output = []
     previous = get_output_emitter()
-    set_output_emitter(lambda *args: parent_output.append(args))
+    set_output_emitter(lambda *args, **_kw: parent_output.append(args))
     try:
         result = runtime.invoke({'messages': [HumanMessage(content='Fix stats_rules.py')]},
                                 {'configurable': {'thread_id': 'parent'}})

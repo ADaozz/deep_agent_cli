@@ -59,6 +59,7 @@ from agent.tools.catalog import (
 )
 from agent.execution.backend import BackendSelection, sandbox_pool_of, select_backend
 from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.ports import supports_interactive_execution
 from agent.execution.types import ExecutionMode, SKILLS_ROOT
 from agent.execution.pool import SandboxPool
 from agent.tools.execute import build_execute_tool, build_write_stdin_tool
@@ -241,7 +242,7 @@ def build_agent(
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     if supports_execute and "execute" in allowed:
         tools.append(build_execute_tool(fs_backend, permission=permission))
-        if "write_stdin" in allowed:
+        if supports_interactive_execution(fs_backend) and "write_stdin" in allowed:
             tools.append(build_write_stdin_tool(fs_backend))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None

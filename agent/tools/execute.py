@@ -9,12 +9,13 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.execution.network import reset_execute_network, set_execute_network
+from agent.execution.ports import supports_interactive_execution
 
 if TYPE_CHECKING:
     from agent.runtime.permissions import PermissionMode
 
 
-_COMMON = (
+_SYNC_COMMON = (
     "Execute a shell command in the sandbox working directory ({workspace_root}). "
     "Each call starts a new shell. Working-directory changes and shell variables do not persist between calls. "
     "The sandbox environment is reused for the session. Files in /tmp and /home, and background processes, "
@@ -23,8 +24,10 @@ _COMMON = (
     "except the agent install and configuration directories. "
     "Networked and offline commands run in separate sandboxes that share the workspace ({workspace_root}) "
     "and declared extra mounts. Commands that depend on each other's /tmp files or background processes "
-    "must use the same network value. "
-    "Use yield_time to return control while a process is running. "
+    "must use the same network value."
+)
+_INTERACTIVE_GUIDANCE = (
+    " Use yield_time to return control while a process is running. "
     "Enable interactive when stdin is required. "
     "Enable tty only for programs that require a terminal. "
     "Use write_stdin to interact with an active execution."
@@ -55,7 +58,10 @@ _SEARCH_UNAVAILABLE = (
 
 
 def _execute_description(
-    *, permission: PermissionMode, workspace_root: str = "/workspace",
+    *,
+    permission: PermissionMode,
+    workspace_root: str = "/workspace",
+    interactive_capable: bool = True,
 ) -> str:
     from agent.runtime.permissions import PermissionMode
     from agent.execution.ripgrep import resolve_rg
@@ -67,7 +73,8 @@ def _execute_description(
     else:
         policy = _ASK_POLICY
     guidance = _SEARCH_GUIDANCE if resolve_rg() else _SEARCH_UNAVAILABLE
-    return (_COMMON + policy + guidance).replace("{workspace_root}", workspace_root)
+    common = _SYNC_COMMON + (_INTERACTIVE_GUIDANCE if interactive_capable else "")
+    return (common + policy + guidance).replace("{workspace_root}", workspace_root)
 
 
 def _stdin_mode(*, interactive: bool, tty: bool) -> str:
@@ -92,14 +99,6 @@ def _artifact_from_response(response) -> dict[str, object]:
     }
 
 
-def _execution_pool(backend: SandboxBackendProtocol):
-    executor = getattr(backend, "executor", backend)
-    pool = getattr(executor, "pool", None)
-    if pool is None:
-        raise RuntimeError("write_stdin requires a sandboxed execution pool")
-    return pool
-
-
 def build_execute_tool(
     backend: SandboxBackendProtocol,
     *,
@@ -116,8 +115,9 @@ def build_execute_tool(
     if permission is None:
         permission = PermissionMode.ASK
     network_by_default = permission is PermissionMode.ALLOW
+    interactive_capable = supports_interactive_execution(backend)
 
-    def execute(
+    def execute_interactive(
         command: Annotated[str, Field(description="Shell command to run.")],
         timeout: Annotated[int | None, Field(description="Timeout in seconds for the whole process lifetime. Overrides sandbox.timeout_seconds when set.")] = None,
         network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
@@ -128,33 +128,46 @@ def build_execute_tool(
         token = set_execute_network(network or network_by_default)
         mode = _stdin_mode(interactive=interactive, tty=tty)
         try:
-            if yield_time is not None or mode != "none":
-                response = backend.execute(
-                    command,
-                    timeout=timeout,
-                    yield_time=yield_time,
-                    stdin_mode=mode,
-                )
-            else:
-                response = backend.execute(command, timeout=timeout)
+            response = backend.execute(  # type: ignore[call-arg]
+                command,
+                timeout=timeout,
+                yield_time=yield_time,
+                stdin_mode=mode,
+            )
+        finally:
+            reset_execute_network(token)
+        output = response.output or ""
+        return output, _artifact_from_response(response)
+
+    def execute_sync(
+        command: Annotated[str, Field(description="Shell command to run.")],
+        timeout: Annotated[int | None, Field(description="Timeout in seconds for the whole process lifetime. Overrides sandbox.timeout_seconds when set.")] = None,
+        network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
+    ) -> tuple[str, dict[str, object]]:
+        token = set_execute_network(network or network_by_default)
+        try:
+            response = backend.execute(command, timeout=timeout)
         finally:
             reset_execute_network(token)
         output = response.output or ""
         return output, _artifact_from_response(response)
 
     return StructuredTool.from_function(
-        func=execute,
+        func=execute_interactive if interactive_capable else execute_sync,
         name="execute",
         response_format="content_and_artifact",
         description=_execute_description(
             permission=permission,
             workspace_root=getattr(backend, "workspace_root", "/workspace"),
+            interactive_capable=interactive_capable,
         ),
     )
 
 
 def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
     """Interact with a yielded execution owned by the current session/agent."""
+    if not supports_interactive_execution(backend):
+        raise ValueError("Backend does not support interactive execution")
 
     def write_stdin(
         execution_id: Annotated[str, Field(description="Active execution id returned by execute.")],
@@ -165,38 +178,51 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             Field(description="write input, close PIPE stdin, or cancel the execution."),
         ] = "write",
     ) -> tuple[str, dict[str, object]]:
-        from agent.execution.lifecycle import interact
         from agent.execution.pool import StdinWriteUncertainError
 
         if yield_time < 0:
             raise ValueError("yield_time must be non-negative")
         if action in {"close", "cancel"} and chars:
             raise ValueError(f"{action} cannot include chars")
-        registry = _execution_pool(backend).executions
-        live = registry.require(execution_id)
+        write_fn = getattr(backend, "write_stdin")
+        meta_fn = getattr(backend, "execution_metadata", None)
         try:
-            response = interact(live, chars=chars, yield_time=yield_time, action=action)
+            response = write_fn(
+                execution_id, chars=chars, yield_time=yield_time, action=action,
+            )
+        except (KeyError, PermissionError):
+            raise
         except StdinWriteUncertainError as exc:
+            meta = (meta_fn(execution_id) if callable(meta_fn) else None) or {
+                "execution_id": execution_id,
+                "running": False,
+                "exit_code": None,
+                "termination_reason": None,
+                "truncated": False,
+                "host_log_path": None,
+                "agent_log_path": None,
+                "log_error": None,
+                "max_output_bytes": None,
+            }
             return (
-                f"Uncertain stdin write outcome: {exc}",
-                {
-                    "exit_code": None,
-                    "truncated": False,
-                    "execution_id": execution_id,
-                    "running": not live.is_done,
-                    "termination_reason": "stdin_write_uncertain",
-                },
+                f"Error: Uncertain stdin write outcome: {exc}",
+                {**meta, "stdin_error": "uncertain"},
             )
         except (OSError, TimeoutError, ValueError) as exc:
+            meta = (meta_fn(execution_id) if callable(meta_fn) else None) or {
+                "execution_id": execution_id,
+                "running": False,
+                "exit_code": None,
+                "termination_reason": None,
+                "truncated": False,
+                "host_log_path": None,
+                "agent_log_path": None,
+                "log_error": None,
+                "max_output_bytes": None,
+            }
             return (
-                f"Error writing stdin: {exc}",
-                {
-                    "exit_code": None,
-                    "truncated": False,
-                    "execution_id": execution_id,
-                    "running": not live.is_done,
-                    "termination_reason": "stdin_error",
-                },
+                f"Error: Failed writing stdin: {exc}",
+                {**meta, "stdin_error": "error"},
             )
         output = response.output or ""
         return output, _artifact_from_response(response)
@@ -212,12 +238,3 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             "Never pass sensitive credentials through this tool."
         ),
     )
-
-
-def lookup_execution_network(backend: Any, execution_id: str) -> bool | None:
-    """Return the yielded execution's network flag, or None when unknown."""
-    try:
-        session = _execution_pool(backend).executions.get(execution_id)
-    except Exception:  # noqa: BLE001
-        return None
-    return None if session is None else bool(session.network)

@@ -8,7 +8,13 @@ from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.network import network_requested
 from agent.runtime.approval.policy import ALLOW, MANUAL
 from agent.runtime.approval.types import Decision
-from agent.tools.catalog import EXECUTE_TOOL, FILE_MUTATION_TOOLS, WEB_TOOLS, WRITE_STDIN_TOOL
+from agent.tools.catalog import (
+    EXECUTE_TOOL,
+    FILE_MUTATION_TOOLS,
+    WEB_TOOLS,
+    WRITE_STDIN_TOOL,
+    write_stdin_is_side_effect,
+)
 
 ALLOW_TRUSTED_MCP = Decision("allow", "受信任的 MCP 服务。")
 ALLOW_WORKSPACE = Decision("allow", "工作区内的文件变更。")
@@ -26,6 +32,7 @@ def static_rule(
     sandbox_mode: str | None,
     trusted: Collection[str] = (),
     custom: Collection[str] = (),
+    thread_id: str | None = None,
 ) -> Decision | None:
     """Return a final Decision, or None when Flash review is required.
 
@@ -46,15 +53,21 @@ def static_rule(
     if name == EXECUTE_TOOL:
         return ALLOW_SANDBOXED if sandbox_mode == "restricted" and not network_requested(args) else None
     if name == WRITE_STDIN_TOOL:
-        from agent.execution.lifecycle import write_stdin_is_side_effect
-        from agent.tools.execute import lookup_execution_network
-
         if not write_stdin_is_side_effect(args):
             return ALLOW  # output poll only
-        network = lookup_execution_network(backend, str(args.get("execution_id") or ""))
-        if network is None:
-            # Unknown id: treat as networked so Auto cannot skip Flash review.
-            network = True
-        return ALLOW_SANDBOXED if sandbox_mode == "restricted" and not network else None
+        query = getattr(backend, "execution_info", None)
+        execution_id = str(args.get("execution_id") or "")
+        info = query(execution_id, thread_id=thread_id) if callable(query) else None
+        if not isinstance(info, dict):
+            # Unknown or unowned execution_id: never auto-allow without review, and leak nothing.
+            return None
+        if (
+            sandbox_mode == "restricted"
+            and info.get("sandbox_mode") == "restricted"
+            and not info.get("network", True)
+            and info.get("running", False)
+        ):
+            return ALLOW_SANDBOXED
+        return None
     # Untrusted host MCP tools and MCP server changes take effect outside the sandbox.
     return MANUAL

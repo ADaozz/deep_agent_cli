@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Literal
+from collections.abc import Iterable, Mapping
+from typing import Any, Literal
 
 EXECUTE_TOOL = "execute"
 WRITE_STDIN_TOOL = "write_stdin"
@@ -131,6 +131,14 @@ def is_exploration_tool(name: str) -> bool:
 
 def is_side_effect_tool(name: str) -> bool:
     return name in SIDE_EFFECT_TOOLS
+
+
+def write_stdin_is_side_effect(args: Mapping[str, Any] | None) -> bool:
+    """Shared Ask/Auto predicate: empty write polls are not side effects."""
+    payload = args or {}
+    action = str(payload.get("action") or "write")
+    chars = str(payload.get("chars") or "")
+    return not (action == "write" and chars == "")
 
 
 def tool_preview_group(name: str) -> str:

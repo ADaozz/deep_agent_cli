@@ -43,7 +43,7 @@ from agent.execution.layout import (
     sandbox_config_dir,
     sandbox_environment,
 )
-from agent.execution.ports import ManagedExecutor
+from agent.execution.ports import ManagedExecutor, supports_interactive_execution
 
 
 LOG = logging.getLogger(__name__)
@@ -888,6 +888,10 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     def id(self) -> str:
         return self.executor.id
 
+    @property
+    def supports_interactive_execution(self) -> bool:
+        return supports_interactive_execution(self.executor)
+
     def execute(
         self,
         command: str,
@@ -896,9 +900,13 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         yield_time: float | None = None,
         stdin_mode: str = "none",
     ) -> ExecuteResponse:
-        return self.executor.execute(
-            command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
-        )
+        if self.supports_interactive_execution:
+            return self.executor.execute(  # type: ignore[call-arg]
+                command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+            )
+        if yield_time is not None or stdin_mode != "none":
+            raise NotImplementedError("Executor does not support interactive execution")
+        return self.executor.execute(command, timeout=timeout)
 
     async def aexecute(
         self,
@@ -908,6 +916,66 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         yield_time: float | None = None,
         stdin_mode: str = "none",
     ) -> ExecuteResponse:
-        return await self.executor.aexecute(
-            command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+        if self.supports_interactive_execution:
+            return await self.executor.aexecute(  # type: ignore[call-arg]
+                command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+            )
+        if yield_time is not None or stdin_mode != "none":
+            raise NotImplementedError("Executor does not support interactive execution")
+        return await self.executor.aexecute(command, timeout=timeout)
+
+    def write_stdin(
+        self,
+        execution_id: str,
+        *,
+        chars: str = "",
+        yield_time: float = 1.0,
+        action: str = "write",
+        write_timeout: float = 15.0,
+        thread_id: str | None = None,
+    ) -> ExecuteResponse:
+        fn = getattr(self.executor, "write_stdin", None)
+        if not callable(fn):
+            raise NotImplementedError("Executor does not support write_stdin")
+        return fn(
+            execution_id,
+            chars=chars,
+            yield_time=yield_time,
+            action=action,
+            write_timeout=write_timeout,
+            thread_id=thread_id,
         )
+
+    def execution_info(
+        self,
+        execution_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, object] | None:
+        fn = getattr(self.executor, "execution_info", None)
+        if not callable(fn):
+            return None
+        return fn(execution_id, thread_id=thread_id)
+
+    def execution_metadata(
+        self,
+        execution_id: str,
+        *,
+        thread_id: str | None = None,
+    ) -> dict[str, object] | None:
+        fn = getattr(self.executor, "execution_metadata", None)
+        if not callable(fn):
+            return None
+        return fn(execution_id, thread_id=thread_id)
+
+    def execution_snapshots(self, thread_id: str) -> dict[str, dict[str, object]]:
+        fn = getattr(self.executor, "execution_snapshots", None)
+        if not callable(fn):
+            return {}
+        return fn(thread_id)
+
+    def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int:
+        fn = getattr(self.executor, "cleanup_executions", None)
+        if not callable(fn):
+            return 0
+        return fn(thread_id, join_timeout=join_timeout)

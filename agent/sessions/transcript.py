@@ -87,6 +87,14 @@ def classify_tool_result(
         ):
             return "failed"
         return "success"
+    if name == "write_stdin":
+        if status == "error" or payload.get("stdin_error") or text.lstrip().startswith("error:"):
+            if termination == "cancelled" or "cancelled by user" in text:
+                return "cancelled"
+            return "failed"
+        if payload.get("execution_id"):
+            # Tool Call Outcome: write_stdin succeeded regardless of command output/exit_code.
+            return "success"
     if termination == "cancelled" or "cancelled by user" in text:
         return "cancelled"
     if status == "error" or text.lstrip().startswith("error:"):
@@ -160,8 +168,7 @@ def messages_to_transcript(
             if getattr(message, "name", None) == "write_stdin":
                 if isinstance(artifact, dict) and artifact.get("execution_id"):
                     owner = executions.get(str(artifact["execution_id"]))
-                    reason = artifact.get("termination_reason")
-                    if owner is not None and reason not in {"stdin_error", "stdin_write_uncertain"}:
+                    if owner is not None and not artifact.get("stdin_error") and not tool_message_is_error(message):
                         existing = owner.artifact if isinstance(owner.artifact, dict) else {}
                         merged = {**existing, **artifact}
                         if artifact.get("running") is False:

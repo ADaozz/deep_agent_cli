@@ -176,7 +176,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
     def _sandbox_config(self):
         return getattr(getattr(self.backend, "executor", None), "config", None) or self.spec.sandbox
 
-    def rule(self, call):
+    def rule(self, call, *, thread_id: str | None = None):
         return static_rule(
             call,
             gated=self.gated,
@@ -184,6 +184,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             sandbox_mode=getattr(self._sandbox_config(), "mode", None),
             trusted=self.trusted,
             custom=self.custom,
+            thread_id=thread_id,
         )
 
     def _policy(self):
@@ -228,7 +229,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             if cached is not None:
                 decisions[call_id] = cached
                 continue
-            decision = MANUAL if self.ask_only else self.rule(call)
+            decision = MANUAL if self.ask_only else self.rule(call, thread_id=thread)
             if decision is None:
                 evidence = self.evidence(state, call, environment)
                 if evidence:
@@ -293,7 +294,7 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
             )
         elif self.ask_only and decision.decision == "allow":
             reason = "已退回 Ask；请在当前权限模式下重新发起操作。"
-        elif decision in REVOCABLE and self.rule(call) != decision:
+        elif decision in REVOCABLE and self.rule(call, thread_id=thread) != decision:
             reason = _REVOKED
         else:
             interactive = call["name"] == "request_human_input" and call["name"] not in self.custom

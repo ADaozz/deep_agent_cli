@@ -664,7 +664,7 @@ def test_foreground_output_streams_until_shell_exit(backend) -> None:
     chunks = []
     ctx = ToolCancelContext("execute", "stream-worker", threading.Event())
     set_cancel_context(ctx)
-    set_output_emitter(lambda _id, text, _stream: chunks.append((time.monotonic(), text)))
+    set_output_emitter(lambda _id, text, _stream, **_kw: chunks.append((time.monotonic(), text)))
     try:
         result = run(backend, "for i in 1 2 3 4; do echo tick-$i; sleep 0.15; done")
         ended = time.monotonic()
