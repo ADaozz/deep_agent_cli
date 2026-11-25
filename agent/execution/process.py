@@ -18,7 +18,13 @@ import uuid
 
 from deepagents.backends.protocol import ExecuteResponse
 
-from agent.runtime.cancellation import ToolOutputEmitter, emit_tool_output, get_cancel_context, get_output_emitter
+from agent.runtime.cancellation import (
+    ToolOutputEmitter,
+    emit_tool_output,
+    get_cancel_context,
+    get_output_emitter,
+    invoke_output_emitter,
+)
 from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxPool
 from agent.execution.policy import sandbox_workspace_root
 from agent.execution.service_observation import OWNER_VARIABLE, begin_command, end_command
@@ -115,11 +121,15 @@ class _OutputCollector:
         max_output_bytes: int,
         workspace_root: Path,
         emit: ToolOutputEmitter | None = None,
+        execution_id: str = "",
+        thread_id: str = "",
     ) -> None:
         self.tool_call_id = tool_call_id
         self.max_output_bytes = max_output_bytes
         self.workspace_root = workspace_root
         self._emit = emit
+        self.execution_id = execution_id
+        self.thread_id = thread_id
         self.decoder: IncrementalDecoder = getincrementaldecoder("utf-8")(errors="replace")
         self.tail_bytes = bytearray()
         self.total_bytes = 0
@@ -135,9 +145,24 @@ class _OutputCollector:
         if not content:
             return
         if self._emit is not None:
-            self._emit(self.tool_call_id, content, stream, name="execute")
+            invoke_output_emitter(
+                self._emit,
+                self.tool_call_id,
+                content,
+                stream=stream,
+                name="execute",
+                thread_id=self.thread_id,
+                execution_id=self.execution_id,
+            )
         else:
-            emit_tool_output(self.tool_call_id, content, stream=stream, name="execute")
+            emit_tool_output(
+                self.tool_call_id,
+                content,
+                stream=stream,
+                name="execute",
+                thread_id=self.thread_id,
+                execution_id=self.execution_id,
+            )
 
     def _discard_log(self, exc: OSError) -> None:
         self.log_error = f"{type(exc).__name__}: {exc}"
@@ -163,8 +188,10 @@ class _OutputCollector:
             return
         with self._lock:
             max_output_bytes = self.max_output_bytes
-            already_truncated = self.truncated
-            if not already_truncated and self.total_bytes + len(raw) > max_output_bytes:
+            remaining = max(0, max_output_bytes - self.total_bytes)
+            accepted = raw[:remaining] if remaining > 0 else b""
+            overflow = raw[remaining:] if remaining < len(raw) else b""
+            if not self.truncated and self.total_bytes + len(raw) > max_output_bytes:
                 self.truncated = True
                 if self.log_fd is None and self.log_error is None:
                     try:
@@ -179,12 +206,18 @@ class _OutputCollector:
                 except OSError as exc:
                     self._discard_log(exc)
             # Always decode new bytes into the unread window, even after truncation.
-            text = self.decoder.decode(raw)
-            if text:
-                self._pending += text
-                self._bound_pending()
-                if not self.truncated:
-                    self._emit_output(text, stream="merged")
+            # Emit only the pre-truncation prefix on "merged" before switching to snapshots.
+            if accepted:
+                accepted_text = self.decoder.decode(accepted)
+                if accepted_text:
+                    self._pending += accepted_text
+                    self._bound_pending()
+                    self._emit_output(accepted_text, stream="merged")
+            if overflow:
+                overflow_text = self.decoder.decode(overflow)
+                if overflow_text:
+                    self._pending += overflow_text
+                    self._bound_pending()
             self.total_bytes += len(raw)
             self.tail_bytes.extend(raw)
             if len(self.tail_bytes) > max_output_bytes:
@@ -212,14 +245,44 @@ class _OutputCollector:
             self._pending = ""
             return text
 
-    def snapshot_meta(self) -> dict[str, Any]:
+    def tail_text(self) -> str:
+        """Return the bounded rolling tail decoded as UTF-8."""
         with self._lock:
-            return {
-                "truncated": self.truncated,
-                "max_output_bytes": self.max_output_bytes,
-                "pending_len": len(self._pending),
-                "total_bytes": self.total_bytes,
-            }
+            return bytes(self.tail_bytes).decode("utf-8", errors="replace") if self.tail_bytes else ""
+
+    def log_metadata(self) -> dict[str, Any]:
+        """Return unified truncation and log-path metadata without judging exit status."""
+        with self._lock:
+            truncated = self.truncated
+            log_error = self.log_error
+            log_name = self.log_name
+            max_output_bytes = self.max_output_bytes
+        host_log_path: str | None = None
+        agent_log_path: str | None = None
+        if truncated and log_error is None and log_name is not None:
+            relative_log_path = Path(".deep-agent/logs/exec") / log_name
+            host_log_path = str(self.workspace_root / relative_log_path)
+            agent_log_path = f"{sandbox_workspace_root(self.workspace_root)}/{relative_log_path.as_posix()}"
+        return {
+            "truncated": truncated,
+            "host_log_path": host_log_path,
+            "agent_log_path": agent_log_path,
+            "log_error": log_error,
+            "max_output_bytes": max_output_bytes,
+        }
+
+    def truncation_detail(self) -> str | None:
+        """Return the bounded truncation footer text when output was truncated."""
+        meta = self.log_metadata()
+        if not meta["truncated"]:
+            return None
+        detail = f"Output truncated: showing the last {meta['max_output_bytes']} bytes."
+        if meta["log_error"] is not None:
+            detail += f"\nFull output could not be saved: {meta['log_error']}"
+        elif meta["host_log_path"] is not None and meta["agent_log_path"] is not None:
+            detail += f"\nFull output saved to: {meta['host_log_path']}"
+            detail += f"\nAgent path: {meta['agent_log_path']}"
+        return detail
 
     def close(self) -> None:
         with self._lock:
@@ -234,74 +297,38 @@ class _OutputCollector:
                 os.close(self.log_directory_fd)
                 self.log_directory_fd = None
 
-    def response(
-        self,
-        *,
-        exit_code: int,
-        timeout: int | None,
-        cancelled: bool = False,
-        timed_out: bool = False,
-        failure: str | None = None,
-        unread_only: bool = False,
-        pending: str | None = None,
-    ) -> LocalExecuteResponse:
-        with self._lock:
-            max_output_bytes = self.max_output_bytes
-            truncated = self.truncated
-            if unread_only:
-                body = (pending if pending is not None else self._pending).rstrip()
-                if pending is None:
-                    self._pending = ""
-                output = body if body else "<no new output>"
-            else:
-                output = bytes(self.tail_bytes).decode("utf-8", errors="replace") if self.tail_bytes else ""
-            host_log_path: str | None = None
-            agent_log_path: str | None = None
-            log_error = self.log_error
-            log_name = self.log_name
-        if truncated:
-            detail = f"Output truncated: showing the last {max_output_bytes} bytes."
-            if log_error is not None:
-                detail += f"\nFull output could not be saved: {log_error}"
-            elif log_name is not None:
-                relative_log_path = Path(".deep-agent/logs/exec") / log_name
-                host_log_path = str(self.workspace_root / relative_log_path)
-                agent_log_path = f"{sandbox_workspace_root(self.workspace_root)}/{relative_log_path.as_posix()}"
-                detail += f"\nFull output saved to: {host_log_path}"
-                detail += f"\nAgent path: {agent_log_path}"
-            if not unread_only:
-                output = f"{output}\n\n[{detail}]"
 
-        result_metadata = {
-            "host_log_path": host_log_path,
-            "agent_log_path": agent_log_path,
-            "log_error": log_error,
-            "max_output_bytes": max_output_bytes,
-        }
-
-        if cancelled:
-            return LocalExecuteResponse(
-                f"{output.rstrip()}\n\nCancelled by user.".strip(), 130, truncated,
-                termination_reason="cancelled", **result_metadata,
-            )
-
-        if timed_out:
-            return LocalExecuteResponse(
-                f"{output.rstrip()}\n\nError: Command timed out after {timeout} seconds.".strip(),
-                124, truncated, termination_reason="timeout", **result_metadata,
-            )
-
-        if failure is not None:
-            return LocalExecuteResponse(
-                f"{output.rstrip()}\n\nError: {failure}".strip(), exit_code, truncated,
-                termination_reason="sandbox_lost", **result_metadata,
-            )
-
-        if not unread_only and not output:
-            output = "<no output>"
-        if exit_code:
-            output = f"{output.rstrip()}\n\nExit code: {exit_code}"
-        return LocalExecuteResponse(output, exit_code, truncated, **result_metadata)
+def format_terminal_output(
+    body: str,
+    *,
+    exit_code: int,
+    termination_reason: str | None,
+    timeout: int | None = None,
+    failure: str | None = None,
+    spawn_error: str | None = None,
+    unread_only: bool = False,
+    truncation_detail: str | None = None,
+) -> str:
+    """Format terminal output text from an already-decided exit_code and termination_reason."""
+    if termination_reason == "spawn_error":
+        return f"Error executing command ({spawn_error})"
+    if unread_only:
+        output = body.rstrip() if body.strip() else "<no new output>"
+    else:
+        output = body
+        if truncation_detail is not None:
+            output = f"{output}\n\n[{truncation_detail}]"
+    if termination_reason == "cancelled":
+        return f"{output.rstrip()}\n\nCancelled by user.".strip()
+    if termination_reason == "timeout":
+        return f"{output.rstrip()}\n\nError: Command timed out after {timeout} seconds.".strip()
+    if termination_reason == "sandbox_lost":
+        return f"{output.rstrip()}\n\nError: {failure}".strip()
+    if not unread_only and not output:
+        output = "<no output>"
+    if exit_code != 0:
+        output = f"{output.rstrip()}\n\nExit code: {exit_code}"
+    return output
 
 
 def _run_process(
@@ -417,9 +444,29 @@ def _run_process(
             ctx.clear_process()
         collector.close()
 
-    return collector.response(
-        exit_code=int(process.returncode or 0), timeout=timeout,
-        cancelled=cancelled or (ctx is not None and ctx.cancelled), timed_out=timed_out,
+    is_cancelled = cancelled or (ctx is not None and ctx.cancelled)
+    if is_cancelled:
+        exit_code, reason = 130, "cancelled"
+    elif timed_out:
+        exit_code, reason = 124, "timeout"
+    else:
+        exit_code, reason = int(process.returncode or 0), None
+    meta = collector.log_metadata()
+    output = format_terminal_output(
+        collector.tail_text(),
+        exit_code=exit_code,
+        termination_reason=reason,
+        timeout=timeout,
+        unread_only=False,
+        truncation_detail=collector.truncation_detail(),
+    )
+    return LocalExecuteResponse(
+        output, exit_code, meta["truncated"],
+        host_log_path=meta["host_log_path"],
+        agent_log_path=meta["agent_log_path"],
+        log_error=meta["log_error"],
+        termination_reason=reason,
+        max_output_bytes=meta["max_output_bytes"],
     )
 
 
@@ -449,38 +496,42 @@ def _run_in_sandbox(
     if yield_time is not None and yield_time < 0:
         raise ValueError(f"yield_time must be non-negative, got {yield_time}")
     mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+    thread_id = execution_thread_id()
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
-    # Prefer the ContextVar emitter; fall back to the pool's run-scoped emitter so
-    # tool workers that miss the ContextVar still publish, and pumps survive clear.
-    emit = get_output_emitter() or getattr(pool, "output_emitter", None)
+    # Prefer the ContextVar emitter; only fall back to the pool's root-run emitter
+    # when the active thread_id matches it so SubAgent output never leaks to root TUI.
+    emit = get_output_emitter()
+    if emit is None and getattr(pool, "output_emitter_thread_id", None) == thread_id:
+        emit = getattr(pool, "output_emitter", None)
     try:
         handle = sandbox.start_command(command, stdin_mode=mode)
     except SandboxLostError as exc:
         pool.discard(sandbox, str(exc))
         return LocalExecuteResponse(
-            f"Error: sandbox is unavailable ({exc}). The command was not run.", 1, False,
+            f"Error: sandbox is unavailable ({exc}). The command was not run.", 125, False,
             termination_reason="sandbox_lost",
         )
-    if ctx is not None:
-        ctx.register_process(handle)
 
     collector = _OutputCollector(
         tool_call_id=tool_call_id,
         max_output_bytes=max_output_bytes,
         workspace_root=workspace,
         emit=emit,
+        execution_id=handle.execution_id,
+        thread_id=thread_id,
     )
     session = CommandSession(
         handle=handle,
         pool=pool,
         collector=collector,
-        thread_id=execution_thread_id(),
+        thread_id=thread_id,
         timeout=timeout,
         deadline=time.monotonic() + timeout if timeout is not None else None,
         network=network,
         tool_call_id=tool_call_id,
         emit=emit,
+        cancel_context=ctx,
     )
     pool.executions.register(session)
     yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
@@ -490,8 +541,7 @@ def _run_in_sandbox(
             session.mark_result_consumed()
         return response
     finally:
-        if ctx is not None:
-            ctx.clear_process()
+        session.detach_cancel_context()
 
 
 def _kill_process_group_pid(pid: int | None) -> None:

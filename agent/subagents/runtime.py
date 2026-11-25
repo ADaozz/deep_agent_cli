@@ -470,6 +470,12 @@ class SubAgentRuntime(Runnable):
             published = False
             return {"messages": [_task_message(content, status, run_id=run_id, result=content)]}
         finally:
+            pool = getattr(prepared, "sandbox_pool", None) if prepared is not None else None
+            if pool is not None:
+                try:
+                    pool.executions.cleanup_owner(run_id)
+                except Exception:
+                    LOG.exception("Subagent execution cleanup failed")
             if env_token is not None:
                 from agent.execution.environment import reset_environment_cache
                 try:

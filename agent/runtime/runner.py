@@ -1424,6 +1424,8 @@ class AgentRunner:
         self._seen_tool_calls.clear()
         run_control = self.control.begin_run()
 
+        origin_thread_id = self.thread_id
+
         def emit_tool_output_event(
             tool_call_id: str,
             content: str = "",
@@ -1431,15 +1433,34 @@ class AgentRunner:
             *,
             result: Any = None,
             name: str = "",
+            thread_id: str = "",
+            execution_id: str = "",
         ) -> None:
             # Close over this run's handler so background pumps can still publish
-            # after invoke clears ``self._event_handler``.
+            # after invoke clears ``self._event_handler``, while blocking output
+            # from leaking into a different session after a switch.
+            owner_thread = thread_id or origin_thread_id
+            if owner_thread and self.thread_id and owner_thread != self.thread_id:
+                return
+            payload = result
+            if isinstance(result, dict):
+                payload = dict(result)
+                if execution_id and not payload.get("execution_id"):
+                    payload["execution_id"] = execution_id
+                if owner_thread and not payload.get("thread_id"):
+                    payload["thread_id"] = owner_thread
+            elif result is None and (execution_id or owner_thread):
+                payload = {}
+                if execution_id:
+                    payload["execution_id"] = execution_id
+                if owner_thread:
+                    payload["thread_id"] = owner_thread
             _emit(event_handler, RunEvent(
                 type="tool_output_delta",
                 tool_call_id=tool_call_id,
                 content=content,
                 stream=stream,
-                result=result,
+                result=payload,
                 name=name or "execute",
             ))
 
@@ -1447,6 +1468,7 @@ class AgentRunner:
         backend = bubblewrap_backend(self.prepared.backend)
         if backend is not None:
             backend.pool.output_emitter = emit_tool_output_event
+            backend.pool.output_emitter_thread_id = origin_thread_id
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         environment_token = set_environment_cache(self._environment)
@@ -1525,6 +1547,7 @@ class AgentRunner:
             backend = bubblewrap_backend(self.prepared.backend)
             if backend is not None:
                 backend.pool.output_emitter = None
+                backend.pool.output_emitter_thread_id = None
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)
@@ -1651,24 +1674,6 @@ class AgentRunner:
         )
         _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
         return result
-
-    def _emit_tool_output(
-        self,
-        tool_call_id: str,
-        content: str = "",
-        stream: str = "merged",
-        *,
-        result: Any = None,
-        name: str = "",
-    ) -> None:
-        _emit(self._event_handler or self.on_event, RunEvent(
-            type="tool_output_delta",
-            tool_call_id=tool_call_id,
-            content=content,
-            stream=stream,
-            result=result,
-            name=name or "execute",
-        ))
 
     def _on_control_event(self, event_type: str, payload: dict[str, Any]) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+import inspect
 import threading
 from typing import Any, Callable
 from uuid import uuid4
@@ -39,12 +40,14 @@ class ToolCancelContext:
     def register_process(self, process: Any) -> None:
         with self._lock:
             self._process = process
-            if self.cancelled:
-                _kill_process_group(process)
+            cancelled = self.cancelled
+        if cancelled:
+            _kill_process_group(process)
 
-    def clear_process(self) -> None:
+    def clear_process(self, process: Any = None) -> None:
         with self._lock:
-            self._process = None
+            if process is None or self._process is process:
+                self._process = None
 
     def request_cancel(self) -> None:
         with self._lock:
@@ -88,6 +91,39 @@ def get_output_emitter() -> ToolOutputEmitter | None:
     return _OUTPUT_EMITTER.get()
 
 
+def invoke_output_emitter(
+    emitter: ToolOutputEmitter | None,
+    tool_call_id: str,
+    content: str = "",
+    *,
+    stream: str = "merged",
+    result: Any = None,
+    name: str = "",
+    thread_id: str = "",
+    execution_id: str = "",
+) -> None:
+    if emitter is None:
+        return
+    if not content and result is None:
+        return
+    extra = {
+        "result": result,
+        "name": name,
+        "thread_id": thread_id,
+        "execution_id": execution_id,
+    }
+    try:
+        params = inspect.signature(emitter).parameters
+    except (TypeError, ValueError):
+        emitter(tool_call_id, content, stream)
+        return
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        emitter(tool_call_id, content, stream, **extra)
+        return
+    accepted = {key: value for key, value in extra.items() if key in params}
+    emitter(tool_call_id, content, stream, **accepted)
+
+
 def emit_tool_output(
     tool_call_id: str,
     content: str = "",
@@ -95,13 +131,19 @@ def emit_tool_output(
     stream: str = "merged",
     result: Any = None,
     name: str = "",
+    thread_id: str = "",
+    execution_id: str = "",
 ) -> None:
-    emitter = get_output_emitter()
-    if emitter is None:
-        return
-    if not content and result is None:
-        return
-    emitter(tool_call_id, content, stream, result=result, name=name)
+    invoke_output_emitter(
+        get_output_emitter(),
+        tool_call_id,
+        content,
+        stream=stream,
+        result=result,
+        name=name,
+        thread_id=thread_id,
+        execution_id=execution_id,
+    )
 
 
 def _kill_process_group(process: Any) -> None:

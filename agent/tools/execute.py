@@ -126,25 +126,20 @@ def build_execute_tool(
         interactive: Annotated[bool, Field(description="Keep a writable stdin PIPE for write_stdin.")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)
+        mode = _stdin_mode(interactive=interactive, tty=tty)
         try:
-            response = backend.execute(
-                command,
-                timeout=timeout,
-                yield_time=yield_time,
-                stdin_mode=_stdin_mode(interactive=interactive, tty=tty),
-            )
+            if yield_time is not None or mode != "none":
+                response = backend.execute(
+                    command,
+                    timeout=timeout,
+                    yield_time=yield_time,
+                    stdin_mode=mode,
+                )
+            else:
+                response = backend.execute(command, timeout=timeout)
         finally:
             reset_execute_network(token)
         output = response.output or ""
-        running = bool(getattr(response, "running", False))
-        if not running and response.exit_code not in (0, None):
-            suffix = f"\n\nExit code: {response.exit_code}"
-            if suffix.strip() not in output:
-                output = f"{output.rstrip()}{suffix}"
-        if response.truncated:
-            marker = "\n\n[output truncated]"
-            if "[Output truncated: showing " not in output and marker not in output:
-                output = f"{output.rstrip()}{marker}"
         return output, _artifact_from_response(response)
 
     return StructuredTool.from_function(
@@ -171,6 +166,7 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
         ] = "write",
     ) -> tuple[str, dict[str, object]]:
         from agent.execution.lifecycle import interact
+        from agent.execution.pool import StdinWriteUncertainError
 
         if yield_time < 0:
             raise ValueError("yield_time must be non-negative")
@@ -180,6 +176,17 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
         live = registry.require(execution_id)
         try:
             response = interact(live, chars=chars, yield_time=yield_time, action=action)
+        except StdinWriteUncertainError as exc:
+            return (
+                f"Uncertain stdin write outcome: {exc}",
+                {
+                    "exit_code": None,
+                    "truncated": False,
+                    "execution_id": execution_id,
+                    "running": not live.is_done,
+                    "termination_reason": "stdin_write_uncertain",
+                },
+            )
         except (OSError, TimeoutError, ValueError) as exc:
             return (
                 f"Error writing stdin: {exc}",
@@ -187,15 +194,11 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
                     "exit_code": None,
                     "truncated": False,
                     "execution_id": execution_id,
-                    "running": True,
+                    "running": not live.is_done,
                     "termination_reason": "stdin_error",
                 },
             )
         output = response.output or ""
-        if not response.running and response.exit_code not in (0, None):
-            suffix = f"\n\nExit code: {response.exit_code}"
-            if suffix.strip() not in output:
-                output = f"{output.rstrip()}{suffix}"
         return output, _artifact_from_response(response)
 
     return StructuredTool.from_function(

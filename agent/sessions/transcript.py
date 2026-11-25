@@ -111,6 +111,7 @@ def messages_to_transcript(
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
     tools: dict[str, TranscriptBlock] = {}
+    executions: dict[str, TranscriptBlock] = {}
     for message in messages:
         if isinstance(message, HumanMessage):
             notice = parse_notification(message)
@@ -155,14 +156,37 @@ def messages_to_transcript(
                     kind="turn_summary", elapsed_seconds=timing[0], finished_at=timing[1],
                 ))
         elif isinstance(message, ToolMessage):
+            artifact = getattr(message, "artifact", None)
             if getattr(message, "name", None) == "write_stdin":
+                if isinstance(artifact, dict) and artifact.get("execution_id"):
+                    owner = executions.get(str(artifact["execution_id"]))
+                    reason = artifact.get("termination_reason")
+                    if owner is not None and reason not in {"stdin_error", "stdin_write_uncertain"}:
+                        existing = owner.artifact if isinstance(owner.artifact, dict) else {}
+                        merged = {**existing, **artifact}
+                        if artifact.get("running") is False:
+                            merged["running"] = False
+                            owner.artifact = merged
+                            outcome = classify_tool_result(name="execute", artifact=merged)
+                            owner.is_error = outcome != "success"
+                            owner.status = "error" if owner.is_error else "completed"
+                            code = merged.get("exit_code")
+                            owner.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+                            delta = message_text(message)
+                            if delta and delta.strip() != "<no new output>":
+                                marker = f"[running execution_id={artifact['execution_id']}]"
+                                base = owner.content.replace(marker, "").rstrip()
+                                if base == "<no new output>":
+                                    base = ""
+                                owner.content = f"{base}\n{delta}".strip() if base else delta
+                        else:
+                            owner.artifact = merged
                 continue
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)
             block = tools.get(tool_call_id)
             is_task = message.name == "start_task" or (block is not None and block.name == "start_task")
-            artifact = getattr(message, "artifact", None)
             if (
                 getattr(message, "name", None) == "execute"
                 and isinstance(artifact, dict)
@@ -174,6 +198,8 @@ def messages_to_transcript(
                     block.status = "running"
                     block.is_error = False
                     block.exit_code = None
+                    if artifact.get("execution_id"):
+                        executions[str(artifact["execution_id"])] = block
                 continue
             status = (
                 subagent_card_status(is_error=is_error, artifact=artifact)

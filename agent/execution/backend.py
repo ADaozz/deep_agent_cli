@@ -169,7 +169,9 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
         stdin_mode: str = "none",
     ) -> ExecuteResponse:
         if not command or not isinstance(command, str):
-            return ExecuteResponse("Error: Command must be a non-empty string.", 1, False)
+            return LocalExecuteResponse(
+                "Error: Command must be a non-empty string.", 1, False, termination_reason="spawn_error",
+            )
         from agent.execution.network import get_execute_network
 
         effective_timeout = _effective_timeout(timeout, self.config.timeout_seconds)

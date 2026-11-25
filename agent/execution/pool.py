@@ -11,6 +11,7 @@ import atexit
 import base64
 from collections import deque
 from concurrent.futures import Future
+from dataclasses import dataclass, field
 import io
 import itertools
 import json
@@ -43,6 +44,21 @@ class SandboxStartError(RuntimeError):
 
 class SandboxLostError(RuntimeError):
     """沙箱 Worker 已失效；正在执行的命令不得自动重试。"""
+
+
+class StdinWriteUncertainError(TimeoutError):
+    """等待 stdin ACK 超时：数据可能已部分或全部写入，结果未知且不得自动重试。"""
+
+    def __init__(self, write_id: str, message: str) -> None:
+        super().__init__(message)
+        self.write_id = write_id
+
+
+@dataclass
+class _PendingWriteAck:
+    event: threading.Event = field(default_factory=threading.Event)
+    ok: bool = False
+    error: str = ""
 
 
 class _Launcher:
@@ -101,9 +117,9 @@ class RemoteCommand:
         self.kill_requested = False
         self.owner_token = ""
         self._write_lock = threading.Lock()
-        self._write_done = threading.Event()
-        self._write_ok = False
-        self._write_error = ""
+        self._ack_lock = threading.Lock()
+        self._write_ids = itertools.count(1)
+        self._pending_acks: dict[str, _PendingWriteAck] = {}
 
     @property
     def execution_id(self) -> str:
@@ -120,33 +136,62 @@ class RemoteCommand:
     # agent.runtime.cancellation 调用此方法，而不是对宿主 PID 发 killpg。
     cancel_execution = kill
 
-    def write_stdin(self, data: bytes) -> None:
+    def write_stdin(self, data: bytes, *, timeout: float = 15.0) -> None:
         if self.stdin_mode == "none":
             raise ValueError("execution does not accept stdin")
         with self._write_lock:
             if self.released or self.sandbox.lost_reason is not None:
                 raise OSError(self.sandbox.lost_reason or "execution has finished")
-            self._write_done.clear()
-            self._write_ok = False
-            self._write_error = ""
+            write_id = f"{self.request_id}-{next(self._write_ids)}"
+            pending = _PendingWriteAck()
+            with self._ack_lock:
+                self._pending_acks[write_id] = pending
             try:
                 self.sandbox._send({
                     "op": "write",
                     "id": self.request_id,
+                    "write_id": write_id,
                     "data": base64.b64encode(data).decode("ascii"),
                 })
             except SandboxLostError as exc:
+                with self._ack_lock:
+                    self._pending_acks.pop(write_id, None)
                 raise OSError(str(exc)) from exc
-            # Pre-start writes ACK only after the worker actually drains them.
-            if not self._write_done.wait(15.0):
-                raise TimeoutError("stdin write timed out waiting for acknowledgment")
-            if not self._write_ok:
-                raise OSError(self._write_error or "stdin write failed")
+            # Pre-start and partial writes ACK only after the worker writes all bytes.
+            completed = pending.event.wait(max(0.0, timeout))
+            with self._ack_lock:
+                self._pending_acks.pop(write_id, None)
+                completed = completed or pending.event.is_set()
+                ok = pending.ok
+                error = pending.error
+            if not completed:
+                raise StdinWriteUncertainError(
+                    write_id,
+                    f"stdin write {write_id} timed out after {timeout:g}s waiting for acknowledgment; "
+                    "outcome is unknown (bytes may have been partially or fully written and were not retried)",
+                )
+            if not ok:
+                raise OSError(error or "stdin write failed")
 
-    def _complete_write(self, *, ok: bool, error: str = "") -> None:
-        self._write_ok = ok
-        self._write_error = error
-        self._write_done.set()
+    def _complete_write(self, *, write_id: str, ok: bool, error: str = "") -> None:
+        if not write_id:
+            return
+        with self._ack_lock:
+            pending = self._pending_acks.get(write_id)
+            if pending is None or pending.event.is_set():
+                return
+            pending.ok = ok
+            pending.error = error
+            pending.event.set()
+
+    def _fail_pending_writes(self, reason: str) -> None:
+        with self._ack_lock:
+            pending_items = list(self._pending_acks.values())
+            for pending in pending_items:
+                if not pending.event.is_set():
+                    pending.ok = False
+                    pending.error = reason
+                    pending.event.set()
 
     def close_stdin(self) -> None:
         if self.stdin_mode == "none":
@@ -175,6 +220,7 @@ class RemoteCommand:
 
     def release(self) -> None:
         self.released = True
+        self._fail_pending_writes("execution has finished")
         self.sandbox._forget(self.request_id)
         if self.owner_token:
             end_command(self.owner_token)
@@ -334,6 +380,7 @@ class PersistentSandbox:
                 self.generation += 1
             commands = list(self._commands.values())
         for handle in commands:
+            handle._fail_pending_writes(self.lost_reason or reason)
             try:
                 handle.events.put_nowait(("lost", self.lost_reason))
             except queue.Full:
@@ -366,7 +413,12 @@ class PersistentSandbox:
                 elif op == "spawn_error":
                     handle._deliver(("spawn_error", str(message.get("message", ""))))
                 elif op == "write_status":
-                    handle._complete_write(ok=bool(message.get("ok")), error=str(message.get("error") or ""))
+                    write_id = message.get("write_id")
+                    handle._complete_write(
+                        write_id="" if write_id is None else str(write_id),
+                        ok=bool(message.get("ok")),
+                        error=str(message.get("error") or ""),
+                    )
         except OSError:
             pass
         except (ValueError, KeyError, TypeError):
@@ -403,8 +455,10 @@ class SandboxPool:
         self._lock = threading.RLock()
         self._sandboxes: dict[bool, PersistentSandbox] = {}
         self.executions = ExecutionRegistry()
-        # Set by Runner for the active run so background pumps outlive ContextVar.
+        # Set by Runner for the active root run so background pumps outlive ContextVar
+        # without leaking into SubAgent threads.
         self.output_emitter: Callable[..., None] | None = None
+        self.output_emitter_thread_id: str | None = None
         _POOLS.add(self)
 
     def sandbox(self, network: bool) -> PersistentSandbox | None:

@@ -8,7 +8,7 @@ from uuid import uuid4
 from agent.sessions.images import ImageAttachmentRef
 from agent.runtime.contracts import RunEvent, TurnTiming
 from agent.runtime.metrics import normalize_usage
-from agent.sessions.transcript import subagent_card_status, task_result_text
+from agent.sessions.transcript import classify_tool_result, subagent_card_status, task_result_text
 from agent.sessions.contracts import TranscriptBlock
 from agent.subagents.notifications import is_background_launch, is_task_tool
 
@@ -91,6 +91,38 @@ def touch(block: MessageBlock | ToolBlock) -> MessageBlock | ToolBlock:
     return block
 
 
+def _is_background_execution(block: ToolBlock) -> bool:
+    """True once execute has yielded into a live background process."""
+    return (
+        block.name == "execute"
+        and block.status == "running"
+        and isinstance(block.artifact, dict)
+        and block.artifact.get("running") is True
+        and bool(block.artifact.get("execution_id"))
+    )
+
+
+def _apply_execution_terminal(
+    tool: ToolBlock,
+    result: dict[str, Any],
+    *,
+    event_is_error: bool = False,
+) -> None:
+    artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
+    merged = {**artifact, **result, "running": False}
+    merged.pop("thread_id", None)
+    tool.artifact = merged
+    code = merged.get("exit_code")
+    tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+    outcome = classify_tool_result(
+        status="error" if event_is_error else "",
+        name="execute",
+        artifact=merged,
+    )
+    tool.is_error = outcome != "success"
+    tool.status = "error" if tool.is_error else "completed"
+
+
 @dataclass
 class CliState:
     blocks: list[Block] = field(default_factory=list)
@@ -116,6 +148,8 @@ class CliState:
     context_pristine: bool = True
     # Live task tree. Root cards stay in `blocks`; deeper tasks hang off them.
     subagent_nodes: dict[str, SubagentNode] = field(default_factory=dict)
+    # Active session thread_id; guards against background execution deltas from other sessions.
+    session_id: str = ""
 
     @property
     def subagent_count(self) -> int:
@@ -275,27 +309,19 @@ class CliState:
         elif event.type == "tool_output_delta":
             if event.name == "write_stdin":
                 return
-            tool = self._tool(event.tool_call_id) or self._running_tool()
+            payload = event.result if isinstance(event.result, dict) else {}
+            event_thread = str(payload.get("thread_id") or "")
+            if self.session_id and event_thread and event_thread != self.session_id:
+                return
+            execution_id = str(payload.get("execution_id") or "")
+            tool = self._find_execution_tool(event.tool_call_id, execution_id)
             if tool is None:
-                tool = ToolBlock(event.tool_call_id, event.name or "tool", {})
-                self.blocks.append(tool)
+                return
             touch(tool)
             if event.stream == "execution_finished" and tool.name == "execute":
                 if event.content:
                     tool.output += event.content
-                artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
-                result = event.result if isinstance(event.result, dict) else {}
-                merged = {**artifact, **result, "running": False}
-                tool.artifact = merged
-                code = merged.get("exit_code")
-                tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-                reason = merged.get("termination_reason")
-                failed = (
-                    reason in {"cancelled", "timeout", "spawn_error", "sandbox_lost"}
-                    or (tool.exit_code not in (0, None))
-                )
-                tool.is_error = failed
-                tool.status = "error" if failed else "completed"
+                _apply_execution_terminal(tool, payload)
             elif event.stream == "tail_snapshot" and tool.name == "execute":
                 tool.output = event.content
                 artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
@@ -351,7 +377,13 @@ class CliState:
             if completed_artifact is not None:
                 tool.artifact = completed_artifact
             if event.name == "execute" and completed_artifact is not None:
-                if completed_artifact.get("truncated") and not had_tail_snapshot and event.content:
+                if completed_artifact.get("running") is True:
+                    if not tool.output and event.content:
+                        marker = f"[running execution_id={completed_artifact.get('execution_id') or ''}]"
+                        cleaned = event.content.replace(marker, "").strip()
+                        if cleaned and cleaned != "<no new output>":
+                            tool.output = cleaned
+                elif completed_artifact.get("truncated") and not had_tail_snapshot and event.content:
                     # Without streamed output, the final result contains the tail.
                     tool.output = event.content
                 elif not tool.output:
@@ -366,6 +398,8 @@ class CliState:
                 tool.is_error = False
                 tool.status = "running"
                 tool.exit_code = None
+            elif event.name == "execute" and completed_artifact is not None:
+                _apply_execution_terminal(tool, completed_artifact, event_is_error=event.is_error)
             else:
                 tool.is_error = event.is_error
                 tool.status = "error" if event.is_error else "completed"
@@ -376,9 +410,6 @@ class CliState:
                     tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
                     tool.is_error = tool.status in {"error", "cancelled"}
                     self._finish_task_card(tool)
-                if event.name == "execute" and completed_artifact is not None:
-                    code = completed_artifact.get("exit_code")
-                    tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "subagent_finished" and isinstance(event.result, dict):
             tool = self._tool_by_id(str(event.result.get("tool_call_id") or ""))
             if tool is not None and is_background_launch(tool.name, tool.arguments):
@@ -410,15 +441,24 @@ class CliState:
             self.active_block = None
             settle = _interaction_settlement(event.result)
             for block in self.blocks:
-                if isinstance(block, ToolBlock) and block.status == "running" and not is_background_launch(block.name, block.arguments):
+                if (
+                    isinstance(block, ToolBlock)
+                    and block.status == "running"
+                    and not is_background_launch(block.name, block.arguments)
+                    and not _is_background_execution(block)
+                ):
                     touch(block).status = settle(block)
         elif event.type == "run_completed":
             self.running = False
             self.status = "Ready"
             for block in self.blocks:
-                # A background subagent outlives the run that started it.
-                if (isinstance(block, ToolBlock) and block.status in {"running", "waiting"}
-                        and not is_background_launch(block.name, block.arguments)):
+                # Background subagents and yielded executions outlive the turn that started them.
+                if (
+                    isinstance(block, ToolBlock)
+                    and block.status in {"running", "waiting"}
+                    and not is_background_launch(block.name, block.arguments)
+                    and not _is_background_execution(block)
+                ):
                     touch(block).status = "interrupted"
                     if is_task_tool(block.name):
                         self._finish_task_card(block)
@@ -437,7 +477,11 @@ class CliState:
             self.running = False
             self.status = "Cancelled"
             for block in self.blocks:
-                if isinstance(block, ToolBlock) and block.status == "running":
+                if (
+                    isinstance(block, ToolBlock)
+                    and block.status == "running"
+                    and not _is_background_execution(block)
+                ):
                     touch(block)
                     if is_task_tool(block.name):
                         block.status = "cancelled"
@@ -453,8 +497,12 @@ class CliState:
             self.running = False
             self.status = "Failed"
             for block in self.blocks:
-                if (isinstance(block, ToolBlock) and block.status in {"running", "waiting"}
-                        and not is_background_launch(block.name, block.arguments)):
+                if (
+                    isinstance(block, ToolBlock)
+                    and block.status in {"running", "waiting"}
+                    and not is_background_launch(block.name, block.arguments)
+                    and not _is_background_execution(block)
+                ):
                     touch(block).status = "error"
                     block.is_error = True
                     if block.name == "start_task":
@@ -619,6 +667,67 @@ class CliState:
         self.blocks.append(block)
         self.active_block = block
         return block
+
+    def restore_executions(self, registry: Any | None, thread_id: str) -> None:
+        """Reconcile restored execute cards against live ExecutionRegistry state."""
+        self.session_id = thread_id
+        for block in self.blocks:
+            if not isinstance(block, ToolBlock) or block.name != "execute":
+                continue
+            artifact = block.artifact if isinstance(block.artifact, dict) else None
+            if artifact is None:
+                continue
+            execution_id = str(artifact.get("execution_id") or "")
+            if not execution_id:
+                continue
+            already_terminal = artifact.get("running") is False and block.status in {"completed", "error"}
+            if already_terminal:
+                continue
+            session = registry.get(execution_id) if registry is not None else None
+            if session is not None and session.owns(thread_id):
+                snap = session.restore_snapshot()
+                if snap["running"]:
+                    block.artifact = {**artifact, **snap["artifact"], "running": True}
+                    block.status = "running"
+                    block.is_error = False
+                    block.exit_code = None
+                    if snap["output"]:
+                        block.output = snap["output"]
+                else:
+                    if snap["output"]:
+                        block.output = snap["output"]
+                    _apply_execution_terminal(block, snap["artifact"])
+                touch(block)
+            elif block.status == "running" or artifact.get("running") is True:
+                # Execution no longer exists (e.g. after CLI restart): never remain Running.
+                block.artifact = {**artifact, "running": False}
+                block.status = "interrupted"
+                block.is_error = False
+                touch(block)
+
+    def _find_execution_tool(self, tool_call_id: str, execution_id: str = "") -> ToolBlock | None:
+        """Locate an execute/tool card by exact tool_call_id or execution_id."""
+        if tool_call_id:
+            found = self._tool_by_id(tool_call_id)
+            if found is not None:
+                existing_id = (
+                    str(found.artifact.get("execution_id") or "")
+                    if isinstance(found.artifact, dict) else ""
+                )
+                if not execution_id or not existing_id or existing_id == execution_id:
+                    return found
+        if execution_id:
+            for block in reversed(self.blocks):
+                if (
+                    isinstance(block, ToolBlock)
+                    and block.name == "execute"
+                    and isinstance(block.artifact, dict)
+                    and str(block.artifact.get("execution_id") or "") == execution_id
+                ):
+                    return block
+        if not tool_call_id and not execution_id:
+            return self._running_tool()
+        return None
 
     def _tool(self, tool_call_id: str) -> ToolBlock | None:
         if not tool_call_id:

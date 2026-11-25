@@ -142,9 +142,21 @@ def _start_background_sleep(backend, *, network: bool = False) -> str:
     result = run(backend, f"nohup sleep {marker} >/dev/null 2>&1 &", network=network)
     assert result.exit_code == 0, result.output
     deadline = time.monotonic() + 5
-    while not _host_pids_with_arg(marker) and time.monotonic() < deadline:
+    pids: list[int] = []
+    while time.monotonic() < deadline:
+        found: list[int] = []
+        for pid in _host_pids_with_arg(marker):
+            try:
+                exe = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
+            except OSError:
+                continue
+            if exe.endswith(b"sleep"):
+                found.append(pid)
+        if found:
+            pids = found
+            break
         time.sleep(0.05)
-    assert _host_pids_with_arg(marker), "background process did not start"
+    assert pids, "background process did not start"
     return marker
 
 

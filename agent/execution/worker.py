@@ -7,19 +7,21 @@
 
 宿主 -> Worker: {"op": "run", "id": N, "command": str, "stdin_mode"?: "none"|"pipe"|"pty"}
                 | {"op": "run_argv", "id": N, "argv": list[str], "cwd": str, ...}
-                | {"op": "write", "id": N, "data": base64}
+                | {"op": "write", "id": N, "write_id": str, "data": base64}
                 | {"op": "close_stdin", "id": N}
                 | {"op": "resize", "id": N, "rows": int, "cols": int}
                 | {"op": "kill", "id": N}
 Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64, "stream"?: str}
                 | {"op": "exit", "id": N, "code": int}
                 | {"op": "spawn_error", "id": N, "message": str}
-                | {"op": "write_status", "id": N, "ok": bool, "error"?: str}
+                | {"op": "write_status", "id": N, "write_id": str, "ok": bool, "error"?: str}
 
 stdin 读到 EOF 表示宿主已退出或要求关闭沙箱：Worker 退出，PID 命名空间会带走
 沙箱里剩下的全部进程。
 """
 import base64
+from collections import deque
+import fcntl
 import json
 import os
 import selectors
@@ -33,25 +35,21 @@ import time
 WORKDIR = os.getcwd()
 CHUNK_BYTES = 65536
 POST_EXIT_DRAIN_SECONDS = 0.1
+MAX_INPUT_BYTES = 1024 * 1024
 
 _send_lock = threading.Lock()
 _running_lock = threading.RLock()
 _running: dict[int, subprocess.Popen[bytes]] = {}
 _stdin_modes: dict[int, str] = {}
 _pty_masters: dict[int, int] = {}
-# FIFO of (payload, acknowledge) waiting for the process to accept stdin.
-_pending_writes: dict[int, list[tuple[bytes, bool]]] = {}
-# In-flight remainder after a partial non-blocking write: (payload, acknowledge).
-_partial_writes: dict[int, tuple[bytes, bool]] = {}
-_pending_close: set[int] = set()
+_inputs: dict[int, "_InputQueue"] = {}
 _killed_before_start: set[int] = set()
 _control_out = -1
-_PENDING_WRITE_LIMIT = 64
 
 # Child-side helper: new process, single-threaded — safe for setsid + TIOCSCTTY.
 # argv: status_fd, slave_fd, command. Writes one status byte then execs.
 _PTY_CHILD = (
-    "import fcntl, os, sys, termios\n"
+    "import fcntl, os, signal, sys, termios\n"
     "status, slave = int(sys.argv[1]), int(sys.argv[2])\n"
     "os.setsid()\n"
     "try:\n"
@@ -75,8 +73,67 @@ _PTY_CHILD = (
     "os.dup2(slave, 2)\n"
     "if slave > 2:\n"
     "    os.close(slave)\n"
+    "signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+    "signal.signal(signal.SIGQUIT, signal.SIG_DFL)\n"
+    "signal.signal(signal.SIGPIPE, signal.SIG_DFL)\n"
     "os.execvp('/bin/sh', ['/bin/sh', '-lc', sys.argv[3]])\n"
 )
+
+
+class _InputQueue:
+    """Per-command byte-bounded FIFO unifying pre-start, active, partial writes and EOF."""
+
+    def __init__(self, stdin_mode: str) -> None:
+        self.stdin_mode = stdin_mode
+        # Elements: ("write", write_id, payload_bytes) | ("eof", None, b"")
+        self.items: deque[tuple[str, str | None, bytes]] = deque()
+        self.queued_bytes = 0
+        self.eof_enqueued = False
+        self.closed_for_new = False
+        self.close_error = "process not running"
+        self.killed = False
+        self.wake_r: int | None = None
+        self.wake_w: int | None = None
+
+    def attach_wake(self, wake_r: int, wake_w: int) -> None:
+        self.wake_r = wake_r
+        self.wake_w = wake_w
+
+    def wake(self) -> None:
+        fd = self.wake_w
+        if fd is not None:
+            try:
+                os.write(fd, b"\x01")
+            except OSError:
+                pass
+
+    def drain_wake(self) -> None:
+        fd = self.wake_r
+        if fd is None:
+            return
+        while True:
+            try:
+                if not os.read(fd, 4096):
+                    break
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+
+    def close_wake(self) -> None:
+        for attr in ("wake_w", "wake_r"):
+            fd = getattr(self, attr)
+            if fd is not None:
+                setattr(self, attr, None)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def _set_nonblocking(fd: int) -> None:
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
 
 def _send(message):
@@ -88,6 +145,16 @@ def _send(message):
                 view = view[os.write(_control_out, view):]
         except OSError:
             os._exit(0)
+
+
+def _write_ack(request_id, write_id, *, ok, error=""):
+    _send({
+        "op": "write_status",
+        "id": request_id,
+        "write_id": "" if write_id is None else str(write_id),
+        "ok": bool(ok),
+        "error": error,
+    })
 
 
 def _kill_group(pid):
@@ -122,6 +189,34 @@ def _open_cwd(path, mount_identity):
         raise
 
 
+def _register_input_queue(request_id: int, stdin_mode: str) -> _InputQueue:
+    mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+    with _running_lock:
+        state = _InputQueue(mode)
+        if request_id in _killed_before_start:
+            _killed_before_start.discard(request_id)
+            state.killed = True
+            state.closed_for_new = True
+            state.close_error = "process killed"
+        _inputs[request_id] = state
+        return state
+
+
+def _fail_queue_items(request_id: int, state: _InputQueue, error: str, *, remove: bool = False) -> None:
+    with _running_lock:
+        state.closed_for_new = True
+        state.close_error = error
+        pending = list(state.items)
+        state.items.clear()
+        state.queued_bytes = 0
+        if remove:
+            if _inputs.get(request_id) is state:
+                _inputs.pop(request_id, None)
+    for kind, write_id, _payload in pending:
+        if kind == "write":
+            _write_ack(request_id, write_id, ok=False, error=error)
+
+
 def _run(
     request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None,
     owner=None, stdin_mode="none",
@@ -129,9 +224,24 @@ def _run(
     descriptors = []
     structured = argv is not None
     stdin_mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+    with _running_lock:
+        state = _inputs.get(request_id)
+        if state is None:
+            state = _register_input_queue(request_id, stdin_mode)
     if structured and stdin_mode != "none":
+        _fail_queue_items(request_id, state, "ValueError: interactive stdin is unsupported for argv runs", remove=True)
         _send({"op": "spawn_error", "id": request_id, "message": "ValueError: interactive stdin is unsupported for argv runs"})
         return
+    with _running_lock:
+        if state.killed:
+            killed_before_spawn = True
+        else:
+            killed_before_spawn = False
+    if killed_before_spawn:
+        _fail_queue_items(request_id, state, "process killed before start", remove=True)
+        _send({"op": "exit", "id": request_id, "code": 137})
+        return
+
     master_fd = None
     slave_fd = None
     try:
@@ -216,9 +326,7 @@ def _run(
                 pass_fds=tuple(descriptors),
             )
             if process.stdin is not None:
-                import fcntl
-                flags = fcntl.fcntl(process.stdin.fileno(), fcntl.F_GETFL)
-                fcntl.fcntl(process.stdin.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                _set_nonblocking(process.stdin.fileno())
         else:
             process = subprocess.Popen(
                 argv if structured else ["/bin/sh", "-lc", command],
@@ -241,73 +349,205 @@ def _run(
                 os.close(slave_fd)
             except OSError:
                 pass
-        _fail_pending_writes(request_id, f"spawn failed: {type(exc).__name__}")
+        _fail_queue_items(request_id, state, f"spawn failed: {type(exc).__name__}", remove=True)
         _send({"op": "spawn_error", "id": request_id, "message": f"{type(exc).__name__}: {detail}"})
         return
     finally:
         for fd in descriptors:
             os.close(fd)
+
+    wake_r, wake_w = os.pipe()
+    _set_nonblocking(wake_r)
+    _set_nonblocking(wake_w)
     with _running_lock:
         _running[request_id] = process
         _stdin_modes[request_id] = stdin_mode
         if master_fd is not None:
             _pty_masters[request_id] = master_fd
-            import fcntl
-            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        queued = _pending_writes.pop(request_id, [])
-        close_after = request_id in _pending_close
-        _pending_close.discard(request_id)
-        if request_id in _killed_before_start:
-            _killed_before_start.discard(request_id)
+            _set_nonblocking(master_fd)
+        state.attach_wake(wake_r, wake_w)
+        killed_now = state.killed
+        if killed_now:
             _kill_group(process.pid)
-            for _payload, acknowledge in queued:
-                if acknowledge:
-                    _write_ack(request_id, ok=False, error="process killed before start")
-            queued = []
-            close_after = False
-    for payload, acknowledge in queued:
-        _write_payload(request_id, payload, acknowledge=acknowledge)
-    if close_after:
-        _close_stdin(request_id)
+    if killed_now:
+        _fail_queue_items(request_id, state, "process killed before start")
 
     selector = selectors.DefaultSelector()
+    open_read_fds: set[object] = set()
+    selector.register(wake_r, selectors.EVENT_READ, "wake")
     if stdin_mode == "pty":
         selector.register(master_fd, selectors.EVENT_READ, "pty")
+        open_read_fds.add(master_fd)
     else:
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        open_read_fds.add(process.stdout)
+        open_read_fds.add(process.stderr)
+
+    stdin_closed = False
+    stdin_broken_error: str | None = None
+    write_watched = False
+
+    def set_write_watch(want: bool) -> None:
+        nonlocal write_watched
+        if want == write_watched:
+            return
+        if stdin_mode == "pty":
+            if master_fd is not None and master_fd in open_read_fds:
+                events = (selectors.EVENT_READ | selectors.EVENT_WRITE) if want else selectors.EVENT_READ
+                try:
+                    selector.modify(master_fd, events, "pty")
+                except (KeyError, ValueError, OSError):
+                    want = False
+            else:
+                want = False
+        elif stdin_mode == "pipe":
+            if process.stdin is not None and not stdin_closed:
+                try:
+                    if want:
+                        selector.register(process.stdin.fileno(), selectors.EVENT_WRITE, "stdin_write")
+                    else:
+                        selector.unregister(process.stdin.fileno())
+                except (KeyError, ValueError, OSError):
+                    want = False
+            else:
+                want = False
+        else:
+            want = False
+        write_watched = want
+
+    def drain_input() -> bool:
+        """Single stdin writer for this command. Returns True while blocked on EVENT_WRITE."""
+        nonlocal stdin_closed, stdin_broken_error
+        while True:
+            with _running_lock:
+                if state.killed:
+                    killed = True
+                    item = None
+                else:
+                    killed = False
+                    item = state.items.popleft() if state.items else None
+                    if item is not None and item[0] == "write":
+                        state.queued_bytes -= len(item[2])
+            if killed:
+                set_write_watch(False)
+                _fail_queue_items(request_id, state, "process killed")
+                return False
+            if item is None:
+                return False
+            kind, write_id, payload = item
+            if kind == "eof":
+                if stdin_mode == "pipe" and process.stdin is not None and not stdin_closed:
+                    set_write_watch(False)
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+                    stdin_closed = True
+                continue
+            if stdin_broken_error is not None:
+                _write_ack(request_id, write_id, ok=False, error=stdin_broken_error)
+                continue
+            if stdin_closed:
+                _write_ack(request_id, write_id, ok=False, error="stdin already closed")
+                continue
+            if stdin_mode == "pty" and master_fd is not None:
+                target_fd = master_fd
+            elif stdin_mode == "pipe" and process.stdin is not None:
+                target_fd = process.stdin.fileno()
+            else:
+                _write_ack(request_id, write_id, ok=False, error="stdin not available")
+                continue
+            view = memoryview(payload)
+            blocked = False
+            try:
+                while view:
+                    try:
+                        written = os.write(target_fd, view)
+                    except BlockingIOError:
+                        remainder = view.tobytes()
+                        with _running_lock:
+                            if state.killed:
+                                killed_during_write = True
+                            else:
+                                killed_during_write = False
+                                state.items.appendleft(("write", write_id, remainder))
+                                state.queued_bytes += len(remainder)
+                        if killed_during_write:
+                            _write_ack(request_id, write_id, ok=False, error="process killed")
+                            set_write_watch(False)
+                            _fail_queue_items(request_id, state, "process killed")
+                            return False
+                        blocked = True
+                        break
+                    if written <= 0:
+                        raise OSError("short write")
+                    view = view[written:]
+            except OSError as exc:
+                err = str(exc.strerror or exc)
+                stdin_broken_error = err
+                _write_ack(request_id, write_id, ok=False, error=err)
+                continue
+            if blocked:
+                return True
+            _write_ack(request_id, write_id, ok=True)
+
     # 后台子进程可能持续写管道；shell 退出后只排空一次固定窗口。
     drain_deadline = None
     try:
-        while selector.get_map() or request_id in _partial_writes or _pending_writes.get(request_id):
-            _flush_writes(request_id)
+        while open_read_fds or process.poll() is None:
             exited = process.poll() is not None
+            if state.killed:
+                set_write_watch(False)
+                _fail_queue_items(request_id, state, "process killed")
+            elif exited:
+                set_write_watch(False)
+                _fail_queue_items(request_id, state, "process exited")
+            else:
+                set_write_watch(drain_input())
             if exited and drain_deadline is None:
                 drain_deadline = time.monotonic() + POST_EXIT_DRAIN_SECONDS
             if drain_deadline is not None and time.monotonic() >= drain_deadline:
                 break
             wait = 0.1 if drain_deadline is None else max(0.0, min(0.05, drain_deadline - time.monotonic()))
             events = selector.select(timeout=wait)
-            for key, _mask in events:
-                try:
-                    if key.data == "pty":
-                        chunk = os.read(key.fileobj, CHUNK_BYTES)
+            for key, mask in events:
+                if key.data == "wake":
+                    state.drain_wake()
+                    continue
+                if key.data == "stdin_write":
+                    continue
+                if mask & selectors.EVENT_READ:
+                    try:
+                        if key.data == "pty":
+                            chunk = os.read(key.fileobj, CHUNK_BYTES)
+                        else:
+                            chunk = key.fileobj.read1(CHUNK_BYTES)
+                    except BlockingIOError:
+                        continue
+                    except Exception:  # noqa: BLE001
+                        chunk = b""
+                    if chunk:
+                        message = {"op": "out", "id": request_id, "data": base64.b64encode(chunk).decode("ascii")}
+                        if structured:
+                            message["stream"] = key.data
+                        _send(message)
                     else:
-                        chunk = key.fileobj.read1(CHUNK_BYTES)
-                except Exception:  # noqa: BLE001
-                    chunk = b""
-                if chunk:
-                    message = {"op": "out", "id": request_id, "data": base64.b64encode(chunk).decode("ascii")}
-                    if structured:
-                        message["stream"] = key.data
-                    _send(message)
-                else:
-                    selector.unregister(key.fileobj)
+                        if key.data == "pty":
+                            write_watched = False
+                        try:
+                            selector.unregister(key.fileobj)
+                        except (KeyError, ValueError):
+                            pass
+                        open_read_fds.discard(key.fileobj)
         code = process.wait()
     finally:
+        set_write_watch(False)
         selector.close()
-        _fail_pending_writes(request_id, "process exited")
+        final_error = "process killed" if state.killed else "process exited"
+        _fail_queue_items(request_id, state, final_error, remove=True)
+        with _running_lock:
+            state.close_wake()
         if stdin_mode == "pty":
             with _running_lock:
                 master = _pty_masters.pop(request_id, None)
@@ -321,7 +561,7 @@ def _run(
                 process.stdout.close()
             if process.stderr is not None:
                 process.stderr.close()
-            if process.stdin is not None:
+            if process.stdin is not None and not stdin_closed:
                 try:
                     process.stdin.close()
                 except OSError:
@@ -330,134 +570,47 @@ def _run(
             _running.pop(request_id, None)
             _stdin_modes.pop(request_id, None)
             _pty_masters.pop(request_id, None)
-            _pending_close.discard(request_id)
     _send({"op": "exit", "id": request_id, "code": 128 - code if code < 0 else code})
 
 
-def _write_ack(request_id, *, ok, error=""):
-    _send({"op": "write_status", "id": request_id, "ok": ok, "error": error})
-
-
-def _fail_pending_writes(request_id, error):
-    with _running_lock:
-        queued = _pending_writes.pop(request_id, [])
-        partial = _partial_writes.pop(request_id, None)
-    for _payload, acknowledge in queued:
-        if acknowledge:
-            _write_ack(request_id, ok=False, error=error)
-    if partial is not None and partial[1]:
-        _write_ack(request_id, ok=False, error=error)
-
-
-def _write_payload(request_id, payload, *, acknowledge):
-    with _running_lock:
-        process = _running.get(request_id)
-        mode = _stdin_modes.get(request_id, "none")
-        master = _pty_masters.get(request_id)
-        if request_id in _partial_writes:
-            # Preserve FIFO order: park behind the in-flight remainder.
-            queued = _pending_writes.setdefault(request_id, [])
-            if len(queued) >= _PENDING_WRITE_LIMIT:
-                if acknowledge:
-                    _write_ack(request_id, ok=False, error="pending write buffer full")
-                return
-            queued.append((payload, acknowledge))
-            return
-    if process is None:
-        if acknowledge:
-            _write_ack(request_id, ok=False, error="process not running")
-        return
-    try:
-        if mode == "pty" and master is not None:
-            target_fd = master
-        elif mode == "pipe" and process.stdin is not None:
-            target_fd = process.stdin.fileno()
-        else:
-            if acknowledge:
-                _write_ack(request_id, ok=False, error="stdin not available")
-            return
-        view = memoryview(payload)
-        while view:
-            try:
-                written = os.write(target_fd, view)
-            except BlockingIOError:
-                with _running_lock:
-                    _partial_writes[request_id] = (view.tobytes(), acknowledge)
-                return
-            if written <= 0:
-                raise OSError("short write")
-            view = view[written:]
-    except OSError as exc:
-        if acknowledge:
-            _write_ack(request_id, ok=False, error=str(exc.strerror or exc))
-        return
-    if acknowledge:
-        _write_ack(request_id, ok=True)
-    _flush_writes(request_id)
-
-
-def _flush_writes(request_id):
-    while True:
-        with _running_lock:
-            partial = _partial_writes.pop(request_id, None)
-            queued = _pending_writes.get(request_id)
-        if partial is not None:
-            _write_payload(request_id, partial[0], acknowledge=partial[1])
-            with _running_lock:
-                if request_id in _partial_writes:
-                    return
-            continue
-        if not queued:
-            return
-        with _running_lock:
-            if not _pending_writes.get(request_id):
-                return
-            payload, acknowledge = _pending_writes[request_id].pop(0)
-            if not _pending_writes[request_id]:
-                _pending_writes.pop(request_id, None)
-        _write_payload(request_id, payload, acknowledge=acknowledge)
-        with _running_lock:
-            if request_id in _partial_writes:
-                return
-
-
-def _write(request_id, data_b64):
+def _write(request_id, write_id, data_b64):
+    """Control thread only: validate and enqueue into the command's byte-bounded FIFO."""
+    wid = "" if write_id is None else str(write_id)
     try:
         payload = base64.b64decode(data_b64)
     except Exception:  # noqa: BLE001
-        _write_ack(request_id, ok=False, error="invalid base64")
+        _write_ack(request_id, wid, ok=False, error="invalid base64")
         return
+    reject_error = None
     with _running_lock:
-        process = _running.get(request_id)
-        if process is None and request_id not in _killed_before_start:
-            # Queue only; ACK after the bytes are actually written once the process starts.
-            queued = _pending_writes.setdefault(request_id, [])
-            if len(queued) >= _PENDING_WRITE_LIMIT:
-                _write_ack(request_id, ok=False, error="pending write buffer full")
-                return
-            queued.append((payload, True))
-            return
-        if process is None:
-            _write_ack(request_id, ok=False, error="process not running")
-            return
-    _write_payload(request_id, payload, acknowledge=True)
+        state = _inputs.get(request_id)
+        if state is None:
+            reject_error = "process not running"
+        elif state.closed_for_new:
+            reject_error = state.close_error
+        elif state.stdin_mode == "none":
+            reject_error = "stdin not available"
+        elif state.eof_enqueued:
+            reject_error = "stdin already closed"
+        elif state.queued_bytes + len(payload) > MAX_INPUT_BYTES:
+            reject_error = "stdin input buffer full"
+        else:
+            state.items.append(("write", wid, payload))
+            state.queued_bytes += len(payload)
+            state.wake()
+    if reject_error is not None:
+        _write_ack(request_id, wid, ok=False, error=reject_error)
 
 
 def _close_stdin(request_id):
+    """Control thread only: enqueue EOF strictly behind all prior writes."""
     with _running_lock:
-        process = _running.get(request_id)
-        mode = _stdin_modes.get(request_id, "none")
-        if process is None and request_id not in _killed_before_start:
-            _pending_close.add(request_id)
+        state = _inputs.get(request_id)
+        if state is None or state.closed_for_new or state.stdin_mode != "pipe" or state.eof_enqueued:
             return
-        if process is None:
-            return
-    # PTY: do not close the master as a plain EOF; callers send terminal EOF bytes if needed.
-    if mode == "pipe" and process.stdin is not None:
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
+        state.eof_enqueued = True
+        state.items.append(("eof", None, b""))
+        state.wake()
 
 
 def _resize(request_id, rows, cols):
@@ -467,7 +620,6 @@ def _resize(request_id, rows, cols):
     if mode != "pty" or master is None:
         return
     try:
-        import fcntl
         import struct
         import termios
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
@@ -477,11 +629,16 @@ def _resize(request_id, rows, cols):
 
 def _kill(request_id):
     with _running_lock:
+        state = _inputs.get(request_id)
         process = _running.get(request_id)
-        _fail_pending_writes(request_id, "process killed")
-        _pending_close.discard(request_id)
+        if state is not None:
+            state.killed = True
+            state.closed_for_new = True
+            state.close_error = "process killed"
+            state.wake()
         if process is None:
-            _killed_before_start.add(request_id)
+            if state is None:
+                _killed_before_start.add(request_id)
             return
         _kill_group(process.pid)
 
@@ -533,20 +690,23 @@ def main():
                 sys.stderr.write("sandbox worker: malformed control message\n")
                 _shutdown()
             if op == "run":
+                stdin_mode = message.get("stdin_mode", "none")
+                _register_input_queue(request_id, stdin_mode)
                 threading.Thread(
                     target=_run,
                     args=(request_id, str(message["command"])),
-                    kwargs={"owner": message.get("owner"), "stdin_mode": message.get("stdin_mode", "none")},
+                    kwargs={"owner": message.get("owner"), "stdin_mode": stdin_mode},
                     daemon=True,
                 ).start()
             elif op == "run_argv":
+                _register_input_queue(request_id, "none")
                 threading.Thread(
                     target=_run, kwargs={"request_id": request_id, "argv": message["argv"],
                                          "cwd": message["cwd"], "mount_identity": message.get("mount_identity"),
                                          "file": message.get("file")}, daemon=True,
                 ).start()
             elif op == "write":
-                _write(request_id, message.get("data", ""))
+                _write(request_id, message.get("write_id"), message.get("data", ""))
             elif op == "close_stdin":
                 _close_stdin(request_id)
             elif op == "resize":

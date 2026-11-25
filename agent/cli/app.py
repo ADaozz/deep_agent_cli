@@ -163,7 +163,7 @@ class CliApplication:
             workspace = sandbox.workspace if sandbox is not None else Path.cwd()
             require_keybindings_outside_workspace(config_dir, workspace)
         _register_terminal_sequences()
-        self.state = CliState()
+        self.state = CliState(session_id=runner.thread_id)
         self.dialogs = DialogState()
         self.drafts = InputDrafts()
         self.run_view = RunPresentation()

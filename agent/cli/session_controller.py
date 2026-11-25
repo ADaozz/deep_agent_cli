@@ -102,6 +102,7 @@ class SessionController:
         self.summaries().remember(info)
         self.reset_session_view()
         self.state.clear()
+        self.state.session_id = info.id
         self.state.context_pristine = True
         self.state.attachments.clear()
         self.state.add_system(f"Started session {info.id}" if info.id else "New session")
@@ -176,6 +177,8 @@ class SessionController:
         store = self.runner.task_log_store()
         if store is not None:
             self.state.restore_task_tree(store, self.runner.thread_id)
+        pool = self.runner.sandbox_pool
+        self.state.restore_executions(pool.executions if pool is not None else None, self.runner.thread_id)
         self.state.load_model_metrics(snapshot.model_metrics_history)
         for notice in snapshot.notices:
             self.state.add_system(notice)
