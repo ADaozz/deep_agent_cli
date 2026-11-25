@@ -93,6 +93,13 @@ class SlashCompleter(Completer):
                 ("test", "Connect and list tools"),
                 ("tools", "Show one server's tools"),
             ))
+        elif name == "secrets":
+            candidates.extend((
+                ("list", "List credential metadata (no values)"),
+                ("set", "Add or update a credential via secure input"),
+                ("update", "Update an existing credential"),
+                ("delete", "Delete a stored credential"),
+            ))
         ranked = []
         for index, (value, description) in enumerate(candidates):
             rank = self._rank(value.lower(), arg.lower())

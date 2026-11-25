@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
-import os
 from pathlib import Path
 from key_value.aio.stores.filetree import (
     FileTreeStore,
@@ -12,25 +10,11 @@ from key_value.aio.stores.filetree import (
 )
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
-from cryptography.fernet import Fernet
+from agent.secrets.store import load_or_create_fernet
 
 
 def oauth_token_storage(directory: Path) -> FernetEncryptionWrapper:
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    directory.chmod(0o700)
-    key_path = directory / "key"
-    # Serialize first use across CLI processes; never replace an existing key.
-    fd = os.open(key_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "r+b") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        os.fchmod(stream.fileno(), 0o600)
-        key = stream.read()
-        if not key:
-            key = Fernet.generate_key()
-            stream.write(key)
-            stream.flush()
-            os.fsync(stream.fileno())
-        fernet = Fernet(key)
+    fernet = load_or_create_fernet(directory)
     tokens = directory / "tokens"
     tokens.mkdir(mode=0o700, exist_ok=True)
     return FernetEncryptionWrapper(FileTreeStore(

@@ -3,16 +3,18 @@ from __future__ import annotations
 import json
 from typing import Any
 from uuid import uuid4
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import interrupt
 
+from agent.secrets.store import SecretScope, validate_secret_name, validate_secret_scope
 from agent.tools.human_interaction import (
     FIELD_TYPES,
     INTERACTION_TYPES,
     FieldType,
     InteractionType,
+    is_rejected_secret_type,
     normalize_interaction_request,
     resume_values,
 )
@@ -41,10 +43,18 @@ class FieldSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str = Field(default="", description="Field id. The user's answer is returned under this key.")
-    type: FieldType = Field(default="text", description="Field type.")
+    type: FieldType = Field(default="text", description="Field type. Use 'secret' for sensitive credentials.")
     label: str = Field(default="", description="Field title.")
     required: bool = Field(default=False, description="Whether an answer is required.")
     placeholder: str = Field(default="", description="Optional input placeholder.")
+    secret_name: str | None = Field(
+        default=None,
+        description="Required when type is 'secret': environment/credential reference name (e.g. GITHUB_TOKEN). Only this name is returned to you.",
+    )
+    secret_scope: SecretScope | None = Field(
+        default=None,
+        description="Required when type is 'secret': 'host' (trusted host consumers such as MCP) or 'sandbox' (authorized sandbox commands).",
+    )
     options: list[FieldOption] = Field(
         default_factory=list,
         max_length=3,
@@ -55,7 +65,23 @@ class FieldSpec(BaseModel):
     @classmethod
     def _lenient_type(cls, value: Any) -> str:
         text = str(value or "").strip().lower()
+        if is_rejected_secret_type(text):
+            raise ValueError(
+                f"Unsupported secret field type {text!r}: use type='secret' with secret_name and secret_scope"
+            )
         return text if text in FIELD_TYPES else "text"
+
+    @model_validator(mode="after")
+    def _validate_secret_declaration(self) -> "FieldSpec":
+        has_secret_attrs = self.secret_name not in (None, "") or self.secret_scope not in (None, "")
+        if has_secret_attrs and self.type != "secret":
+            raise ValueError("secret_name and secret_scope require type='secret'")
+        if self.type == "secret":
+            if self.options:
+                raise ValueError("Secret fields cannot declare options")
+            self.secret_name = validate_secret_name(self.secret_name)
+            self.secret_scope = validate_secret_scope(self.secret_scope)
+        return self
 
 
 class Recommendation(BaseModel):
@@ -161,5 +187,6 @@ def _request_description() -> str:
         "Resolve ordinary technical details independently using the available context and tools. "
         "Do not use this tool for permission approvals. "
         "Provide structured options when a choice is required. "
+        "For API keys, tokens, or passwords, use a field with type='secret', secret_name, and secret_scope ('host' or 'sandbox') so only the credential reference is returned to you. "
         "Pass fields, recommendation, and impact as JSON values, not serialized strings."
     )

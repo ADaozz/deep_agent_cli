@@ -26,6 +26,9 @@ def create_bindings(
     kb = KeyBindings()
     shared = KeyBindings()
     interaction_active = Condition(lambda: self.dialogs.current is not None)
+    secret_input_active = Condition(
+        lambda: self.dialogs.current is not None and self.dialogs.current.accepts_secret
+    )
 
     def bind(action: str, bindings: KeyBindings = kb):  # type: ignore[no-untyped-def]
         def register(handler):  # type: ignore[no-untyped-def]
@@ -70,7 +73,7 @@ def create_bindings(
     def next_turn(event) -> None:  # type: ignore[no-untyped-def]
         self.transcript.jump_turn(1)
 
-    editing = Condition(lambda: bool(self.buffer.text) and (
+    editing = Condition(lambda: not secret_input_active() and bool(self.buffer.text) and (
         self.dialogs.current is None or self.dialogs.current.accepts_text
     ))
 
@@ -88,6 +91,8 @@ def create_bindings(
 
     @bind("newline")
     def newline(event) -> None:  # type: ignore[no-untyped-def]
+        if secret_input_active():
+            return
         event.current_buffer.insert_text("\n")
 
     @bind("follow_up")
@@ -103,6 +108,10 @@ def create_bindings(
 
     @kb.add(Keys.BracketedPaste, eager=True)
     def bracketed_paste(event) -> None:  # type: ignore[no-untyped-def]
+        if secret_input_active():
+            sanitized = event.data.replace("\r\n", "").replace("\n", "").replace("\r", "")
+            self.secret_buffer.insert_text(sanitized)
+            return
         self.attachments_controller._handle_pasted_text(event.data.replace("\r\n", "\n").replace("\r", "\n"))
 
     @kb.add("backspace", filter=Condition(
@@ -166,22 +175,42 @@ def create_bindings(
     @kb.add("s-tab", filter=interaction_active)
     def interaction_previous(event) -> None:  # type: ignore[no-untyped-def]
         assert self.dialogs.current
+        self._clear_secret_buffer()
         if self.dialogs.current.custom_entry:
             self.dialogs.current.custom_entry = False
             self.dialogs.current.error = ""
-            event.current_buffer.reset()
+            self.buffer.reset()
             self.drafts.pasted.clear()
             self.drafts.skill.clear()
+            return
+        if self.dialogs.current.current.get("id") == "__confirm_overwrite__":
+            self.dialogs.current.fields = [
+                item for item in self.dialogs.current.fields if item.get("id") != "__confirm_overwrite__"
+            ]
+            self.dialogs.current.index = max(0, len(self.dialogs.current.fields) - 1)
+            self.dialogs.current.option_index = 0
+            if self.dialogs.current.accepts_secret:
+                fid = str(self.dialogs.current.current.get("id") or "")
+                self.dialogs.current._secret_values.pop(fid, None)
+            self.application.invalidate()
             return
         if self.dialogs.current.index > 0:
             self.dialogs.current.index -= 1
             self.dialogs.current.option_index = 0
-            previous = self.dialogs.current.values.get(str(self.dialogs.current.current.get("id") or ""), "")
+            field_id = str(self.dialogs.current.current.get("id") or "")
+            if self.dialogs.current.accepts_secret:
+                # Never copy a previously entered secret back into any editable buffer.
+                self.dialogs.current._secret_values.pop(field_id, None)
+                self.buffer.reset()
+                self.drafts.pasted.clear()
+                self.drafts.skill.clear()
+                return
+            previous = self.dialogs.current.values.get(field_id, "")
             if self.dialogs.current.accepts_text and isinstance(previous, str):
-                event.current_buffer.text = previous
-                event.current_buffer.cursor_position = len(previous)
+                self.buffer.text = previous
+                self.buffer.cursor_position = len(previous)
             else:
-                event.current_buffer.reset()
+                self.buffer.reset()
                 self.drafts.pasted.clear()
                 self.drafts.skill.clear()
 

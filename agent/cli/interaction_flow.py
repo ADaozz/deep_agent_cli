@@ -41,6 +41,8 @@ class InteractionFlow:
         state: CliState,
         invalidate: Callable[[], None],
         finish_mcp: Callable[..., None],
+        finish_secrets: Callable[..., None] | None = None,
+        clear_secret_buffer: Callable[[], None] | None = None,
     ) -> None:
         self._on_event_thread = _on_event_thread
         self.access_selection = access_selection
@@ -56,15 +58,37 @@ class InteractionFlow:
         self.state = state
         self.invalidate = invalidate
         self.finish_mcp = finish_mcp
-
+        self.finish_secrets = finish_secrets
+        self._clear_secret_buffer = clear_secret_buffer or (lambda: None)
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
         interaction = self.dialogs.current
         if interaction is None:
             return
+        if interaction.kind.startswith("secret_"):
+            if self.finish_secrets is not None:
+                self.finish_secrets(interaction, cancelled=cancelled)
+            else:
+                interaction.clear_secrets()
+                self._clear_secret_buffer()
+                self.dialogs.current = None
+            return
+        if interaction.source == "runtime_auth":
+            callback = interaction.auth_callback
+            secret = None if cancelled else interaction.runtime_auth_secret()
+            interaction.clear_secrets()
+            self._clear_secret_buffer()
+            self.dialogs.current = None
+            deferred = self.dialogs.deferred
+            if deferred is not None:
+                self.dialogs.current = deferred
+                self.dialogs.deferred = None
+            if callable(callback):
+                callback(secret)
+            self.set_status("Authentication cancelled" if cancelled else "Authentication submitted")
+            self.invalidate()
+            return
         if interaction.kind.startswith("mcp_"):
-            from agent.cli.mcp_ui import finish_mcp_interaction
-
             self.finish_mcp(interaction, cancelled=cancelled)
             return
         if interaction.kind == "approval":
@@ -91,6 +115,8 @@ class InteractionFlow:
             self.access_selection().finish_interaction(interaction, cancelled=cancelled)
             return
         if cancelled and interaction.kind in {"pause", "approval", "human"}:
+            interaction.clear_secrets()
+            self._clear_secret_buffer()
             self._dismiss_pending_interrupt(interaction.kind)
             return
         if interaction.kind == "pause":
@@ -126,11 +152,49 @@ class InteractionFlow:
                 )
             self.run_dispatch()._start_run("", resume_call=resume_call)
             return
-        values = dict(interaction.values)
+        # Agent human_input: handle overwrite confirmation for secret fields before resuming.
+        if "__confirm_overwrite__" in interaction.values:
+            decision = str(interaction.values.pop("__confirm_overwrite__") or "")
+            if decision != "overwrite":
+                interaction.clear_secrets()
+                self._clear_secret_buffer()
+                self._dismiss_pending_interrupt("human")
+                return
+            interaction.overwrite_confirmed = True
+            interaction.fields = [f for f in interaction.fields if f.get("id") != "__confirm_overwrite__"]
+        if interaction.has_secret_fields and not interaction.overwrite_confirmed:
+            targets = interaction.secret_targets()
+            conflicts = self.runner.check_secret_overwrites(targets) if targets else []
+            if conflicts:
+                interaction.prompt_overwrite_confirmation(conflicts)
+                self.set_status("Credential exists · confirm overwrite", transient=False)
+                self.invalidate()
+                return
+        secret_ids = {str(f.get("id") or "") for f in interaction.fields if f.get("type") == "secret"}
+        values = {
+            k: v for k, v in interaction.values.items()
+            if k != "__confirm_overwrite__" and k not in secret_ids
+        }
+        secret_subs = interaction.secret_submissions()
+        overwrite = interaction.overwrite_confirmed
+        interaction.clear_secrets()
+        self._clear_secret_buffer()
         self.dialogs.current = None
-        self.run_dispatch()._start_run("", resume_call=partial(
-            self.runner.submit_human_input, values, on_event=self._on_event_thread,
-        ))
+        if secret_subs:
+            resume_call = partial(
+                self.runner.submit_human_input,
+                values,
+                secrets=secret_subs,
+                overwrite_secrets=overwrite,
+                on_event=self._on_event_thread,
+            )
+        else:
+            resume_call = partial(
+                self.runner.submit_human_input,
+                values,
+                on_event=self._on_event_thread,
+            )
+        self.run_dispatch()._start_run("", resume_call=resume_call)
 
     def _restore_approval_draft(self) -> None:
         if self.dialogs.approval_draft is None:

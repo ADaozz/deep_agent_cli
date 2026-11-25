@@ -52,12 +52,16 @@ class RunDispatch:
         state: CliState,
         invalidate: Callable[[], None],
         _call_in_run_epoch: Callable[..., Any],
+        secret_buffer: Buffer | None = None,
+        clear_secret_buffer: Callable[[], None] | None = None,
     ) -> None:
         self.execute_command = execute_command
         self._on_event_thread = _on_event_thread
         self._run_blocking = _run_blocking
         self._working_messages = _working_messages
         self.buffer = buffer
+        self.secret_buffer = secret_buffer
+        self._clear_secret_buffer = clear_secret_buffer or (lambda: None)
         self.command_by_name = command_by_name
         self.dialogs = dialogs
         self.drafts = drafts
@@ -112,6 +116,14 @@ class RunDispatch:
         self.slash_completer.accepted_text = None
         if self.sessions().waiting:
             self.set_status(self.sessions().wait_status(), transient=False)
+            return
+        if self.dialogs.current is not None and self.dialogs.current.accepts_secret:
+            raw_secret = self.secret_buffer.text if self.secret_buffer is not None else ""
+            self._clear_secret_buffer()
+            complete = self.dialogs.current.accept_secret(raw_secret)
+            if complete:
+                self.interaction_flow()._finish_interaction()
+            self.invalidate()
             return
         displayed = self.buffer.text.strip()
         if self.drafts.skill.has_invalid_marker(displayed):

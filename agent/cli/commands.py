@@ -47,6 +47,11 @@ def command_table() -> tuple[Command, ...]:
             "MCP servers: enable, disable, add, remove, test, tools",
             _mcp,
         ),
+        Command(
+            "secrets",
+            "Credentials: list, set, update, delete (values are never shown)",
+            _secrets,
+        ),
         Command("exit", "Exit DeepAgent", _exit),
     )
 
@@ -131,6 +136,12 @@ async def _mcp(app: "CliApplication", arg: str) -> None:
     from agent.cli.mcp_ui import handle_mcp_command
 
     await handle_mcp_command(app, arg)
+
+
+async def _secrets(app: "CliApplication", arg: str) -> None:
+    from agent.cli.secrets_ui import handle_secrets_command
+
+    await handle_secrets_command(app, arg)
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:

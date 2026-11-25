@@ -23,7 +23,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_focus
 from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.history import DummyHistory, InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.keys import Keys
@@ -40,6 +40,7 @@ from prompt_toolkit.layout.containers import WindowAlign
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.layout.processors import PasswordProcessor
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -92,6 +93,7 @@ from agent.cli.gitinfo import REFRESH_SECONDS, GitProbe
 from agent.cli.input import Keymap
 from agent.cli.interactions import InteractionController
 from agent.cli.mcp_ui import finish_mcp_interaction
+from agent.cli.secrets_ui import finish_secrets_interaction
 from agent.cli.pasted_content import PastedContentDraft
 from agent.cli.skills import SkillDraft
 from agent.cli.rendering import (
@@ -202,6 +204,7 @@ class CliApplication:
         self.terminated_by: signal.Signals | None = None
         self.mcp_controller = MCPController()
         self._mcp_draft: dict[str, str] = {}
+        self._secret_draft: dict[str, str] = {}
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._queue_scroll = 0
         self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
@@ -242,6 +245,13 @@ class CliApplication:
             history=InMemoryHistory(),
             completer=self.slash_completer,
             complete_while_typing=True,
+        )
+        # Isolated secret input buffer: single-line, no history, no completer,
+        # never touches drafts.pasted or self.buffer.
+        self.secret_buffer = Buffer(
+            multiline=False,
+            history=DummyHistory(),
+            complete_while_typing=False,
         )
         self.drafts.pasted = PastedContentDraft()
         self.drafts.skill = SkillDraft()
@@ -304,6 +314,8 @@ class CliApplication:
             state=self.state,
             invalidate=lambda: self.application.invalidate(),
             _call_in_run_epoch=_call_in_run_epoch,
+            secret_buffer=self.secret_buffer,
+            clear_secret_buffer=self._clear_secret_buffer,
         )
         self.session_summaries = SessionSummaries(
             runner=self.runner, lifecycle=lambda: self.lifecycle,
@@ -341,6 +353,8 @@ class CliApplication:
             state=self.state,
             invalidate=lambda: self.application.invalidate(),
             finish_mcp=lambda interaction, **kwargs: finish_mcp_interaction(self, interaction, **kwargs),
+            finish_secrets=lambda interaction, **kwargs: finish_secrets_interaction(self, interaction, **kwargs),
+            clear_secret_buffer=self._clear_secret_buffer,
         )
         self.sessions = SessionController(
             summaries=lambda: self.session_summaries,
@@ -419,8 +433,16 @@ class CliApplication:
                 _PastedContentProcessor(self.drafts.skill, "skill-block"),
             ],
         )
+        self.secret_editor = _EditorScrollControl(
+            buffer=self.secret_buffer, focusable=True, on_scroll=self.transcript.scroll_transcript,
+            on_select_outside=self.transcript._select_below_transcript,
+            input_processors=[PasswordProcessor(char="•")],
+        )
 
         interaction_visible = Condition(lambda: self.dialogs.current is not None)
+        secret_input_active = Condition(
+            lambda: self.dialogs.current is not None and self.dialogs.current.accepts_secret
+        )
         editor_visible = Condition(lambda: self.dialogs.current is None or self.dialogs.current.accepts_text)
         attachments_visible = Condition(lambda: bool(self.state.attachments) and self.dialogs.current is None)
         back_to_bottom_visible = Condition(self.transcript.transcript_away_from_bottom)
@@ -530,6 +552,10 @@ class CliApplication:
                 build_input_editor(self.editor_control, height=editor_height),
                 filter=editor_visible,
             ),
+            ConditionalContainer(
+                build_input_editor(self.secret_editor, height=1, wrap_lines=False),
+                filter=secret_input_active,
+            ),
             Window(
                 self.footer_control,
                 height=FOOTER_LINES,
@@ -582,6 +608,12 @@ class CliApplication:
         def restore_focus(app):
             if not visible():
                 sidebar.selection.clear_selection()
+            if secret_input_active():
+                if app.layout.current_control is not self.secret_editor:
+                    app.layout.focus(self.secret_editor)
+                return
+            if app.layout.current_control is self.secret_editor:
+                app.layout.focus(self.editor_control)
             if app.layout.current_control is self.lain_editor and not available():
                 app.layout.focus(self.editor_control)
         title = FormattedText([("#00d7e6 bold", "DeepAgentCLI"),
@@ -987,12 +1019,24 @@ class CliApplication:
     async def resume_session(self, arg: str = "") -> None:
         await self.sessions.resume(arg)
 
+    def _clear_secret_buffer(self) -> None:
+        """Erase the isolated secret editor buffer, including undo/redo stacks."""
+        self.secret_buffer.reset(append_to_history=False)
+        self.secret_buffer._undo_stack.clear()
+        self.secret_buffer._redo_stack.clear()
+
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
         self.companion.sync_session()
         self.lain_buffer.reset()
+        self._clear_secret_buffer()
+        self._secret_draft = {}
         self.skills._clear_skill_draft()
         self.transcript.clear_transcript_selection()
+        if self.dialogs.current is not None:
+            self.dialogs.current.clear_secrets()
+        if self.dialogs.deferred is not None:
+            self.dialogs.deferred.clear_secrets()
         self.dialogs.current = None
         self.dialogs.deferred = None
         self.transcript.jump_message_id = None
@@ -1113,11 +1157,14 @@ class CliApplication:
             self.application.invalidate()
             return
         if action is InputAction.CLEAR_INPUT:
-            buffer.reset()
-            if buffer is not self.lain_buffer:
-                self.drafts.pasted.clear()
-                self.drafts.skill.clear()
-                self.state.attachments.clear()
+            if buffer is self.secret_buffer:
+                self._clear_secret_buffer()
+            else:
+                buffer.reset()
+                if buffer is not self.lain_buffer:
+                    self.drafts.pasted.clear()
+                    self.drafts.skill.clear()
+                    self.state.attachments.clear()
             self._show_input_cleared_hint()
             return
         if action is InputAction.REQUEST_EXIT:
@@ -1134,6 +1181,12 @@ class CliApplication:
 
     def exit(self) -> None:
         """Ask the lifecycle to leave. Resource shutdown happens after the prompt loop."""
+        self._clear_secret_buffer()
+        self._secret_draft = {}
+        if self.dialogs.current is not None:
+            self.dialogs.current.clear_secrets()
+        if self.dialogs.deferred is not None:
+            self.dialogs.deferred.clear_secrets()
         self.lifecycle.request_exit()
 
     async def _run_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:

@@ -11,6 +11,7 @@ from rich.text import Text
 
 from agent.cli.highlighting import code_renderer
 from agent.redaction import SecretRef, replace_known_secrets, sanitize_display_text
+from agent.secrets.store import ManagedStorage, SecretMetadata, SecretSubmission
 from agent.tools.catalog import FILE_MUTATION_TOOLS, WEB_TOOLS
 from agent.tools.human_interaction import ensure_other_option
 
@@ -131,6 +132,7 @@ class InteractionController:
     fields: list[dict[str, Any]]
     interaction_id: str = ""
     reason: str = ""
+    source: str = "agent_input"
     recommendation: dict[str, Any] = field(default_factory=dict)
     impact: list[str] = field(default_factory=list)
     index: int = 0
@@ -141,9 +143,14 @@ class InteractionController:
     error: str = ""
     tool_call_ids: list[str] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
+    # Isolated from ``values`` and excluded from repr so plaintext secrets never leak into logs/events.
+    _secret_values: dict[str, str] = field(default_factory=dict, repr=False)
+    secret_storages: dict[str, ManagedStorage] = field(default_factory=dict)
+    overwrite_confirmed: bool = False
+    auth_callback: Any = field(default=None, repr=False)
 
     @classmethod
-    def human(cls, payload: dict[str, Any]) -> "InteractionController":
+    def human(cls, payload: dict[str, Any], *, auth_callback: Any = None) -> "InteractionController":
         fields = payload.get("fields") if isinstance(payload.get("fields"), list) else []
         if not fields:
             fields = [{"id": "text", "type": "textarea", "label": "Reply", "required": True, "options": []}]
@@ -157,15 +164,20 @@ class InteractionController:
             elif item.get("type") in {"single_select", "multi_select"}:
                 item["options"] = ensure_other_option(item.get("options") or [])
         raw_recommendation = payload.get("recommendation")
+        source = str(payload.get("source") or "agent_input")
+        if source not in {"agent_input", "runtime_auth"}:
+            source = "agent_input"
         return cls(
             kind="human",
-            title=str(payload.get("title") or "Input required"),
+            source=source,
+            title=str(payload.get("title") or ("Authentication required" if source == "runtime_auth" else "Input required")),
             question=str(payload.get("question") or "Please provide the requested information."),
             reason=str(payload.get("reason") or ""),
             fields=fields,
             interaction_id=str(payload.get("interactionId") or ""),
             recommendation=raw_recommendation if isinstance(raw_recommendation, dict) else {},
             impact=[str(item) for item in payload.get("impact", [])],
+            auth_callback=auth_callback if source == "runtime_auth" else None,
         )
 
     @classmethod
@@ -275,12 +287,111 @@ class InteractionController:
     def accepts_text(self) -> bool:
         return self.custom_entry or str(self.current.get("type")) in {"text", "textarea"}
 
+    @property
+    def accepts_secret(self) -> bool:
+        return not self.custom_entry and str(self.current.get("type")) == "secret"
+
+    @property
+    def has_secret_fields(self) -> bool:
+        return any(str(item.get("type")) == "secret" for item in self.fields)
+
+    def current_secret_storage(self) -> ManagedStorage:
+        field_id = str(self.current.get("id") or f"field_{self.index}")
+        return self.secret_storages.get(field_id, "session")
+
+    def secret_targets(self) -> list[tuple[str, ManagedStorage]]:
+        targets: list[tuple[str, ManagedStorage]] = []
+        for idx, item in enumerate(self.fields):
+            if str(item.get("type")) != "secret":
+                continue
+            field_id = str(item.get("id") or f"field_{idx}")
+            secret_name = str(item.get("secret_name") or "").strip()
+            if secret_name and self._secret_values.get(field_id, "") != "":
+                targets.append((secret_name, self.secret_storages.get(field_id, "session")))
+        return targets
+
+    def secret_submissions(self) -> dict[str, SecretSubmission]:
+        submissions: dict[str, SecretSubmission] = {}
+        for idx, item in enumerate(self.fields):
+            if str(item.get("type")) != "secret":
+                continue
+            field_id = str(item.get("id") or f"field_{idx}")
+            if field_id not in self._secret_values:
+                continue
+            raw_val = self._secret_values[field_id]
+            if raw_val == "":
+                continue
+            submissions[field_id] = SecretSubmission(
+                value=raw_val,
+                storage=self.secret_storages.get(field_id, "session"),
+                overwrite=self.overwrite_confirmed,
+            )
+        return submissions
+
+    def runtime_auth_secret(self) -> str:
+        field_id = str(self.fields[0].get("id") or "password") if self.fields else "password"
+        return self._secret_values.get(field_id, "")
+
+    def clear_secrets(self) -> None:
+        self._secret_values.clear()
+        self.auth_callback = None
+
+    def prompt_overwrite_confirmation(self, conflicts: list[SecretMetadata]) -> None:
+        names = ", ".join(
+            f"{meta.name} ({meta.storage})" for meta in conflicts
+        )
+        confirm_field = {
+            "id": "__confirm_overwrite__",
+            "type": "single_select",
+            "label": "Overwrite existing credential?",
+            "required": True,
+            "options": [
+                {"value": "cancel", "label": "Cancel", "description": f"Keep existing {names}"},
+                {"value": "overwrite", "label": "Overwrite", "description": f"Replace {names}"},
+            ],
+        }
+        self.fields = [item for item in self.fields if item.get("id") != "__confirm_overwrite__"]
+        self.fields.append(confirm_field)
+        self.index = len(self.fields) - 1
+        self.option_index = 0
+        self.error = ""
+
     def move(self, delta: int) -> None:
         if self.custom_entry:
+            return
+        if self.accepts_secret:
+            if self.source == "runtime_auth":
+                return
+            field_id = str(self.current.get("id") or f"field_{self.index}")
+            storages: tuple[ManagedStorage, ManagedStorage] = ("session", "persistent")
+            current = self.secret_storages.get(field_id, "session")
+            next_idx = (storages.index(current) + delta) % len(storages)
+            self.secret_storages[field_id] = storages[next_idx]
+            self.option_index = next_idx
             return
         options = self.current.get("options") or []
         if options:
             self.option_index = (self.option_index + delta) % len(options)
+
+    def accept_secret(self, secret_text: str) -> bool:
+        """Accept a secret value strictly into isolated storage (never ``self.values``)."""
+        field = self.current
+        field_id = str(field.get("id") or f"field_{self.index}")
+        if field.get("required") and secret_text == "":
+            self.error = "This field is required."
+            return False
+        if secret_text != "":
+            self._secret_values[field_id] = secret_text
+            if self.source != "runtime_auth":
+                self.secret_storages.setdefault(field_id, "session")
+        else:
+            self._secret_values.pop(field_id, None)
+        self.error = ""
+        if self.index + 1 < len(self.fields):
+            self.index += 1
+            self.option_index = 0
+            return False
+        return True
 
     def toggle(self) -> None:
         if self.custom_entry or self.current.get("type") != "multi_select":
@@ -307,6 +418,8 @@ class InteractionController:
         field = self.current
         field_id = str(field.get("id") or f"field_{self.index}")
         field_type = str(field.get("type") or "text")
+        if not self.custom_entry and field_type == "secret":
+            return self.accept_secret(text)
         options = field.get("options") or []
         value: Any
         if self.custom_entry:
@@ -373,10 +486,39 @@ class InteractionController:
         if self.impact:
             parts.append(Text("Impact:\n" + "\n".join(f"• {item}" for item in self.impact), style="yellow"))
         field = self.current
-        if len(self.fields) > 1:
-            parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {field.get('label') or field.get('id')}", style="bold"))
+        is_secret = not self.custom_entry and str(field.get("type")) == "secret"
+        label_name = str(field.get("label") or field.get("id") or "")
+        if is_secret:
+            step = f"{self.index + 1}/{len(self.fields)}  " if len(self.fields) > 1 else ""
+            parts.append(Text(f"{step}{label_name} · Secure Input", style="bold"))
+            if self.source == "runtime_auth":
+                parts.append(Text("Password is passed directly to sudo and is not stored.", style="dim"))
+            else:
+                secret_name = str(field.get("secret_name") or "")
+                secret_scope = str(field.get("secret_scope") or "host")
+                scope_label = "Host" if secret_scope == "host" else "Sandbox"
+                if secret_name:
+                    parts.append(Text(f"Reference: {secret_name}", style="cyan"))
+                parts.append(Text(f"Scope: {scope_label}", style="dim"))
+                selected_storage = self.current_secret_storage()
+                storage_line = "Storage: " + (
+                    "[Session] / Persistent" if selected_storage == "session" else "Session / [Persistent]"
+                )
+                parts.append(Text(storage_line, style="cyan"))
+        elif len(self.fields) > 1:
+            parts.append(Text(f"{self.index + 1}/{len(self.fields)}  {label_name}", style="bold"))
         options_start = len(parts)
-        options = [] if self.custom_entry else field.get("options") or []
+        options = [] if self.custom_entry or is_secret else field.get("options") or []
+        if is_secret and self.source != "runtime_auth":
+            selected_storage = self.current_secret_storage()
+            storage_choices = (
+                ("session", "Session", "Memory only for this session"),
+                ("persistent", "Persistent", "Encrypted in ~/.deep-agent/secrets"),
+            )
+            for value, choice_label, desc in storage_choices:
+                pointer = "→" if value == selected_storage else " "
+                style = "bold cyan" if value == selected_storage else ""
+                parts.append(Text(f"{pointer}  {choice_label}  {desc}", style=style))
         selected = self.values.get(str(field.get("id") or "")) or []
         for idx, option in enumerate(options):
             pointer = "→" if idx == self.option_index else " "
@@ -402,12 +544,21 @@ class InteractionController:
             else:
                 parts.append(label_text)
         options_end = len(parts)
+        if is_secret and self.source != "runtime_auth":
+            parts.append(Text("Only the credential name is returned to the agent.", style="dim"))
         if self.error:
             parts.append(Text(self.error, style="red"))
         if self.custom_entry:
             parts.append(Text("Other: enter your answer", style="cyan"))
         if self.custom_entry:
             hint = "Enter submit  Ctrl+J newline  Esc back"
+        elif is_secret:
+            if self.source == "runtime_auth":
+                hint = "Enter submit  Esc cancel"
+            elif self.kind == "human":
+                hint = "↑↓ storage  Enter submit  Esc cancel · F2 to reopen"
+            else:
+                hint = "↑↓ storage  Enter submit  Esc cancel"
         elif self.kind == "model_reasoning" or (self.kind == "model" and self.values.get("source")):
             hint = "↑↓ select  Enter confirm  Esc back"
         elif self.kind in {"approval", "human", "pause"} and options:

@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 from threading import Lock
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
@@ -32,6 +32,16 @@ from agent.sessions.images import (
 from agent.bootstrap.config import Settings
 from agent.execution.policy import SandboxConfig, SandboxMode
 from agent.redaction import SecretRef, known_secret_refs
+from agent.secrets.store import (
+    ManagedStorage,
+    SecretExistsError,
+    SecretMetadata,
+    SecretScope,
+    SecretStore,
+    SecretSubmission,
+    validate_secret_name,
+    validate_secret_scope,
+)
 from agent.models.profile import InputKind, ModelProfile
 from agent.runtime.control import RunController
 from agent.runtime.configuration import RuntimeConfiguration
@@ -164,6 +174,7 @@ class AgentRunner:
         settings: Settings | None = None,
         model_id: str | None = None,
         mcp_manager: Any | None = None,
+        secret_store: SecretStore | None = None,
     ) -> None:
         if prepared is not None and (backend is not None or sandbox_config is not None):
             raise ValueError("prepared already defines the backend and sandbox configuration")
@@ -199,6 +210,21 @@ class AgentRunner:
         self._close_completed = False
         self.mcp = mcp_manager
         self._runtime: SessionRuntime | None = None
+        secrets_dir = (
+            (settings.config_dir if settings is not None and settings.config_dir is not None else None)
+            or (
+                self._sandbox_config.protected_config_dir
+                if self._sandbox_config is not None and self._sandbox_config.protected_config_dir is not None
+                else None
+            )
+            or (
+                prepared.spec.settings.config_dir
+                if prepared is not None and prepared.spec.settings is not None
+                else None
+            )
+        )
+        self.secret_store = secret_store if secret_store is not None else SecretStore(secrets_dir)
+        self._committed_secret_interactions: dict[str, dict[str, str]] = {}
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -795,7 +821,71 @@ class AgentRunner:
         return [item.text for item in self.control.take_unapplied()]
 
     def summary_secrets(self) -> tuple[SecretRef, ...]:
-        return known_secret_refs(self.settings or self._spec.settings, self._spec.deepseek_api_key)
+        base = known_secret_refs(self.settings or self._spec.settings, self._spec.deepseek_api_key)
+        managed = self.secret_store.redaction_refs(session_id=self.thread_id)
+        return (*base, *managed)
+
+    def list_secrets(self) -> list[SecretMetadata]:
+        return self.secret_store.list_secrets(session_id=self.thread_id)
+
+    def check_secret_overwrites(
+        self,
+        items: Sequence[tuple[str, ManagedStorage]],
+    ) -> list[SecretMetadata]:
+        return self.secret_store.find_conflicts(items, session_id=self.thread_id)
+
+    def set_secret(
+        self,
+        name: str,
+        value: str,
+        *,
+        scope: SecretScope,
+        storage: ManagedStorage = "session",
+        consumers: Sequence[str] = (),
+        overwrite: bool = False,
+    ) -> SecretMetadata:
+        meta = self.secret_store.set_secret(
+            name,
+            value,
+            scope=scope,
+            storage=storage,
+            session_id=self.thread_id,
+            consumers=consumers,
+            overwrite=overwrite,
+        )
+        invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
+        if callable(invalidate_mcp):
+            invalidate_mcp(meta.name)
+        return meta
+
+    def delete_secret(
+        self,
+        name: str,
+        *,
+        storage: ManagedStorage | None = None,
+    ) -> bool:
+        removed = self.secret_store.delete_secret(
+            name, storage=storage, session_id=self.thread_id,
+        )
+        if removed:
+            invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
+            if callable(invalidate_mcp):
+                invalidate_mcp(name)
+        return removed
+
+    def authorize_secret_consumer(
+        self,
+        name: str,
+        consumer: str,
+        *,
+        expected_scope: SecretScope = "host",
+    ) -> bool:
+        return self.secret_store.authorize_consumer(
+            name,
+            consumer,
+            expected_scope=expected_scope,
+            session_id=self.thread_id,
+        )
 
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         assert self._runtime is not None
@@ -1061,6 +1151,8 @@ class AgentRunner:
         if manager is not None:
             manager.reap_closed()
         self._close_mcp()
+        self.secret_store.clear_all_sessions()
+        self._committed_secret_interactions.clear()
         self._close_completed = True
         self._runtime.close()
         if self._attachment_tempdir is not None:
@@ -1263,16 +1355,105 @@ class AgentRunner:
         self,
         values: dict[str, Any],
         *,
+        secrets: Mapping[str, SecretSubmission | str] | None = None,
+        overwrite_secrets: bool = False,
         on_delta: DeltaHandler | None = None,
         on_event: RunEventHandler | None = None,
     ) -> RunResult:
         self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_HUMAN, "submit_human_input")
-        validate_human_input_values(values, state.payload)
-        envelope: dict[str, Any] = {"type": "human_input", "values": dict(values)}
-        if state.payload.get("interactionId"):
-            envelope["interactionId"] = state.payload["interactionId"]
-        return self._resume(envelope, on_delta=on_delta, on_event=on_event)
+        fields = [item for item in (state.payload.get("fields") or []) if isinstance(item, dict)]
+        secret_fields = [item for item in fields if item.get("type") == "secret"]
+        secret_ids = {str(item.get("id") or "") for item in secret_fields}
+        # Never allow raw secret values to enter through the plain values dictionary.
+        for field_id in secret_ids:
+            if field_id in values and values[field_id] not in (None, ""):
+                raise ValueError(
+                    f"Secret field {field_id!r} must be submitted via isolated secrets, never in plain values"
+                )
+        validate_human_input_values(values, state.payload, allow_omitted_secrets=True)
+
+        interaction_id = str(state.payload.get("interactionId") or "")
+        committed = self._committed_secret_interactions.get(interaction_id) if interaction_id else None
+        raw_secrets = dict(secrets or {})
+        unknown_secret_ids = set(raw_secrets) - secret_ids
+        if unknown_secret_ids:
+            raise ValueError(f"Unknown secret field(s): {', '.join(sorted(unknown_secret_ids))}")
+
+        batch: list[tuple[str, str, SecretScope, ManagedStorage, tuple[str, ...]]] = []
+        resolved_refs: dict[str, str] = {}
+        all_overwrite = bool(overwrite_secrets)
+        sub_overwrites: list[bool] = []
+        for field in secret_fields:
+            field_id = str(field.get("id") or "")
+            secret_name = validate_secret_name(field.get("secret_name"))
+            secret_scope = validate_secret_scope(field.get("secret_scope"))
+            required = bool(field.get("required"))
+            if field_id in raw_secrets:
+                submitted = raw_secrets[field_id]
+                if isinstance(submitted, SecretSubmission):
+                    raw_value = submitted.value
+                    storage: ManagedStorage = submitted.storage
+                    consumers = submitted.consumers
+                    sub_overwrites.append(submitted.overwrite)
+                elif isinstance(submitted, str):
+                    raw_value = submitted
+                    storage = "session"
+                    consumers = ()
+                    sub_overwrites.append(False)
+                else:
+                    raise ValueError(f"Secret field {field_id!r} must be a string or SecretSubmission")
+                if raw_value == "":
+                    if required:
+                        raise ValueError("Required secret fields must not be empty")
+                    continue
+                batch.append((secret_name, raw_value, secret_scope, storage, consumers))
+                resolved_refs[field_id] = secret_name
+            elif (
+                committed is not None
+                and committed.get(field_id) == secret_name
+                and self.secret_store.get_metadata(secret_name, session_id=self.thread_id) is not None
+            ):
+                # Safe retry when a previous save succeeded before Graph resume failed.
+                resolved_refs[field_id] = secret_name
+            elif required:
+                raise ValueError("Required secret fields must not be empty")
+
+        if batch:
+            committed_names = set(committed.values()) if committed else set()
+            retry_same_commit = bool(committed_names) and all(entry[0] in committed_names for entry in batch)
+            effective_overwrite = (
+                all_overwrite
+                or retry_same_commit
+                or (bool(sub_overwrites) and all(sub_overwrites))
+            )
+            stored = self.secret_store.set_secrets_atomic(
+                batch,
+                session_id=self.thread_id,
+                overwrite=effective_overwrite,
+            )
+            invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
+            if callable(invalidate_mcp):
+                for meta in stored:
+                    invalidate_mcp(meta.name)
+            if interaction_id:
+                self._committed_secret_interactions[interaction_id] = dict(resolved_refs)
+        batch.clear()
+        raw_secrets.clear()
+
+        sanitized_values = {
+            key: val for key, val in values.items() if key not in secret_ids
+        }
+        sanitized_values.update(resolved_refs)
+        envelope: dict[str, Any] = {"type": "human_input", "values": sanitized_values}
+        if interaction_id:
+            envelope["interactionId"] = interaction_id
+        result = self._resume(envelope, on_delta=on_delta, on_event=on_event)
+        if interaction_id:
+            pending = self.current_interrupt()
+            if pending is None or str(pending.payload.get("interactionId") or "") != interaction_id:
+                self._committed_secret_interactions.pop(interaction_id, None)
+        return result
 
     @_exclusive_operation
     def decide_tools(
