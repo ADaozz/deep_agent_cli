@@ -7,7 +7,7 @@ from prompt_toolkit.utils import get_cwidth
 
 from agent.cli.formatting import _fit_footer_parts, _truncate_cells
 from agent.companion.theme import ACCENT, MUTED, TEXT
-from agent.mcp.names import is_external_mcp_tool, mcp_display_identity, unique_mcp_identity
+from agent.mcp.names import resolve_mcp_display
 from agent.redaction import sanitize_display_text
 
 
@@ -63,7 +63,7 @@ class ActivityHeatmap:
         frequency = Counter(obs.tool_name for obs in calls)
         top = sorted(frequency, key=lambda name: (-frequency[name], name))[:TOOL_ROWS]
         has_other = len(frequency) > len(top)
-        labels = tool_health_labels(frequency)
+        labels = tool_health_labels(calls, name_width)
         counts = []
         for group in groups:
             buckets = [(obs.tool_name if obs.tool_name in top else None, obs.outcome) for obs in group]
@@ -75,7 +75,8 @@ class ActivityHeatmap:
             label = "other" if name is None else labels.get(name, name)
             if name == "other" and has_other:
                 label = "other tool"
-            label = _truncate_cells(label, name_width)
+            if name is None:
+                label = _truncate_cells(label, name_width)
             row = [(TEXT, margin + label + " " * (name_width - get_cwidth(label) + 2))]
             for i, (activity, failures) in enumerate(counts):
                 if i:
@@ -94,34 +95,86 @@ def _display_text(value: str) -> str:
     return " ".join(sanitize_display_text(value, keep_newlines=False).split())
 
 
-def _external_identity(name: str) -> tuple[str, str] | None:
-    """Registered server and remote tool. One unambiguous boundary is the fallback."""
-    if not is_external_mcp_tool(name):
-        return None
-    identity = mcp_display_identity(name) or unique_mcp_identity(name)
+def _clean_identity(name: str, server: str, remote: str) -> tuple[str, str] | None:
+    identity = resolve_mcp_display(name, server, remote)
     if identity is None:
         return None
-    server, remote = _display_text(identity[0]), _display_text(identity[1])
-    if not server or not remote:
+    cleaned_server, cleaned_remote = _display_text(identity[0]), _display_text(identity[1])
+    if not cleaned_server or not cleaned_remote:
         return None
-    return server, remote
+    return cleaned_server, cleaned_remote
 
 
-def tool_health_labels(names: Iterable[str]) -> dict[str, str]:
+def _recorded_identity(name: str, calls) -> tuple[str, str] | None:
+    server = remote = ""
+    for obs in calls:
+        if getattr(obs, "tool_name", None) != name:
+            continue
+        recorded_server = getattr(obs, "mcp_server", "") or ""
+        recorded_remote = getattr(obs, "mcp_remote", "") or ""
+        if recorded_server and recorded_remote:
+            server, remote = recorded_server, recorded_remote
+            break
+    return _clean_identity(name, server, remote)
+
+
+def _distinct_servers(entries: list[tuple[str, str]]) -> dict[str, str]:
+    """Shortest unique server prefix. Identical prefixes gain a stable number."""
+    prefixes: dict[str, str] = {}
+    servers = [server for _, server in entries]
+    for name, server in entries:
+        prefix = server
+        for length in range(1, len(server) + 1):
+            candidate = server[:length]
+            if sum(other[:length] == candidate for other in servers) == 1:
+                prefix = candidate
+                break
+        prefixes[name] = prefix
+    grouped: dict[str, list[str]] = {}
+    for name, prefix in prefixes.items():
+        grouped.setdefault(prefix, []).append(name)
+    labels: dict[str, str] = {}
+    for prefix, names in grouped.items():
+        for index, name in enumerate(sorted(names)):
+            labels[name] = prefix if index == 0 else f"{prefix}{index + 1}"
+    return labels
+
+
+def _fit_health_label(remote: str, suffix: str, width: int) -> str:
+    """Keep the distinguishing suffix. Truncate the tool name when the row is narrow."""
+    label = f"{remote}{suffix}" if suffix else remote
+    if width <= 0:
+        return ""
+    if get_cwidth(label) <= width:
+        return label
+    if not suffix or get_cwidth(suffix) >= width:
+        return _truncate_cells(label, width)
+    return _truncate_cells(remote, width - get_cwidth(suffix)) + suffix
+
+
+def tool_health_labels(calls: Iterable[object], width: int) -> dict[str, str]:
     """Row labels for Tool Health. Counts stay keyed by the registered name.
 
-    An external MCP tool shows its remote name. A server name is added only when
-    another tool in the same window would otherwise use that same label.
+    An external MCP tool shows its remote name. A server abbreviation is added
+    only when another tool in the same window would otherwise use that label.
     """
-    parsed = {name: _external_identity(name) for name in names}
+    calls = list(calls)
+    names = {str(getattr(obs, "tool_name", "") or "") for obs in calls}
+    names.discard("")
+    parsed = {name: _recorded_identity(name, calls) for name in names}
     short = {name: identity[1] if identity else name for name, identity in parsed.items()}
     shared = {label for label, count in Counter(short.values()).items() if count > 1}
+    colliding = [
+        (name, parsed[name][0])
+        for name, label in short.items()
+        if parsed[name] is not None and label in shared
+    ]
+    servers = _distinct_servers(colliding)
     labels: dict[str, str] = {}
     for name, identity in parsed.items():
-        label = short[name]
-        if identity is not None and label in shared:
-            label = f"{label} · {identity[0]}"
-        labels[name] = label
+        remote = short[name]
+        suffix = f" · {servers[name]}" if name in servers else ""
+        labels[name] = _fit_health_label(remote, suffix, width)
     return labels
 
 

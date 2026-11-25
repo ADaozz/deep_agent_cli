@@ -2068,9 +2068,7 @@ def test_mcp_card_restores_from_saved_transcript() -> None:
 
 
 def test_mcp_ambiguous_server_name_uses_identity_or_registered_name() -> None:
-    from agent.mcp.names import (
-        external_tool_name, forget_mcp_display_identity, register_mcp_display_identity,
-    )
+    from agent.mcp.names import external_tool_name
 
     registered = external_tool_name("my__srv", "search")
     assert registered == "mcp__my__srv__search"
@@ -2080,13 +2078,13 @@ def test_mcp_ambiguous_server_name_uses_identity_or_registered_name() -> None:
     assert "MCP my · srv__search" not in fallback
     assert "MCP my__srv · search" not in fallback
 
-    register_mcp_display_identity(registered, "my__srv", "search")
-    try:
-        titled = _plain(_capture(_tool(block, False), 120))
-        assert "MCP my__srv · search" in titled
-        assert registered not in titled
-    finally:
-        forget_mcp_display_identity(registered)
+    remembered = ToolBlock(
+        "mcp-us", registered, {"q": "x"}, output="ok", status="completed",
+        mcp_server="my__srv", mcp_remote="search",
+    )
+    titled = _plain(_capture(_tool(remembered, False), 120))
+    assert "MCP my__srv · search" in titled
+    assert registered not in titled
 
 
 def test_mcp_sanitized_empty_output_does_not_fall_back_to_raw_text() -> None:

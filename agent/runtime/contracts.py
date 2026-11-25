@@ -32,6 +32,9 @@ class RunEvent:
     run_id: str = ""
     turn_id: str = ""
     checkpoint_replay: bool = False
+    # Display only. Empty means the executing tool had no recorded MCP identity.
+    mcp_server: str = ""
+    mcp_remote: str = ""
 
 
 @dataclass(frozen=True)

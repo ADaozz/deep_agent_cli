@@ -12,8 +12,11 @@ from agent.runtime.contracts import InterruptKind
 from agent.runtime.events import classify_interrupt
 
 
-def read_snapshot(graph: Any, info: SessionInfo, repository: SessionRepository | None) -> SessionSnapshot:
-    transcript, interrupt, _ = read_transcript(graph, info.id, repository=repository)
+def read_snapshot(
+    graph: Any, info: SessionInfo, repository: SessionRepository | None, *,
+    identities: dict[str, tuple[str, str]] | None = None,
+) -> SessionSnapshot:
+    transcript, interrupt, _ = read_transcript(graph, info.id, repository=repository, identities=identities)
     return SessionSnapshot(
         info=info,
         transcript=transcript,
@@ -24,7 +27,10 @@ def read_snapshot(graph: Any, info: SessionInfo, repository: SessionRepository |
     )
 
 
-def read_transcript(graph, thread_id, *, repository=None, max_messages=None, include_thinking=True):
+def read_transcript(
+    graph, thread_id, *, repository=None, max_messages=None, include_thinking=True,
+    identities: dict[str, tuple[str, str]] | None = None,
+):
     config = {"configurable": {"thread_id": thread_id}}
     try:
         state = graph.get_state(config)
@@ -39,6 +45,7 @@ def read_transcript(graph, thread_id, *, repository=None, max_messages=None, inc
     transcript = messages_to_transcript(
         messages, include_thinking=include_thinking,
         turn_timings=repository.turn_timings(thread_id) if repository is not None else None,
+        identities=identities,
     )
     settle_restored_tools(
         transcript,

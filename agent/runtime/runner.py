@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 from threading import Lock
+from collections.abc import Mapping
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -61,6 +62,7 @@ from agent.runtime.events import (
     cancelled_result,
     classify_interrupt,
     final_answer_committed,
+    mcp_event_identity,
     update_tool_events,
     interrupt_kind_from_state,
     is_valid_hitl_interrupt as is_valid_hitl_interrupt,
@@ -199,6 +201,8 @@ class AgentRunner:
         self._close_completed = False
         self.mcp = mcp_manager
         self._runtime: SessionRuntime | None = None
+        # Optional read of display identity already stored with tool history.
+        self.display_identity_source: Callable[[str], Mapping[str, tuple[str, str]]] | None = None
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -814,7 +818,10 @@ class AgentRunner:
         info = self._runtime.resolve(session_id)
         if info is None:
             return None
-        return read_snapshot(self.prepared.graph, info, self.session_store)
+        identities = None
+        if self.display_identity_source is not None:
+            identities = self.display_identity_source(info.id)
+        return read_snapshot(self.prepared.graph, info, self.session_store, identities=identities)
 
     @_exclusive_operation
     def switch_session(self, session_id: str) -> SessionSnapshot:
@@ -1569,9 +1576,10 @@ class AgentRunner:
                         name = str(call.get("name") or "tool")
                         if name == "start_task":
                             self._subagent_tool_ids.add(call_id)
+                        server, remote = mcp_event_identity(self._bound_tools(), name)
                         _emit(event_handler, RunEvent(
                             "tool_resumed", tool_call_id=call_id, message_id=message.id or "", name=name,
-                            arguments=call["args"],
+                            arguments=call["args"], mcp_server=server, mcp_remote=remote,
                         ))
                     break
         last_message_id = _last_message_id(state_values)
@@ -1631,8 +1639,15 @@ class AgentRunner:
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
+    def _bound_tools(self) -> Mapping[str, Any]:
+        """Tools registered on the graph that is executing this run."""
+        nodes = getattr(self.prepared.graph, "nodes", None)
+        node = nodes.get("tools") if isinstance(nodes, Mapping) else None
+        tools = getattr(getattr(node, "bound", None), "tools_by_name", None)
+        return tools if isinstance(tools, Mapping) else {}
+
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None, resume_calls=None) -> None:
-        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
+        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls, self._bound_tools())
         # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
         if saw_input_usage:
             self._context_usage_invalidated = False

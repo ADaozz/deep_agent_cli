@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -102,9 +103,24 @@ def tool_message_is_error(message: ToolMessage) -> bool:
     ) != "success"
 
 
+def _recorded_identity(
+    identities: Mapping[str, tuple[str, str]] | None, tool_call_id: str,
+) -> tuple[str, str]:
+    if not identities or not tool_call_id:
+        return "", ""
+    pair = identities.get(tool_call_id)
+    if not isinstance(pair, tuple) or len(pair) != 2:
+        return "", ""
+    server, remote = pair
+    if isinstance(server, str) and server and isinstance(remote, str) and remote:
+        return server, remote
+    return "", ""
+
+
 def messages_to_transcript(
     messages: list[BaseMessage], *, turn_timings: dict[str, tuple[float, datetime]] | None = None,
     include_thinking: bool = True,
+    identities: Mapping[str, tuple[str, str]] | None = None,
 ) -> list[TranscriptBlock]:
     """Rebuild a presentation-neutral transcript from LangGraph checkpoint messages."""
     blocks: list[TranscriptBlock] = []
@@ -141,6 +157,7 @@ def messages_to_transcript(
                     status="running",
                     message_id=message.id or "",
                 )
+                block.mcp_server, block.mcp_remote = _recorded_identity(identities, block.tool_call_id)
                 blocks.append(block)
                 tools[block.tool_call_id] = block
             timing = (turn_timings or {}).get(message.id or "")
@@ -193,6 +210,7 @@ def messages_to_transcript(
                     exit_code=exit_code,
                     artifact=artifact,
                 )
+                block.mcp_server, block.mcp_remote = _recorded_identity(identities, tool_call_id)
                 blocks.append(block)
                 tools[tool_call_id] = block
     return blocks

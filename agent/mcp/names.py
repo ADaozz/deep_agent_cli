@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import hashlib
 import re
+from typing import Any
 
 from agent.runtime.permissions import host_decision_rule
 
@@ -45,8 +46,8 @@ def is_external_mcp_tool(name: str) -> bool:
 def unique_mcp_identity(name: str) -> tuple[str, str] | None:
     """Return server and remote tool only when one valid server boundary exists.
 
-    Several ``__`` boundaries are left unresolved. Callers use
-    ``mcp_display_identity`` for the server and remote name recorded at registration.
+    Several ``__`` boundaries stay unresolved. Recorded tool metadata is the
+    source for those names; this parser is only the fallback for old records.
     """
     if not is_external_mcp_tool(name):
         return None
@@ -66,22 +67,22 @@ def unique_mcp_identity(name: str) -> tuple[str, str] | None:
     return matches[0]
 
 
-# Display-only. The registered name stays the protocol identity.
-_DISPLAY_IDENTITIES: dict[str, tuple[str, str]] = {}
+def mcp_metadata_identity(metadata: Mapping[str, Any] | None) -> tuple[str, str] | None:
+    """Server and remote tool stored on the live tool. No process-wide cache."""
+    raw = (metadata or {}).get("deep_agent_mcp")
+    if not isinstance(raw, dict):
+        return None
+    server, remote = raw.get("server"), raw.get("remote_name")
+    if isinstance(server, str) and server and isinstance(remote, str) and remote:
+        return server, remote
+    return None
 
 
-def register_mcp_display_identity(local_name: str, server: str, remote_name: str) -> None:
-    """Remember the server and remote tool already stored on the live tool."""
-    if local_name and server and remote_name:
-        _DISPLAY_IDENTITIES[local_name] = (server, remote_name)
-
-
-def forget_mcp_display_identity(local_name: str) -> None:
-    _DISPLAY_IDENTITIES.pop(local_name, None)
-
-
-def mcp_display_identity(local_name: str) -> tuple[str, str] | None:
-    return _DISPLAY_IDENTITIES.get(local_name)
+def resolve_mcp_display(name: str, server: str = "", remote: str = "") -> tuple[str, str] | None:
+    """Recorded server and remote name, else one unambiguous registered-name boundary."""
+    if server and remote:
+        return server, remote
+    return unique_mcp_identity(name)
 
 
 def is_managed_mcp_name(name: str) -> bool:

@@ -7,11 +7,13 @@ and records them.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import field
 from typing import Any, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from agent.mcp.names import mcp_metadata_identity
 from agent.runtime.contracts import (
     RunEvent,
     RunEventHandler,
@@ -260,7 +262,20 @@ def normalize_stream_error(exc: BaseException, *, cancel_requested: bool) -> Bas
     return exc
 
 
-def update_tool_events(chunk: Any, seen: set[str]) -> tuple[list[RunEvent], bool]:
+def mcp_event_identity(tools_by_name: Mapping[str, Any] | None, name: str) -> tuple[str, str]:
+    """Server and remote tool from the graph bound for this run. Missing stays blank."""
+    if not isinstance(tools_by_name, Mapping) or not name:
+        return "", ""
+    tool = tools_by_name.get(name)
+    identity = mcp_metadata_identity(getattr(tool, "metadata", None) if tool is not None else None)
+    if identity is None:
+        return "", ""
+    return identity
+
+
+def update_tool_events(
+    chunk: Any, seen: set[str], tools_by_name: Mapping[str, Any] | None = None,
+) -> tuple[list[RunEvent], bool]:
     """Tool and usage events for one graph update.
 
     Mutates ``seen`` so a replayed tool start is not emitted twice. The bool is
@@ -281,22 +296,30 @@ def update_tool_events(chunk: Any, seen: set[str]) -> tuple[list[RunEvent], bool
                 if identity in seen:
                     continue
                 seen.add(identity)
+                name = str(call.get("name") or "tool")
+                server, remote = mcp_event_identity(tools_by_name, name)
                 events.append(RunEvent(
                     type="tool_started",
                     message_id=message_id,
                     tool_call_id=tool_call_id,
-                    name=str(call.get("name") or "tool"),
+                    name=name,
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
+                    mcp_server=server,
+                    mcp_remote=remote,
                 ))
         elif isinstance(message, ToolMessage):
             content = message_text(message)
+            name = str(getattr(message, "name", "") or "tool")
+            server, remote = mcp_event_identity(tools_by_name, name)
             events.append(RunEvent(
                 type="tool_completed",
                 tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
-                name=str(getattr(message, "name", "") or "tool"),
+                name=name,
                 content=content,
                 result=getattr(message, "content", content),
                 is_error=tool_message_is_error(message),
                 artifact=getattr(message, "artifact", None),
+                mcp_server=server,
+                mcp_remote=remote,
             ))
     return events, saw_input_usage

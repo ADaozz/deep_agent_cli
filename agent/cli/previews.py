@@ -740,7 +740,7 @@ def _phrase(block: ToolBlock, *, success: bool, target: str | None = None) -> st
     from agent.mcp.names import is_external_mcp_tool
 
     if is_external_mcp_tool(name):
-        identity = operand or _mcp_titles(name)
+        identity = operand or _mcp_titles(block)
         return labeled("Called" if success else "Calling", f"MCP {identity}")
     return labeled(name) or name
 
@@ -850,12 +850,12 @@ def _mcp_clean(value: str) -> str:
     return " ".join(mcp_display_text(value).split())
 
 
-def _mcp_titles(name: str) -> str:
+def _mcp_titles(block: ToolBlock) -> str:
     """Display title only. Ambiguous registered names are not guessed apart."""
-    from agent.mcp.names import mcp_display_identity, unique_mcp_identity
+    from agent.mcp.names import resolve_mcp_display
 
-    cleaned = _mcp_clean(name) or "mcp"
-    identity = mcp_display_identity(name) or unique_mcp_identity(name)
+    cleaned = _mcp_clean(block.name) or "mcp"
+    identity = resolve_mcp_display(block.name, block.mcp_server, block.mcp_remote)
     if identity is None:
         return cleaned
     server, remote = (_mcp_clean(identity[0]), _mcp_clean(identity[1]))
@@ -892,7 +892,7 @@ def build_mcp_preview(block: ToolBlock) -> ToolPreview:
     """Same card as every other tool. Only the title and argument lines differ."""
     from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
 
-    target = _mcp_titles(block.name)
+    target = _mcp_titles(block)
     summary = _mcp_argument_summary(block.arguments)
     structured = mcp_arguments_preview(block.arguments, expanded=True)
     expanded = [PreviewLine("Host (outside sandbox)", "dim")]

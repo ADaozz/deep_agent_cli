@@ -102,12 +102,13 @@ def test_heatmap_uses_tool_results_and_preserves_cumulative_statistics(tmp_path)
     asyncio.run(run())
 
 
-def _observe_tool(timeline, i, name, *, failed=False, model="fixed model"):
+def _observe_tool(timeline, i, name, *, failed=False, model="fixed model", server="", remote=""):
     from agent.companion.timeline import ToolObservation
 
     obs = ToolObservation(
         "s", "t", "r", "main", model, "default", name, str(i), i - 1, i, 1,
         "failed" if failed else "success", "timeout" if failed else "",
+        mcp_server=server, mcp_remote=remote,
     )
     timeline.completed(obs)
     timeline.record("tool", vars(obs), key=f"r/{i}", stamp=i)
@@ -192,40 +193,101 @@ def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp
 
 
 def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
     from agent.companion.chart import ActivityHeatmap, tool_health_labels
-    from agent.mcp.names import (
-        external_tool_name, forget_mcp_display_identity, register_mcp_display_identity,
-        unique_mcp_identity,
-    )
+    from agent.companion.timeline import ToolObservation, recorded_mcp_identities, restore_session, transact
+    from agent.mcp.names import external_tool_name, unique_mcp_identity
+    from agent.runtime.events import mcp_event_identity, update_tool_events
+    from agent.sessions.transcript import messages_to_transcript
+
+    def obs(name, server="", remote=""):
+        return SimpleNamespace(tool_name=name, mcp_server=server, mcp_remote=remote)
 
     alpha, beta = "mcp__a__search", "mcp__b__search"
     ambiguous = external_tool_name("my__srv", "search")
     hashed = external_tool_name("a", "web search")
     assert unique_mcp_identity(ambiguous) is None
-    assert tool_health_labels([ambiguous])[ambiguous] == ambiguous
-    assert tool_health_labels([alpha])[alpha] == "search"
-    assert tool_health_labels(["read", "mcp_list"]) == {"read": "read", "mcp_list": "mcp_list"}
-    assert tool_health_labels(["search", alpha]) == {"search": "search", alpha: "search · a"}
-    register_mcp_display_identity(ambiguous, "my__srv", "search")
-    register_mcp_display_identity(hashed, "a", "web search")
-    try:
-        assert tool_health_labels([ambiguous])[ambiguous] == "search"
-        assert tool_health_labels([hashed])[hashed] == "web search"
-        assert "mcp__" not in tool_health_labels([hashed])[hashed]
-    finally:
-        forget_mcp_display_identity(ambiguous)
-        forget_mcp_display_identity(hashed)
+    wide = 40
+    assert tool_health_labels([obs(ambiguous)], wide)[ambiguous] == ambiguous
+    assert tool_health_labels([obs(alpha)], wide)[alpha] == "search"
+    assert tool_health_labels([obs("read"), obs("mcp_list")], wide) == {
+        "read": "read", "mcp_list": "mcp_list",
+    }
+    assert tool_health_labels([obs("search"), obs(alpha)], wide) == {
+        "search": "search", alpha: "search · a",
+    }
+    assert tool_health_labels([obs(ambiguous, "my__srv", "search")], wide)[ambiguous] == "search"
+    assert tool_health_labels([obs(hashed, "a", "web search")], wide)[hashed] == "web search"
+    fitted = tool_health_labels([
+        obs("mcp__alpha__searchtoolname", "alpha", "searchtoolname"),
+        obs("mcp__alpine__searchtoolname", "alpine", "searchtoolname"),
+    ], 12)
+    assert fitted["mcp__alpha__searchtoolname"].endswith("alph")
+    assert fitted["mcp__alpine__searchtoolname"].endswith("alpi")
+    assert "…" in fitted["mcp__alpha__searchtoolname"]
+    numbered = tool_health_labels([
+        obs("mcp__ab__search", "ab", "search"),
+        obs("mcp__abx__search", "ab", "search"),
+    ], wide)
+    assert set(numbered.values()) == {"search · ab", "search · ab2"}
+
+    class Bound:
+        def __init__(self, server, remote):
+            self.metadata = {"deep_agent_mcp": {"server": server, "remote_name": remote}}
+
+    left = {"mcp__a__search": Bound("a", "search")}
+    right = {"mcp__a__search": Bound("b", "lookup")}
+    assert mcp_event_identity(left, "mcp__a__search") == ("a", "search")
+    assert mcp_event_identity(right, "mcp__a__search") == ("b", "lookup")
+    started, _ = update_tool_events(
+        {"agent": {"messages": [AIMessage(content="", tool_calls=[
+            {"id": "call", "name": alpha, "args": {}},
+        ])]}},
+        set(), left,
+    )
+    assert started[0].name == alpha
+    assert (started[0].mcp_server, started[0].mcp_remote) == ("a", "search")
+
+    old = ToolObservation(**{
+        "session_id": "s", "turn_id": "t", "run_id": "r", "agent_id": "main",
+        "model_id": "fixed model", "reasoning_effort": "default",
+        "tool_name": alpha, "tool_call_id": "old", "started_at": 0, "finished_at": 1,
+        "outcome": "success",
+    })
+    old_ambiguous = ToolObservation(**{
+        "session_id": "s", "turn_id": "t", "run_id": "r", "agent_id": "main",
+        "model_id": "fixed model", "reasoning_effort": "default",
+        "tool_name": ambiguous, "tool_call_id": "older", "started_at": 0, "finished_at": 1,
+        "outcome": "success",
+    })
+    assert tool_health_labels([old], wide)[alpha] == "search"
+    assert tool_health_labels([old_ambiguous], wide)[ambiguous] == ambiguous
 
     c = companion(tmp_path, lambda: "s")
     chart = ActivityHeatmap(c)
-    for index, name in enumerate([alpha] * 3 + [beta] * 3 + ["read"]):
-        _observe_tool(c.timeline, index, name)
+    for index, (name, server) in enumerate(
+        [(ambiguous, "my__srv")] * 3 + [(beta, "b")] * 3 + [("read", "")],
+    ):
+        remote = "" if name == "read" else "search"
+        _observe_tool(c.timeline, index, name, server=server, remote=remote)
     labels = [row[0][1].strip() for row in chart.draw(64, 9)[2:5]]
-    assert labels == ["search · a", "search · b", "read"]
+    assert labels == ["search · b", "search · m", "read"]
     assert chart.draw(64, 9)[-1][0][1] == "7 calls · 7 success · 0 failed"
-    assert c.timeline.series["fixed model", "default", alpha].counts["success"] == 3
+    assert c.timeline.series["fixed model", "default", ambiguous].counts["success"] == 3
     assert c.timeline.series["fixed model", "default", beta].counts["success"] == 3
     assert ("fixed model", "default", "search") not in c.timeline.series
+    transact(c.database, c.timeline.pending)
+    assert recorded_mcp_identities(c.database, "s")["0"] == ("my__srv", "search")
+    restored = restore_session(c.database, "s", c.window)
+    assert restored.recent_tool_calls[0].mcp_remote == "search"
+    blocks = messages_to_transcript(
+        [AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}])],
+        identities=recorded_mcp_identities(c.database, "s"),
+    )
+    assert (blocks[0].mcp_server, blocks[0].mcp_remote) == ("my__srv", "search")
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):

@@ -32,6 +32,8 @@ class ToolObservation:
     message_id: str = ""
     retry_basis: str = ""
     resumed_from_checkpoint: bool = False
+    mcp_server: str = ""
+    mcp_remote: str = ""
 
 
 def category(text, exit_code):
@@ -318,6 +320,34 @@ def restore_session(path, session, window):
     state = Timeline(session, window)
     state.restore(transact(path, [], session))
     return state
+
+
+def recorded_mcp_identities(path, session) -> dict[str, tuple[str, str]]:
+    """Display identity already stored on tool rows. Missing history stays empty."""
+    from pathlib import Path
+
+    location = Path(path)
+    if not location.is_file():
+        return {}
+    found: dict[str, tuple[str, str]] = {}
+    try:
+        with readonly_database(location) as db:
+            rows = db.execute(
+                """SELECT payload FROM timeline
+                   WHERE session=? AND kind='tool' ORDER BY stamp, rowid""",
+                (session,),
+            )
+            for (payload,) in rows:
+                data = json.loads(payload)
+                if not isinstance(data, dict):
+                    continue
+                server, remote = data.get("mcp_server"), data.get("mcp_remote")
+                call = data.get("tool_call_id")
+                if isinstance(call, str) and call and isinstance(server, str) and server and isinstance(remote, str) and remote:
+                    found[call] = (server, remote)
+    except (OSError, sqlite3.Error, json.JSONDecodeError, TypeError):
+        return found
+    return found
 
 
 def timeline_window(path, session, kind, start, end, budget=None, *,
