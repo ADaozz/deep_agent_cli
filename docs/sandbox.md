@@ -153,6 +153,13 @@
 - 沙箱无法启动时，`execute` 返回错误，不会改在宿主机上运行。
 - 切换会话（`/resume`、`/new`）或等待其他窗口释放会话时，保留当前 Runner 的沙箱及后台进程，不会接管其他 CLI 进程的沙箱。`/new` 继承当前已生效的文件系统模式；`/resume` 恢复配置文件中的模式，若模式确实变化则重建沙箱。关闭 Runner 或退出 CLI 时，两个沙箱及其中所有进程都被销毁。`/tmp` 与 `/home` 里的文件保留。切换模型或权限模式不会重建沙箱。`/sandbox` 会关闭当前 Runner 的两个沙箱，下一次 `execute` 按新挂载启动。
 
+## 交互式命令与动态凭据注入
+
+- **交互式执行（`execute` / `write_stdin` / `/stdin`）**：支持 `BubblewrapBackend` 的会话允许 `execute` 指定 `yield_time` 与 `stdin_mode`（`none` / `pipe` / `pty`），超时交还控制权后可通过 `write_stdin` 或 TUI `/stdin` 继续交互。所有 stdin 写入经由 `CommandSession -> RemoteCommand -> Worker 单一写队列` 串行化，受 1 MiB 队列上限与写确认（ACK）约束；不支持交互执行的 `CUSTOM` Backend 仅保留原有同步 `execute` 签名，不注册 `write_stdin`。
+- **按命令动态注入 `sandbox` 凭据**：通过 `SecretStore` 存入的 `scope=sandbox` 凭据仅在命令启动时注入该命令子进程环境，不修改常驻 Worker 的全局环境，不重启持久沙箱，也不中断已运行的后台命令。`scope=host` 凭据永远不会注入沙箱。SubAgent 继承根会话的 `sandbox` 凭据授权而不扩大作用域，同时保持各自的执行所有权与退出清理隔离。
+- **共享 Worker 的 `/proc` 隔离边界**：由于 Linux 在 `execve("/bin/sh", ...)` 后会重置进程的 `PR_SET_DUMPABLE`，同一常驻 Worker 内同 UID 的并发进程可读取彼此的 `/proc/<pid>/environ`。因此同一根会话内的并发命令（含其 SubAgent）共享同一信任域；当另一根会话在共享 Worker 中存在活动进程时，系统显式阻止跨根会话的凭据注入或共享执行，直至原进程结束。
+- **Bubblewrap `NoNewPrivs` 与 `sudo` 限制**：实测非特权 Bubblewrap 在 `restricted` 与 `full-access` 模式下均强制设置内核 `PR_SET_NO_NEW_PRIVS`（`/proc/self/status` 中 `NoNewPrivs: 1`），setuid `sudo` 会直接因 `no new privileges` 失败；同时共享同 UID Worker 内无法建立不可伪造的 `SUDO_ASKPASS` 校验通道。为避免破坏沙箱隔离或退化为明文/PTY/环境变量注入，`sudo` 运行时密码提权保持禁用（详见 `agent/execution/sudo_probe.py`）。
+
 ## 网络
 
 全局 `trust_env: true` 会将代理与 CA 环境变量传给 `execute`，并为支持环境代理的 Node 默认设置 `NODE_USE_ENV_PROXY=1`。这只控制环境传递，命令是否使用这些变量由其自身决定，也不会改变以下网络权限。

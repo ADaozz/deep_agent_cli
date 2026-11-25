@@ -332,14 +332,15 @@ llm:
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `state_path` | `null` | 会话数据库路径。默认 `~/.deep-agent/sessions/<工作区路径哈希>.sqlite3`，每个工作区一个文件。设置后所有工作区共用这一个文件 |
-| `config_dir` | `null` | `keybindings.json` 和 `working_messages.yaml` 所在目录，默认 `~/.deep-agent` |
+| `config_dir` | `null` | `keybindings.json`、`working_messages.yaml`、`mcp.json` 与加密凭据目录 `secrets/`（权限 `0700`，密钥与条目 `0600`）所在目录，默认 `~/.deep-agent` |
 
 ## 脱敏（`redaction`）
 
-展示侧（审批卡、Auto 证据、会话标题、MCP 工具输出、Companion 诊断等）会对**已知字面量**做精确替换：
+展示侧、流式命令输出、执行日志落盘、截断窗口、审批卡、Auto 证据、会话标题、SubAgent 日志与 MCP 输出会对**已知字面量**做精确替换：
 
 1. 配置里解析出的模型 `api_key` → `$llm.models.…` 路径名（如 `$llm.models.deepseek.api_key`）。
-2. 可选字典 `redaction.replacements`：字面值 → 自定义展示名（不必带 `$`）。
+2. `SecretStore` 托管凭据（含会话内、加密持久化以及进程生命周期内已轮换或删除的退役凭据）→ `$<凭据名>`；命令流式输出使用精确前缀重叠缓冲，跨块拆分及截断边界均在落盘与展示前完成替换。
+3. 可选字典 `redaction.replacements`：字面值 → 自定义展示名（不必带 `$`）。
 
 ```yaml
 redaction:
@@ -351,7 +352,7 @@ redaction:
 |---|---|---|
 | `replacements` | `{}` | 精确匹配的字面量 → 展示名；键与值均须非空。类型错误时启动失败 |
 
-沙箱 `env_set` / `env_allowlist`、MCP bearer / `env_passthrough` 的环境变量值**不会**自动加入替换表。需要遮盖时，把对应字面量写进 `replacements`。不对自由文本中的 JWT / `sk-` 等形态做正则猜测遮盖。
+未经 `SecretStore` 托管的沙箱 `env_set` / `env_allowlist`、以及沿用宿主环境变量的 MCP bearer / `env_passthrough` 值**不会**自动加入替换表；需要遮盖时把对应字面量写进 `replacements` 或改用 `/secrets` 托管。托管的持久化 `host` 凭据可供经用户 `/mcp add` 或人工审批通过的 MCP 目标（`mcp:<name>@<target>`）解析，全局 `MCPManager` 不缓存会话级凭据；凭据更新或删除后相关 MCP 连接自动失效待重连。仍不对自由文本中的 JWT / `sk-` 等形态做正则或熵值猜测遮盖。
 
 ## 界面（`ui`）
 

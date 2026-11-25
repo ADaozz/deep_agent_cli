@@ -32,6 +32,8 @@ deep-agent --version
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|auto\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
 | `/mcp` | 查看 MCP 全局开关和宿主服务。`/mcp enable` 打开并自动连接；`/mcp disable` 关闭连接和工具，但保留配置与 OAuth 缓存。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。关闭期间只能查询和 `/mcp enable`。工具审批统一由 `/permission` 控制；服务在宿主运行，不受 Bubblewrap 限制 |
+| `/secrets` | 管理宿主 `SecretStore` 凭据：`/secrets` 或 `/secrets list` 仅列出元数据（名称、作用域、存储方式、授权消费者，不显示明文）；`/secrets set [name]`、`/secrets update [name]` 使用独立掩码输入框写入/更新；`/secrets delete [name]` 确认后删除 |
+| `/stdin [execution_id\|off]` | 进入当前会话运行中交互进程（`pipe` / `pty`）的直输模式；多个活动进程时弹出选择列表，`/stdin off` 或 `Esc` 脱离直输模式而不终止进程 |
 | `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
@@ -156,9 +158,17 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 ## 审批与提问
 
 - `ask` 模式下，需要审批的工具调用会弹出面板，选择 Run 或 Reject。正在输入草稿或有待发送附件时，只显示待审批提示，不打断输入；按 `F2` 打开审批，处理或关闭后恢复草稿和光标。等待审批时提交的新消息进入队列，原审批仍需明确处理。
-- Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔。每道选择题最多 3 个模型提供的选项，系统另行附带 `Other:` 用于自定义输入，不计入这 3 个。超过上限时工具参数校验失败，模型需精简后重新提交。
+- Agent 调用 `request_human_input` 时弹出提问面板，字段类型有单行文本、多行文本、单选、多选、布尔及安全凭据（`secret`）。每道选择题最多 3 个模型提供的选项，系统另行附带 `Other:` 用于自定义输入，不计入这 3 个。超过上限时工具参数校验失败，模型需精简后重新提交。
+- **安全凭据输入（`secret`）**：复用同一交互面板，输入区切换为独立单行掩码缓冲区（`•` 掩码、独立无历史缓冲，不写入普通输入框、历史记录、粘贴块或撤销栈）。面板展示凭据引用名、作用域（`Host` / `Sandbox`）及存储方式（`↑↓` 切换 `Session` 会话内存 / `Persistent` `~/.deep-agent/secrets/` 加密落盘），覆盖已有凭据前要求二次确认。提交后先写入宿主 `SecretStore`，**仅将凭据引用名返回给 Agent**，明文不进入 Graph 状态、Checkpoint 数据库、ToolMessage 或 RunEvent。
 - 关掉面板后，待处理提示显示在原 Working 状态栏位置，不单独追加到聊天记录；按 `F2` 重新打开。
 - 正在输入 `ALLOW` 时，新的审批不会替换确认栏。`F2` 打开审批，`Esc` 回到确认；确认结束或取消后，审批面板再出现。
+
+## 运行中进程直输（`/stdin`）
+
+- 当本会话有正在运行的 `pipe` 或 `pty` 命令时，可执行 `/stdin`（或 `/stdin <execution_id>`）切换到进程输入模式；输入框上方显示 `⌨ Process stdin · <execution_id> (<mode>)` 提示条，与普通聊天输入明确区分。
+- 进程输入模式下：`Enter` 直接向该进程 stdin 写入一整行（不生成聊天消息、不伪造 `write_stdin` 工具调用、不写入聊天历史，也不消费 Agent 的未读输出窗口）；`Ctrl+D`（输入框为空）发送 EOF；`Ctrl+C`（输入框为空）向 PTY 发送 `\x03` 或取消 PIPE 进程；`Esc` 或 `/stdin off` 脱离进程输入模式并返回聊天输入，**不会终止正在运行的进程**。
+- 附加到 PTY 进程时自动同步终端尺寸（`TIOCSWINSZ`）。进程退出、取消或切换会话时自动退出进程输入模式。
+- 普通进程直输通道**不是**安全凭据输入通道；输入敏感令牌或密码应使用 `request_human_input` 的 `secret` 字段或 `/secrets`。
 
 ## Skills
 

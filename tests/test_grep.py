@@ -90,13 +90,18 @@ def test_execute_description_tracks_rg_availability(monkeypatch):
         def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
             return ExecuteResponse(command, 0, False)
 
+    class InteractiveBackend(Backend):
+        supports_interactive_execution = True
+
     monkeypatch.setattr(implementation, "resolve_rg", lambda: "/usr/bin/rg")
     available = build_execute_tool(Backend())  # type: ignore[arg-type]
     allowed = build_execute_tool(Backend(), permission=PermissionMode.ALLOW)  # type: ignore[arg-type]
     for tool in (available, allowed):
         assert _SEARCH_GUIDANCE in tool.description
         assert _SEARCH_UNAVAILABLE not in tool.description
-        assert set(tool.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
+        assert set(tool.args) == {"command", "timeout", "network"}
+    interactive_tool = build_execute_tool(InteractiveBackend())  # type: ignore[arg-type]
+    assert set(interactive_tool.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
     assert available.description != allowed.description
     assert "Allow mode" in allowed.description
     assert "Ask mode" in available.description

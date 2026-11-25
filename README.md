@@ -142,6 +142,8 @@ python3.12 -m venv ~/.venvs/deep-agent
 | `Ctrl+C` | 清空当前输入框，1 秒内再按一次退出 |
 | `/resume` / `/new` | 恢复或新建会话 |
 | `/mcp` | 查看、开关和配置宿主 MCP 服务 |
+| `/secrets` | 管理会话或加密持久化凭据（不展示明文） |
+| `/stdin` | 进入运行中交互进程直输模式（`Esc` 脱离） |
 | `/help` / `/status` | 查看完整操作与当前状态 |
 
 更多按键、图片附件、队列、Skills 和显示设置见 [终端界面](docs/tui.md)。
@@ -190,6 +192,7 @@ SubAgent 共享已验证的沙箱，继承启动时的权限。委派范围、�
 - **网络与进程**：无网命名空间不阻断通过共享 Unix socket、FIFO 或文件实现的间接通信。有网实例可访问互联网、localhost 和局域网；切回 `ask` 不停止此前的后台进程。模型与会话切换复用 Pool，关闭 Runner 或更换文件系统模式时清理沙箱。
 - **挂载与资源**：用户可通过现有挂载列表扩大或缩小文件系统可见范围，审批逻辑保持独立。只读挂载仍允许读取其中的敏感文件。没有 CPU、内存、磁盘或进程数硬配额。Skills、`AGENTS.md` 和提示词不是操作系统安全边界。
 - **本地状态**：SubAgent 执行摘要独立保存在受保护配置目录的 `subagents/` 下，仅记录任务起止、工具状态和有界最终结果，不保存模型 Token、思考或原始工具输出，按[脱敏配置](docs/configuration.md#脱敏redaction)替换已知字面量；同一会话只允许一个进程持有；工作区可能产生 `.deep-agent/` 命令日志和 `.deepagents/` 压缩历史，程序不修改 `.gitignore`。
+- **凭据与交互执行**：`execute` 支持 `yield_time` 与 `pipe`/`pty` 交互式输入（`write_stdin` 与 `/stdin` 复用同一单写队列与 ACK）；`request_human_input` 支持 `type="secret"` 安全输入，明文通过独立掩码缓冲区写入宿主 `SecretStore`（会话内存或 `~/.deep-agent/secrets/` Fernet 加密存储），仅向模型返回凭据引用名，并在流式输出、截断与日志落盘前执行精确匹配脱敏。非特权 Bubblewrap 在 `restricted` 与 `full-access` 下均强制设置内核 `NoNewPrivs: 1`，无法在不破坏隔离的前提下运行 setuid `sudo`，因此 `sudo` 运行时密码提权保持禁用。
 - **客户端**：模型、MCP、DeepSeek 网页工具和子进程统一使用全局 [`trust_env`](docs/configuration.md#全局网络环境trust_env) 配置，默认忽略代理与 CA 环境变量；剪贴板图片仅支持 WSL，其他环境通过文件添加。MCP 支持 Streamable HTTP 和 stdio 工具调用及工具返回的内嵌资源；不提供独立 Resources / Prompts 接口、Sampling 回调、旧式服务端 Elicitation、MCP Apps UI。MCP 工具仅向主 Agent 提供。
 
 完整隔离范围与环境变量见 [沙箱与权限](docs/sandbox.md)。
