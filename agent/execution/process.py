@@ -19,7 +19,7 @@ import uuid
 
 from deepagents.backends.protocol import ExecuteResponse
 
-from agent.redaction import SecretRef, StreamingSecretRedactor
+from agent.redaction import SecretRef, StreamingSecretRedactor, replace_known_secrets
 
 from agent.runtime.cancellation import (
     ToolOutputEmitter,
@@ -610,6 +610,12 @@ def _run_in_sandbox(
         thread_id=thread_id,
         redaction_provider=redaction_provider,
     )
+    safe_command = command
+    if redaction_provider is not None:
+        try:
+            safe_command = replace_known_secrets(command, tuple(redaction_provider()))
+        except Exception:  # noqa: BLE001
+            pass
     session = CommandSession(
         handle=handle,
         pool=pool,
@@ -620,6 +626,7 @@ def _run_in_sandbox(
         network=network,
         tool_call_id=tool_call_id,
         sandbox_mode=sandbox_mode,
+        command=safe_command[:200],
         root_session_id=session_root,
         has_injected_secrets=bool(extra_env),
         emit=emit,

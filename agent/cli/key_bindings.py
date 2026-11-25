@@ -216,6 +216,9 @@ def create_bindings(
 
     @bind("interrupt")
     def escape(event) -> None:  # type: ignore[no-untyped-def]
+        if self.dialogs.current is None and self._attached_execution is not None:
+            self.detach_process_input()
+            return
         buffer = event.current_buffer
         action = self._input_actions.decide_interrupt(self._input_view(buffer))
         self.run_view.last_queue_enter = None
@@ -231,6 +234,19 @@ def create_bindings(
     @bind("clear_or_exit", shared)
     def ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
         buffer = event.current_buffer
+        if self.dialogs.current is None and self._attached_execution is not None and buffer is self.buffer:
+            if buffer.text:
+                buffer.reset(append_to_history=False)
+                self.drafts.pasted.clear()
+                self.drafts.skill.clear()
+                self.application.invalidate()
+                return
+            _exec_id, mode = self._attached_execution
+            if mode == "pty":
+                self.send_attached_input(chars="\x03", action="write")
+            else:
+                self.send_attached_input(action="cancel")
+            return
         now = clock()
         action = self._input_actions.decide_clear_or_exit(self._input_view(buffer), now)
         self.apply_input_action(action, buffer)
@@ -240,6 +256,13 @@ def create_bindings(
     @bind("exit")
     def ctrl_d(event) -> None:  # type: ignore[no-untyped-def]
         buffer = event.current_buffer
+        if self.dialogs.current is None and self._attached_execution is not None and not buffer.text:
+            _exec_id, mode = self._attached_execution
+            if mode == "pty":
+                self.send_attached_input(chars="\x04", action="write")
+            else:
+                self.send_attached_input(action="close")
+            return
         action = self._input_actions.decide_ctrl_d(self._input_view(buffer))
         self.apply_input_action(action, buffer)
 

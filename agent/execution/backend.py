@@ -282,6 +282,54 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
     def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int:
         return self.pool.executions.cleanup_owner(thread_id, join_timeout=join_timeout)
 
+    def list_active_executions(self, thread_id: str) -> list[dict[str, object]]:
+        """List running interactive (pipe/pty) executions owned by ``thread_id``."""
+        if not thread_id:
+            return []
+        return [
+            {
+                "execution_id": session.execution_id,
+                "stdin_mode": session.stdin_mode,
+                "command": session.command,
+                "network": bool(session.network),
+                "sandbox_mode": session.sandbox_mode,
+            }
+            for session in self.pool.executions.active_interactive_for_thread(thread_id)
+        ]
+
+    def send_execution_input(
+        self,
+        execution_id: str,
+        *,
+        chars: str = "",
+        action: str = "write",
+        write_timeout: float = 15.0,
+        thread_id: str | None = None,
+    ) -> None:
+        """Send direct user input via the same CommandSession/Worker single-writer queue.
+
+        Unlike ``write_stdin``, does NOT consume the unread output window so the
+        agent's incremental poll semantics remain intact.
+        """
+        from agent.execution.lifecycle import StdinAction
+        from typing import cast
+
+        session = self.pool.executions.require(execution_id, thread_id=thread_id)
+        session.apply_stdin(chars=chars, action=cast(StdinAction, action), write_timeout=write_timeout)
+
+    def resize_execution(
+        self,
+        execution_id: str,
+        rows: int,
+        cols: int,
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        """Synchronize PTY terminal dimensions for an owned active PTY execution."""
+        session = self.pool.executions.require(execution_id, thread_id=thread_id)
+        if session.stdin_mode == "pty":
+            session.resize(rows, cols)
+
 
 def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelection:
     workspace = _validate_config(config)

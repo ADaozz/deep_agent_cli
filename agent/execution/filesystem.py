@@ -980,6 +980,44 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             return 0
         return fn(thread_id, join_timeout=join_timeout)
 
+    def list_active_executions(self, thread_id: str) -> list[dict[str, object]]:
+        fn = getattr(self.executor, "list_active_executions", None)
+        if not callable(fn):
+            return []
+        return fn(thread_id)
+
+    def send_execution_input(
+        self,
+        execution_id: str,
+        *,
+        chars: str = "",
+        action: str = "write",
+        write_timeout: float = 15.0,
+        thread_id: str | None = None,
+    ) -> None:
+        fn = getattr(self.executor, "send_execution_input", None)
+        if not callable(fn):
+            raise NotImplementedError("Executor does not support direct process input")
+        fn(
+            execution_id,
+            chars=chars,
+            action=action,
+            write_timeout=write_timeout,
+            thread_id=thread_id,
+        )
+
+    def resize_execution(
+        self,
+        execution_id: str,
+        rows: int,
+        cols: int,
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        fn = getattr(self.executor, "resize_execution", None)
+        if callable(fn):
+            fn(execution_id, rows, cols, thread_id=thread_id)
+
     def set_secret_provider(self, sandbox_env_provider=None, redaction_provider=None) -> None:
         fn = getattr(self.executor, "set_secret_provider", None)
         if callable(fn):

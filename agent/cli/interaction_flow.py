@@ -43,6 +43,7 @@ class InteractionFlow:
         finish_mcp: Callable[..., None],
         finish_secrets: Callable[..., None] | None = None,
         clear_secret_buffer: Callable[[], None] | None = None,
+        attach_process: Callable[[str, str], None] | None = None,
     ) -> None:
         self._on_event_thread = _on_event_thread
         self.access_selection = access_selection
@@ -60,6 +61,7 @@ class InteractionFlow:
         self.finish_mcp = finish_mcp
         self.finish_secrets = finish_secrets
         self._clear_secret_buffer = clear_secret_buffer or (lambda: None)
+        self._attach_process = attach_process
 
     def _finish_interaction(self, *, cancelled: bool = False) -> None:
         interaction = self.dialogs.current
@@ -86,6 +88,23 @@ class InteractionFlow:
             if callable(callback):
                 callback(secret)
             self.set_status("Authentication cancelled" if cancelled else "Authentication submitted")
+            self.invalidate()
+            return
+        if interaction.kind == "process_attach":
+            self.dialogs.current = None
+            if cancelled:
+                self.set_status("Process attach cancelled")
+                self.invalidate()
+                return
+            exec_id = str(interaction.values.get("execution_id") or "")
+            match = next(
+                (item for item in self.runner.list_active_executions() if item.get("execution_id") == exec_id),
+                None,
+            )
+            if match is None:
+                self.state.add_system(f"Process {exec_id or '<unknown>'} is no longer running.", error=True)
+            elif self._attach_process is not None:
+                self._attach_process(str(match["execution_id"]), str(match.get("stdin_mode") or "pipe"))
             self.invalidate()
             return
         if interaction.kind.startswith("mcp_"):

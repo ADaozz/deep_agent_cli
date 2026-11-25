@@ -755,6 +755,38 @@ class AgentRunner:
         fn = getattr(self.prepared.backend, "execution_snapshots", None)
         return fn(owner) if callable(fn) and owner else {}
 
+    def list_active_executions(self, thread_id: str | None = None) -> list[dict[str, Any]]:
+        """List active interactive (pipe/pty) processes owned by the active session."""
+        owner = self.thread_id if thread_id is None else thread_id
+        fn = getattr(self.prepared.backend, "list_active_executions", None)
+        return list(fn(owner)) if callable(fn) and owner else []
+
+    def send_execution_input(
+        self,
+        execution_id: str,
+        *,
+        chars: str = "",
+        action: str = "write",
+        write_timeout: float = 15.0,
+    ) -> None:
+        """Send direct user input to an owned running process without fabricating tool calls."""
+        fn = getattr(self.prepared.backend, "send_execution_input", None)
+        if not callable(fn):
+            raise NotImplementedError("Active backend does not support direct process input")
+        fn(
+            execution_id,
+            chars=chars,
+            action=action,
+            write_timeout=write_timeout,
+            thread_id=self.thread_id,
+        )
+
+    def resize_execution(self, execution_id: str, rows: int, cols: int) -> None:
+        """Forward terminal dimensions to an owned running PTY process."""
+        fn = getattr(self.prepared.backend, "resize_execution", None)
+        if callable(fn) and self.thread_id:
+            fn(execution_id, rows, cols, thread_id=self.thread_id)
+
     def _end_sandbox_session(self, reason: str) -> None:
         pool = self.sandbox_pool
         if pool is not None:

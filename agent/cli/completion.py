@@ -24,11 +24,13 @@ class SlashCompleter(Completer):
         model_profiles: Callable[[], list[ModelProfile]] | None = None,
         permission_modes: Callable[[], list[str]] | None = None,
         sandbox_modes: Callable[[], list[str]] | None = None,
+        active_executions: Callable[[], list[dict[str, object]]] | None = None,
     ) -> None:
         self.commands = commands
         self.model_profiles = model_profiles or (lambda: [])
         self.permission_modes = permission_modes or (lambda: [])
         self.sandbox_modes = sandbox_modes or (lambda: [])
+        self.active_executions = active_executions or (lambda: [])
         self.accepted_text: str | None = None
 
     @staticmethod
@@ -100,6 +102,14 @@ class SlashCompleter(Completer):
                 ("update", "Update an existing credential"),
                 ("delete", "Delete a stored credential"),
             ))
+        elif name == "stdin":
+            candidates.append(("off", "Detach from process input mode (process keeps running)"))
+            for item in self.active_executions():
+                exec_id = str(item.get("execution_id") or "")
+                mode = str(item.get("stdin_mode") or "")
+                cmd = str(item.get("command") or "")[:40]
+                if exec_id:
+                    candidates.append((exec_id, f"{mode} · {cmd}" if cmd else mode))
         ranked = []
         for index, (value, description) in enumerate(candidates):
             rank = self._rank(value.lower(), arg.lower())

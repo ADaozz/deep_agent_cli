@@ -205,6 +205,8 @@ class CliApplication:
         self.mcp_controller = MCPController()
         self._mcp_draft: dict[str, str] = {}
         self._secret_draft: dict[str, str] = {}
+        self._attached_execution: tuple[str, str] | None = None
+        self._attached_pty_size: tuple[int, int] | None = None
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._queue_scroll = 0
         self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
@@ -239,6 +241,7 @@ class CliApplication:
             model_profiles=self.runner.list_models,
             permission_modes=lambda: ["ask"] + (["auto"] if self.runner.auto_available() else []) + (["allow"] if self.access_selection._allow_available() else []),
             sandbox_modes=lambda: ["restricted", "full-access"],
+            active_executions=self.runner.list_active_executions,
         )
         self.buffer = Buffer(
             multiline=True,
@@ -316,6 +319,8 @@ class CliApplication:
             _call_in_run_epoch=_call_in_run_epoch,
             secret_buffer=self.secret_buffer,
             clear_secret_buffer=self._clear_secret_buffer,
+            is_process_attached=lambda: self._attached_execution is not None,
+            send_process_input=self.send_attached_input,
         )
         self.session_summaries = SessionSummaries(
             runner=self.runner, lifecycle=lambda: self.lifecycle,
@@ -337,6 +342,7 @@ class CliApplication:
             set_status=lambda *args, **kwargs: self.set_status(*args, **kwargs),
             state=self.state,
             invalidate=lambda: self.application.invalidate(),
+            on_execution_finished=self._on_execution_finished,
         )
         self.interaction_flow = InteractionFlow(
             skills=lambda: self.skills,
@@ -355,6 +361,7 @@ class CliApplication:
             finish_mcp=lambda interaction, **kwargs: finish_mcp_interaction(self, interaction, **kwargs),
             finish_secrets=lambda interaction, **kwargs: finish_secrets_interaction(self, interaction, **kwargs),
             clear_secret_buffer=self._clear_secret_buffer,
+            attach_process=self.attach_process_input,
         )
         self.sessions = SessionController(
             summaries=lambda: self.session_summaries,
@@ -442,6 +449,9 @@ class CliApplication:
         interaction_visible = Condition(lambda: self.dialogs.current is not None)
         secret_input_active = Condition(
             lambda: self.dialogs.current is not None and self.dialogs.current.accepts_secret
+        )
+        process_input_active = Condition(
+            lambda: self.dialogs.current is None and self._attached_execution is not None
         )
         editor_visible = Condition(lambda: self.dialogs.current is None or self.dialogs.current.accepts_text)
         attachments_visible = Condition(lambda: bool(self.state.attachments) and self.dialogs.current is None)
@@ -549,6 +559,22 @@ class CliApplication:
                 filter=back_to_bottom_visible & ~interaction_visible,
             ),
             ConditionalContainer(
+                Window(
+                    _ScrollableTextControl(
+                        text=self._process_input_banner_text,
+                        focusable=False,
+                        on_scroll=self.transcript.scroll_transcript,
+                        on_select_outside=self.transcript._select_below_transcript,
+                    ),
+                    height=1,
+                    wrap_lines=False,
+                    always_hide_cursor=True,
+                    dont_extend_height=True,
+                    style="class:process-input-banner",
+                ),
+                filter=process_input_active,
+            ),
+            ConditionalContainer(
                 build_input_editor(self.editor_control, height=editor_height),
                 filter=editor_visible,
             ),
@@ -608,6 +634,7 @@ class CliApplication:
         def restore_focus(app):
             if not visible():
                 sidebar.selection.clear_selection()
+            self._sync_attached_pty_size()
             if secret_input_active():
                 if app.layout.current_control is not self.secret_editor:
                     app.layout.focus(self.secret_editor)
@@ -647,6 +674,7 @@ class CliApplication:
                 "interaction": "#d0d0d0",
                 "attachments": "#72d5e8",
                 "back-to-bottom": "bg:#163a5f #d7edff",
+                "process-input-banner": "bg:#183a2c #b8ffda bold",
                 "interaction-divider": "#3b82f6",
                 "completion-menu": "bg:#15191d #d0d0d0",
                 "completion-menu.completion.current": "bg:#3b5c73 #ffffff",
@@ -1025,10 +1053,145 @@ class CliApplication:
         self.secret_buffer._undo_stack.clear()
         self.secret_buffer._redo_stack.clear()
 
+    @property
+    def attached_execution_id(self) -> str | None:
+        return self._attached_execution[0] if self._attached_execution is not None else None
+
+    def _process_input_banner_text(self) -> FormattedText:
+        if self._attached_execution is None:
+            return FormattedText([])
+        exec_id, mode = self._attached_execution
+        text = (
+            f" ⌨ Process stdin · {exec_id} ({mode}) · "
+            "Enter send · Ctrl+D EOF · Ctrl+C interrupt · Esc detach (plain input)"
+        )
+        return FormattedText([("class:process-input-banner", _truncate_cells(text, self._width()))])
+
+    def _sync_attached_pty_size(self) -> None:
+        if self._attached_execution is None:
+            return
+        exec_id, mode = self._attached_execution
+        if mode != "pty":
+            return
+        try:
+            size = self.application.output.get_size()
+            dims = (max(1, int(size.rows)), max(1, int(size.columns)))
+        except Exception:  # noqa: BLE001
+            return
+        if dims == self._attached_pty_size:
+            return
+        try:
+            self.runner.resize_execution(exec_id, dims[0], dims[1])
+            self._attached_pty_size = dims
+        except Exception:  # noqa: BLE001
+            pass
+
+    def attach_process_input(self, execution_id: str, stdin_mode: str) -> None:
+        self._attached_execution = (execution_id, stdin_mode)
+        self._attached_pty_size = None
+        self._sync_attached_pty_size()
+        self.set_status(f"Process input mode: {execution_id} ({stdin_mode}) · Esc to detach", transient=False)
+        self.application.invalidate()
+
+    def detach_process_input(self, *, announce: bool = True, reason: str = "") -> None:
+        if self._attached_execution is None:
+            return
+        exec_id = self._attached_execution[0]
+        self._attached_execution = None
+        self._attached_pty_size = None
+        if announce:
+            self.set_status(reason or f"Detached from process {exec_id} (still running)")
+        self.application.invalidate()
+
+    def _on_execution_finished(self, execution_id: str) -> None:
+        if execution_id and self.attached_execution_id == execution_id:
+            self.detach_process_input(reason=f"Process {execution_id} finished · returned to chat input")
+
+    def handle_stdin_command(self, arg: str) -> None:
+        text = arg.strip()
+        if text.lower() in {"off", "detach"}:
+            if self._attached_execution is None:
+                self.set_status("Not attached to any process")
+            else:
+                self.detach_process_input()
+            return
+        active = self.runner.list_active_executions()
+        if text:
+            matches = [
+                item for item in active
+                if str(item.get("execution_id") or "") == text
+                or str(item.get("execution_id") or "").startswith(text)
+            ]
+            if not matches:
+                self.state.add_system(f"No active interactive process matching {text!r}.", error=True)
+                return
+            if len(matches) > 1:
+                self.state.add_system(f"Multiple active processes match {text!r}; pass the full execution_id.", error=True)
+                return
+            match = matches[0]
+            self.attach_process_input(str(match["execution_id"]), str(match.get("stdin_mode") or "pipe"))
+            return
+        if not active:
+            self.state.add_system("No active interactive process (pipe/pty) in this session.")
+            return
+        if len(active) == 1:
+            only = active[0]
+            self.attach_process_input(str(only["execution_id"]), str(only.get("stdin_mode") or "pipe"))
+            return
+        if self.dialogs.current is not None:
+            self.set_status("Finish the current interaction before attaching to a process")
+            return
+        self.dialogs.current = InteractionController(
+            kind="process_attach",
+            title="Attach process stdin",
+            question="Select a running interactive process. Plain process input is not a secure credential channel.",
+            fields=[{
+                "id": "execution_id",
+                "type": "single_select",
+                "label": "Process",
+                "required": True,
+                "options": [
+                    {
+                        "value": str(item["execution_id"]),
+                        "label": f"{item['execution_id']} ({item.get('stdin_mode')})",
+                        "description": str(item.get("command") or "")[:80],
+                    }
+                    for item in active
+                ],
+            }],
+        )
+        self.set_status("Select process · Enter attach · Esc cancel", transient=False)
+
+    def send_attached_input(self, *, chars: str = "", action: str = "write") -> bool:
+        if self._attached_execution is None:
+            return False
+        exec_id, mode = self._attached_execution
+        try:
+            self.runner.send_execution_input(exec_id, chars=chars, action=action)
+        except KeyError:
+            self.detach_process_input(reason=f"Process {exec_id} finished · returned to chat input")
+            return False
+        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
+            message = str(exc)
+            self.state.add_system(f"Process input error ({exec_id}): {message}", error=True)
+            if any(tok in message.lower() for tok in ("already finished", "not running", "has finished")):
+                self.detach_process_input(reason=f"Process {exec_id} ended · returned to chat input")
+            else:
+                self.set_status(f"Process input error: {message}")
+            return False
+        if action == "close" or chars == "\x04":
+            self.set_status(f"Sent EOF to {exec_id} ({mode})")
+        elif action == "cancel" or chars == "\x03":
+            self.set_status(f"Sent interrupt to {exec_id} ({mode})")
+        else:
+            self.set_status(f"Sent input to {exec_id} ({mode})")
+        return True
+
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
         self.companion.sync_session()
         self.lain_buffer.reset()
+        self.detach_process_input(announce=False)
         self._clear_secret_buffer()
         self._secret_draft = {}
         self.skills._clear_skill_draft()
@@ -1181,6 +1344,7 @@ class CliApplication:
 
     def exit(self) -> None:
         """Ask the lifecycle to leave. Resource shutdown happens after the prompt loop."""
+        self.detach_process_input(announce=False)
         self._clear_secret_buffer()
         self._secret_draft = {}
         if self.dialogs.current is not None:

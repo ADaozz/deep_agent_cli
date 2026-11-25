@@ -54,6 +54,8 @@ class RunDispatch:
         _call_in_run_epoch: Callable[..., Any],
         secret_buffer: Buffer | None = None,
         clear_secret_buffer: Callable[[], None] | None = None,
+        is_process_attached: Callable[[], bool] | None = None,
+        send_process_input: Callable[..., bool] | None = None,
     ) -> None:
         self.execute_command = execute_command
         self._on_event_thread = _on_event_thread
@@ -62,6 +64,8 @@ class RunDispatch:
         self.buffer = buffer
         self.secret_buffer = secret_buffer
         self._clear_secret_buffer = clear_secret_buffer or (lambda: None)
+        self._is_process_attached = is_process_attached or (lambda: False)
+        self._send_process_input = send_process_input
         self.command_by_name = command_by_name
         self.dialogs = dialogs
         self.drafts = drafts
@@ -158,6 +162,14 @@ class RunDispatch:
                 self._reset_submitted_buffer(text)
             if complete:
                 self.interaction_flow()._finish_interaction()
+            self.invalidate()
+            return
+        if self._is_process_attached() and self._send_process_input is not None:
+            raw_line = self.buffer.text
+            self.buffer.reset(append_to_history=False)
+            self.drafts.pasted.clear()
+            self.drafts.skill.clear()
+            self._send_process_input(chars=raw_line + "\n", action="write")
             self.invalidate()
             return
         if not text and not self.state.attachments:

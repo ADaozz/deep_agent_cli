@@ -52,6 +52,11 @@ def command_table() -> tuple[Command, ...]:
             "Credentials: list, set, update, delete (values are never shown)",
             _secrets,
         ),
+        Command(
+            "stdin",
+            "Direct input to a running interactive process (/stdin [execution_id|off])",
+            _stdin,
+        ),
         Command("exit", "Exit DeepAgent", _exit),
     )
 
@@ -142,6 +147,10 @@ async def _secrets(app: "CliApplication", arg: str) -> None:
     from agent.cli.secrets_ui import handle_secrets_command
 
     await handle_secrets_command(app, arg)
+
+
+async def _stdin(app: "CliApplication", arg: str) -> None:
+    app.handle_stdin_command(arg)
 
 
 async def _exit(app: "CliApplication", _arg: str) -> None:

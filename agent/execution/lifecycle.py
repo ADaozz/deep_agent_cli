@@ -52,6 +52,7 @@ class CommandSession:
     network: bool
     tool_call_id: str
     sandbox_mode: str = "restricted"
+    command: str = ""
     root_session_id: str = ""
     has_injected_secrets: bool = False
     emit: ToolOutputEmitter | None = None
@@ -393,6 +394,13 @@ class CommandSession:
             handle = self.handle
         handle.close_stdin()
 
+    def resize(self, rows: int, cols: int) -> None:
+        with self._cv:
+            if self._done or self.handle is None:
+                raise ValueError("execution has already finished")
+            handle = self.handle
+        handle.resize(rows, cols)
+
     def cancel(self) -> None:
         with self._cv:
             self._cancel_locked()
@@ -575,6 +583,16 @@ class ExecutionRegistry:
         with self._lock:
             self._cleanup_locked()
             return [session for session in self._items.values() if session.owns(thread_id)]
+
+    def active_interactive_for_thread(self, thread_id: str) -> list[CommandSession]:
+        """Return currently running interactive (pipe/pty) sessions owned by ``thread_id``."""
+        with self._lock:
+            self._cleanup_locked()
+            return [
+                session
+                for session in self._items.values()
+                if session.owns(thread_id) and not session.is_done and session.stdin_mode != "none"
+            ]
 
     def has_active_other_root_session(
         self,

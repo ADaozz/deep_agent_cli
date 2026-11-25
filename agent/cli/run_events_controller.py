@@ -36,6 +36,7 @@ class RunEventsController:
         set_status: Callable[..., None],
         state: CliState,
         invalidate: Callable[[], None],
+        on_execution_finished: Callable[[str], None] | None = None,
     ) -> None:
         self.request_summary = request_summary
         self._allow_confirm_open = _allow_confirm_open
@@ -52,6 +53,7 @@ class RunEventsController:
         self.set_status = set_status
         self.state = state
         self.invalidate = invalidate
+        self._on_execution_finished = on_execution_finished
 
 
     def _apply_event(self, event: RunEvent, *, announce: bool = True) -> None:
@@ -95,6 +97,9 @@ class RunEventsController:
                     self.state.add_system(f"sandbox: {event.result['sandbox_mode']}")
         elif event.type == "runtime_config_failed":
             self.state.add_system(f"Pending runtime config failed: {event.content}", error=True)
+        elif event.type == "tool_output_delta" and event.stream == "execution_finished" and isinstance(event.result, dict):
+            if self._on_execution_finished is not None:
+                self._on_execution_finished(str(event.result.get("execution_id") or ""))
         elif (event.type == "subagent_finished" and isinstance(event.result, dict)
               and not self.state.running
               and (self.run_view.task is None or self.run_view.task.done())):
