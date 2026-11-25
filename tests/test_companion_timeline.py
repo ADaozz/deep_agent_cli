@@ -234,6 +234,13 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     narrow = tool_health_labels([obs(alpha, "0")], 8, identity)
     assert narrow[alpha] == _truncate_cells("MCP · Parallel · search", 8)
     assert "search" not in narrow[alpha]
+    registered = "mcp__parallel__web_search"
+    upgraded = tool_health_labels(
+        [obs(registered, "old"), obs(registered, "new")],
+        8,
+        {"new": {"mcp_server_name": "Parallel", "mcp_tool_name": "web_search"}},
+    )
+    assert upgraded[registered] == _truncate_cells("MCP · Parallel · web_search", 8)
 
     started, _ = update_tool_events(
         {"agent": {"messages": [AIMessage(content="", tool_calls=[

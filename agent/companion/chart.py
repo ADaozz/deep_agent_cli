@@ -115,8 +115,8 @@ def tool_health_labels(
         artifact = recorded.get(str(getattr(obs, "tool_call_id", "") or ""))
         title = mcp_preview_title(name, artifact)
         if name not in labels or (labels[name] == name and title != name):
-            labels[name] = _truncate_cells(title, width)
-    return labels
+            labels[name] = title
+    return {name: _truncate_cells(title, width) for name, title in labels.items()}
 
 
 def _legend(width):
