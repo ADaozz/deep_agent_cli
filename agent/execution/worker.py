@@ -36,6 +36,29 @@ WORKDIR = os.getcwd()
 CHUNK_BYTES = 65536
 POST_EXIT_DRAIN_SECONDS = 0.1
 MAX_INPUT_BYTES = 1024 * 1024
+_RESERVED_CHILD_ENV = frozenset({
+    "PATH", "HOME", "PWD", "TMPDIR", "USER", "LOGNAME", "SHELL", "TERM",
+    "LANG", "LC_ALL", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "NODE_OPTIONS",
+    "BASH_ENV", "ENV", "IFS", "DEEP_AGENT_CONFIG", "DEEP_AGENT_EXECUTION_OWNER",
+})
+
+
+def _build_child_env(owner, extra_env):
+    """Build per-command child env without mutating the persistent Worker's os.environ."""
+    if not owner and not extra_env:
+        return None
+    merged = dict(os.environ)
+    if isinstance(extra_env, dict):
+        for key, val in extra_env.items():
+            if not isinstance(key, str) or not isinstance(val, str):
+                continue
+            if not key or key in _RESERVED_CHILD_ENV or key.startswith("LC_"):
+                continue
+            merged[key] = val
+    if owner:
+        merged["DEEP_AGENT_EXECUTION_OWNER"] = owner
+    return merged
 
 _send_lock = threading.Lock()
 _running_lock = threading.RLock()
@@ -223,7 +246,7 @@ def _fail_queue_items(request_id: int, state: _InputQueue, error: str, *, remove
 
 def _run(
     request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None,
-    owner=None, stdin_mode="none",
+    owner=None, stdin_mode="none", env=None,
 ):
     descriptors = []
     structured = argv is not None
@@ -269,8 +292,9 @@ def _run(
                     if mount_identity[0] == file_virtual and (info.st_dev, info.st_ino) != tuple(mount_identity[1:]):
                         raise ValueError("search mount changed; retry after restoring the workspace")
                 argv = [*argv[:-1], f"/proc/self/fd/{fd}"]
+        child_env = _build_child_env(owner, env)
         popen_kwargs = {
-            "env": {**os.environ, "DEEP_AGENT_EXECUTION_OWNER": owner} if owner else None,
+            "env": child_env,
             "shell": False,
             "cwd": cwd,
             "start_new_session": True,
@@ -284,7 +308,7 @@ def _run(
             # Controlling-TTY setup runs in a fresh child process (not via preexec_fn).
             process = subprocess.Popen(
                 [sys.executable, "-I", "-S", "-c", _PTY_CHILD, str(status_w), str(slave_fd), command],
-                env={**os.environ, "DEEP_AGENT_EXECUTION_OWNER": owner} if owner else None,
+                env=child_env,
                 shell=False,
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
@@ -713,7 +737,11 @@ def main():
                 threading.Thread(
                     target=_run,
                     args=(request_id, str(message["command"])),
-                    kwargs={"owner": message.get("owner"), "stdin_mode": stdin_mode},
+                    kwargs={
+                        "owner": message.get("owner"),
+                        "stdin_mode": stdin_mode,
+                        "env": message.get("env"),
+                    },
                     daemon=True,
                 ).start()
             elif op == "run_argv":

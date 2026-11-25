@@ -979,3 +979,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         if not callable(fn):
             return 0
         return fn(thread_id, join_timeout=join_timeout)
+
+    def set_secret_provider(self, sandbox_env_provider=None, redaction_provider=None) -> None:
+        fn = getattr(self.executor, "set_secret_provider", None)
+        if callable(fn):
+            fn(sandbox_env_provider, redaction_provider)

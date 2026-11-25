@@ -232,7 +232,7 @@ def _commit_add(app: Any, draft: dict[str, str]) -> None:
         fields["command"] = draft.get("target") or ""
     else:
         fields["url"] = draft.get("target") or ""
-    _start_operation(app, partial(manager.add_from_fields, **fields))
+    _start_operation(app, partial(manager.add_from_fields, authorize_secrets=True, **fields))
 
 
 def _cli_exiting(app: Any) -> bool:

@@ -329,9 +329,18 @@ class PersistentSandbox:
             raise SandboxStartError(f"sandbox worker did not become ready within {timeout:g}s: {detail}")
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
 
-    def start_command(self, command: str, *, stdin_mode: str = "none") -> RemoteCommand:
+    def start_command(
+        self,
+        command: str,
+        *,
+        stdin_mode: str = "none",
+        env: dict[str, str] | None = None,
+    ) -> RemoteCommand:
         mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
-        return self._start({"op": "run", "command": command, "stdin_mode": mode}, stdin_mode=mode)
+        payload: dict[str, Any] = {"op": "run", "command": command, "stdin_mode": mode}
+        if env:
+            payload["env"] = dict(env)
+        return self._start(payload, stdin_mode=mode)
 
     def start_argv(self, argv: list[str], cwd: str, *,
                    mount_identity: tuple[str, int, int] | None = None,

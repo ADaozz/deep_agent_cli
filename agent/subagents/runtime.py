@@ -18,6 +18,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from agent.execution.ownership import reset_root_session_id, root_session_id, set_root_session_id
 from agent.runtime.auto_approval import delegating_user_request
 from agent.runtime.contracts import observation_scope
 from agent.runtime.cancellation import get_cancel_context, set_output_emitter
@@ -209,9 +210,11 @@ class SubAgentRuntime(Runnable):
         if not parent:
             return {"messages": [_task_message("Subagent failed: parent session ID unavailable", "failed")]}
         cancel = call.get("cancel")
-        # Context().run below drops context vars. Capture the launching call first
-        # so the root card binds by tool_call_id, not by start order.
+        # Context().run below drops context vars. Capture the launching call and
+        # root session ID first so the root card binds by tool_call_id and
+        # sandbox credential inheritance stays scoped to the root session.
         tool_call_id = _active_task_call_id()
+        root_sid = root_session_id() or parent
         try:
             with self.manager.running(parent, self.owner_controller) as (run_id, controller):
                 # Publish immediately so ainvoke CancelledError can target this child only.
@@ -221,7 +224,7 @@ class SubAgentRuntime(Runnable):
                     controller.cancel()
                 controller.approval_user_request = delegating_user_request.get()
                 return Context().run(
-                    self._run, input, parent, run_id, controller, observation_scope.get(), tool_call_id,
+                    self._run, input, parent, run_id, controller, observation_scope.get(), tool_call_id, root_sid,
                 )
         except Exception as exc:
             reason = _error_reason(exc, self.store._redact)
@@ -272,13 +275,14 @@ class SubAgentRuntime(Runnable):
         )
 
         scope = observation_scope.get()
+        root_sid = root_session_id() or parent
         def work() -> None:
             try:
                 # Same clean context as the synchronous path: no parent
                 # callbacks, stream writer or checkpoint namespace.
                 Context().run(
                     self._run, {"messages": [HumanMessage(content=description)]}, parent, run_id, controller, scope,
-                    tool_call_id,
+                    tool_call_id, root_sid,
                 )
             except BaseException as exc:  # noqa: BLE001
                 state = "cancelled" if controller.cancel_requested else "failed"
@@ -311,7 +315,14 @@ class SubAgentRuntime(Runnable):
         return task
 
     def _run(
-        self, input: dict, parent: str, run_id: str, controller: Any, scope=None, tool_call_id: str = "",
+        self,
+        input: dict,
+        parent: str,
+        run_id: str,
+        controller: Any,
+        scope=None,
+        tool_call_id: str = "",
+        root_sid: str = "",
     ) -> dict:
         started = monotonic()
         description = visible_text(input["messages"][-1])
@@ -361,6 +372,7 @@ class SubAgentRuntime(Runnable):
         )
         set_stream_owner(controller)
         set_output_emitter(None)
+        root_session_token = set_root_session_id(root_sid or parent)
         callback = LogCallback(write, self.store._redact)
         prepared = None
         env_token = None
@@ -470,6 +482,10 @@ class SubAgentRuntime(Runnable):
             published = False
             return {"messages": [_task_message(content, status, run_id=run_id, result=content)]}
         finally:
+            try:
+                reset_root_session_id(root_session_token)
+            except Exception:
+                LOG.exception("Subagent root session cleanup failed")
             cleanup = getattr(getattr(prepared, "backend", None), "cleanup_executions", None)
             if callable(cleanup):
                 try:

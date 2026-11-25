@@ -197,14 +197,20 @@ class AutoApprovalMiddleware(HumanInTheLoopMiddleware):
         )
 
     def evidence(self, state, call, environment):
-        """Review input with configured credentials replaced, or None when the call cannot be judged."""
+        """Review input with configured & managed credentials replaced, or None when the call cannot be judged."""
         parent = None
         if self.spec.role == "subagent":
             parent = getattr(self.controller, "approval_user_request", None) or ""
-        return build_evidence(state["messages"], call, environment, parent_request=parent, secrets=known_secret_refs(
+        refs = list(known_secret_refs(
             getattr(self.spec, "settings", None), self.spec.deepseek_api_key,
             min_length=_MIN_SECRET_LEN,
         ))
+        provider = getattr(self.controller, "secret_refs_provider", None)
+        if callable(provider):
+            for item in provider():
+                if getattr(item, "value", "") and len(item.value) >= _MIN_SECRET_LEN:
+                    refs.append(item)
+        return build_evidence(state["messages"], call, environment, parent_request=parent, secrets=tuple(refs))
 
     async def aafter_model(self, state, runtime):
         message = state["messages"][-1]

@@ -322,7 +322,14 @@ def build_agent(
         )
         if manager.log_store is None:
             root = (cfg.config_dir or Path.home() / ".deep-agent") / "subagents"
-            manager.log_store = SubAgentLogStore(root, known_secret_refs(cfg, spec.deepseek_api_key))
+            base_refs = known_secret_refs(cfg, spec.deepseek_api_key)
+            provider = getattr(run_controller, "secret_refs_provider", None)
+            if callable(provider):
+                def _subagent_secret_refs(_base=base_refs, _provider=provider):
+                    return (*_base, *_provider())
+                manager.log_store = SubAgentLogStore(root, _subagent_secret_refs)
+            else:
+                manager.log_store = SubAgentLogStore(root, base_refs)
         store = manager.log_store
 
         def prepare_child(controller: RunController) -> PreparedAgent:
@@ -353,6 +360,9 @@ def build_agent(
             )
             # Share the tree's concurrency manager; cancel chains use owner controllers.
             controller.subagent_manager = manager
+            provider = getattr(run_controller, "secret_refs_provider", None)
+            if callable(provider):
+                controller.secret_refs_provider = provider
             try:
                 # The child runs under the parent's permission mode; it never gains more than the parent has.
                 child = build_agent(child_spec, child_model, permission, None, controller, lambda: False,

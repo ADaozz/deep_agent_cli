@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from codecs import IncrementalDecoder, getincrementaldecoder
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +18,8 @@ from typing import Any
 import uuid
 
 from deepagents.backends.protocol import ExecuteResponse
+
+from agent.redaction import SecretRef, StreamingSecretRedactor
 
 from agent.runtime.cancellation import (
     ToolOutputEmitter,
@@ -123,6 +126,7 @@ class _OutputCollector:
         emit: ToolOutputEmitter | None = None,
         execution_id: str = "",
         thread_id: str = "",
+        redaction_provider: Callable[[], Iterable[SecretRef]] | None = None,
     ) -> None:
         self.tool_call_id = tool_call_id
         self.max_output_bytes = max_output_bytes
@@ -130,6 +134,7 @@ class _OutputCollector:
         self._emit = emit
         self.execution_id = execution_id
         self.thread_id = thread_id
+        self._redactor = StreamingSecretRedactor(redaction_provider) if redaction_provider is not None else None
         self.decoder: IncrementalDecoder = getincrementaldecoder("utf-8")(errors="replace")
         self.tail_bytes = bytearray()
         self.total_bytes = 0
@@ -190,10 +195,56 @@ class _OutputCollector:
             del self._pending_bytes[:-max_output_bytes]
             _drop_partial_character_head(self._pending_bytes)
 
+    def _ingest_safe_text_locked(self, safe_text: str) -> None:
+        """Write already-redacted text to log, rolling tail, unread window, and UI stream."""
+        if not safe_text:
+            return
+        safe_bytes = safe_text.encode("utf-8")
+        max_output_bytes = self.max_output_bytes
+        remaining = max(0, max_output_bytes - self.total_bytes)
+        if not self.truncated and self.total_bytes + len(safe_bytes) > max_output_bytes:
+            self.truncated = True
+            if self.log_fd is None and self.log_error is None:
+                try:
+                    self.log_fd, self.log_directory_fd, self.log_name = _create_exec_log(self.workspace_root)
+                    _write_all(self.log_fd, self.tail_bytes)
+                    _write_all(self.log_fd, safe_bytes)
+                except OSError as exc:
+                    self._discard_log(exc)
+        elif self.log_fd is not None:
+            try:
+                _write_all(self.log_fd, safe_bytes)
+            except OSError as exc:
+                self._discard_log(exc)
+        self._append_pending_text(safe_text)
+        self.total_bytes += len(safe_bytes)
+        if max_output_bytes <= 0:
+            self.tail_bytes.clear()
+        else:
+            self.tail_bytes.extend(safe_bytes)
+            if len(self.tail_bytes) > max_output_bytes:
+                del self.tail_bytes[:-max_output_bytes]
+                _drop_partial_character_head(self.tail_bytes)
+        if remaining > 0:
+            accepted_bytes = safe_bytes[:remaining]
+            accepted_text = _decode_tail_snapshot(accepted_bytes)
+            if accepted_text:
+                self._emit_output(accepted_text, stream="merged")
+        if self.truncated:
+            current_tail = _decode_tail_snapshot(bytes(self.tail_bytes))
+            self._emit_output(current_tail, stream="tail_snapshot")
+
     def append(self, raw: bytes) -> None:
         if not raw:
             return
         with self._lock:
+            if self._redactor is not None:
+                decoded = self.decoder.decode(raw)
+                if decoded:
+                    safe_text = self._redactor.feed(decoded)
+                    if safe_text:
+                        self._ingest_safe_text_locked(safe_text)
+                return
             max_output_bytes = self.max_output_bytes
             remaining = max(0, max_output_bytes - self.total_bytes)
             accepted = raw[:remaining] if remaining > 0 else b""
@@ -235,9 +286,14 @@ class _OutputCollector:
                 self._emit_output(current_tail, stream="tail_snapshot")
 
     def flush(self) -> None:
-        """刷新解码器，处理末尾不完整的多字节序列。"""
+        """刷新解码器与流式脱敏尾部缓冲，处理末尾不完整的多字节序列。"""
         with self._lock:
             tail = self.decoder.decode(b"", final=True)
+            if self._redactor is not None:
+                safe_text = (self._redactor.feed(tail) if tail else "") + self._redactor.flush()
+                if safe_text:
+                    self._ingest_safe_text_locked(safe_text)
+                return
             if not tail:
                 return
             self._append_pending_text(tail)
@@ -490,6 +546,8 @@ def _run_in_sandbox(
     stdin_mode: str = "none",
     network: bool = False,
     sandbox_mode: str = "restricted",
+    sandbox_env_provider: Callable[[str], dict[str, str]] | None = None,
+    redaction_provider: Callable[[], Iterable[SecretRef]] | None = None,
 ) -> ExecuteResponse:
     """在持久沙箱里为一条命令启动新的 shell。
 
@@ -500,17 +558,42 @@ def _run_in_sandbox(
     同步与 yield 都只等待 ``CommandSession`` 状态；事件由后台 pump 独占消费。
     """
     from agent.execution.lifecycle import CommandSession
-    from agent.execution.ownership import execution_thread_id
+    from agent.execution.ownership import execution_thread_id, root_session_id
 
     if yield_time is not None and yield_time < 0:
         raise ValueError(f"yield_time must be non-negative, got {yield_time}")
     mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
     thread_id = execution_thread_id()
+    session_root = root_session_id()
+    extra_env = (
+        sandbox_env_provider(session_root)
+        if sandbox_env_provider is not None and session_root
+        else {}
+    )
+    # Linux resets PR_SET_DUMPABLE across execve('/bin/sh'), so concurrent processes
+    # inside the same shared Worker PID namespace share /proc/<pid>/environ visibility.
+    # Refuse cross-root-session sharing whenever sandbox credentials are involved.
+    if extra_env and pool.executions.has_active_other_root_session(sandbox.id, session_root):
+        return LocalExecuteResponse(
+            "Error: cannot inject sandbox credentials while another session has an active "
+            "process in the shared sandbox (same PID namespace /proc boundary).",
+            1,
+            False,
+            termination_reason="spawn_error",
+        )
+    if pool.executions.has_active_other_root_session(sandbox.id, session_root, require_secrets=True):
+        return LocalExecuteResponse(
+            "Error: cannot start a command in the shared sandbox while another session's "
+            "credential-bearing process is still running (same PID namespace /proc boundary).",
+            1,
+            False,
+            termination_reason="spawn_error",
+        )
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
     emit = get_output_emitter()
     try:
-        handle = sandbox.start_command(command, stdin_mode=mode)
+        handle = sandbox.start_command(command, stdin_mode=mode, env=extra_env or None)
     except SandboxLostError as exc:
         pool.discard(sandbox, str(exc))
         return LocalExecuteResponse(
@@ -525,6 +608,7 @@ def _run_in_sandbox(
         emit=emit,
         execution_id=handle.execution_id,
         thread_id=thread_id,
+        redaction_provider=redaction_provider,
     )
     session = CommandSession(
         handle=handle,
@@ -536,6 +620,8 @@ def _run_in_sandbox(
         network=network,
         tool_call_id=tool_call_id,
         sandbox_mode=sandbox_mode,
+        root_session_id=session_root,
+        has_injected_secrets=bool(extra_env),
         emit=emit,
         cancel_context=ctx,
     )

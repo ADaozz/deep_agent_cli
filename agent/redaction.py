@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import re
 from typing import Any
@@ -168,6 +168,59 @@ def replace_known_secrets(
     return text
 
 
+class StreamingSecretRedactor:
+    """Exact-match streaming redactor that prevents cross-chunk credential splits.
+
+    Reuses ``replace_known_secrets`` (no regex or heuristic scanners). Holds only
+    the shortest tail that is a proper prefix of a known credential value, so
+    normal non-matching output streams immediately with zero extra buffering.
+    """
+
+    def __init__(self, provider: Callable[[], Iterable[SecretRef]]) -> None:
+        self._provider = provider
+        self._carry = ""
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        refs = tuple(item for item in self._provider() if isinstance(item, SecretRef) and item.value)
+        combined = self._carry + chunk
+        self._carry = ""
+        if not refs:
+            return combined
+        replaced = replace_known_secrets(combined, refs)
+        hold = self._prefix_overlap_len(replaced, refs)
+        if hold > 0:
+            self._carry = replaced[-hold:]
+            return replaced[:-hold]
+        return replaced
+
+    def flush(self) -> str:
+        if not self._carry:
+            return ""
+        pending = self._carry
+        self._carry = ""
+        refs = tuple(item for item in self._provider() if isinstance(item, SecretRef) and item.value)
+        return replace_known_secrets(pending, refs) if refs else pending
+
+    @staticmethod
+    def _prefix_overlap_len(text: str, refs: tuple[SecretRef, ...]) -> int:
+        if not text:
+            return 0
+        max_hold = 0
+        text_len = len(text)
+        for ref in refs:
+            val = ref.value
+            limit = min(len(val) - 1, text_len)
+            if limit <= max_hold:
+                continue
+            for size in range(limit, max_hold, -1):
+                if text.endswith(val[:size]):
+                    max_hold = size
+                    break
+        return max_hold
+
+
 def strip_control_sequences(text: str) -> str:
     """Remove ANSI/OSC/DCS control sequences from untrusted display text."""
     return _CONTROL_SEQUENCE.sub("", text)
@@ -195,6 +248,7 @@ __all__ = [
     "REDACTED",
     "REDACTION_MARKERS",
     "SecretRef",
+    "StreamingSecretRedactor",
     "contains_redaction_marker",
     "known_secret_refs",
     "known_secrets",

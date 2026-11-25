@@ -5,6 +5,7 @@ from __future__ import annotations
 from agent.redaction import SecretRef, replace_known_secrets
 
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -21,17 +22,31 @@ MAX_PAGE_BYTES = 64_000
 
 
 class SubAgentLogStore:
-    def __init__(self, root: Path, secrets: tuple[SecretRef, ...] = ()) -> None:
+    def __init__(
+        self,
+        root: Path,
+        secrets: tuple[SecretRef, ...] | Callable[[], tuple[SecretRef, ...]] = (),
+    ) -> None:
         self.root = root
-        self.secrets = tuple(item for item in secrets if isinstance(item, SecretRef) and item.value)
+        if callable(secrets):
+            self._secrets_provider: Callable[[], tuple[SecretRef, ...]] | None = secrets
+            self.secrets: tuple[SecretRef, ...] = ()
+        else:
+            self._secrets_provider = None
+            self.secrets = tuple(item for item in secrets if isinstance(item, SecretRef) and item.value)
         self._lock = threading.Lock()
+
+    def _current_secrets(self) -> tuple[SecretRef, ...]:
+        if self._secrets_provider is None:
+            return self.secrets
+        return tuple(item for item in self._secrets_provider() if isinstance(item, SecretRef) and item.value)
 
     def _directory(self, parent: str) -> Path:
         # Parent IDs are opaque, never paths, including legacy session IDs.
         return self.root / hashlib.sha256(parent.encode()).hexdigest()
 
     def _redact(self, text: str) -> str:
-        return replace_known_secrets(text, self.secrets)
+        return replace_known_secrets(text, self._current_secrets())
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):

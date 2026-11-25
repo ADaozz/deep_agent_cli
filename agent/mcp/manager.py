@@ -12,7 +12,7 @@ from typing import Any, NamedTuple
 from langchain_core.tools import BaseTool
 
 from agent.mcp.contracts import ServerStatus, MCPResult
-from agent.mcp.adapter import close_client, open_server
+from agent.mcp.adapter import close_client, mcp_secret_consumer, mcp_secret_names, open_server
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import (
     MCPAuthError,
@@ -65,12 +65,14 @@ class MCPManager:
         connect_timeout: float = 20,
         oauth_callback_timeout: float = 120,
         trust_env: bool = False,
+        secret_store: Any | None = None,
     ) -> None:
         self.path = path
         self._trust_env = trust_env
         self._call_timeout = call_timeout
         self._connect_timeout = connect_timeout
         self._oauth_callback_timeout = oauth_callback_timeout
+        self._secret_store = secret_store
         self._lock = threading.RLock()
         self._bridge = SyncAsyncBridge()
         self._document = MCPFile()
@@ -108,6 +110,50 @@ class MCPManager:
     @property
     def config_error(self) -> str:
         return self._config_error
+
+    def set_secret_store(self, secret_store: Any | None) -> None:
+        """Attach the host SecretStore used to resolve authorized persistent MCP credentials."""
+        with self._lock:
+            self._secret_store = secret_store
+
+    def invalidate_credential(self, name: str) -> list[str]:
+        """Disconnect and mark dirty any server referencing ``name`` after rotation or deletion."""
+        if not name:
+            return []
+        affected: list[str] = []
+        with self._lock:
+            if self._closed:
+                return []
+            for server_name, state in self._states.items():
+                if name not in mcp_secret_names(state.config):
+                    continue
+                affected.append(server_name)
+                self._versions[server_name] = self._versions.get(server_name, 0) + 1
+                if state.client is not None:
+                    self._retired.append(state.client)
+                    state.client = None
+                state.tools = []
+                state.warnings = []
+                if state.config.enabled:
+                    state.status = ServerStatus.DISCONNECTED
+                    state.error = ""
+            if affected:
+                self._revision += 1
+        if affected:
+            self._close_unpublished()
+        return affected
+
+    def _authorize_server_secrets(self, server: MCPServerConfig) -> None:
+        """Grant explicit host-consumer authorization for a user-confirmed server config."""
+        store = self._secret_store
+        if store is None:
+            return
+        consumer = mcp_secret_consumer(server)
+        for cred_name in mcp_secret_names(server):
+            try:
+                store.authorize_consumer(cred_name, consumer, expected_scope="host", session_id=None)
+            except Exception:  # noqa: BLE001 — wrong scope or missing secret stays rejected on connect
+                continue
 
     def load(self) -> None:
         """Read the catalog. A later load marks the toolset dirty without rewriting the file."""
@@ -270,14 +316,30 @@ class MCPManager:
             lines.append(f"{name}  invalid  {error}")
         return "\n".join(lines)
 
-    def add_from_fields(self, *, allow_oauth_browser: bool = True, **fields: Any) -> MCPResult:
+    def add_from_fields(
+        self,
+        *,
+        allow_oauth_browser: bool = True,
+        authorize_secrets: bool = False,
+        **fields: Any,
+    ) -> MCPResult:
         try:
             server = server_from_fields(**fields)
         except MCPConfigError as exc:
             return MCPResult(False, False, str(exc))
-        return self.add(server, allow_oauth_browser=allow_oauth_browser)
+        return self.add(
+            server,
+            allow_oauth_browser=allow_oauth_browser,
+            authorize_secrets=authorize_secrets,
+        )
 
-    def add(self, server: MCPServerConfig, *, allow_oauth_browser: bool = True) -> MCPResult:
+    def add(
+        self,
+        server: MCPServerConfig,
+        *,
+        allow_oauth_browser: bool = True,
+        authorize_secrets: bool = False,
+    ) -> MCPResult:
         """Save a server and try to connect. Identical repeats are a no-op."""
         try:
             server = parse_server(server.name, server.to_json())
@@ -321,6 +383,8 @@ class MCPManager:
                 except OSError as exc:
                     self._document.servers.pop(server.name, None)
                     return MCPResult(False, False, f"Could not save MCP config: {exc.strerror or exc}")
+        if authorize_secrets:
+            self._authorize_server_secrets(server)
         state = self._activate(server, allow_oauth_browser=allow_oauth_browser)
         if state.status is ServerStatus.DISABLED:
             return MCPResult(True, not already, f"Saved MCP server {server.name} as disabled. It exposes no tools.", pending=True)
@@ -607,6 +671,7 @@ class MCPManager:
                     allow_oauth_browser=allow_oauth_browser,
                     oauth_browser_attempts=self._oauth_browser_attempts,
                     cancel_event=cancel_event,
+                    secret_store=self._secret_store,
                 )
         except MCPAuthError as exc:
             state = ServerState(config=server, status=ServerStatus.AUTH_REQUIRED, error=_public_error(exc))

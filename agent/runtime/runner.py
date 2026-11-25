@@ -57,6 +57,7 @@ from agent.execution.environment import (
 )
 from agent.bootstrap.factory import AgentSpec, PreparedAgent, build_agent
 from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.ownership import reset_root_session_id, set_root_session_id
 from agent.execution.pool import SandboxPool
 from agent.models.client import build_chat_model
 from agent.models.stream_lifecycle import reset_stream_owner, set_stream_owner
@@ -225,6 +226,11 @@ class AgentRunner:
         )
         self.secret_store = secret_store if secret_store is not None else SecretStore(secrets_dir)
         self._committed_secret_interactions: dict[str, dict[str, str]] = {}
+        self.control.secret_refs_provider = self.summary_secrets
+        if self.mcp is not None:
+            bind_mcp_store = getattr(self.mcp, "set_secret_store", None)
+            if callable(bind_mcp_store):
+                bind_mcp_store(self.secret_store)
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -296,6 +302,7 @@ class AgentRunner:
             backend_selection=prepared.backend_selection if prepared is not None else None,
             mcp=mcp_manager, settings=settings,
         )
+        self._bind_backend_secrets()
         self._checkpointer = self.prepared.checkpointer
         self._chat_model = initial_model
 
@@ -718,7 +725,14 @@ class AgentRunner:
             mcp=self.mcp, settings=self.settings,
             thread_id=thread_id,
         )
+        self._bind_backend_secrets()
         self._chat_model = chat
+
+    def _bind_backend_secrets(self) -> None:
+        """Bind store-level sandbox credential & redaction providers onto the active backend."""
+        bind = getattr(self.prepared.backend, "set_secret_provider", None)
+        if callable(bind):
+            bind(self.secret_store.sandbox_env_for_session, self.summary_secrets)
 
     def _ensure_approval_guard(self, thread_id: str | None) -> None:
         """Rebuild when Ask needs a different Auto replay guard for ``thread_id`` than the current graph has."""
@@ -1325,6 +1339,7 @@ class AgentRunner:
     ) -> RunResult:
         self._require_active_session()
         state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, "approve_tool")
+        self._authorize_approved_mcp_adds(state.pending_tools, {tool_call_id})
         return self._resume(
             _tool_decisions(list(state.pending_tools), decision_type="approve", tool_call_ids=[tool_call_id]),
             on_delta=on_delta,
@@ -1482,6 +1497,9 @@ class AgentRunner:
             by_id[call_id] = item
         if set(by_id) != set(pending_ids):
             raise ValueError("Decisions must cover every pending tool call")
+        approved_ids = {call_id for call_id, item in by_id.items() if item.get("type") == "approve"}
+        if approved_ids:
+            self._authorize_approved_mcp_adds(state.pending_tools, approved_ids)
         return self._resume(
             {"decisions": [by_id[call_id] for call_id in pending_ids]},
             on_delta=on_delta, on_event=on_event,
@@ -1499,6 +1517,9 @@ class AgentRunner:
     ) -> RunResult:
         action = "approve_tool" if approved else "reject_tool"
         state = self._require_interrupt(InterruptKind.WAITING_CONFIRMATION, action)
+        if approved:
+            target_ids = set(tool_call_ids) or {str(call.get("toolCallId") or "") for call in state.pending_tools}
+            self._authorize_approved_mcp_adds(state.pending_tools, target_ids)
         return self._resume(
             _tool_decisions(
                 list(state.pending_tools),
@@ -1510,6 +1531,44 @@ class AgentRunner:
             on_delta=on_delta,
             on_event=on_event,
         )
+
+    def _authorize_approved_mcp_adds(
+        self,
+        pending_tools: Sequence[dict[str, Any]],
+        approved_ids: set[str],
+    ) -> None:
+        """Grant managed persistent host credential access ONLY for human-approved mcp_add targets."""
+        from agent.mcp.adapter import mcp_secret_consumer, mcp_secret_names
+        from agent.mcp.config import MCPConfigError, server_from_fields
+
+        for call in pending_tools:
+            call_id = str(call.get("toolCallId") or "")
+            if call_id not in approved_ids or call.get("name") != "mcp_add":
+                continue
+            raw_args = call.get("args")
+            if not isinstance(raw_args, dict):
+                continue
+            try:
+                server = server_from_fields(
+                    name=raw_args.get("name", ""),
+                    transport=raw_args.get("transport", ""),
+                    url=raw_args.get("url", ""),
+                    command=raw_args.get("command", ""),
+                    args=raw_args.get("argv") if "argv" in raw_args else raw_args.get("args"),
+                    auth_type=raw_args.get("auth_type", "none"),
+                    token_env=raw_args.get("token_env", ""),
+                    env_passthrough=raw_args.get("env_passthrough"),
+                )
+            except MCPConfigError:
+                continue
+            consumer = mcp_secret_consumer(server)
+            for cred_name in mcp_secret_names(server):
+                try:
+                    self.secret_store.authorize_consumer(
+                        cred_name, consumer, expected_scope="host", session_id=None,
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
 
     def _require_interrupt(self, expected: InterruptKind, action: str) -> InterruptState:
         state = self.current_interrupt()
@@ -1652,6 +1711,7 @@ class AgentRunner:
             ))
 
         set_output_emitter(emit_tool_output_event)
+        root_session_token = set_root_session_id(self.thread_id)
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         environment_token = set_environment_cache(self._environment)
@@ -1727,6 +1787,7 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
+            reset_root_session_id(root_session_token)
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)

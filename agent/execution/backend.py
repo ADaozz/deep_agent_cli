@@ -69,7 +69,14 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
         self.executable = executable
         self._env = sandbox_environment(self.config)
         self._sandbox_id = f"bwrap-{uuid.uuid4().hex[:8]}"
+        self._sandbox_env_provider = None
+        self._redaction_provider = None
         self.pool = SandboxPool(lambda network: self.worker_args(network))
+
+    def set_secret_provider(self, sandbox_env_provider=None, redaction_provider=None) -> None:
+        """Bind store-level sandbox credential & redaction providers (not per-turn state)."""
+        self._sandbox_env_provider = sandbox_env_provider
+        self._redaction_provider = redaction_provider
 
     def reconfigure(self, config: SandboxConfig, skills: Path | None, environment: dict[str, str]) -> None:
         self.pool.shutdown("sandbox mode changed")
@@ -189,6 +196,8 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
                 stdin_mode=stdin_mode,
                 network=network,
                 sandbox_mode=self.config.mode,
+                sandbox_env_provider=self._sandbox_env_provider,
+                redaction_provider=self._redaction_provider,
             ))
         except SandboxStartError as exc:
             return LocalExecuteResponse(

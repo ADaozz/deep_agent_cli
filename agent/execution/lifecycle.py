@@ -52,6 +52,8 @@ class CommandSession:
     network: bool
     tool_call_id: str
     sandbox_mode: str = "restricted"
+    root_session_id: str = ""
+    has_injected_secrets: bool = False
     emit: ToolOutputEmitter | None = None
     cancel_context: ToolCancelContext | None = field(default=None, repr=False)
     _execution_id: str = field(init=False, default="")
@@ -573,6 +575,29 @@ class ExecutionRegistry:
         with self._lock:
             self._cleanup_locked()
             return [session for session in self._items.values() if session.owns(thread_id)]
+
+    def has_active_other_root_session(
+        self,
+        sandbox_id: str,
+        root_session_id: str,
+        *,
+        require_secrets: bool = False,
+    ) -> bool:
+        """True when another root session has a live process inside the same Worker sandbox."""
+        with self._lock:
+            self._cleanup_locked()
+            for session in self._items.values():
+                if session.is_done:
+                    continue
+                handle = session.handle
+                if handle is None or handle.sandbox.id != sandbox_id:
+                    continue
+                if require_secrets and not session.has_injected_secrets:
+                    continue
+                other_root = session.root_session_id or session.thread_id
+                if other_root != root_session_id:
+                    return True
+        return False
 
     def require(self, execution_id: str, *, thread_id: str | None = None) -> CommandSession:
         owner = execution_thread_id() if thread_id is None else thread_id

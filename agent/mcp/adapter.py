@@ -34,7 +34,26 @@ from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import MCPAuthError, MCPServerConfig
 from agent.mcp.content import preserve_generic_resources
 from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
+from agent.secrets.store import SecretAccessError
 from agent.tools.catalog import NATIVE_TOOL_NAMES
+
+
+def mcp_secret_consumer(server: MCPServerConfig) -> str:
+    """Stable consumer identity bound to server name AND target URL/command."""
+    if server.transport == "stdio":
+        return f"mcp:{server.name}@stdio:{server.command or ''}"
+    return f"mcp:{server.name}@{server.url or ''}"
+
+
+def mcp_secret_names(server: MCPServerConfig) -> tuple[str, ...]:
+    """Return all credential reference names referenced by ``server``."""
+    names: list[str] = []
+    if server.auth is not None and server.auth.type == "bearer" and server.auth.token_env:
+        names.append(server.auth.token_env)
+    for item in server.env_passthrough:
+        if item and item not in names:
+            names.append(item)
+    return tuple(names)
 
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -64,6 +83,7 @@ def open_server(
     allow_oauth_browser: bool = True,
     oauth_browser_attempts: dict[str, float] | None = None,
     cancel_event: threading.Event | None = None,
+    secret_store: Any | None = None,
 ) -> LoadedServer:
     """Connect on the bridge loop and return synchronous LangChain tools."""
     secrets: list[SecretRef] = []
@@ -73,6 +93,7 @@ def open_server(
             trust_env=trust_env, oauth_storage_dir=oauth_storage_dir,
             allow_oauth_browser=allow_oauth_browser,
             oauth_browser_attempts=oauth_browser_attempts,
+            secret_store=secret_store,
         )
         timeout = connect_timeout
         if server.auth is not None and server.auth.type == "oauth":
@@ -98,6 +119,35 @@ def _looks_like_auth(message: str) -> bool:
     return any(token in folded for token in ("401", "unauthorized", "invalid_token", "oauth", "authentication"))
 
 
+def _resolve_mcp_credential(
+    name: str,
+    server: MCPServerConfig,
+    secret_store: Any | None,
+    secrets: list[SecretRef],
+) -> str | None:
+    """Resolve an authorized host credential for persistent MCP servers (never caches session secrets)."""
+    if secret_store is None:
+        return os.environ.get(name) or None
+    try:
+        resolved = secret_store.resolve_secret(
+            name,
+            scope="host",
+            session_id=None,
+            consumer=mcp_secret_consumer(server),
+            allow_session=False,
+            allow_env=True,
+        )
+    except SecretAccessError as exc:
+        raise MCPAuthError(f"Credential {name} is not authorized for MCP server {server.name}: {exc}") from None
+    except ValueError as exc:
+        raise MCPAuthError(f"Invalid credential reference {name}: {exc}") from None
+    if resolved is None:
+        return None
+    if resolved.storage != "environment":
+        secrets.append(SecretRef(name=name, value=resolved.value, raw=False))
+    return resolved.value
+
+
 def build_transport(
     server: MCPServerConfig,
     secrets: list[SecretRef],
@@ -107,6 +157,7 @@ def build_transport(
     oauth_storage_dir: Path | None = None,
     allow_oauth_browser: bool = True,
     oauth_browser_attempts: dict[str, float] | None = None,
+    secret_store: Any | None = None,
 ) -> Any:
     if server.transport == "streamable_http":
         from fastmcp.client.auth import BearerAuth
@@ -115,10 +166,9 @@ def build_transport(
         auth: Any = None
         if server.auth is not None and server.auth.type == "bearer":
             token_env = server.auth.token_env or ""
-            token = os.environ.get(token_env, "")
+            token = _resolve_mcp_credential(token_env, server, secret_store, secrets) or ""
             if not token:
                 raise MCPAuthError(f"Environment variable {token_env} is not set")
-            # Bearer / env values are not auto-redacted; use config redaction.replacements.
             auth = BearerAuth(token)
         elif server.auth is not None and server.auth.type == "oauth":
             from agent.mcp.oauth_storage import oauth_token_storage
@@ -141,10 +191,16 @@ def build_transport(
 
     from fastmcp.client.transports import StdioTransport
 
-    missing = [name for name in server.env_passthrough if name not in os.environ]
+    env: dict[str, str] = {}
+    missing: list[str] = []
+    for name in server.env_passthrough:
+        resolved_val = _resolve_mcp_credential(name, server, secret_store, secrets)
+        if resolved_val is None:
+            missing.append(name)
+        else:
+            env[name] = resolved_val
     if missing:
         raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
-    env = {name: os.environ[name] for name in server.env_passthrough}
     from agent.models.http import apply_http_environment
 
     env = apply_http_environment(env, os.environ, trust_env=trust_env)
