@@ -74,8 +74,6 @@ class ToolBlock:
     exit_code: int | None = None
     # Nested tasks under this delegation. Empty when the task has no children.
     subtasks: tuple[SubtaskView, ...] = ()
-    mcp_server: str = ""
-    mcp_remote: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,15 +89,6 @@ def touch(block: MessageBlock | ToolBlock) -> MessageBlock | ToolBlock:
     """Mark a block as changed so its cached rendering is rebuilt."""
     block.revision += 1
     return block
-
-
-def _keep_mcp_identity(tool: ToolBlock, event: RunEvent) -> None:
-    """Fill a missing display identity. A recorded one stays put."""
-    if tool.mcp_server and tool.mcp_remote:
-        return
-    if event.mcp_server and event.mcp_remote:
-        tool.mcp_server = event.mcp_server
-        tool.mcp_remote = event.mcp_remote
 
 
 @dataclass
@@ -222,8 +211,6 @@ class CliState:
                     status=item.status or ("error" if item.is_error else "completed"),
                     is_error=item.is_error,
                     exit_code=item.exit_code,
-                    mcp_server=item.mcp_server,
-                    mcp_remote=item.mcp_remote,
                 ))
 
     def apply(self, event: RunEvent) -> None:
@@ -268,15 +255,12 @@ class CliState:
                     tool_call_id=event.tool_call_id,
                     name=event.name,
                     arguments=event.arguments,
-                    mcp_server=event.mcp_server,
-                    mcp_remote=event.mcp_remote,
                 ))
             elif tool.status not in {"completed", "error"}:
                 touch(tool)
                 tool.name = event.name or tool.name
                 tool.arguments = event.arguments or tool.arguments
                 tool.status = "running"
-                _keep_mcp_identity(tool, event)
             if tool is not None and is_task_tool(tool.name):
                 self._paint_task_card(tool)
             elif is_task_tool(event.name):
@@ -301,13 +285,8 @@ class CliState:
         elif event.type == "tool_completed":
             tool = self._tool(event.tool_call_id)
             if tool is None:
-                tool = ToolBlock(
-                    event.tool_call_id, event.name, {},
-                    mcp_server=event.mcp_server, mcp_remote=event.mcp_remote,
-                )
+                tool = ToolBlock(event.tool_call_id, event.name, {})
                 self.blocks.append(tool)
-            else:
-                _keep_mcp_identity(tool, event)
             touch(tool)
             if is_background_launch(tool.name, tool.arguments):
                 # A running launch leaves the card open. The task's own event ends it.

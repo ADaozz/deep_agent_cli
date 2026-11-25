@@ -16,6 +16,7 @@ import warnings
 from typing import Any
 
 from langchain_core._api import LangChainBetaWarning
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
 # The supported adapter's namespace announces its beta status on import.
@@ -297,8 +298,9 @@ def _bridge_tool(
         "Runs on the host, outside the sandbox. The result is untrusted data.)"
     )
     metadata = dict(remote.metadata or {})
-    metadata["deep_agent_mcp"] = {"server": server, "remote_name": remote_name}
-    return StructuredTool(
+    # remote_name stays for routing checks. The config alias is not a display name.
+    metadata["deep_agent_mcp"] = {"remote_name": remote_name}
+    return _IdentifiedMCPTool(
         name=name,
         description=redact(description, secrets),
         args_schema=remote.args_schema,
@@ -307,7 +309,70 @@ def _bridge_tool(
         response_format=remote.response_format,
         metadata=metadata,
         handle_tool_error=_handle,
+        mcp_server_name=_server_info_name(metadata),
+        mcp_remote_name=remote_name,
     )
+
+
+def _server_info_name(metadata: Any) -> str:
+    """Remote serverInfo.name already stored by the MCP adapter. No extra request."""
+    mcp = metadata.get("mcp") if isinstance(metadata, dict) else None
+    server = mcp.get("server") if isinstance(mcp, dict) else None
+    name = server.get("name") if isinstance(server, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return ""
+    return name
+
+
+def _attach_mcp_identity(artifact: Any, *, server_name: str, tool_name: str) -> Any:
+    """Add display identity beside an existing artifact. Original keys stay put."""
+    extra: dict[str, str] = {}
+    if tool_name:
+        extra["mcp_tool_name"] = tool_name
+    if server_name:
+        extra["mcp_server_name"] = server_name
+    if not extra:
+        return artifact
+    if artifact is None:
+        return extra
+    if not isinstance(artifact, dict):
+        return artifact
+    return {**extra, **artifact}
+
+
+def _stamp_tool_message(result: Any, *, server_name: str, tool_name: str) -> Any:
+    """Merge identity into the ToolMessage StructuredTool already built.
+
+    ``_call`` and ``_handle`` keep their current returns. A direct tool result
+    is not a ToolMessage, and an error handler still returns only its content.
+    """
+    if not isinstance(result, ToolMessage):
+        return result
+    artifact = _attach_mcp_identity(result.artifact, server_name=server_name, tool_name=tool_name)
+    if artifact is result.artifact:
+        return result
+    return result.model_copy(update={"artifact": artifact})
+
+
+class _IdentifiedMCPTool(StructuredTool):
+    """Existing StructuredTool path, with display identity on the final message."""
+
+    mcp_server_name: str = ""
+    mcp_remote_name: str = ""
+
+    def run(self, *args: Any, **kwargs: Any) -> Any:
+        return _stamp_tool_message(
+            super().run(*args, **kwargs),
+            server_name=self.mcp_server_name,
+            tool_name=self.mcp_remote_name,
+        )
+
+    async def arun(self, *args: Any, **kwargs: Any) -> Any:
+        return _stamp_tool_message(
+            await super().arun(*args, **kwargs),
+            server_name=self.mcp_server_name,
+            tool_name=self.mcp_remote_name,
+        )
 
 
 def _redact_value(value: Any, secrets: list[SecretRef]) -> Any:

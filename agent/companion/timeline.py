@@ -2,7 +2,7 @@
 
 from bisect import insort_right
 from collections import Counter, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import json
 import re
 import sqlite3
@@ -32,8 +32,6 @@ class ToolObservation:
     message_id: str = ""
     retry_basis: str = ""
     resumed_from_checkpoint: bool = False
-    mcp_server: str = ""
-    mcp_remote: str = ""
 
 
 def category(text, exit_code):
@@ -66,6 +64,14 @@ TOOL_ACTIVITY_LIMIT = 60
 
 def _completion_key(obs):
     return obs.finished_at, obs.run_id, obs.tool_call_id
+
+
+def observation_from_payload(data):
+    """Build an observation from a stored record. Extra keys are ignored."""
+    if not isinstance(data, dict):
+        data = {}
+    known = {item.name for item in fields(ToolObservation)}
+    return ToolObservation(**{key: value for key, value in data.items() if key in known})
 
 
 class Series:
@@ -217,7 +223,7 @@ class Timeline:
         for kind, stamp, data in rows:
             self.version += 1
             if kind == "tool":
-                obs = ToolObservation(**data)
+                obs = observation_from_payload(data)
                 if obs.finished_at is None:
                     # Interrupted after a committed start. Unknown is excluded from rates.
                     key = (obs.run_id, obs.tool_call_id)
@@ -246,7 +252,7 @@ class Timeline:
                 # Window rows are statistics already stored on the series.
                 continue
             if kind == "tool" and data["finished_at"] is not None:
-                self.completed(ToolObservation(**data))
+                self.completed(observation_from_payload(data))
             elif kind == "turn":
                 self.summaries.append(data)
             elif kind != "tool":

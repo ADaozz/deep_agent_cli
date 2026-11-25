@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 import hashlib
 import re
-from typing import Any
 
 from agent.runtime.permissions import host_decision_rule
 
@@ -41,48 +40,6 @@ def external_tool_name(server: str, remote: str) -> str:
 
 def is_external_mcp_tool(name: str) -> bool:
     return name.startswith(EXTERNAL_PREFIX)
-
-
-def unique_mcp_identity(name: str) -> tuple[str, str] | None:
-    """Return server and remote tool only when one valid server boundary exists.
-
-    Several ``__`` boundaries stay unresolved. Recorded tool metadata is the
-    source for those names; this parser is only the fallback for old records.
-    """
-    if not is_external_mcp_tool(name):
-        return None
-    rest = name[len(EXTERNAL_PREFIX):]
-    matches: list[tuple[str, str]] = []
-    start = 0
-    while True:
-        index = rest.find("__", start)
-        if index <= 0:
-            break
-        server, remote = rest[:index], rest[index + 2:]
-        if remote and valid_server_name(server):
-            matches.append((server, remote))
-        start = index + 2
-    if len(matches) != 1:
-        return None
-    return matches[0]
-
-
-def mcp_metadata_identity(metadata: Mapping[str, Any] | None) -> tuple[str, str] | None:
-    """Server and remote tool stored on the live tool. No process-wide cache."""
-    raw = (metadata or {}).get("deep_agent_mcp")
-    if not isinstance(raw, dict):
-        return None
-    server, remote = raw.get("server"), raw.get("remote_name")
-    if isinstance(server, str) and server and isinstance(remote, str) and remote:
-        return server, remote
-    return None
-
-
-def resolve_mcp_display(name: str, server: str = "", remote: str = "") -> tuple[str, str] | None:
-    """Recorded server and remote name, else one unambiguous registered-name boundary."""
-    if server and remote:
-        return server, remote
-    return unique_mcp_identity(name)
 
 
 def is_managed_mcp_name(name: str) -> bool:

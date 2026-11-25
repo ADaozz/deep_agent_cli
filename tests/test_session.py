@@ -69,20 +69,31 @@ def test_turn_timings_survive_restart_and_restore_after_each_answer(tmp_path: Pa
         store.close()
 
 
-def test_tool_display_survives_restart_without_companion(tmp_path: Path) -> None:
+def test_checkpoint_artifact_restores_mcp_card_without_companion(tmp_path: Path) -> None:
+    import sqlite3
+
     path = tmp_path / "display.sqlite3"
-    store = SessionStore(path)
-    store.create_session(session_id="s")
-    store.save_tool_display("s", "call", "my__srv", "search")
-    store.close()
+    with sqlite3.connect(path) as database:
+        database.execute(
+            "CREATE TABLE session_tool_display (session_id TEXT, tool_call_id TEXT, mcp_server TEXT, mcp_remote TEXT)"
+        )
     store = SessionStore(path)
     try:
-        assert store.tool_display("s") == {"call": ("my__srv", "search")}
+        tables = {row[0] for row in store._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "session_tool_display" not in tables
+        artifact = {
+            "structured_content": {"q": "x"},
+            "mcp_server_name": "Parallel",
+            "mcp_tool_name": "search",
+        }
         blocks = messages_to_transcript([
             AIMessage(content="", tool_calls=[{"id": "call", "name": "mcp__my__srv__search", "args": {}}]),
-        ], identities=store.tool_display("s"))
-        assert (blocks[0].mcp_server, blocks[0].mcp_remote) == ("my__srv", "search")
+            ToolMessage(content="ok", tool_call_id="call", name="mcp__my__srv__search", artifact=artifact),
+        ])
         assert blocks[0].name == "mcp__my__srv__search"
+        assert blocks[0].artifact["structured_content"] == {"q": "x"}
+        assert blocks[0].artifact["mcp_server_name"] == "Parallel"
+        assert blocks[0].artifact["mcp_tool_name"] == "search"
     finally:
         store.close()
 

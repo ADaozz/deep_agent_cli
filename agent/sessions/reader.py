@@ -28,7 +28,6 @@ def read_snapshot(
 
 def read_transcript(
     graph, thread_id, *, repository=None, max_messages=None, include_thinking=True,
-    identities: dict[str, tuple[str, str]] | None = None,
 ):
     config = {"configurable": {"thread_id": thread_id}}
     try:
@@ -41,12 +40,9 @@ def read_transcript(
     truncated = max_messages is not None and len(messages) > max_messages
     if truncated:
         messages = messages[-max_messages:]
-    if identities is None and repository is not None:
-        identities = repository.tool_display(thread_id)
     transcript = messages_to_transcript(
         messages, include_thinking=include_thinking,
         turn_timings=repository.turn_timings(thread_id) if repository is not None else None,
-        identities=identities,
     )
     settle_restored_tools(
         transcript,

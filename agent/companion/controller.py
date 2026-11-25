@@ -469,8 +469,6 @@ class Companion:
                 wall,
                 message_id=event.message_id,
                 resumed_from_checkpoint=kind == "tool_resumed",
-                mcp_server=event.mcp_server,
-                mcp_remote=event.mcp_remote,
             )
             series = self.timeline.series.get((model, effort, name))
             previous = series.last_failed if series else None
@@ -508,8 +506,7 @@ class Companion:
             if obs is None:
                 obs = ToolObservation(self.thread, self.turn, run, agent, model, effort,
                                       clean(event.name) or "tool", event.tool_call_id, wall,
-                                      message_id=event.message_id, resumed_from_checkpoint=bool(event.message_id),
-                                      mcp_server=event.mcp_server, mcp_remote=event.mcp_remote)
+                                      message_id=event.message_id, resumed_from_checkpoint=bool(event.message_id))
             if obs.finished_at is not None:
                 return
             artifact = event.artifact if isinstance(event.artifact, dict) else {}

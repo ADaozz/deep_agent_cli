@@ -740,8 +740,7 @@ def _phrase(block: ToolBlock, *, success: bool, target: str | None = None) -> st
     from agent.mcp.names import is_external_mcp_tool
 
     if is_external_mcp_tool(name):
-        identity = operand or _mcp_titles(block)
-        return labeled("Called" if success else "Calling", f"MCP {identity}")
+        return _mcp_titles(block)
     return labeled(name) or name
 
 
@@ -850,18 +849,26 @@ def _mcp_clean(value: str) -> str:
     return " ".join(mcp_display_text(value).split())
 
 
-def _mcp_titles(block: ToolBlock) -> str:
-    """Display title only. Ambiguous registered names are not guessed apart."""
-    from agent.mcp.names import resolve_mcp_display
+def mcp_preview_title(name: str, artifact: Any) -> str:
+    """Card and Tool Health title. Missing identity keeps the registered name."""
+    from agent.mcp.names import is_external_mcp_tool
 
-    cleaned = _mcp_clean(block.name) or "mcp"
-    identity = resolve_mcp_display(block.name, block.mcp_server, block.mcp_remote)
-    if identity is None:
-        return cleaned
-    server, remote = (_mcp_clean(identity[0]), _mcp_clean(identity[1]))
-    if not server or not remote:
-        return cleaned
-    return f"{server} · {remote}"
+    if not isinstance(name, str) or not is_external_mcp_tool(name):
+        return name if isinstance(name, str) else ""
+    payload = artifact if isinstance(artifact, dict) else {}
+    tool_name = payload.get("mcp_tool_name")
+    server_name = payload.get("mcp_server_name")
+    tool = _mcp_clean(tool_name) if isinstance(tool_name, str) else ""
+    server = _mcp_clean(server_name) if isinstance(server_name, str) else ""
+    if not tool:
+        return name
+    if server:
+        return f"MCP · {server} · {tool}"
+    return f"MCP · {tool}"
+
+
+def _mcp_titles(block: ToolBlock) -> str:
+    return mcp_preview_title(block.name, block.artifact)
 
 
 def _mcp_argument_summary(args: Any) -> str:
@@ -902,7 +909,8 @@ def build_mcp_preview(block: ToolBlock) -> ToolPreview:
         kind="mcp",
         verb="MCP",
         target=target,
-        summary=f"MCP {target}",
+        title=target,
+        summary=target,
         collapsed_lines=(PreviewLine(summary, "dim"),) if summary else (),
         expanded_lines=tuple(expanded),
         display_output=mcp_display_text(block.output),

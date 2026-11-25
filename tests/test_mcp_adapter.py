@@ -343,12 +343,73 @@ def test_alias_keeps_remote_schema_description_and_actual_call_target():
         assert original.name == "read.file"
         assert wrapped.args_schema is original.args_schema
         assert wrapped.description.startswith(original.description)
-        assert wrapped.metadata["deep_agent_mcp"] == {"server": "local", "remote_name": "read.file"}
+        assert wrapped.metadata["deep_agent_mcp"] == {"remote_name": "read.file"}
         assert wrapped.coroutine is not original.coroutine
         assert wrapped.invoke({"value": "sync"}) == "sync"
         assert asyncio.run(wrapped.ainvoke({"value": "async"})) == "async"
     finally:
         bridge.shutdown()
+
+
+def test_tool_message_keeps_artifact_and_adds_remote_identity():
+    import asyncio
+    from langchain_core.messages import ToolMessage
+    from langchain_core.tools import StructuredTool, ToolException
+    from agent.mcp.adapter import _bridge_tool
+
+    async def remote(value: str):
+        if value == "fail":
+            raise ToolException("remote failed")
+        return f"text {value}", {"structured_content": {"value": value}, "kept": True}
+
+    original = StructuredTool.from_function(
+        coroutine=remote, name="read.file", description="Read.",
+        response_format="content_and_artifact",
+        metadata={"mcp": {"server": {"name": "Parallel", "version": "1"}}},
+    )
+    bridge = SyncAsyncBridge()
+    try:
+        wrapped = _bridge_tool(
+            original, name="mcp__local__read_file", bridge=bridge, timeout=3,
+            server="local", remote_name=original.name, secrets=[],
+        )
+        assert wrapped.metadata["deep_agent_mcp"] == {"remote_name": "read.file"}
+        assert "local" not in wrapped.metadata["deep_agent_mcp"]
+        success = asyncio.run(wrapped.arun({"value": "ok"}, tool_call_id="call-1"))
+        assert isinstance(success, ToolMessage)
+        assert success.status == "success"
+        assert success.content == "text ok"
+        assert success.artifact["structured_content"] == {"value": "ok"}
+        assert success.artifact["kept"] is True
+        assert success.artifact["mcp_server_name"] == "Parallel"
+        assert success.artifact["mcp_tool_name"] == "read.file"
+        failed = asyncio.run(wrapped.arun({"value": "fail"}, tool_call_id="call-2"))
+        assert isinstance(failed, ToolMessage)
+        assert failed.status == "error"
+        assert failed.content == "remote failed"
+        assert failed.artifact == {"mcp_server_name": "Parallel", "mcp_tool_name": "read.file"}
+    finally:
+        bridge.shutdown()
+
+
+def test_identity_merge_keeps_existing_artifact_values():
+    from agent.mcp.adapter import _attach_mcp_identity, _server_info_name
+
+    assert _server_info_name({"mcp": {"server": {"name": "Docs", "version": "1"}}}) == "Docs"
+    assert _server_info_name({"mcp": {"server": {"name": "  "}}}) == ""
+    assert _server_info_name({}) == ""
+    original = ["not-a-dict"]
+    assert _attach_mcp_identity(original, server_name="Docs", tool_name="echo") is original
+    merged = _attach_mcp_identity(
+        {"mcp_tool_name": "kept", "structured_content": {"a": 1}},
+        server_name="local-config", tool_name="echo",
+    )
+    assert merged == {
+        "mcp_server_name": "local-config",
+        "mcp_tool_name": "kept",
+        "structured_content": {"a": 1},
+    }
+    assert _attach_mcp_identity(None, server_name="", tool_name="echo") == {"mcp_tool_name": "echo"}
 
 
 def test_exact_secret_replacement_preserves_unknown_json_and_nested_values():

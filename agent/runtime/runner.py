@@ -7,7 +7,6 @@ from pathlib import Path
 import tempfile
 import time
 from threading import Lock
-from collections.abc import Mapping
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
@@ -62,7 +61,6 @@ from agent.runtime.events import (
     cancelled_result,
     classify_interrupt,
     final_answer_committed,
-    mcp_event_identity,
     update_tool_events,
     interrupt_kind_from_state,
     is_valid_hitl_interrupt as is_valid_hitl_interrupt,
@@ -1571,13 +1569,10 @@ class AgentRunner:
                         name = str(call.get("name") or "tool")
                         if name == "start_task":
                             self._subagent_tool_ids.add(call_id)
-                        server, remote = mcp_event_identity(self._bound_tools(), name)
-                        resumed = RunEvent(
+                        _emit(event_handler, RunEvent(
                             "tool_resumed", tool_call_id=call_id, message_id=message.id or "", name=name,
-                            arguments=call["args"], mcp_server=server, mcp_remote=remote,
-                        )
-                        self._remember_tool_display(resumed)
-                        _emit(event_handler, resumed)
+                            arguments=call["args"],
+                        ))
                     break
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
@@ -1636,27 +1631,8 @@ class AgentRunner:
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
-    def _remember_tool_display(self, event: RunEvent) -> None:
-        """Store MCP display identity with the session, not the companion database."""
-        if self.session_store is None or self._runtime is None or not self._runtime.thread_id:
-            return
-        if event.type not in {"tool_started", "tool_completed", "tool_resumed"}:
-            return
-        self.session_store.save_tool_display(
-            self._runtime.thread_id, event.tool_call_id, event.mcp_server, event.mcp_remote,
-        )
-
-    def _bound_tools(self) -> Mapping[str, Any]:
-        """Tools registered on the graph that is executing this run."""
-        nodes = getattr(self.prepared.graph, "nodes", None)
-        node = nodes.get("tools") if isinstance(nodes, Mapping) else None
-        tools = getattr(getattr(node, "bound", None), "tools_by_name", None)
-        return tools if isinstance(tools, Mapping) else {}
-
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None, resume_calls=None) -> None:
-        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls, self._bound_tools())
-        for event in events:
-            self._remember_tool_display(event)
+        events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls)
         # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
         if saw_input_usage:
             self._context_usage_invalidated = False

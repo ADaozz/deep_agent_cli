@@ -359,7 +359,7 @@ def test_mcp_argument_previews_have_bounded_expansion_without_credential_guessin
                          tools_expanded=expanded)
         rendered = render_transcript(state, 80)
         assert "[REDACTED]" not in rendered
-        assert "MCP local · write" in rendered
+        assert "mcp__local__write" in rendered
         assert "Arguments:" not in rendered
         if expanded:
             assert "fake-private-value" in rendered

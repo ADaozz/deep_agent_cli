@@ -52,7 +52,6 @@ from agent.companion.theme import ACCENT as COMPANION_ACCENT
 from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
 from agent.sessions.reader import read_transcript
-from agent.sessions.store import read_tool_display
 from agent.cli.widgets import (
     EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
@@ -545,7 +544,7 @@ class CliApplication:
         visible = Condition(lambda: bool(self._companion_geometry()[0]))
         self.lain_buffer = Buffer(multiline=False)
         self.lain_editor = BufferControl(buffer=self.lain_buffer, focus_on_click=True)
-        chart = ActivityHeatmap(self.companion)
+        chart = ActivityHeatmap(self.companion, self._checkpoint_tool_artifacts)
         sidebar = _SelectablePane(
             build_panel(
                 self.companion,
@@ -1311,6 +1310,16 @@ class CliApplication:
         fragments.append(("class:footer", _fit_footer_line(status, context, width)))
         return FormattedText(fragments)
 
+    def _checkpoint_tool_artifacts(self):
+        """Artifacts already restored onto tool cards. Not written to Companion."""
+        from agent.cli.state import ToolBlock
+
+        return {
+            block.tool_call_id: block.artifact
+            for block in self.state.blocks
+            if isinstance(block, ToolBlock) and block.tool_call_id
+        }
+
     def _companion_session_blocks(self, thread_id, budget):
         store = self.runner.session_store
         if not thread_id or store is None:
@@ -1328,7 +1337,6 @@ class CliApplication:
             graph = self.runner.prepared.graph.copy({"checkpointer": saver})
             blocks, _, truncated = read_transcript(
                 graph, thread_id, max_messages=400, include_thinking=False,
-                identities=read_tool_display(database, thread_id),
             )
             return blocks, truncated
 

@@ -102,16 +102,17 @@ def test_heatmap_uses_tool_results_and_preserves_cumulative_statistics(tmp_path)
     asyncio.run(run())
 
 
-def _observe_tool(timeline, i, name, *, failed=False, model="fixed model", server="", remote=""):
+def _observe_tool(timeline, i, name, *, failed=False, model="fixed model"):
+    from dataclasses import asdict
+
     from agent.companion.timeline import ToolObservation
 
     obs = ToolObservation(
         "s", "t", "r", "main", model, "default", name, str(i), i - 1, i, 1,
         "failed" if failed else "success", "timeout" if failed else "",
-        mcp_server=server, mcp_remote=remote,
     )
     timeline.completed(obs)
-    timeline.record("tool", vars(obs), key=f"r/{i}", stamp=i)
+    timeline.record("tool", asdict(obs), key=f"r/{i}", stamp=i)
 
 
 def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
@@ -139,7 +140,7 @@ def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
     assert rows[1][0][1] == "Last 19 calls"
     assert all(sum(get_cwidth(text) for _, text in row) <= 30 for row in rows)
     matrix = rows[2:6]
-    assert [row[0][1].strip() for row in matrix] == ["read", "甲乙丙…", "shell", "other"]
+    assert [row[0][1].strip() for row in matrix] == ["read", "甲乙丙工具执行…", "shell", "other"]
     assert len({get_cwidth(row[0][1]) for row in matrix}) == 1
     for width in (30, 47, 64):
         for row in chart.draw(width, 8)[2:6]:
@@ -177,15 +178,15 @@ def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp
     assert [obs.finished_at for obs in c.timeline.recent_tool_calls] == list(range(5, 65))
     wide = chart.draw(64, 9)
     assert wide[0][-1][1] == "90% success"
-    assert wide[1][0][1] == "Last 60 calls"
+    assert wide[1][0][1] == "Last 60 calls · 57 shown"
     assert wide[2][0][1].strip() == "execute"
-    assert wide[2][1::2] == [FAILED_CELL] * 2 + [ACTIVITY_CELLS[3]] * 18
+    assert wide[2][1::2] == [FAILED_CELL] + [ACTIVITY_CELLS[3]] * 18
     assert wide[-1][0][1] == "60 calls · 54 success · 6 failed"
     _observe_tool(c.timeline, -1, "old", failed=True)
     assert chart.draw(64, 9) is wide
     narrow = chart.draw(30, 9)
-    assert narrow[1][0][1] == "Last 60 calls · 33 shown"
-    assert narrow[2][1::2] == [ACTIVITY_CELLS[3]] * 11
+    assert narrow[1][0][1] == "Last 60 calls · 21 shown"
+    assert narrow[2][1::2] == [ACTIVITY_CELLS[3]] * 7
     assert narrow[-1][0][1] == "60 calls·54 success·6 failed"
     transact(c.database, c.timeline.pending)
     c.timeline = restore_session(c.database, "s", c.window)
@@ -193,114 +194,96 @@ def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp
 
 
 def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
+    from dataclasses import asdict
     from types import SimpleNamespace
 
-    from langchain_core.messages import AIMessage
+    from langchain_core.messages import AIMessage, ToolMessage
 
     from agent.companion.chart import ActivityHeatmap, tool_health_labels
-    from agent.companion.timeline import ToolObservation, restore_session, transact
-    from agent.sessions.store import SessionStore
-    from agent.mcp.names import external_tool_name, unique_mcp_identity
-    from agent.runtime.events import mcp_event_identity, update_tool_events
+    from agent.companion.timeline import ToolObservation, observation_from_payload, restore_session, transact
+    from agent.cli.formatting import _truncate_cells
+    from agent.mcp.names import external_tool_name
+    from agent.runtime.events import update_tool_events
     from agent.sessions.transcript import messages_to_transcript
 
-    def obs(name, server="", remote=""):
-        return SimpleNamespace(tool_name=name, mcp_server=server, mcp_remote=remote)
+    def obs(name, call_id=""):
+        return SimpleNamespace(tool_name=name, tool_call_id=call_id)
 
     alpha, beta = "mcp__a__search", "mcp__b__search"
     ambiguous = external_tool_name("my__srv", "search")
-    hashed = external_tool_name("a", "web search")
-    assert unique_mcp_identity(ambiguous) is None
     wide = 40
-    assert tool_health_labels([obs(ambiguous)], wide)[ambiguous] == ambiguous
-    assert tool_health_labels([obs(alpha)], wide)[alpha] == "search"
+    assert tool_health_labels([obs(ambiguous)], wide)[ambiguous] == _truncate_cells(ambiguous, wide)
     assert tool_health_labels([obs("read"), obs("mcp_list")], wide) == {
         "read": "read", "mcp_list": "mcp_list",
     }
-    assert tool_health_labels([obs("search"), obs(alpha)], wide) == {
-        "search": "search", alpha: "search · a",
+    identity = {
+        "0": {"mcp_server_name": "Parallel", "mcp_tool_name": "search", "structured_content": {"q": 1}},
+        "1": {"mcp_tool_name": "lookup"},
     }
-    assert tool_health_labels([obs(ambiguous, "my__srv", "search")], wide)[ambiguous] == "search"
-    assert tool_health_labels([obs(hashed, "a", "web search")], wide)[hashed] == "web search"
-    fitted = tool_health_labels([
-        obs("mcp__alpha__searchtoolname", "alpha", "searchtoolname"),
-        obs("mcp__alpine__searchtoolname", "alpine", "searchtoolname"),
-    ], 12)
-    assert fitted["mcp__alpha__searchtoolname"].endswith("alph")
-    assert fitted["mcp__alpine__searchtoolname"].endswith("alpi")
-    assert "…" in fitted["mcp__alpha__searchtoolname"]
-    numbered_fit = tool_health_labels([
-        obs("mcp__alpha__searchtoolname", "alpha", "searchtoolname"),
-        obs("mcp__alpine__searchtoolname", "alpine", "searchtoolname"),
-    ], 5)
-    assert numbered_fit["mcp__alpha__searchtoolname"].endswith(" · 1")
-    assert numbered_fit["mcp__alpine__searchtoolname"].endswith(" · 2")
-    assert "alph" not in numbered_fit["mcp__alpha__searchtoolname"]
-    numbered = tool_health_labels([
-        obs("mcp__ab__search", "ab", "search"),
-        obs("mcp__abx__search", "ab", "search"),
-    ], wide)
-    assert set(numbered.values()) == {"search · ab", "search · ab2"}
+    labeled = tool_health_labels([obs(alpha, "0"), obs(beta, "1")], wide, identity)
+    assert labeled[alpha] == "MCP · Parallel · search"
+    assert labeled[beta] == "MCP · lookup"
+    duplicated = tool_health_labels([
+        obs("mcp__alpha__search", "a"),
+        obs("mcp__alpine__search", "b"),
+    ], wide, {
+        "a": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
+        "b": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
+    })
+    assert duplicated["mcp__alpha__search"] == duplicated["mcp__alpine__search"] == "MCP · Parallel · search"
+    narrow = tool_health_labels([obs(alpha, "0")], 8, identity)
+    assert narrow[alpha] == _truncate_cells("MCP · Parallel · search", 8)
+    assert "search" not in narrow[alpha]
 
-    class Bound:
-        def __init__(self, server, remote):
-            self.metadata = {"deep_agent_mcp": {"server": server, "remote_name": remote}}
-
-    left = {"mcp__a__search": Bound("a", "search")}
-    right = {"mcp__a__search": Bound("b", "lookup")}
-    assert mcp_event_identity(left, "mcp__a__search") == ("a", "search")
-    assert mcp_event_identity(right, "mcp__a__search") == ("b", "lookup")
     started, _ = update_tool_events(
         {"agent": {"messages": [AIMessage(content="", tool_calls=[
             {"id": "call", "name": alpha, "args": {}},
         ])]}},
-        set(), left,
+        set(),
     )
     assert started[0].name == alpha
-    assert (started[0].mcp_server, started[0].mcp_remote) == ("a", "search")
+    assert started[0].artifact is None
 
-    old = ToolObservation(**{
+    old = observation_from_payload({
         "session_id": "s", "turn_id": "t", "run_id": "r", "agent_id": "main",
         "model_id": "fixed model", "reasoning_effort": "default",
         "tool_name": alpha, "tool_call_id": "old", "started_at": 0, "finished_at": 1,
-        "outcome": "success",
+        "outcome": "success", "mcp_server": "gone", "mcp_remote": "search", "artifact": {"huge": True},
     })
-    old_ambiguous = ToolObservation(**{
-        "session_id": "s", "turn_id": "t", "run_id": "r", "agent_id": "main",
-        "model_id": "fixed model", "reasoning_effort": "default",
-        "tool_name": ambiguous, "tool_call_id": "older", "started_at": 0, "finished_at": 1,
-        "outcome": "success",
-    })
-    assert tool_health_labels([old], wide)[alpha] == "search"
-    assert tool_health_labels([old_ambiguous], wide)[ambiguous] == ambiguous
+    assert tool_health_labels([old], wide)[alpha] == _truncate_cells(alpha, wide)
+    assert "artifact" not in asdict(old)
 
     c = companion(tmp_path, lambda: "s")
-    chart = ActivityHeatmap(c)
-    for index, (name, server) in enumerate(
-        [(ambiguous, "my__srv")] * 3 + [(beta, "b")] * 3 + [("read", "")],
-    ):
-        remote = "" if name == "read" else "search"
-        _observe_tool(c.timeline, index, name, server=server, remote=remote)
+    recorded = {
+        "0": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
+        "1": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
+        "2": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
+        "3": {"mcp_server_name": "Beta", "mcp_tool_name": "search"},
+        "4": {"mcp_server_name": "Beta", "mcp_tool_name": "search"},
+        "5": {"mcp_server_name": "Beta", "mcp_tool_name": "search"},
+    }
+    chart = ActivityHeatmap(c, lambda: recorded)
+    for index, name in enumerate([ambiguous] * 3 + [beta] * 3 + ["read"]):
+        _observe_tool(c.timeline, index, name)
     labels = [row[0][1].strip() for row in chart.draw(64, 9)[2:5]]
-    assert labels == ["search · b", "search · m", "read"]
+    assert labels == ["MCP · Beta · search", "MCP · Parallel · search", "read"]
     assert chart.draw(64, 9)[-1][0][1] == "7 calls · 7 success · 0 failed"
     assert c.timeline.series["fixed model", "default", ambiguous].counts["success"] == 3
     assert c.timeline.series["fixed model", "default", beta].counts["success"] == 3
     assert ("fixed model", "default", "search") not in c.timeline.series
     transact(c.database, c.timeline.pending)
     restored = restore_session(c.database, "s", c.window)
-    assert restored.recent_tool_calls[0].mcp_remote == "search"
-    store = SessionStore(tmp_path / "session.sqlite3")
-    try:
-        store.create_session(session_id="s")
-        store.save_tool_display("s", "0", "my__srv", "search")
-        blocks = messages_to_transcript(
-            [AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}])],
-            identities=store.tool_display("s"),
-        )
-    finally:
-        store.close()
-    assert (blocks[0].mcp_server, blocks[0].mcp_remote) == ("my__srv", "search")
+    assert "artifact" not in asdict(restored.recent_tool_calls[0])
+    bare = ActivityHeatmap(type("Holder", (), {"timeline": restored})())
+    assert any(ambiguous in text for row in bare.draw(64, 9) for _, text in row)
+    remembered = ActivityHeatmap(type("Holder", (), {"timeline": restored})(), lambda: recorded)
+    assert "MCP · Parallel · search" in [row[0][1].strip() for row in remembered.draw(64, 9)]
+    blocks = messages_to_transcript([
+        AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}]),
+        ToolMessage(content="ok", tool_call_id="0", name=ambiguous, artifact=recorded["0"]),
+    ])
+    assert blocks[0].name == ambiguous
+    assert blocks[0].artifact == recorded["0"]
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):

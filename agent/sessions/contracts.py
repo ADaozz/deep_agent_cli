@@ -58,5 +58,3 @@ class TranscriptBlock:
     elapsed_seconds: float = 0.0
     finished_at: datetime | None = None
     message_id: str = ""
-    mcp_server: str = ""
-    mcp_remote: str = ""

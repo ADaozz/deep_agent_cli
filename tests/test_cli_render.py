@@ -1909,10 +1909,11 @@ def test_mcp_card_collapses_arguments_and_folds_output() -> None:
     block = ToolBlock(
         "mcp-fold", "mcp__local__echo", {"q": "python"},
         output=output, status="completed",
+        artifact={"structured_content": {"ok": True}, "mcp_server_name": "Local Server", "mcp_tool_name": "echo"},
     )
     collapsed = _plain(_capture(_tool(block, False), 100))
     assert block.name == "mcp__local__echo"
-    assert "MCP local · echo" in collapsed
+    assert "MCP · Local Server · echo" in collapsed
     assert "mcp__local__echo" not in collapsed
     assert "q: python" in collapsed
     assert "Arguments:" not in collapsed
@@ -1925,9 +1926,10 @@ def test_mcp_card_collapses_arguments_and_folds_output() -> None:
     parallel = ToolBlock(
         "mcp-parallel", "mcp__parallel__search", {"q": "x"},
         output="ok", status="completed",
+        artifact={"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
     )
     rendered = _plain(_capture(_tool(parallel, False), 80))
-    assert "MCP parallel · search" in rendered
+    assert "MCP · Parallel · search" in rendered
     assert "mcp__parallel__search" not in rendered
 
 
@@ -1936,9 +1938,10 @@ def test_mcp_card_expands_location_arguments_and_output() -> None:
     block = ToolBlock(
         "mcp-open", "mcp__local__echo", {"q": "python", "count": 2},
         output=output, status="completed",
+        artifact={"mcp_server_name": "Local Server", "mcp_tool_name": "echo"},
     )
     expanded = _plain(_capture(_tool(block, True), 100))
-    assert "MCP local · echo" in expanded
+    assert "MCP · Local Server · echo" in expanded
     assert "Host (outside sandbox)" in expanded
     assert "q: python" in expanded
     assert "count: 2" in expanded
@@ -1951,11 +1954,12 @@ def test_mcp_failure_reuses_the_failure_card() -> None:
     block = ToolBlock(
         "mcp-fail", "mcp__local__echo", {"q": "python"},
         output="Error: boom", status="error", is_error=True,
+        artifact={"structured_content": {"ok": False}, "mcp_server_name": "Local Server", "mcp_tool_name": "echo"},
     )
     collapsed = _plain(_capture(_tool(block, False), 100))
     expanded = _plain(_capture(_tool(block, True), 100))
     for rendered in (collapsed, expanded):
-        assert "Failed Calling MCP local · echo" in rendered
+        assert "Failed MCP · Local Server · echo" in rendered
         assert "Failed Failed" not in rendered
         assert "boom" in rendered
         assert "Arguments:" not in rendered
@@ -1971,8 +1975,8 @@ def test_mcp_running_card_uses_the_green_spinner() -> None:
     title = _tool(running, False).renderable.renderables[0]
     assert title.plain.lstrip()[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     assert title.spans[0].style == "green"
-    assert "MCP local · echo" in title.plain
-    assert "mcp__local__echo" not in title.plain
+    assert "mcp__local__echo" in title.plain
+    assert "MCP ·" not in title.plain
     assert "— running" not in title.plain
 
 
@@ -2011,16 +2015,16 @@ def test_mcp_waiting_and_interrupted_cards_keep_status_marks() -> None:
     title = _tool(waiting, False).renderable.renderables[0]
     assert title.plain.lstrip()[0] == "•"
     assert title.spans[0].style == "yellow"
-    assert "MCP local · echo" in title.plain
+    assert "mcp__local__echo" in title.plain
     assert " — waiting for input" in title.plain
-    assert "mcp__local__echo" not in title.plain
+    assert "MCP ·" not in title.plain
 
     interrupted = ToolBlock(
         "mcp-stop", "mcp__local__echo", {"q": "hi"}, output="partial", status="interrupted",
     )
     title = _tool(interrupted, False).renderable.renderables[0]
     assert title.spans[0].style == "#888888"
-    assert "MCP local · echo" in title.plain
+    assert "mcp__local__echo" in title.plain
     assert " — interrupted (completion unconfirmed)" in title.plain
     rendered = _plain(_capture(_tool(interrupted, False), 100))
     assert "partial" in rendered
@@ -2033,7 +2037,10 @@ def test_mcp_card_restores_from_saved_transcript() -> None:
         AIMessage(content="", tool_calls=[{
             "id": "mcp-saved", "name": "mcp__local__echo", "args": {"q": "python"},
         }]),
-        ToolMessage(content="saved body", tool_call_id="mcp-saved", name="mcp__local__echo"),
+        ToolMessage(
+            content="saved body", tool_call_id="mcp-saved", name="mcp__local__echo",
+            artifact={"structured_content": {"ok": True}, "mcp_server_name": "Local Server", "mcp_tool_name": "echo"},
+        ),
     ])
     state = CliState()
     state.load_transcript(saved)
@@ -2044,7 +2051,8 @@ def test_mcp_card_restores_from_saved_transcript() -> None:
     assert block.output == "saved body"
     assert block.status == "completed"
     restored = _plain(render_transcript(state, 100))
-    assert "MCP local · echo" in restored
+    assert block.artifact["structured_content"] == {"ok": True}
+    assert "MCP · Local Server · echo" in restored
     assert "q: python" in restored
     assert "saved body" in restored
 
@@ -2059,9 +2067,9 @@ def test_mcp_card_restores_from_saved_transcript() -> None:
     assert pending[1].status == "interrupted"
     state.load_transcript(pending)
     rendered = _plain(render_transcript(state, 100))
-    assert "MCP local · echo" in rendered
+    assert "mcp__local__echo" in rendered
     assert " — waiting for input" in rendered
-    assert "MCP docs · search" in rendered
+    assert "mcp__docs__search" in rendered
     assert " — interrupted (completion unconfirmed)" in rendered
     assert state.blocks[0].name == "mcp__local__echo"
     assert state.blocks[1].name == "mcp__docs__search"
@@ -2074,16 +2082,18 @@ def test_mcp_ambiguous_server_name_uses_identity_or_registered_name() -> None:
     assert registered == "mcp__my__srv__search"
     block = ToolBlock("mcp-us", registered, {"q": "x"}, output="ok", status="completed")
     fallback = _plain(_capture(_tool(block, False), 120))
-    assert f"MCP {registered}" in fallback
+    assert registered in fallback
+    assert "MCP ·" not in fallback
     assert "MCP my · srv__search" not in fallback
     assert "MCP my__srv · search" not in fallback
 
     remembered = ToolBlock(
         "mcp-us", registered, {"q": "x"}, output="ok", status="completed",
-        mcp_server="my__srv", mcp_remote="search",
+        artifact={"mcp_server_name": "my__srv", "mcp_tool_name": "search", "structured_content": {"q": "x"}},
     )
     titled = _plain(_capture(_tool(remembered, False), 120))
-    assert "MCP my__srv · search" in titled
+    assert "MCP · my__srv · search" in titled
+    assert remembered.artifact["structured_content"] == {"q": "x"}
     assert registered not in titled
 
 
@@ -2813,7 +2823,7 @@ _TITLE_CASES = [
     ("compact_conversation", {}, {}, "Compacting conversation", "Compacted conversation", "Failed Compacting conversation"),
     ("read_task", {"run_id": "run-1"}, {}, "Reading Task run-1", "Read Task run-1", "Failed Reading Task run-1"),
     ("cancel_task", {"run_id": "run-1"}, {}, "Cancelling Task run-1", "Requested Task Cancellation run-1", "Failed Cancelling Task run-1"),
-    ("mcp__parallel-mcp__web_search", {"q": "x"}, {}, "Calling MCP parallel-mcp · web_search", "Called MCP parallel-mcp · web_search", "Failed Calling MCP parallel-mcp · web_search"),
+    ("mcp__parallel-mcp__web_search", {"q": "x"}, {"mcp_server_name": "Parallel", "mcp_tool_name": "web_search", "structured_content": {"q": "x"}}, "mcp__parallel-mcp__web_search", "MCP · Parallel · web_search", "Failed MCP · Parallel · web_search"),
 ]
 
 
@@ -2823,14 +2833,15 @@ def test_tool_titles_follow_status(name, arguments, artifact, running, completed
     assert build_tool_preview(live).title == running
     done = ToolBlock("done", name, arguments, artifact=artifact or None, status="completed")
     assert build_tool_preview(done).title == completed
-    error_artifact = {"exit_code": 7} if name == "execute" else None
+    error_artifact = {"exit_code": 7} if name == "execute" else artifact or None
     broken = ToolBlock(
         "bad", name, arguments, output="Error: boom", status="error", is_error=True,
         exit_code=7 if name == "execute" else None, artifact=error_artifact,
     )
     assert build_tool_preview(broken).title == failed
     assert failed.count("Failed") == 1
-    assert completed not in build_tool_preview(broken).title
+    if not str(name).startswith("mcp__"):
+        assert completed not in build_tool_preview(broken).title
     waiting = ToolBlock("wait", name, arguments, status="waiting")
     rendered = _plain(_capture(_tool(waiting, False), 160))
     assert running in rendered
