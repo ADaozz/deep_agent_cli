@@ -1,11 +1,14 @@
 """Session tool activity in fixed groups of three recorded completions."""
 
 from collections import Counter
+from collections.abc import Iterable
 
 from prompt_toolkit.utils import get_cwidth
 
 from agent.cli.formatting import _fit_footer_parts, _truncate_cells
 from agent.companion.theme import ACCENT, MUTED, TEXT
+from agent.mcp.names import is_external_mcp_tool, mcp_display_identity, unique_mcp_identity
+from agent.redaction import sanitize_display_text
 
 
 ACTIVITY_HEIGHT = 9
@@ -60,6 +63,7 @@ class ActivityHeatmap:
         frequency = Counter(obs.tool_name for obs in calls)
         top = sorted(frequency, key=lambda name: (-frequency[name], name))[:TOOL_ROWS]
         has_other = len(frequency) > len(top)
+        labels = tool_health_labels(frequency)
         counts = []
         for group in groups:
             buckets = [(obs.tool_name if obs.tool_name in top else None, obs.outcome) for obs in group]
@@ -68,7 +72,7 @@ class ActivityHeatmap:
                 {name for name, outcome in buckets if outcome == "failed"},
             ))
         for name in [*top, None] if has_other else top:
-            label = "other" if name is None else name
+            label = "other" if name is None else labels.get(name, name)
             if name == "other" and has_other:
                 label = "other tool"
             label = _truncate_cells(label, name_width)
@@ -84,6 +88,41 @@ class ActivityHeatmap:
             summary = summary.replace(" · ", "·")
         rows.extend((_legend(width), [(MUTED, _truncate_cells(summary, width))]))
         return rows
+
+
+def _display_text(value: str) -> str:
+    return " ".join(sanitize_display_text(value, keep_newlines=False).split())
+
+
+def _external_identity(name: str) -> tuple[str, str] | None:
+    """Registered server and remote tool. One unambiguous boundary is the fallback."""
+    if not is_external_mcp_tool(name):
+        return None
+    identity = mcp_display_identity(name) or unique_mcp_identity(name)
+    if identity is None:
+        return None
+    server, remote = _display_text(identity[0]), _display_text(identity[1])
+    if not server or not remote:
+        return None
+    return server, remote
+
+
+def tool_health_labels(names: Iterable[str]) -> dict[str, str]:
+    """Row labels for Tool Health. Counts stay keyed by the registered name.
+
+    An external MCP tool shows its remote name. A server name is added only when
+    another tool in the same window would otherwise use that same label.
+    """
+    parsed = {name: _external_identity(name) for name in names}
+    short = {name: identity[1] if identity else name for name, identity in parsed.items()}
+    shared = {label for label, count in Counter(short.values()).items() if count > 1}
+    labels: dict[str, str] = {}
+    for name, identity in parsed.items():
+        label = short[name]
+        if identity is not None and label in shared:
+            label = f"{label} · {identity[0]}"
+        labels[name] = label
+    return labels
 
 
 def _legend(width):

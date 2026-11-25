@@ -194,8 +194,8 @@ def test_editor_height_respects_terminal_and_config_limits(monkeypatch, rows, co
 
 
 @pytest.mark.parametrize("name,arguments,target", [
-    ("write", {"file_path": "notes", "content": "one\ntwo\nthree"}, "write notes"),
-    ("edit", {"file_path": "notes", "old_string": "old", "new_string": "new"}, "edit notes"),
+    ("write", {"file_path": "notes", "content": "one\ntwo\nthree"}, "Writing notes"),
+    ("edit", {"file_path": "notes", "old_string": "old", "new_string": "new"}, "Editing notes"),
     ("custom_tool", {}, "custom_tool"),
 ])
 def test_failure_dispatch_preserves_tool_summary_and_configured_limit(name, arguments, target) -> None:

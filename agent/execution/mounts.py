@@ -34,7 +34,7 @@ def render_launch_manifest(
     from agent.execution.layout import NETWORK_FILES, RUNTIME_FILES, RUNTIME_PATHS, SEARCH_BINARY_PATH, sandbox_state_dirs, sandbox_config_dir
     from agent.execution.backend import sandbox_workspace_root
     from agent.execution.types import SKILLS_ROOT
-    from agent.tools.grep import resolve_rg
+    from agent.execution.ripgrep import resolve_rg
 
     read_only, read_write = effective_user_mounts(config)
     workspace = sandbox_workspace_root(config.workspace)

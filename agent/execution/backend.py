@@ -141,7 +141,7 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
         if self.skills_dir is not None:
             args += ["--bind", str(self.skills_dir), SKILLS_ROOT]
         # Shared by persistent workers and one-shot shell commands.
-        from agent.tools.grep import resolve_rg
+        from agent.execution.ripgrep import resolve_rg
 
         rg = resolve_rg()
         if rg is not None:

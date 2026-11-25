@@ -358,8 +358,15 @@ def test_mcp_argument_previews_have_bounded_expansion_without_credential_guessin
         state = CliState(blocks=[ToolBlock("private", "mcp__local__write", args, status="waiting")],
                          tools_expanded=expanded)
         rendered = render_transcript(state, 80)
-        assert "fake-private-value" in rendered
         assert "[REDACTED]" not in rendered
+        assert "MCP local · write" in rendered
+        assert "Arguments:" not in rendered
+        if expanded:
+            assert "fake-private-value" in rendered
+            assert "Host (outside sandbox)" in rendered
+        else:
+            assert "fake-private-value" not in rendered
+            assert "Execution: Host" not in rendered
     assert args["auth"]["api_key"] == "fake-private-value"
     assert len(args["payload"]) == 100000
 

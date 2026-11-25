@@ -10,10 +10,9 @@ is never persisted; sessions keep the raw ToolMessage artifact instead.
 
 from __future__ import annotations
 
-import json
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import unified_diff
 from pathlib import PurePosixPath
 from typing import Any, Callable, Literal
@@ -58,6 +57,10 @@ class ToolPreview:
     kind: str
     verb: str
     target: str = ""
+    # Full heading after the status marker. The renderer does not invent a verb.
+    title: str = ""
+    # Human-input waiting already says Asking; do not append another status suffix.
+    omit_status_suffix: bool = False
     # Title suffix (edit: "(+2 -2)").
     detail: str = ""
     # Highlighted count line above the content (write: "+302 lines").
@@ -70,6 +73,11 @@ class ToolPreview:
     syntax: str | None = None
     file_mutation: FileMutationPreview | None = None
     command_execution: CommandExecutionPreview | None = None
+    # Extra lines above folded output. Empty for every non-MCP tool.
+    collapsed_lines: tuple[PreviewLine, ...] = ()
+    expanded_lines: tuple[PreviewLine, ...] = ()
+    # Sanitized body. None keeps ToolBlock.output.
+    display_output: str | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +409,7 @@ def file_tool_preview(mutation: FileMutationPreview) -> ToolPreview:
     target = f"{len(mutation.paths)} files" if multi else mutation.path
     return ToolPreview(
         kind="file_mutation", verb=verb, target=target,
+        title=f"{verb} {target}".strip(),
         detail=_mutation_count_detail(mutation.diff, mutation.operation),
         lines=mutation.compact_lines,
         group="mutation", action="expand", file_mutation=mutation,
@@ -574,26 +583,6 @@ def build_read_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
-def build_grep_preview(block: ToolBlock) -> ToolPreview:
-    pattern = block.arguments.get("pattern")
-    label = json.dumps(str(pattern), ensure_ascii=False) if pattern else ""
-    return ToolPreview(
-        kind="grep", verb="grep", target=_operand(block.arguments),
-        summary=f"Search {label}" if pattern else "Search",
-        group="explore", action="expand",
-    )
-
-
-def build_glob_preview(block: ToolBlock) -> ToolPreview:
-    pattern = block.arguments.get("pattern")
-    label = json.dumps(str(pattern), ensure_ascii=False) if pattern else ""
-    return ToolPreview(
-        kind="glob", verb="glob", target=_operand(block.arguments),
-        summary=f"Glob {label}" if pattern else "Glob",
-        group="explore", action="expand",
-    )
-
-
 def build_ls_preview(block: ToolBlock) -> ToolPreview:
     path = block.arguments.get("path")
     return ToolPreview(
@@ -700,10 +689,105 @@ def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
     )
 
 
+def _phrase(block: ToolBlock, *, success: bool, target: str | None = None) -> str:
+    """Present participle, or the past form after a successful result.
+
+    ``target`` is the operand the builder already chose, so the title keeps
+    that path. Unknown names stay the registered name. A finished write
+    without ``artifact.operation`` stays the neutral ``write`` label.
+    """
+    name = block.name
+    operand = target if target else _operand(block.arguments)
+
+    def labeled(verb: str, value: str = operand) -> str:
+        return f"{verb} {value}".strip()
+
+    if name == "ls":
+        return labeled("Listed" if success else "Listing")
+    if name == "read":
+        return labeled("Read" if success else "Reading")
+    if name == "write":
+        return labeled("write" if success else "Writing")
+    if name == "edit":
+        return labeled("Edited" if success else "Editing")
+    if name == "delete":
+        return labeled("Deleted" if success else "Deleting")
+    if name == "web_search":
+        quoted = operand or f'"{str(block.arguments.get("query") or "…").replace(chr(10), " ")[:80]}"'
+        return labeled("Searched Web" if success else "Searching Web", quoted)
+    if name == "web_fetch":
+        url = operand or str(block.arguments.get("url") or "…").replace("\n", " ")[:100]
+        return labeled("Fetched" if success else "Fetching", url)
+    if name == "request_human_input":
+        question = operand or str(block.arguments.get("question") or "input required").replace("\n", " ")[:100]
+        return labeled("Asked" if success else "Asking", question)
+    if name == "mcp_list":
+        return "Listed MCP Servers" if success else "Listing MCP Servers"
+    if name == "mcp_add":
+        server = str(block.arguments.get("name") or "").strip()
+        return labeled("Added" if success else "Adding", f"MCP Server {server}".strip())
+    if name == "mcp_remove":
+        server = str(block.arguments.get("name") or "").strip()
+        return labeled("Removed" if success else "Removing", f"MCP Server {server}".strip())
+    if name == "compact_conversation":
+        return "Compacted conversation" if success else "Compacting conversation"
+    if name == "read_task":
+        run_id = str(block.arguments.get("run_id") or "").strip()
+        return labeled("Read Task" if success else "Reading Task", run_id)
+    if name == "cancel_task":
+        run_id = str(block.arguments.get("run_id") or "").strip()
+        return labeled("Requested Task Cancellation" if success else "Cancelling Task", run_id)
+    from agent.mcp.names import is_external_mcp_tool
+
+    if is_external_mcp_tool(name):
+        identity = operand or _mcp_titles(name)
+        return labeled("Called" if success else "Calling", f"MCP {identity}")
+    return labeled(name) or name
+
+
+def _failure_heading(phrase: str, *, exit_code: object = None) -> str:
+    """One Failed prefix. An exit code is included only when the tool reported one."""
+    code = exit_code if type(exit_code) is int else None
+    head = f"Failed (exit {code})" if code is not None else "Failed"
+    text = str(phrase or "").strip()
+    return f"{head} {text}".strip() if text else head
+
+
+def _command_title(execution: CommandExecutionPreview) -> str:
+    command = execution.command
+    status = execution.status
+    if status in {"running", "waiting", "interrupted"}:
+        return f"Running {command}"
+    if status == "succeeded":
+        return f"Ran {command}"
+    if status == "failed":
+        return _failure_heading(command, exit_code=execution.exit_code)
+    if status == "timeout":
+        return f"Timed out {command}"
+    if status == "cancelled":
+        return f"Cancelled {command}"
+    if status == "spawn_error":
+        return f"Failed to start {command}"
+    return f"Running {command}"
+
+
+def _finalize_title(block: ToolBlock, preview: ToolPreview) -> ToolPreview:
+    """Fill a missing title. A title already chosen by the builder is kept."""
+    if preview.title:
+        return preview
+    success = block.status == "completed" and not block.is_error
+    return replace(
+        preview,
+        title=_phrase(block, success=success, target=preview.target),
+        omit_status_suffix=block.name == "request_human_input" and block.status == "waiting",
+    )
+
+
 def build_execute_preview(block: ToolBlock) -> ToolPreview:
     execution = normalize_command_execution(block)
     return ToolPreview(
         kind="execute", verb="execute", target=execution.command,
+        title=_command_title(execution),
         summary=f"execute {execution.command}",
         group="command", action="expand", command_execution=execution,
     )
@@ -756,6 +840,77 @@ def build_human_input_preview(block: ToolBlock) -> ToolPreview:
     )
 
 
+_MCP_SUMMARY_LIMIT = 120
+_MCP_SUMMARY_ARGS = 4
+
+
+def _mcp_clean(value: str) -> str:
+    from agent.cli.interactions import mcp_display_text
+
+    return " ".join(mcp_display_text(value).split())
+
+
+def _mcp_titles(name: str) -> str:
+    """Display title only. Ambiguous registered names are not guessed apart."""
+    from agent.mcp.names import mcp_display_identity, unique_mcp_identity
+
+    cleaned = _mcp_clean(name) or "mcp"
+    identity = mcp_display_identity(name) or unique_mcp_identity(name)
+    if identity is None:
+        return cleaned
+    server, remote = (_mcp_clean(identity[0]), _mcp_clean(identity[1]))
+    if not server or not remote:
+        return cleaned
+    return f"{server} · {remote}"
+
+
+def _mcp_argument_summary(args: Any) -> str:
+    """One collapsed line, bounded by the existing argument preview."""
+    from agent.cli.interactions import mcp_arguments_preview
+
+    chosen: list[str] = []
+    extra = False
+    for line in mcp_arguments_preview(args, expanded=False).splitlines():
+        if "content omitted" in line or not line.startswith("  ") or line.startswith("    "):
+            continue
+        compact = " ".join(line.split())
+        if not compact:
+            continue
+        if len(chosen) >= _MCP_SUMMARY_ARGS:
+            extra = True
+            break
+        chosen.append(compact)
+    if extra:
+        chosen.append("…")
+    text = " ".join(chosen)
+    if len(text) > _MCP_SUMMARY_LIMIT:
+        return text[: _MCP_SUMMARY_LIMIT - 1].rstrip() + "…"
+    return text
+
+
+def build_mcp_preview(block: ToolBlock) -> ToolPreview:
+    """Same card as every other tool. Only the title and argument lines differ."""
+    from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
+
+    target = _mcp_titles(block.name)
+    summary = _mcp_argument_summary(block.arguments)
+    structured = mcp_arguments_preview(block.arguments, expanded=True)
+    expanded = [PreviewLine("Host (outside sandbox)", "dim")]
+    if structured:
+        expanded.extend(PreviewLine(line, "dim") for line in structured.splitlines())
+    return ToolPreview(
+        kind="mcp",
+        verb="MCP",
+        target=target,
+        summary=f"MCP {target}",
+        collapsed_lines=(PreviewLine(summary, "dim"),) if summary else (),
+        expanded_lines=tuple(expanded),
+        display_output=mcp_display_text(block.output),
+        group="other",
+        action="expand",
+    )
+
+
 def build_generic_preview(block: ToolBlock) -> ToolPreview:
     display = block.name
     target = _operand(block.arguments)
@@ -781,8 +936,6 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "start_task": build_task_preview,
     "ls": build_ls_preview,
     "read": build_read_preview,
-    "grep": build_grep_preview,
-    "glob": build_glob_preview,
 
     "delete": build_delete_preview,
 
@@ -812,8 +965,11 @@ def _failure_summary(output: str) -> str:
     return next((line for line in lines if not line.startswith("Exit code:")), "")
 
 
-def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS) -> list[str]:
-    lines = block.output.strip().splitlines()
+def _failure_lines(
+    block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
+    output: str | None = None,
+) -> list[str]:
+    lines = (block.output if output is None else output).strip().splitlines()
     if lines and lines[0].startswith("Argument validation failed"):
         details = [line.strip().removeprefix("- ") for line in lines if line.startswith("- ")]
         shown = details[:limits.head_lines] or lines[:1]
@@ -829,10 +985,14 @@ def _failure_lines(block: ToolBlock, group: PreviewGroup, *, limits: UiDisplayLi
 
 
 def _build_base_preview(block: ToolBlock, *, limits: UiDisplayLimits, full: bool = False) -> ToolPreview:
+    from agent.mcp.names import is_external_mcp_tool
+
     if block.name == "write":
         return build_write_preview(block, limits=limits, full=full)
     if block.name == "edit":
         return build_edit_preview(block, limits=limits, full=full)
+    if is_external_mcp_tool(block.name):
+        return build_mcp_preview(block)
     builder = _PREVIEW_BUILDERS.get(block.name, build_generic_preview)
     return builder(block)
 
@@ -841,16 +1001,21 @@ def build_failure_preview(block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT
     """Uniform preview for failed tools: real exit code + compact error output."""
     base = _build_base_preview(block, limits=limits)
     group = tool_group(block.name)
-    summary = base.summary or f"{base.verb} {base.target}".strip() or base.kind
+    phrase = _phrase(block, success=False, target=base.target)
+    output = block.output if base.display_output is None else base.display_output
     return ToolPreview(
         kind="failure",
         verb="Failed",
-        target=summary,
-        detail=_failure_summary(block.output),
+        target=phrase,
+        title=_failure_heading(phrase, exit_code=block.exit_code),
+        detail=_failure_summary(output),
         summary=base.summary,
-        lines=tuple(PreviewLine(line, "dim") for line in _failure_lines(block, group, limits=limits)),
+        lines=tuple(PreviewLine(line, "dim") for line in _failure_lines(block, group, limits=limits, output=output)),
         group=group,
         action="expand",
+        collapsed_lines=base.collapsed_lines,
+        expanded_lines=base.expanded_lines,
+        display_output=base.display_output,
     )
 
 
@@ -858,9 +1023,9 @@ def build_tool_preview(
     block: ToolBlock, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, full: bool = False,
 ) -> ToolPreview:
     if is_task_tool(block.name):
-        return build_task_preview(block)
+        return _finalize_title(block, build_task_preview(block))
     if block.name == "execute":
         return build_execute_preview(block)
     if block.is_error:
         return build_failure_preview(block, limits=limits)
-    return _build_base_preview(block, limits=limits, full=full)
+    return _finalize_title(block, _build_base_preview(block, limits=limits, full=full))

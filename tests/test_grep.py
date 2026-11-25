@@ -17,7 +17,7 @@ from agent.execution.policy import SandboxConfig
 from agent.execution.types import ExecutionMode
 from agent.runtime.control import RunController
 from agent.runtime.permissions import PermissionMode
-from agent.tools import grep as implementation
+from agent.execution import ripgrep as implementation
 from tests.conftest import graph_tool_names, scripted_model
 
 

@@ -28,6 +28,7 @@ from agent.cli.previews import (
     aggregate_file_mutations,
     build_diff_preview,
     build_tool_preview,
+    file_tool_preview,
     normalize_file_mutation,
     normalize_command_execution,
 )
@@ -471,37 +472,22 @@ def test_explore_tools_collapse_into_summary() -> None:
     state = CliState(blocks=[
         ToolBlock(
             tool_call_id="r1", name="read",
-            arguments={"file_path": "/workspace/a.py", "offset": 0, "limit": 2000},
+            arguments={"file_path": "/workspace/a.py"},
             output="src", status="completed",
-        ),
-        ToolBlock(
-            tool_call_id="g1", name="grep",
-            arguments={"pattern": "foo", "path": "/workspace", "output_mode": "files_with_matches"},
-            output="/workspace/a.py", status="completed",
-        ),
-        ToolBlock(
-            tool_call_id="g2", name="grep",
-            arguments={"pattern": "bar", "path": "/workspace", "glob": "*.py", "output_mode": "content"},
-            output="hit", status="completed",
-        ),
-        ToolBlock(
-            tool_call_id="gl1", name="glob",
-            arguments={"pattern": "*.py", "path": "/workspace"},
-            output="/workspace/a.py", status="completed",
-        ),
-        ToolBlock(
-            tool_call_id="gl2", name="glob",
-            arguments={"pattern": "*.md", "path": "/workspace"},
-            output="/workspace/README.md", status="completed",
-        ),
-        ToolBlock(
-            tool_call_id="gl3", name="glob",
-            arguments={"pattern": "*.txt", "path": "/workspace"},
-            output="/workspace/note.txt", status="completed",
         ),
         ToolBlock(
             tool_call_id="ls1", name="ls",
             arguments={"path": "/workspace"},
+            output="/workspace/a.py", status="completed",
+        ),
+        ToolBlock(
+            tool_call_id="g1", name="grep",
+            arguments={"pattern": "foo", "path": "/workspace"},
+            output="/workspace/a.py", status="completed",
+        ),
+        ToolBlock(
+            tool_call_id="gl1", name="glob",
+            arguments={"pattern": "*.py", "path": "/workspace"},
             output="/workspace/a.py", status="completed",
         ),
         ToolBlock(
@@ -515,20 +501,20 @@ def test_explore_tools_collapse_into_summary() -> None:
             output="Wrote /workspace/out.txt", status="completed",
         ),
     ])
-    collapsed = render_transcript(state, 80)
-    assert "Explored 7 items" in collapsed
-    assert "… 2 more" in collapsed
-    assert 'Search "bar"' in collapsed
-    assert 'Glob "*.py"' in collapsed
-    assert "List /workspace" in collapsed
-    assert 'Search "foo"' not in collapsed
+    collapsed = _plain(render_transcript(state, 80))
+    assert "Explored 2 items" in collapsed
+    assert "Read /workspace/a.py" in collapsed
+    assert "Listed /workspace" in collapsed
+    assert "grep" in collapsed and "glob" in collapsed
+    assert "Searched" not in collapsed and "Finding" not in collapsed
+    assert "Explored 4 items" not in collapsed
     assert "Ctrl+O to expand" in collapsed
-    assert "/workspace/a.py" not in collapsed
     assert "Ran pytest" in collapsed
     assert "write workspace/out.txt" in collapsed
     state.tools_expanded = True
-    expanded = render_transcript(state, 80)
-    assert "read /workspace/a.py" in expanded
+    expanded = _plain(render_transcript(state, 120))
+    assert "Read /workspace/a.py" in expanded
+    assert "Listed /workspace" in expanded
     assert "items hidden" not in expanded
 
 
@@ -559,7 +545,7 @@ def test_explore_preview_shows_only_last_five_in_order(count: int) -> None:
 def test_running_explore_group_does_not_fill_terminal_width() -> None:
     """Live summaries must leave room before the terminal's auto-wrap edge."""
     blocks = [
-        ToolBlock(str(index), ("ls", "glob", "grep")[index % 3], {}, status="running")
+        ToolBlock(str(index), ("ls", "read")[index % 2], {}, status="running")
         for index in range(10)
     ]
     for count in (4, 6, 8, 10):
@@ -664,7 +650,8 @@ def test_failed_human_input_summarizes_fields_without_schema_until_expanded() ->
         output=output, status="error", is_error=True,
     )])
     collapsed = _plain(render_transcript(state, 100))
-    assert "Failed ask 下一步怎么处理？" in collapsed
+    assert "Failed Asking 下一步怎么处理？" in collapsed
+    assert "Failed Failed" not in collapsed
     assert "fields: received str" in collapsed
     assert "recommendation: received str" in collapsed
     assert "schema" not in collapsed
@@ -683,7 +670,8 @@ def test_failed_mutation_shows_error_instead_of_unapplied_diff() -> None:
     for expanded in (False, True):
         state.tools_expanded = expanded
         rendered = _plain(render_transcript(state, 100))
-        assert "Failed write workspace/out.txt" in rendered
+        assert "Failed Writing workspace/out.txt" in rendered
+        assert "Failed Failed" not in rendered
         assert "permission denied" in rendered
         assert "+hello" not in rendered
 
@@ -786,7 +774,7 @@ def test_generic_tool_card_title_preserves_wrapped_indentation(width, name) -> N
         marker = "SubAgent"
     else:
         args = {"query": long}
-        marker = "web_search"
+        marker = "Searching"
     block = ToolBlock("wrap", name, args, status="running")
     lines = [line.rstrip() for line in _plain(_capture(_tool(block, False, width), width)).splitlines() if line.strip()]
     assert any(marker in line for line in lines)
@@ -806,19 +794,21 @@ def test_explore_group_keeps_last_five_and_surfaces_older_failures() -> None:
     assert "Explore 8 items · 1 failed" in rendered
     assert "… 3 more" in rendered
     assert "└ Read file-7.py" in rendered
-    assert "Failed Read file-0.py: Error: permission denied" in rendered
+    assert "Failed Reading file-0.py: Error: permission denied" in rendered
+    assert "Failed Failed" not in rendered
     assert group.renderables[1].spans[0].style == "#888888"
 
 
 def test_explore_group_caps_failure_preview_and_terminal_width() -> None:
     blocks = [ToolBlock(
-        str(index), "glob", {"pattern": f"file-{index}.py"},
+        str(index), "read", {"file_path": f"file-{index}.py"},
         output="Error: search failed", status="error", is_error=True,
     ) for index in range(10)]
     rendered = _plain(_capture(_explore_group(blocks, 80), 80))
     assert "Explore 10 items · 10 failed" in rendered
     assert "… 7 more failed" in rendered
-    assert rendered.count("Failed ") == 3
+    assert rendered.count("Error: search failed") == 3
+    assert "Failed Failed" not in rendered
     assert "Failed (exit" not in rendered
     assert all(len(line) < 80 for line in rendered.splitlines())
 
@@ -838,7 +828,7 @@ def test_approval_pane_shows_command_and_network() -> None:
         arguments={"command": command, "network": True},
         status="waiting",
     )])
-    assert "execute python -m pytest tests/test_cli.py" in render_transcript(state, 120)
+    assert "Running python -m pytest tests/test_cli.py" in render_transcript(state, 120)
 
 
 def test_tool_render_is_compact_then_expandable() -> None:
@@ -1014,7 +1004,7 @@ def test_execute_unconfirmed_states_override_stale_exit_code(block_status, expec
     )
     assert normalize_command_execution(block).status == block_status
     rendered = _plain(_capture(_tool(block, False), 100))
-    assert f"execute pytest -q — {expected}" in rendered
+    assert f"Running pytest -q — {expected}" in rendered
     assert "Cancelled" not in rendered
 
 
@@ -1040,7 +1030,7 @@ def test_run_completed_cannot_confirm_unfinished_execute() -> None:
     block = state.blocks[0]
     assert isinstance(block, ToolBlock) and block.status == "interrupted"
     rendered = _plain(render_transcript(state, 100))
-    assert "execute pytest -q — interrupted (completion unconfirmed)" in rendered
+    assert "Running pytest -q — interrupted (completion unconfirmed)" in rendered
     assert "Ran pytest -q" not in rendered
 
 
@@ -1092,7 +1082,7 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
         status="waiting",
     )])
     rendered = _plain(render_transcript(state, 80))
-    assert "edit /workspace/tests/test_cache.py" in rendered
+    assert "Editing /workspace/tests/test_cache.py" in rendered
     assert "waiting for input" in rendered
     assert "--- a/workspace/tests/test_cache.py" not in rendered
     assert "+++ b/workspace/tests/test_cache.py" not in rendered
@@ -1914,6 +1904,263 @@ def test_unknown_tool_completion_freezes_status_transitions() -> None:
     assert "boom" in rendered
 
 
+def test_mcp_card_collapses_arguments_and_folds_output() -> None:
+    output = "\n".join(f"row {index}" for index in range(12))
+    block = ToolBlock(
+        "mcp-fold", "mcp__local__echo", {"q": "python"},
+        output=output, status="completed",
+    )
+    collapsed = _plain(_capture(_tool(block, False), 100))
+    assert block.name == "mcp__local__echo"
+    assert "MCP local · echo" in collapsed
+    assert "mcp__local__echo" not in collapsed
+    assert "q: python" in collapsed
+    assert "Arguments:" not in collapsed
+    assert "Execution: Host" not in collapsed
+    assert "Host (outside sandbox)" not in collapsed
+    assert "row 11" in collapsed
+    assert "row 0" not in collapsed
+    assert "output lines hidden" in collapsed
+
+    parallel = ToolBlock(
+        "mcp-parallel", "mcp__parallel__search", {"q": "x"},
+        output="ok", status="completed",
+    )
+    rendered = _plain(_capture(_tool(parallel, False), 80))
+    assert "MCP parallel · search" in rendered
+    assert "mcp__parallel__search" not in rendered
+
+
+def test_mcp_card_expands_location_arguments_and_output() -> None:
+    output = "\n".join(f"row {index}" for index in range(12))
+    block = ToolBlock(
+        "mcp-open", "mcp__local__echo", {"q": "python", "count": 2},
+        output=output, status="completed",
+    )
+    expanded = _plain(_capture(_tool(block, True), 100))
+    assert "MCP local · echo" in expanded
+    assert "Host (outside sandbox)" in expanded
+    assert "q: python" in expanded
+    assert "count: 2" in expanded
+    assert "Arguments:" not in expanded
+    assert "row 0" in expanded and "row 11" in expanded
+    assert "output lines hidden" not in expanded
+
+
+def test_mcp_failure_reuses_the_failure_card() -> None:
+    block = ToolBlock(
+        "mcp-fail", "mcp__local__echo", {"q": "python"},
+        output="Error: boom", status="error", is_error=True,
+    )
+    collapsed = _plain(_capture(_tool(block, False), 100))
+    expanded = _plain(_capture(_tool(block, True), 100))
+    for rendered in (collapsed, expanded):
+        assert "Failed Calling MCP local · echo" in rendered
+        assert "Failed Failed" not in rendered
+        assert "boom" in rendered
+        assert "Arguments:" not in rendered
+        assert "Execution: Host" not in rendered
+        assert "Host (outside sandbox)" not in rendered
+    title = next(item for item in _tool(block, False).renderables if getattr(item, "plain", "").strip())
+    assert title.plain.lstrip()[0] == "•"
+    assert title.spans[0].style == "#888888"
+
+
+def test_mcp_running_card_uses_the_green_spinner() -> None:
+    running = ToolBlock("mcp-run", "mcp__local__echo", {"q": "hi"}, status="running")
+    title = _tool(running, False).renderable.renderables[0]
+    assert title.plain.lstrip()[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert title.spans[0].style == "green"
+    assert "MCP local · echo" in title.plain
+    assert "mcp__local__echo" not in title.plain
+    assert "— running" not in title.plain
+
+
+def test_mcp_long_arguments_stay_bounded() -> None:
+    args = {"payload": "A" * 100_000, "tail": "AFTER_PAYLOAD"}
+    block = ToolBlock("mcp-long", "mcp__local__echo", args, output="done", status="completed")
+    collapsed = _plain(_capture(_tool(block, False), 80))
+    expanded = _plain(_capture(_tool(block, True), 100))
+    assert "AAA" in collapsed
+    assert "A" * 200 not in collapsed
+    assert "AFTER_PAYLOAD" not in collapsed
+    assert "Arguments:" not in collapsed
+    assert "Host (outside sandbox)" not in collapsed
+    assert "omitted" in expanded
+    assert "AFTER_PAYLOAD" in expanded
+    assert "Host (outside sandbox)" in expanded
+    assert len(args["payload"]) == 100_000
+
+
+def test_mcp_collapsed_summary_is_one_bounded_line() -> None:
+    args = {f"k{index}": str(index) for index in range(6)}
+    preview = build_tool_preview(ToolBlock(
+        "mcp-sum", "mcp__local__echo", args, status="completed",
+    ))
+    assert len(preview.collapsed_lines) == 1
+    text = preview.collapsed_lines[0].text
+    assert "\n" not in text
+    assert len(text) <= 120
+    assert "k0:" in text and "k3:" in text
+    assert "k4:" not in text and "k5:" not in text
+    assert text.endswith("…")
+
+
+def test_mcp_waiting_and_interrupted_cards_keep_status_marks() -> None:
+    waiting = ToolBlock("mcp-wait", "mcp__local__echo", {"q": "hi"}, status="waiting")
+    title = _tool(waiting, False).renderable.renderables[0]
+    assert title.plain.lstrip()[0] == "•"
+    assert title.spans[0].style == "yellow"
+    assert "MCP local · echo" in title.plain
+    assert " — waiting for input" in title.plain
+    assert "mcp__local__echo" not in title.plain
+
+    interrupted = ToolBlock(
+        "mcp-stop", "mcp__local__echo", {"q": "hi"}, output="partial", status="interrupted",
+    )
+    title = _tool(interrupted, False).renderable.renderables[0]
+    assert title.spans[0].style == "#888888"
+    assert "MCP local · echo" in title.plain
+    assert " — interrupted (completion unconfirmed)" in title.plain
+    rendered = _plain(_capture(_tool(interrupted, False), 100))
+    assert "partial" in rendered
+
+
+def test_mcp_card_restores_from_saved_transcript() -> None:
+    from agent.sessions.transcript import settle_restored_tools
+
+    saved = messages_to_transcript([
+        AIMessage(content="", tool_calls=[{
+            "id": "mcp-saved", "name": "mcp__local__echo", "args": {"q": "python"},
+        }]),
+        ToolMessage(content="saved body", tool_call_id="mcp-saved", name="mcp__local__echo"),
+    ])
+    state = CliState()
+    state.load_transcript(saved)
+    block = state.blocks[0]
+    assert isinstance(block, ToolBlock)
+    assert block.name == "mcp__local__echo"
+    assert block.arguments == {"q": "python"}
+    assert block.output == "saved body"
+    assert block.status == "completed"
+    restored = _plain(render_transcript(state, 100))
+    assert "MCP local · echo" in restored
+    assert "q: python" in restored
+    assert "saved body" in restored
+
+    pending = messages_to_transcript([
+        AIMessage(content="", tool_calls=[
+            {"id": "mcp-ask", "name": "mcp__local__echo", "args": {"q": "wait"}},
+            {"id": "mcp-old", "name": "mcp__docs__search", "args": {"q": "old"}},
+        ]),
+    ])
+    settle_restored_tools(pending, waiting_ids={"mcp-ask"})
+    assert pending[0].status == "waiting"
+    assert pending[1].status == "interrupted"
+    state.load_transcript(pending)
+    rendered = _plain(render_transcript(state, 100))
+    assert "MCP local · echo" in rendered
+    assert " — waiting for input" in rendered
+    assert "MCP docs · search" in rendered
+    assert " — interrupted (completion unconfirmed)" in rendered
+    assert state.blocks[0].name == "mcp__local__echo"
+    assert state.blocks[1].name == "mcp__docs__search"
+
+
+def test_mcp_ambiguous_server_name_uses_identity_or_registered_name() -> None:
+    from agent.mcp.names import (
+        external_tool_name, forget_mcp_display_identity, register_mcp_display_identity,
+    )
+
+    registered = external_tool_name("my__srv", "search")
+    assert registered == "mcp__my__srv__search"
+    block = ToolBlock("mcp-us", registered, {"q": "x"}, output="ok", status="completed")
+    fallback = _plain(_capture(_tool(block, False), 120))
+    assert f"MCP {registered}" in fallback
+    assert "MCP my · srv__search" not in fallback
+    assert "MCP my__srv · search" not in fallback
+
+    register_mcp_display_identity(registered, "my__srv", "search")
+    try:
+        titled = _plain(_capture(_tool(block, False), 120))
+        assert "MCP my__srv · search" in titled
+        assert registered not in titled
+    finally:
+        forget_mcp_display_identity(registered)
+
+
+def test_mcp_sanitized_empty_output_does_not_fall_back_to_raw_text() -> None:
+    from agent.cli.previews import build_failure_preview, build_mcp_preview
+
+    raw = "\x1b[31m\x1b[0m\x00\u202e"
+    block = ToolBlock("mcp-empty", "mcp__local__echo", {"q": "x"}, output=raw, status="completed")
+    preview = build_mcp_preview(block)
+    assert preview.display_output == ""
+    assert preview.display_output is not None
+    rendered = _capture(_tool(block, True), 80)
+    assert raw not in rendered
+    assert "\x00" not in rendered and "\u202e" not in rendered
+    assert "\x1b" not in _plain(rendered)
+
+    failed = ToolBlock(
+        "mcp-empty-fail", "mcp__local__echo", {"q": "x"},
+        output=raw, status="error", is_error=True,
+    )
+    failure = build_failure_preview(failed)
+    base = build_mcp_preview(failed)
+    assert failure.display_output == ""
+    assert failure.collapsed_lines == base.collapsed_lines
+    assert failure.expanded_lines == base.expanded_lines
+    assert failure.detail == ""
+    assert failure.lines == ()
+    failed_render = _capture(_tool(failed, True), 80)
+    assert raw not in failed_render
+    assert "\x00" not in failed_render and "\u202e" not in failed_render
+    assert "\x1b" not in _plain(failed_render)
+
+
+def test_mcp_failure_preview_keeps_sanitized_output_fields() -> None:
+    from agent.cli.previews import build_failure_preview, build_mcp_preview
+
+    raw = "Error: boom\x1b[31m\nsecond line"
+    block = ToolBlock(
+        "mcp-fail-fields", "mcp__local__echo", {"q": "python"},
+        output=raw, status="error", is_error=True,
+    )
+    failure = build_failure_preview(block)
+    base = build_mcp_preview(block)
+    assert failure.display_output == base.display_output
+    assert failure.display_output is not None
+    assert "\x1b" not in failure.display_output
+    assert failure.collapsed_lines == base.collapsed_lines
+    assert failure.expanded_lines == base.expanded_lines
+    assert failure.detail == "Error: boom"
+    assert any("boom" in line.text for line in failure.lines)
+    expanded = _plain(_capture(_tool(block, True), 100))
+    collapsed = _plain(_capture(_tool(block, False), 100))
+    assert "boom" in expanded and "second line" in expanded
+    assert "boom" in collapsed
+
+
+def test_mcp_card_strips_terminal_controls_from_arguments_and_output() -> None:
+    args = {"q": "\x1b[31mvisible\x1b[0m\x1b]52;c;clipboard\x07\x00\u202e"}
+    output = "\x1b[32mbody\x1b[0m\x00ok\u202e"
+    block = ToolBlock("mcp-ctrl", "mcp__local__echo", args, output=output, status="completed")
+    preview = build_tool_preview(block)
+    visible = "\n".join(line.text for line in (*preview.collapsed_lines, *preview.expanded_lines))
+    assert preview.display_output is not None
+    for text in (preview.display_output, visible):
+        assert "\x1b" not in text and "\x00" not in text and "\u202e" not in text
+        assert "clipboard" not in text
+    for expanded in (False, True):
+        rendered = _capture(_tool(block, expanded), 100)
+        assert "\x00" not in rendered and "\u202e" not in rendered
+        plain = _plain(rendered)
+        assert "clipboard" not in plain
+        assert "visible" in plain
+        assert "body" in plain and "ok" in plain
+
+
 def test_unknown_tool_preview_falls_back_to_generic_builder() -> None:
     block = ToolBlock(
         "u-6", "custom_unknown_tool", {"query": "middleware"},
@@ -1983,7 +2230,7 @@ def test_write_and_delete_previews_use_real_schema() -> None:
         arguments={"file_path": "/workspace/out.txt", "content": "hello"},
         status="waiting",
     )]), 80)
-    assert "write workspace/out.txt" in write
+    assert "Writing workspace/out.txt" in write
     assert "(+1 -0)" in write
     assert "/dev/null" not in write
     assert "+ hello" in _plain(write)
@@ -1992,7 +2239,7 @@ def test_write_and_delete_previews_use_real_schema() -> None:
         arguments={"file_path": "/workspace/out.txt"},
         status="waiting",
     )]), 80)
-    assert "delete /workspace/out.txt" in delete
+    assert "Deleting /workspace/out.txt" in delete
 
 
 def test_large_new_file_preview_shows_semantic_summary_and_review() -> None:
@@ -2436,7 +2683,7 @@ def test_restored_interrupted_write_has_static_gray_status() -> None:
     block = state.blocks[0]
     assert isinstance(block, ToolBlock)
     title = _tool(block, False).renderable.renderables[0]
-    assert title.plain.startswith("• write workspace/report.md")
+    assert title.plain.startswith("• Writing workspace/report.md")
     assert "interrupted (completion unconfirmed)" in title.plain
     assert title.spans[0].style == "#888888"
 
@@ -2550,3 +2797,127 @@ def test_unchanged_transcript_prefix_reuses_unit_objects() -> None:
     # The unit at the old tail is rebuilt in case the new block joins its group.
     assert all(left is right for left, right in zip(first[:-1], second))
     assert transcript_units(state, memo=memo) == second
+
+
+_TITLE_CASES = [
+    ("ls", {"path": "agent"}, {}, "Listing agent", "Listed agent", "Failed Listing agent"),
+    ("read", {"file_path": "agent/runtime/runner.py"}, {}, "Reading agent/runtime/runner.py", "Read agent/runtime/runner.py", "Failed Reading agent/runtime/runner.py"),
+    ("write", {"file_path": "notes", "content": "new"}, {"operation": "create"}, "Writing notes", "Created notes", "Failed Writing notes"),
+    ("edit", {"file_path": "notes", "old_string": "old", "new_string": "new"}, {}, "Editing notes", "Edited notes", "Failed Editing notes"),
+    ("delete", {"file_path": "notes"}, {}, "Deleting notes", "Deleted notes", "Failed Deleting notes"),
+    ("execute", {"command": "pwd"}, {}, "Running pwd", "Ran pwd", "Failed (exit 7) pwd"),
+    ("web_search", {"query": "LangGraph release"}, {}, 'Searching Web "LangGraph release"', 'Searched Web "LangGraph release"', 'Failed Searching Web "LangGraph release"'),
+    ("web_fetch", {"url": "https://example.com"}, {}, "Fetching https://example.com", "Fetched https://example.com", "Failed Fetching https://example.com"),
+    ("request_human_input", {"question": "How would you like to proceed?"}, {}, "Asking How would you like to proceed?", "Asked How would you like to proceed?", "Failed Asking How would you like to proceed?"),
+    ("mcp_list", {}, {}, "Listing MCP Servers", "Listed MCP Servers", "Failed Listing MCP Servers"),
+    ("mcp_add", {"name": "parallel-mcp"}, {}, "Adding MCP Server parallel-mcp", "Added MCP Server parallel-mcp", "Failed Adding MCP Server parallel-mcp"),
+    ("mcp_remove", {"name": "parallel-mcp"}, {}, "Removing MCP Server parallel-mcp", "Removed MCP Server parallel-mcp", "Failed Removing MCP Server parallel-mcp"),
+    ("compact_conversation", {}, {}, "Compacting conversation", "Compacted conversation", "Failed Compacting conversation"),
+    ("read_task", {"run_id": "run-1"}, {}, "Reading Task run-1", "Read Task run-1", "Failed Reading Task run-1"),
+    ("cancel_task", {"run_id": "run-1"}, {}, "Cancelling Task run-1", "Requested Task Cancellation run-1", "Failed Cancelling Task run-1"),
+    ("mcp__parallel-mcp__web_search", {"q": "x"}, {}, "Calling MCP parallel-mcp · web_search", "Called MCP parallel-mcp · web_search", "Failed Calling MCP parallel-mcp · web_search"),
+]
+
+
+@pytest.mark.parametrize(("name", "arguments", "artifact", "running", "completed", "failed"), _TITLE_CASES)
+def test_tool_titles_follow_status(name, arguments, artifact, running, completed, failed) -> None:
+    live = ToolBlock("live", name, arguments, status="running")
+    assert build_tool_preview(live).title == running
+    done = ToolBlock("done", name, arguments, artifact=artifact or None, status="completed")
+    assert build_tool_preview(done).title == completed
+    error_artifact = {"exit_code": 7} if name == "execute" else None
+    broken = ToolBlock(
+        "bad", name, arguments, output="Error: boom", status="error", is_error=True,
+        exit_code=7 if name == "execute" else None, artifact=error_artifact,
+    )
+    assert build_tool_preview(broken).title == failed
+    assert failed.count("Failed") == 1
+    assert completed not in build_tool_preview(broken).title
+    waiting = ToolBlock("wait", name, arguments, status="waiting")
+    rendered = _plain(_capture(_tool(waiting, False), 160))
+    assert running in rendered
+    assert completed not in rendered
+    if name == "request_human_input":
+        assert "waiting for input" not in rendered
+    else:
+        assert "waiting for input" in rendered
+    stopped = ToolBlock("stop", name, arguments, status="interrupted")
+    stopped_title = build_tool_preview(stopped).title
+    assert stopped_title == running
+    assert completed not in stopped_title
+
+
+def test_cancel_task_success_is_a_request_not_a_stopped_task() -> None:
+    block = ToolBlock("cancel", "cancel_task", {"run_id": "run-1"}, output="cancellation requested", status="completed")
+    assert build_tool_preview(block).title == "Requested Task Cancellation run-1"
+    assert "Cancelled Task" not in build_tool_preview(block).title
+
+
+def test_mcp_management_titles_ignore_result_text() -> None:
+    added = ToolBlock(
+        "add", "mcp_add", {"name": "parallel-mcp"},
+        output="The server was not added.", status="completed",
+    )
+    removed = ToolBlock(
+        "remove", "mcp_remove", {"name": "parallel-mcp"},
+        output="Removed nothing.", status="completed",
+    )
+    assert build_tool_preview(added).title == "Added MCP Server parallel-mcp"
+    assert build_tool_preview(removed).title == "Removed MCP Server parallel-mcp"
+
+
+def test_file_tool_preview_titles_multi_file_groups_directly() -> None:
+    created = [
+        ToolBlock(str(index), "write", {"file_path": f"/workspace/f{index}.py", "content": "x"},
+                  artifact={"operation": "create"}, status="completed")
+        for index in range(3)
+    ]
+    edited = [
+        ToolBlock(str(index), "edit", {"file_path": f"/workspace/f{index}.py", "old_string": "a", "new_string": "b"},
+                  status="completed")
+        for index in range(2)
+    ]
+    overwritten = [
+        ToolBlock(str(index), "write", {"file_path": f"/workspace/f{index}.py", "content": "y"},
+                  artifact={"operation": "overwrite"}, status="completed")
+        for index in range(2)
+    ]
+    assert file_tool_preview(aggregate_file_mutations(
+        [normalize_file_mutation(block) for block in created],
+    )).title == "Created 3 files"
+    assert file_tool_preview(aggregate_file_mutations(
+        [normalize_file_mutation(block) for block in edited],
+    )).title == "Edited 2 files"
+    assert file_tool_preview(aggregate_file_mutations(
+        [normalize_file_mutation(block) for block in overwritten],
+    )).title == "Wrote 2 files"
+
+
+def test_explore_child_titles_follow_each_item_status() -> None:
+    blocks = [
+        ToolBlock("ls", "ls", {"path": "agent"}, status="completed"),
+        ToolBlock("read", "read", {"file_path": "agent/runtime/runner.py"}, status="running"),
+    ]
+    rendered = _plain(_capture(_explore_group(blocks), 100))
+    assert "Exploring 2 items" in rendered
+    assert "Listed agent" in rendered
+    assert "Reading agent/runtime/runner.py" in rendered
+    assert "Explored" not in rendered
+
+
+def test_historical_grep_and_glob_use_generic_preview() -> None:
+    grep = build_tool_preview(ToolBlock(
+        "g", "grep", {"pattern": "build_tool_preview"}, status="completed",
+    ))
+    glob = build_tool_preview(ToolBlock(
+        "gl", "glob", {"pattern": "**/*.py"}, status="running",
+    ))
+    assert grep.group == "other" and glob.group == "other"
+    assert grep.title.startswith("grep ")
+    assert glob.title.startswith("glob ")
+    assert "Searched" not in grep.title and "Finding" not in glob.title and "Found" not in glob.title
+    rendered = _plain(render_transcript(CliState(blocks=[
+        ToolBlock("g", "grep", {"pattern": "build_tool_preview"}, status="completed"),
+        ToolBlock("gl", "glob", {"pattern": "**/*.py"}, status="running"),
+    ]), 100))
+    assert "Exploring" not in rendered and "Explored" not in rendered

@@ -54,7 +54,7 @@ def _execute_description(
     *, permission: PermissionMode, workspace_root: str = "/workspace",
 ) -> str:
     from agent.runtime.permissions import PermissionMode
-    from agent.tools.grep import resolve_rg
+    from agent.execution.ripgrep import resolve_rg
 
     if permission is PermissionMode.ALLOW:
         policy = _ALLOW_POLICY

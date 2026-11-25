@@ -290,7 +290,7 @@ def test_web_search_tui_collapses_to_result_count() -> None:
     )
     collapsed = _capture(_tool(block, False), 100)
     expanded = _capture(_tool(block, True), 100)
-    assert 'web_search "python release"' in collapsed
+    assert 'Searched Web "python release"' in collapsed
     assert "… 2 results · Ctrl+O to expand" in collapsed
     assert "https://example.com/first" not in collapsed
     assert "https://example.com/first" in expanded
@@ -315,7 +315,7 @@ def test_web_search_preview_uses_artifact() -> None:
         status="completed",
     )
     collapsed = _capture(_tool(block, False), 100)
-    assert 'web_search "deepagents"' in collapsed
+    assert 'Searched Web "deepagents"' in collapsed
     assert "5 results" in collapsed
     assert "0.42" in collapsed
     assert "https://example.com/a" not in collapsed

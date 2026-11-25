@@ -191,6 +191,43 @@ def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp
     assert chart.draw(64, 9) == wide
 
 
+def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
+    from agent.companion.chart import ActivityHeatmap, tool_health_labels
+    from agent.mcp.names import (
+        external_tool_name, forget_mcp_display_identity, register_mcp_display_identity,
+        unique_mcp_identity,
+    )
+
+    alpha, beta = "mcp__a__search", "mcp__b__search"
+    ambiguous = external_tool_name("my__srv", "search")
+    hashed = external_tool_name("a", "web search")
+    assert unique_mcp_identity(ambiguous) is None
+    assert tool_health_labels([ambiguous])[ambiguous] == ambiguous
+    assert tool_health_labels([alpha])[alpha] == "search"
+    assert tool_health_labels(["read", "mcp_list"]) == {"read": "read", "mcp_list": "mcp_list"}
+    assert tool_health_labels(["search", alpha]) == {"search": "search", alpha: "search · a"}
+    register_mcp_display_identity(ambiguous, "my__srv", "search")
+    register_mcp_display_identity(hashed, "a", "web search")
+    try:
+        assert tool_health_labels([ambiguous])[ambiguous] == "search"
+        assert tool_health_labels([hashed])[hashed] == "web search"
+        assert "mcp__" not in tool_health_labels([hashed])[hashed]
+    finally:
+        forget_mcp_display_identity(ambiguous)
+        forget_mcp_display_identity(hashed)
+
+    c = companion(tmp_path, lambda: "s")
+    chart = ActivityHeatmap(c)
+    for index, name in enumerate([alpha] * 3 + [beta] * 3 + ["read"]):
+        _observe_tool(c.timeline, index, name)
+    labels = [row[0][1].strip() for row in chart.draw(64, 9)[2:5]]
+    assert labels == ["search · a", "search · b", "read"]
+    assert chart.draw(64, 9)[-1][0][1] == "7 calls · 7 success · 0 failed"
+    assert c.timeline.series["fixed model", "default", alpha].counts["success"] == 3
+    assert c.timeline.series["fixed model", "default", beta].counts["success"] == 3
+    assert ("fixed model", "default", "search") not in c.timeline.series
+
+
 def test_committed_start_survives_crash_and_replay(tmp_path):
     async def run():
         c = companion(tmp_path, lambda: "session")

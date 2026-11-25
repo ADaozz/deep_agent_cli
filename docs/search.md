@@ -60,7 +60,7 @@ sudo pacman -S ripgrep
 ```bash
 python - <<'PY'
 import subprocess
-from agent.tools.grep import resolve_rg
+from agent.execution.ripgrep import resolve_rg
 
 rg = resolve_rg()
 if rg:

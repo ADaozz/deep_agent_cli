@@ -1041,7 +1041,7 @@ def test_transcript_renderer_renders_each_unit_once(monkeypatch) -> None:
 
 
 def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> None:
-    """A collapsed read/grep/glob group is one unit and must not re-render when frozen."""
+    """A collapsed read/ls group is one unit and must not re-render when frozen."""
     import agent.cli.rendering as rendering
 
     original = rendering._render_unit
@@ -1059,7 +1059,7 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
             arguments={"file_path": f"f{index}.py"}, output="x", status="completed",
         )
 
-    state = CliState(blocks=[explore(0, "read"), explore(1, "grep"), explore(2, "glob")])
+    state = CliState(blocks=[explore(0, "read"), explore(1, "ls"), explore(2, "read")])
     renderer = TranscriptRenderer()
 
     fragments, _ = renderer.render(state, 80)
@@ -1086,8 +1086,8 @@ def test_transcript_renderer_caches_collapsed_explore_groups(monkeypatch) -> Non
     fragments, _ = renderer.render(state, 80)
     assert len(rendered) == 11  # cached header, seven tool units built
     expanded = _plain("".join(part[1] for part in fragments))
-    assert "read f0.py" in expanded
-    assert "read f6.py" in expanded
+    assert "Read f0.py" in expanded
+    assert "Read f6.py" in expanded
     assert "Ctrl+O to expand" not in expanded
 
 

@@ -5,7 +5,7 @@
   python examples/benchmark.py cli [--blocks 5000] [--repeat 200]
   python examples/benchmark.py live --prompt "..." [--repeat 3]
 
-``agent`` drives a scripted model through ls/read_file/glob tool rounds on a
+``agent`` drives a scripted model through ls/read tool rounds on a
 temporary workspace, so model latency is zero and the remaining time is the
 graph, middleware and tool overhead. ``cli`` times one streamed delta, one
 tool completion lookup, one transcript frame and one footer render against a
@@ -63,7 +63,7 @@ def _agent_script() -> list[Any]:
             {"id": "read-1", "name": "read", "args": {"file_path": "/pkg/mod_0.py"}},
             {"id": "read-2", "name": "read", "args": {"file_path": "/pkg/mod_1.py"}},
         ]),
-        AIMessage(content="", tool_calls=[{"id": "glob-1", "name": "glob", "args": {"pattern": "**/*.py"}}]),
+        AIMessage(content="", tool_calls=[{"id": "read-3", "name": "read", "args": {"file_path": "/pkg/mod_2.py"}}]),
         AIMessage(content="The package has 50 modules."),
     ]
 

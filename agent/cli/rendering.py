@@ -817,7 +817,7 @@ def _is_explore(block: Any) -> TypeGuard[ToolBlock]:
 
 
 def _preview_label(preview: ToolPreview) -> str:
-    return preview.summary or f"{preview.verb} {preview.target}".strip() or preview.kind
+    return preview.title or preview.summary or f"{preview.verb} {preview.target}".strip() or preview.kind
 
 
 def _explore_group(
@@ -863,9 +863,9 @@ def _explore_group(
             row = _tree_branch(f"… {omitted} more failed", glyph="├")
             row.truncate(max(1, width - 1), overflow="ellipsis")
             rows.append(row)
-        for block, preview in failed[-limits.explore_failure_items:]:
+        for _block, preview in failed[-limits.explore_failure_items:]:
             reason = preview.detail
-            heading = _failure_title(_preview_label(preview), exit_code=block.exit_code)
+            heading = preview.title or _preview_label(preview)
             row = Text.assemble(
                 (f"  ├ {heading}", TREE_BRANCH_STYLE),
                 (f": {reason}" if reason else "", TREE_BRANCH_STYLE),
@@ -880,25 +880,17 @@ def _explore_group(
     return Group(*([] if after_user else [Text("")]), title, *rows)
 
 
+def _card_output(block: ToolBlock, preview: ToolPreview) -> str:
+    """Use sanitized text when the builder set it, including an empty string."""
+    if preview.display_output is None:
+        return block.output
+    return preview.display_output
+
+
 def _tool(
     block: ToolBlock, expanded: bool, width: int = 80, *, limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS,
     after_user: bool = False, tasks_expanded: bool = False, files_full: bool = False,
 ) -> Any:
-    if block.name.startswith("mcp__"):
-        from agent.cli.interactions import mcp_arguments_preview, mcp_display_text
-        symbol, color = _tool_status_marker(block.status, block.is_error)
-        body = [
-            Text(f"{symbol} {mcp_display_text(block.name)} — {block.status}", style=color),
-            Text("Execution: Host (outside sandbox)", style="dim"),
-            Text("Arguments:\n" + mcp_arguments_preview(block.arguments, expanded=expanded)),
-        ]
-        if block.output and block.status != "waiting":
-            console = Console(width=max(20, width))
-            body.extend(_output_tail(
-                mcp_display_text(block.output).splitlines(), console, width,
-                expanded=expanded, limit=limits.tail_lines, indent=0, earlier=False,
-            ))
-        return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
     return render_tool_preview(
         block, build_tool_preview(block, limits=limits, full=expanded or files_full),
         expanded=expanded, width=width, limits=limits,
@@ -913,7 +905,10 @@ def render_tool_preview(
 ) -> Any:
     """Generic tool card: status, spinner, colors, folding — no tool semantics."""
     if preview.command_execution is not None:
-        return _command_card(block.output, preview.command_execution, expanded, width, limits=limits, after_user=after_user)
+        return _command_card(
+            block.output, preview.command_execution, expanded, width,
+            limits=limits, after_user=after_user, heading=preview.title,
+        )
     if preview.kind == "failure":
         return _failure_card(block, preview, expanded, width, after_user=after_user)
     console = Console(width=max(20, width))
@@ -925,11 +920,8 @@ def render_tool_preview(
         )
     else:
         symbol, color = _tool_status_marker(block.status, block.is_error)
-        suffix = _tool_status_suffix(block.status)
-        verb = preview.verb
-        if block.status == "running":
-            verb = {"edit": "Editing", "write": "Writing", "delete": "Deleting"}.get(block.name, verb)
-        summary = f"{verb} {preview.target}".strip()
+        suffix = "" if preview.omit_status_suffix else _tool_status_suffix(block.status)
+        summary = preview.title or f"{preview.verb} {preview.target}".strip()
         title = Text.assemble((f"{symbol} ", color), (summary, "bold"))
         mutation = preview.file_mutation
         counts = preview.detail if preview.detail.startswith("(+") and preview.detail.endswith(")") else ""
@@ -967,7 +959,10 @@ def render_tool_preview(
             Text(f"  … {preview.detail} · {EXPAND_HINT}", style="dim"), console, width,
         ))
     else:
-        output = block.output.strip()
+        context = preview.expanded_lines if expanded else preview.collapsed_lines
+        for line in context:
+            body.extend(_wrap_card_line(Text(f"  {line.text}", style="dim"), console, width))
+        output = _card_output(block, preview).strip()
         if output:
             error = block.is_error
             syntax = preview.syntax if preview.kind == "read" and not error else None
@@ -1043,21 +1038,16 @@ def _subagent_tree(
 def _command_card(
     output: str, preview: CommandExecutionPreview, expanded: bool, width: int, *,
     limits: UiDisplayLimits = DEFAULT_UI_DISPLAY_LIMITS, after_user: bool = False,
+    heading: str = "",
 ) -> Any:
     """Render the current output snapshot; every delta rebuilds this card."""
     status = preview.status
-    verb = {
-        "running": "Running", "waiting": "execute", "interrupted": "execute",
-        "succeeded": "Ran",
-        "failed": _failure_title(preview.command, exit_code=preview.exit_code),
-        "timeout": "Timed out", "cancelled": "Cancelled", "spawn_error": "Failed to start",
-    }[status]
     suffix = _tool_status_suffix(status, cancelled=False)
     marker_status = {
         "running": "running", "waiting": "waiting", "succeeded": "completed",
     }.get(status, "error")
     symbol, color = _tool_status_marker(marker_status)
-    heading = verb if status == "failed" else f"{verb} {preview.command}"
+    heading = heading or preview.command
     title = Text.assemble(
         (f"{symbol} ", color), (heading, "bold"), (suffix, "dim"),
     )
@@ -1195,15 +1185,16 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
 
 def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width: int, *, after_user: bool = False) -> Any:
     symbol, color = _tool_status_marker("error")
+    heading = preview.title or preview.target
     title = Text.assemble(
         (f"{symbol} ", color),
-        (f"{_failure_title(preview.target, exit_code=block.exit_code)} ", "bold"),
+        (f"{heading} ", "bold"),
     )
     console = Console(width=max(20, width))
     body: list[Any] = [] if after_user else [Text("")]
     body.extend(_wrap_card_line(title, console, width))
     if expanded:
-        lines = block.output.strip().splitlines()
+        lines = _card_output(block, preview).strip().splitlines()
     else:
         lines = [line.text for line in preview.lines]
     if lines:
@@ -1211,14 +1202,6 @@ def _failure_card(block: ToolBlock, preview: ToolPreview, expanded: bool, width:
         for line in lines:
             body.extend(_wrap_card_line(Text(f"    {line}", style="dim"), console, width, indent=4))
     return Group(*body)
-
-
-def _failure_title(target: str, *, exit_code: object = None) -> str:
-    """Failed, plus an exit code only when the tool reported one."""
-    code = exit_code if type(exit_code) is int else None
-    head = f"Failed (exit {code})" if code is not None else "Failed"
-    text = str(target or "").strip()
-    return f"{head} {text}".strip() if text else head
 
 
 def _output_tail(

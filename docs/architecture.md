@@ -68,11 +68,16 @@ flowchart TB
 | 写入文件 | `Writing <路径>` | 根据结果显示 `Created <路径>` 或 `Wrote <路径>` |
 | 删除文件 | `Deleting <路径>` | `Deleted <路径>` |
 | 探索分组 | `Exploring N items` | `Explored N items`（单项用 `item`） |
+| 目录与读取 | `Listing` / `Reading <路径>` | `Listed` / `Read <路径>` |
+| 网页搜索与抓取 | `Searching Web "..."` / `Fetching <URL>` | `Searched Web "..."` / `Fetched <URL>` |
+| 外部 MCP | `Calling MCP <服务> · <工具>` | `Called MCP <服务> · <工具>` |
+| 向用户提问 | `Asking <问题>` | `Asked <问题>` |
+| 取消子任务 | `Cancelling Task <run_id>` | `Requested Task Cancellation <run_id>` |
 
-- **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。
-- **等待与异常单独表达**：等待执行使用中性动作名和 `waiting for input`；完成未确认使用 `interrupted (completion unconfirmed)`。命令失败、超时、取消、启动失败分别显示 `Failed`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
-- **聚合状态覆盖全部成员**：探索分组有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`。多文件树与嵌套 SubAgent 共用同一套灰色树干；文件行用短的 `├` / `│` / `└`，并在每文件下展示 compact diff。`Ctrl+R` 与 `Ctrl+O` 都在这张卡片上展开全部变更行。
-- **区分动作标签与状态标题**：工具名、审批动作和探索明细中的 `Read`、`Search`、`List` 等动作标签不承担完成状态；成功与否由状态标题、标记及异常提示表达。
+- **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。`mcp_add` 与 `mcp_remove` 也不从返回文本推断服务器是否已经变更。`cancel_task` 的成功标题只表示取消请求已经返回。
+- **等待与异常单独表达**：等待审批使用进行式，并附 `waiting for input`。`request_human_input` 等待用户时标题已是 `Asking`，不再附这句。完成未确认使用进行式和 `interrupted (completion unconfirmed)`。失败标题只写一次 `Failed`，并使用进行式短语，例如 `Failed Reading <路径>`；命令失败、超时、取消、启动失败分别显示 `Failed (exit N)`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
+- **聚合状态覆盖全部成员**：探索分组只包含 `ls` 和 `read`。有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。每一行与展开后的单卡共用同一标题，所以一张仍在运行的卡片里可以同时出现 `Listed` 和 `Reading`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`。多文件树与嵌套 SubAgent 共用同一套灰色树干；文件行用短的 `├` / `│` / `└`，并在每文件下展示 compact diff。`Ctrl+R` 与 `Ctrl+O` 都在这张卡片上展开全部变更行。
+- **标题来自预览**：工具名对应的进行式和过去式写在预览层。渲染层负责标记、颜色、折叠和审批等待后缀，不再按工具名选择动词。SubAgent 卡片仍使用 `Running SubAgent` / `SubAgent`。
 - **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
 
 ## 构图
@@ -391,7 +396,7 @@ TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展�
 ## 源码入口
 
 - 图与运行控制：[factory.py](../agent/bootstrap/factory.py)、[runner.py](../agent/runtime/runner.py)、[events.py](../agent/runtime/events.py)、[control.py](../agent/runtime/control.py)、[permissions.py](../agent/runtime/permissions.py)、[tools/catalog.py](../agent/tools/catalog.py)。
-- 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[grep.py](../agent/tools/grep.py)、[execute.py](../agent/tools/execute.py)。
+- 文件与进程：[backend.py](../agent/execution/backend.py)、[pool.py](../agent/execution/pool.py)、[worker.py](../agent/execution/worker.py)、[ripgrep.py](../agent/execution/ripgrep.py)、[execute.py](../agent/tools/execute.py)。
 - 终端控制：[cli/input_actions.py](../agent/cli/input_actions.py)、[cli/lifecycle.py](../agent/cli/lifecycle.py)、[cli/session_controller.py](../agent/cli/session_controller.py)。
 - Companion 侧栏：[companion/](../agent/companion/)、[cli 挂载与 RunEvent 转发](../agent/cli/app.py)。
 - 宿主 MCP：[mcp/](../agent/mcp/)、[cli/mcp_controller.py](../agent/cli/mcp_controller.py)、[cli/mcp_ui.py](../agent/cli/mcp_ui.py)。

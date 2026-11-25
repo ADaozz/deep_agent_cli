@@ -32,7 +32,7 @@ from agent.runtime.cancellation import get_cancel_context
 from agent.mcp.bridge import MCPCallCancelled, MCPCallTimeout, SyncAsyncBridge
 from agent.mcp.config import MCPAuthError, MCPServerConfig
 from agent.mcp.content import preserve_generic_resources
-from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name
+from agent.mcp.names import MANAGEMENT_TOOLS, external_tool_name, register_mcp_display_identity
 from agent.tools.catalog import NATIVE_TOOL_NAMES
 
 
@@ -298,6 +298,7 @@ def _bridge_tool(
     )
     metadata = dict(remote.metadata or {})
     metadata["deep_agent_mcp"] = {"server": server, "remote_name": remote_name}
+    register_mcp_display_identity(name, server, remote_name)
     return StructuredTool(
         name=name,
         description=redact(description, secrets),

@@ -488,7 +488,7 @@ def test_extra_mount_cannot_replace_worker(tmp_path: Path) -> None:
 
 
 def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
-    from agent.tools import grep
+    from agent.execution import ripgrep as grep
     from agent.execution.layout import SEARCH_BINARY_PATH
 
     binary = tmp_path / "bin" / "rg"
@@ -508,7 +508,7 @@ def test_worker_args_mount_environment_rg_read_only(tmp_path, monkeypatch):
 
 def test_missing_rg_does_not_change_worker_startup(tmp_path, monkeypatch, caplog):
     import logging
-    from agent.tools import grep
+    from agent.execution import ripgrep as grep
     from agent.execution.layout import SEARCH_BINARY_PATH
 
     monkeypatch.setattr(grep, "resolve_rg", lambda: None)
@@ -950,7 +950,7 @@ def test_bubblewrap_execute_and_file_tools_share_declared_mounts(tmp_path: Path)
     import shutil
     import subprocess
 
-    from agent.tools.grep import resolve_rg
+    from agent.execution.ripgrep import resolve_rg
 
     executable = shutil.which("bwrap")
     if not executable:
@@ -1275,7 +1275,7 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
     import subprocess
 
     from agent.execution.network import reset_execute_network, set_execute_network
-    from agent.tools.grep import resolve_rg
+    from agent.execution.ripgrep import resolve_rg
 
     executable = _bwrap_executable()
     host_rg = resolve_rg()
@@ -1309,7 +1309,7 @@ def test_bubblewrap_rg_is_on_path_in_both_sandboxes(tmp_path: Path, monkeypatch:
     sources.append(str(link))
 
     def check(source: str) -> None:
-        monkeypatch.setattr("agent.tools.grep.resolve_rg", lambda: source)
+        monkeypatch.setattr("agent.execution.ripgrep.resolve_rg", lambda: source)
         env_set = {"PATH": "/opt/node/bin:/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin"} if custom_path else {}
         backend = select_backend(SandboxConfig(workspace=workspace, bwrap_path=executable, env_set=env_set)).backend
         try:

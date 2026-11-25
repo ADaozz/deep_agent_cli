@@ -25,8 +25,6 @@ FILE_MUTATION_TOOLS = frozenset({
 EXPLORATION_TOOLS = frozenset({
     "ls",
     "read",
-    "grep",
-    "glob",
 })
 
 # Ask / Auto 静态规则关心的副作用工具（审批策略口径）。
