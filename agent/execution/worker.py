@@ -5,8 +5,12 @@
 协议为按行分隔的 JSON。控制通道是继承来的 stdin/stdout 管道，不会暴露成
 文件路径或 socket。
 
-宿主 -> Worker: {"op": "run", "id": N, "command": str} | {"op": "kill", "id": N}
+宿主 -> Worker: {"op": "run", "id": N, "command": str, "stdin_mode"?: "none"|"pipe"|"pty"}
                 | {"op": "run_argv", "id": N, "argv": list[str], "cwd": str, ...}
+                | {"op": "write", "id": N, "data": base64}
+                | {"op": "close_stdin", "id": N}
+                | {"op": "resize", "id": N, "rows": int, "cols": int}
+                | {"op": "kill", "id": N}
 Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64, "stream"?: str}
                 | {"op": "exit", "id": N, "code": int}
                 | {"op": "spawn_error", "id": N, "message": str}
@@ -32,6 +36,8 @@ POST_EXIT_DRAIN_SECONDS = 0.1
 _send_lock = threading.Lock()
 _running_lock = threading.Lock()
 _running: dict[int, subprocess.Popen[bytes]] = {}
+_stdin_modes: dict[int, str] = {}
+_pty_masters: dict[int, int] = {}
 _killed_before_start: set[int] = set()
 _control_out = -1
 
@@ -76,9 +82,18 @@ def _open_cwd(path, mount_identity):
         raise
 
 
-def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None, owner=None):
+def _run(
+    request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, file=None,
+    owner=None, stdin_mode="none",
+):
     descriptors = []
     structured = argv is not None
+    stdin_mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+    if structured and stdin_mode != "none":
+        _send({"op": "spawn_error", "id": request_id, "message": "ValueError: interactive stdin is unsupported for argv runs"})
+        return
+    master_fd = None
+    slave_fd = None
     try:
         if structured:
             if not isinstance(argv, list) or not argv or not all(isinstance(arg, str) for arg in argv):
@@ -100,21 +115,55 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
                     if mount_identity[0] == file_virtual and (info.st_dev, info.st_ino) != tuple(mount_identity[1:]):
                         raise ValueError("search mount changed; retry after restoring the workspace")
                 argv = [*argv[:-1], f"/proc/self/fd/{fd}"]
-        process = subprocess.Popen(
-            argv if structured else ["/bin/sh", "-lc", command],
-            env={**os.environ, "DEEP_AGENT_EXECUTION_OWNER": owner} if owner else None,
-            shell=False,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            close_fds=True,
-            pass_fds=tuple(descriptors),
-        )
+        popen_kwargs = {
+            "env": {**os.environ, "DEEP_AGENT_EXECUTION_OWNER": owner} if owner else None,
+            "shell": False,
+            "cwd": cwd,
+            "start_new_session": True,
+            "close_fds": True,
+            "pass_fds": tuple(descriptors),
+        }
+        if stdin_mode == "pty":
+            import pty as _pty
+            master_fd, slave_fd = _pty.openpty()
+            popen_kwargs.update(
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                pass_fds=tuple(descriptors) + (slave_fd,),
+            )
+            process = subprocess.Popen(argv if structured else ["/bin/sh", "-lc", command], **popen_kwargs)
+            os.close(slave_fd)
+            slave_fd = None
+        elif stdin_mode == "pipe":
+            process = subprocess.Popen(
+                argv if structured else ["/bin/sh", "-lc", command],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **{k: v for k, v in popen_kwargs.items() if k != "pass_fds"},
+                pass_fds=tuple(descriptors),
+            )
+        else:
+            process = subprocess.Popen(
+                argv if structured else ["/bin/sh", "-lc", command],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **{k: v for k, v in popen_kwargs.items() if k != "pass_fds"},
+                pass_fds=tuple(descriptors),
+            )
     except Exception as exc:  # noqa: BLE001
         # OSError embeds paths; only return its path-free diagnostic.
         detail = exc.strerror if structured and isinstance(exc, OSError) else str(exc)
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+        if slave_fd is not None:
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
         _send({"op": "spawn_error", "id": request_id, "message": f"{type(exc).__name__}: {detail}"})
         return
     finally:
@@ -122,13 +171,19 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
             os.close(fd)
     with _running_lock:
         _running[request_id] = process
+        _stdin_modes[request_id] = stdin_mode
+        if master_fd is not None:
+            _pty_masters[request_id] = master_fd
         if request_id in _killed_before_start:
             _killed_before_start.discard(request_id)
             _kill_group(process.pid)
 
     selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    if stdin_mode == "pty":
+        selector.register(master_fd, selectors.EVENT_READ, "pty")
+    else:
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     # 后台子进程可能持续写管道；shell 退出后只排空一次固定窗口。
     drain_deadline = None
     try:
@@ -142,7 +197,10 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
             events = selector.select(timeout=wait)
             for key, _mask in events:
                 try:
-                    chunk = key.fileobj.read1(CHUNK_BYTES)
+                    if key.data == "pty":
+                        chunk = os.read(key.fileobj, CHUNK_BYTES)
+                    else:
+                        chunk = key.fileobj.read1(CHUNK_BYTES)
                 except Exception:  # noqa: BLE001
                     chunk = b""
                 if chunk:
@@ -155,11 +213,81 @@ def _run(request_id, command=None, argv=None, cwd=WORKDIR, mount_identity=None, 
         code = process.wait()
     finally:
         selector.close()
-        process.stdout.close()
-        process.stderr.close()
+        if stdin_mode == "pty":
+            with _running_lock:
+                master = _pty_masters.pop(request_id, None)
+            if master is not None:
+                try:
+                    os.close(master)
+                except OSError:
+                    pass
+        else:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
         with _running_lock:
             _running.pop(request_id, None)
+            _stdin_modes.pop(request_id, None)
+            _pty_masters.pop(request_id, None)
     _send({"op": "exit", "id": request_id, "code": 128 - code if code < 0 else code})
+
+
+def _write(request_id, data_b64):
+    try:
+        payload = base64.b64decode(data_b64)
+    except Exception:  # noqa: BLE001
+        return
+    with _running_lock:
+        process = _running.get(request_id)
+        mode = _stdin_modes.get(request_id, "none")
+        master = _pty_masters.get(request_id)
+    if process is None:
+        return
+    try:
+        if mode == "pty" and master is not None:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(master, view):]
+        elif mode == "pipe" and process.stdin is not None:
+            process.stdin.write(payload)
+            process.stdin.flush()
+    except OSError:
+        pass
+
+
+def _close_stdin(request_id):
+    with _running_lock:
+        process = _running.get(request_id)
+        mode = _stdin_modes.get(request_id, "none")
+    if process is None:
+        return
+    # PTY: do not close the master as a plain EOF; callers send terminal EOF bytes if needed.
+    if mode == "pipe" and process.stdin is not None:
+        try:
+            process.stdin.close()
+        except OSError:
+            pass
+
+
+def _resize(request_id, rows, cols):
+    with _running_lock:
+        master = _pty_masters.get(request_id)
+        mode = _stdin_modes.get(request_id, "none")
+    if mode != "pty" or master is None:
+        return
+    try:
+        import fcntl
+        import struct
+        import termios
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", int(rows), int(cols), 0, 0))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _kill(request_id):
@@ -219,7 +347,10 @@ def main():
                 _shutdown()
             if op == "run":
                 threading.Thread(
-                    target=_run, args=(request_id, str(message["command"])), kwargs={"owner": message.get("owner")}, daemon=True,
+                    target=_run,
+                    args=(request_id, str(message["command"])),
+                    kwargs={"owner": message.get("owner"), "stdin_mode": message.get("stdin_mode", "none")},
+                    daemon=True,
                 ).start()
             elif op == "run_argv":
                 threading.Thread(
@@ -227,6 +358,12 @@ def main():
                                          "cwd": message["cwd"], "mount_identity": message.get("mount_identity"),
                                          "file": message.get("file")}, daemon=True,
                 ).start()
+            elif op == "write":
+                _write(request_id, message.get("data", ""))
+            elif op == "close_stdin":
+                _close_stdin(request_id)
+            elif op == "resize":
+                _resize(request_id, message.get("rows", 24), message.get("cols", 80))
             elif op == "kill":
                 _kill(request_id)
 

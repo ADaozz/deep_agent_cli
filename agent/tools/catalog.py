@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 EXECUTE_TOOL = "execute"
+WRITE_STDIN_TOOL = "write_stdin"
 
 WEB_TOOLS = frozenset({
     "web_search",
@@ -28,7 +29,8 @@ EXPLORATION_TOOLS = frozenset({
 })
 
 # Ask / Auto 静态规则关心的副作用工具（审批策略口径）。
-SIDE_EFFECT_TOOLS = frozenset({EXECUTE_TOOL}) | WEB_TOOLS | FILE_MUTATION_TOOLS
+# write_stdin 空轮询在权限层单独放行；非空写入仍算副作用。
+SIDE_EFFECT_TOOLS = frozenset({EXECUTE_TOOL, WRITE_STDIN_TOOL}) | WEB_TOOLS | FILE_MUTATION_TOOLS
 
 # 文件系统中间件对外暴露的本地名（有序；新增工具只改这一处）。
 FILESYSTEM_TOOL_NAMES: tuple[str, ...] = ("ls", "read", "write", "edit", "delete")
@@ -38,6 +40,7 @@ FILESYSTEM_TOOLS = frozenset(FILESYSTEM_TOOL_NAMES)
 COMMON_TOOLS = frozenset({
     *FILESYSTEM_TOOL_NAMES,
     EXECUTE_TOOL,
+    WRITE_STDIN_TOOL,
     *WEB_TOOLS,
     "compact_conversation",
 })
@@ -83,7 +86,7 @@ NATIVE_TOOL_NAMES = (
     FILESYSTEM_TOOLS
     | EXPLORATION_TOOLS
     | WEB_TOOLS
-    | {EXECUTE_TOOL}
+    | {EXECUTE_TOOL, WRITE_STDIN_TOOL}
     | INTERNAL_TOOLS
 )
 
@@ -136,7 +139,7 @@ def tool_preview_group(name: str) -> str:
         return "explore"
     if name in FILE_MUTATION_TOOLS:
         return "mutation"
-    if name == EXECUTE_TOOL:
+    if name in {EXECUTE_TOOL, WRITE_STDIN_TOOL}:
         return "command"
     if name in WEB_TOOLS:
         return "web"

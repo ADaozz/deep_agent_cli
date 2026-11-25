@@ -69,13 +69,15 @@ def test_grep_and_glob_are_not_registered(tmp_path: Path, monkeypatch, permissio
     assert "write_todos" not in names
     delegation = set() if permission is PermissionMode.ASK else {"start_task"}
     assert set(names) == delegation | {
-        "ls", "read", "write", "edit", "delete", "execute", "request_human_input", "compact_conversation",
-        "read_task", "cancel_task",
+        "ls", "read", "write", "edit", "delete", "execute", "write_stdin", "request_human_input",
+        "compact_conversation", "read_task", "cancel_task",
     }
     from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE
 
     execute = next(tool for tool in schemas[-1] if tool.name == "execute")
-    assert set(execute.args) == {"command", "timeout", "network"}
+    assert set(execute.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
+    write_stdin = next(tool for tool in schemas[-1] if tool.name == "write_stdin")
+    assert set(write_stdin.args) == {"execution_id", "chars", "yield_time", "action"}
     expected = _SEARCH_GUIDANCE if implementation.resolve_rg() else _SEARCH_UNAVAILABLE
     assert expected in execute.description
 
@@ -94,7 +96,7 @@ def test_execute_description_tracks_rg_availability(monkeypatch):
     for tool in (available, allowed):
         assert _SEARCH_GUIDANCE in tool.description
         assert _SEARCH_UNAVAILABLE not in tool.description
-        assert set(tool.args) == {"command", "timeout", "network"}
+        assert set(tool.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
     assert available.description != allowed.description
     assert "Allow mode" in allowed.description
     assert "Ask mode" in available.description

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 from pydantic import Field
 
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -23,7 +23,11 @@ _COMMON = (
     "except the agent install and configuration directories. "
     "Networked and offline commands run in separate sandboxes that share the workspace ({workspace_root}) "
     "and declared extra mounts. Commands that depend on each other's /tmp files or background processes "
-    "must use the same network value."
+    "must use the same network value. "
+    "Use yield_time to return control while a process is running. "
+    "Enable interactive when stdin is required. "
+    "Enable tty only for programs that require a terminal. "
+    "Use write_stdin to interact with an active execution."
 )
 _ASK_POLICY = (
     " Ask mode requires approval before each execute. "
@@ -66,6 +70,28 @@ def _execute_description(
     return (_COMMON + policy + guidance).replace("{workspace_root}", workspace_root)
 
 
+def _stdin_mode(*, interactive: bool, tty: bool) -> str:
+    if tty:
+        return "pty"
+    if interactive:
+        return "pipe"
+    return "none"
+
+
+def _artifact_from_response(response) -> dict[str, object]:
+    return {
+        "exit_code": response.exit_code,
+        "truncated": response.truncated,
+        "host_log_path": getattr(response, "host_log_path", None),
+        "agent_log_path": getattr(response, "agent_log_path", None),
+        "log_error": getattr(response, "log_error", None),
+        "termination_reason": getattr(response, "termination_reason", None),
+        "max_output_bytes": getattr(response, "max_output_bytes", None),
+        "execution_id": getattr(response, "execution_id", None),
+        "running": bool(getattr(response, "running", False)),
+    }
+
+
 def build_execute_tool(
     backend: SandboxBackendProtocol,
     *,
@@ -85,19 +111,25 @@ def build_execute_tool(
 
     def execute(
         command: Annotated[str, Field(description="Shell command to run.")],
-        timeout: Annotated[int | None, Field(description="Timeout in seconds for this call. Overrides sandbox.timeout_seconds when set.")] = None,
+        timeout: Annotated[int | None, Field(description="Timeout in seconds for the whole process lifetime. Overrides sandbox.timeout_seconds when set.")] = None,
         network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
+        yield_time: Annotated[float | None, Field(description="Seconds to wait before returning while the process keeps running. Null keeps the previous synchronous behavior.")] = None,
+        tty: Annotated[bool, Field(description="Allocate a PTY with correct controlling-terminal semantics. Implies interactive input.")] = False,
+        interactive: Annotated[bool, Field(description="Keep a writable stdin PIPE for write_stdin.")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)
         try:
-            if timeout is not None:
-                response = backend.execute(command, timeout=timeout)
-            else:
-                response = backend.execute(command)
+            response = backend.execute(
+                command,
+                timeout=timeout,
+                yield_time=yield_time,
+                stdin_mode=_stdin_mode(interactive=interactive, tty=tty),
+            )
         finally:
             reset_execute_network(token)
         output = response.output or ""
-        if response.exit_code not in (0, None):
+        running = bool(getattr(response, "running", False))
+        if not running and response.exit_code not in (0, None):
             suffix = f"\n\nExit code: {response.exit_code}"
             if suffix.strip() not in output:
                 output = f"{output.rstrip()}{suffix}"
@@ -105,16 +137,7 @@ def build_execute_tool(
             marker = "\n\n[output truncated]"
             if "[Output truncated: showing " not in output and marker not in output:
                 output = f"{output.rstrip()}{marker}"
-        artifact: dict[str, object] = {
-            "exit_code": response.exit_code,
-            "truncated": response.truncated,
-            "host_log_path": getattr(response, "host_log_path", None),
-            "agent_log_path": getattr(response, "agent_log_path", None),
-            "log_error": getattr(response, "log_error", None),
-            "termination_reason": getattr(response, "termination_reason", None),
-            "max_output_bytes": getattr(response, "max_output_bytes", None),
-        }
-        return output, artifact
+        return output, _artifact_from_response(response)
 
     return StructuredTool.from_function(
         func=execute,
@@ -123,5 +146,50 @@ def build_execute_tool(
         description=_execute_description(
             permission=permission,
             workspace_root=getattr(backend, "workspace_root", "/workspace"),
+        ),
+    )
+
+
+def build_write_stdin_tool() -> BaseTool:
+    """Interact with a yielded execution owned by the current session/agent."""
+
+    def write_stdin(
+        execution_id: Annotated[str, Field(description="Active execution id returned by execute.")],
+        chars: Annotated[str, Field(description="Bytes to write. Empty polls for new output.")] = "",
+        yield_time: Annotated[float, Field(description="Seconds to wait for new output after the action.")] = 1.0,
+        action: Annotated[
+            Literal["write", "close", "cancel"],
+            Field(description="write input, close PIPE stdin, or cancel the execution."),
+        ] = "write",
+    ) -> tuple[str, dict[str, object]]:
+        from agent.execution.lifecycle import execution_registry, interact
+
+        if yield_time < 0:
+            raise ValueError("yield_time must be non-negative")
+        if action == "write" and chars == "" and yield_time == 0:
+            # Empty poll with zero wait is allowed; just return current unread.
+            pass
+        if action in {"close", "cancel"} and chars:
+            raise ValueError(f"{action} cannot include chars")
+        live = execution_registry().require(execution_id)
+        response = interact(live, chars=chars, yield_time=yield_time, action=action)
+        if not response.running:
+            execution_registry().discard(execution_id)
+        output = response.output or ""
+        if not response.running and response.exit_code not in (0, None):
+            suffix = f"\n\nExit code: {response.exit_code}"
+            if suffix.strip() not in output:
+                output = f"{output.rstrip()}{suffix}"
+        return output, _artifact_from_response(response)
+
+    return StructuredTool.from_function(
+        func=write_stdin,
+        name="write_stdin",
+        response_format="content_and_artifact",
+        description=(
+            "Interact with an active execution. "
+            "Empty chars polls new output. "
+            "Non-empty chars writes input to the process. "
+            "Never pass sensitive credentials through this tool."
         ),
     )

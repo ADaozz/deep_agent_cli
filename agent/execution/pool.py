@@ -84,13 +84,26 @@ _LAUNCHER = _Launcher()
 class RemoteCommand:
     """宿主侧句柄，对应持久沙箱里正在跑的一条命令。"""
 
-    def __init__(self, sandbox: PersistentSandbox, request_id: int) -> None:
+    def __init__(
+        self,
+        sandbox: PersistentSandbox,
+        request_id: int,
+        *,
+        stdin_mode: str = "none",
+        generation: int = 0,
+    ) -> None:
         self.sandbox = sandbox
         self.request_id = request_id
+        self.stdin_mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+        self.generation = generation
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=_EVENT_QUEUE_SIZE)
         self.released = False
         self.kill_requested = False
         self.owner_token = ""
+
+    @property
+    def execution_id(self) -> str:
+        return f"{self.sandbox.id}:{self.generation}:{self.request_id}"
 
     def kill(self) -> None:
         """杀掉这条命令的进程组，沙箱本身继续运行。"""
@@ -102,6 +115,30 @@ class RemoteCommand:
 
     # agent.runtime.cancellation 调用此方法，而不是对宿主 PID 发 killpg。
     cancel_execution = kill
+
+    def write_stdin(self, data: bytes) -> None:
+        if self.stdin_mode == "none":
+            raise ValueError("execution does not accept stdin")
+        self.sandbox._send({
+            "op": "write",
+            "id": self.request_id,
+            "data": base64.b64encode(data).decode("ascii"),
+        })
+
+    def close_stdin(self) -> None:
+        if self.stdin_mode == "none":
+            raise ValueError("execution does not accept stdin")
+        if self.stdin_mode == "pty":
+            # Closing the PTY master is not a portable EOF; callers should write ^D when needed.
+            return
+        self.sandbox._send({"op": "close_stdin", "id": self.request_id})
+
+    def resize(self, rows: int, cols: int) -> None:
+        if self.stdin_mode != "pty":
+            raise ValueError("resize requires a PTY execution")
+        self.sandbox._send({
+            "op": "resize", "id": self.request_id, "rows": int(rows), "cols": int(cols),
+        })
 
     def next_event(self, timeout: float) -> tuple[str, Any] | None:
         try:
@@ -135,6 +172,7 @@ class PersistentSandbox:
         self.id = f"bwrap-{'net' if network else 'offline'}-{uuid.uuid4().hex[:8]}"
         self.process: subprocess.Popen[bytes] | None = None
         self.lost_reason: str | None = None
+        self.generation = 0
         self._ids = itertools.count(1)
         self._commands: dict[int, RemoteCommand] = {}
         self._lock = threading.Lock()
@@ -185,8 +223,9 @@ class PersistentSandbox:
             raise SandboxStartError(f"sandbox worker did not become ready within {timeout:g}s: {detail}")
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
 
-    def start_command(self, command: str) -> RemoteCommand:
-        return self._start({"op": "run", "command": command})
+    def start_command(self, command: str, *, stdin_mode: str = "none") -> RemoteCommand:
+        mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
+        return self._start({"op": "run", "command": command, "stdin_mode": mode}, stdin_mode=mode)
 
     def start_argv(self, argv: list[str], cwd: str, *,
                    mount_identity: tuple[str, int, int] | None = None,
@@ -195,11 +234,13 @@ class PersistentSandbox:
         return self._start({"op": "run_argv", "argv": argv, "cwd": cwd,
                             "mount_identity": mount_identity, "file": file})
 
-    def _start(self, request: dict[str, Any]) -> RemoteCommand:
+    def _start(self, request: dict[str, Any], *, stdin_mode: str = "none") -> RemoteCommand:
         with self._lock:
             if self.lost_reason is not None:
                 raise SandboxLostError(self.lost_reason)
-            handle = RemoteCommand(self, next(self._ids))
+            handle = RemoteCommand(
+                self, next(self._ids), stdin_mode=stdin_mode, generation=self.generation,
+            )
             self._commands[handle.request_id] = handle
         try:
             if request["op"] == "run":
@@ -265,6 +306,7 @@ class PersistentSandbox:
         with self._lock:
             if self.lost_reason is None:
                 self.lost_reason = reason
+                self.generation += 1
             commands = list(self._commands.values())
         for handle in commands:
             try:

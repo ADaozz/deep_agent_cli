@@ -11,6 +11,7 @@ from agent.tools.catalog import (
     EXECUTE_TOOL,
     FILE_MUTATION_TOOLS,
     WEB_TOOLS,
+    WRITE_STDIN_TOOL,
 )
 
 
@@ -34,7 +35,7 @@ def host_decision_rule() -> dict[str, list[str]]:
 def ask_interrupt_on() -> dict[str, Any]:
     """Ask 模式 interrupt_on：每次新建，避免共享可变 allowed_decisions。"""
     return {
-        **{name: host_decision_rule() for name in (EXECUTE_TOOL, *WEB_TOOLS)},
+        **{name: host_decision_rule() for name in (EXECUTE_TOOL, WRITE_STDIN_TOOL, *WEB_TOOLS)},
         **{name: True for name in FILE_MUTATION_TOOLS},
     }
 

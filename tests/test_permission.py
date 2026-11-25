@@ -101,7 +101,7 @@ def test_permission_availability_is_shared() -> None:
 
 def test_tool_catalog_drives_ask_interrupt_and_native_reserved() -> None:
     assert SIDE_EFFECT_TOOLS <= NATIVE_TOOL_NAMES
-    assert FILE_MUTATION_TOOLS | WEB_TOOLS | {"execute"} == SIDE_EFFECT_TOOLS
+    assert FILE_MUTATION_TOOLS | WEB_TOOLS | {"execute", "write_stdin"} == SIDE_EFFECT_TOOLS
     for name in SIDE_EFFECT_TOOLS:
         assert name in ask_interrupt_on()
     assert "read" in NATIVE_TOOL_NAMES
@@ -152,7 +152,7 @@ def test_execute_network_setting_is_scoped_to_one_call() -> None:
     seen: list[bool] = []
 
     class Backend:
-        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        def execute(self, command: str, *, timeout: int | None = None, **_kwargs) -> ExecuteResponse:
             seen.append(get_execute_network())
             return ExecuteResponse(command, 0, False)
 
@@ -167,7 +167,7 @@ def test_execute_tool_network_by_default_applies_without_declaration() -> None:
     seen: list[bool] = []
 
     class Backend:
-        def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        def execute(self, command: str, *, timeout: int | None = None, **_kwargs) -> ExecuteResponse:
             seen.append(get_execute_network())
             return ExecuteResponse(command, 0, False)
 
@@ -493,7 +493,7 @@ class _RecordingSandboxBackend(StateBackend, SandboxBackendProtocol):
     def id(self) -> str:
         return "recording-sandbox"
 
-    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+    def execute(self, command: str, *, timeout: int | None = None, **_kwargs) -> ExecuteResponse:
         self.network_calls.append(get_execute_network())
         return ExecuteResponse(command, 0, False)
 

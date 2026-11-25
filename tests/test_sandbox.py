@@ -366,11 +366,12 @@ def test_sandbox_backend_adds_execute(tmp_path: Path, monkeypatch: pytest.Monkey
         "edit",
         "delete",
         "execute",
+        "write_stdin",
         "compact_conversation",
         "read_task",
         "cancel_task",
     }
-    assert len(names) == 10
+    assert len(names) == 11
     assert "execute" not in prepared.filesystem_tools
     assert "execute" in names
 

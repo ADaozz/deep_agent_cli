@@ -29,9 +29,21 @@ class HostCommandBackend(LocalShellBackend):
         self.config = config
         self.workspace_root = sandbox_workspace_root(config.workspace)
 
-    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse:
         if not command or not isinstance(command, str):
             return ExecuteResponse("Error: Command must be a non-empty string.", 1, False)
+        if yield_time is not None or stdin_mode != "none":
+            return ExecuteResponse(
+                "Error: HostCommandBackend does not support yield_time or interactive stdin.",
+                1, False,
+            )
         effective = _effective_timeout(timeout, self.config.timeout_seconds)
         env = {
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),

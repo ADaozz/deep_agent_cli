@@ -61,7 +61,7 @@ from agent.execution.backend import BackendSelection, sandbox_pool_of, select_ba
 from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.types import ExecutionMode, SKILLS_ROOT
 from agent.execution.pool import SandboxPool
-from agent.tools.execute import build_execute_tool
+from agent.tools.execute import build_execute_tool, build_write_stdin_tool
 from agent.tools.human_input import build_human_input_tools
 from agent.middleware.runtime_config import RuntimeConfigGateMiddleware
 from agent.tools.web import build_web_fetch_tool, build_web_search_tool
@@ -241,6 +241,8 @@ def build_agent(
     supports_execute = isinstance(fs_backend, SandboxBackendProtocol)
     if supports_execute and "execute" in allowed:
         tools.append(build_execute_tool(fs_backend, permission=permission))
+        if "write_stdin" in allowed:
+            tools.append(build_write_stdin_tool())
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )

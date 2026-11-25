@@ -8,7 +8,7 @@ from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.network import network_requested
 from agent.runtime.approval.policy import ALLOW, MANUAL
 from agent.runtime.approval.types import Decision
-from agent.tools.catalog import EXECUTE_TOOL, FILE_MUTATION_TOOLS, WEB_TOOLS
+from agent.tools.catalog import EXECUTE_TOOL, FILE_MUTATION_TOOLS, WEB_TOOLS, WRITE_STDIN_TOOL
 
 ALLOW_TRUSTED_MCP = Decision("allow", "受信任的 MCP 服务。")
 ALLOW_WORKSPACE = Decision("allow", "工作区内的文件变更。")
@@ -45,5 +45,11 @@ def static_rule(
         return ALLOW_WORKSPACE if in_workspace else None
     if name == EXECUTE_TOOL:
         return ALLOW_SANDBOXED if sandbox_mode == "restricted" and not network_requested(args) else None
+    if name == WRITE_STDIN_TOOL:
+        action = str(args.get("action") or "write")
+        chars = str(args.get("chars") or "")
+        if action == "write" and not chars:
+            return ALLOW  # output poll only
+        return ALLOW_SANDBOXED if sandbox_mode == "restricted" else None
     # Untrusted host MCP tools and MCP server changes take effect outside the sandbox.
     return MANUAL

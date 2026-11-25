@@ -160,7 +160,14 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
         args += ["--chdir", self.workspace_root, "--"]
         return args
 
-    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse:
         if not command or not isinstance(command, str):
             return ExecuteResponse("Error: Command must be a non-empty string.", 1, False)
         from agent.execution.network import get_execute_network
@@ -173,11 +180,15 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
                 timeout=effective_timeout,
                 max_output_bytes=self.config.max_output_bytes,
                 workspace=self.config.workspace,
+                yield_time=yield_time,
+                stdin_mode=stdin_mode,
             ))
         except SandboxStartError as exc:
             return LocalExecuteResponse(
                 f"Error: sandbox failed to start: {exc}", 1, False, termination_reason="spawn_error",
             )
+        except ValueError as exc:
+            return LocalExecuteResponse(f"Error: {exc}", 1, False, termination_reason="spawn_error")
 
 
 def select_backend(config: SandboxConfig, *, check: bool = True) -> BackendSelection:

@@ -34,6 +34,8 @@ class LocalExecuteResponse(ExecuteResponse):
     log_error: str | None = None
     termination_reason: str | None = None
     max_output_bytes: int | None = None
+    execution_id: str | None = None
+    running: bool = False
 
 
 def _effective_timeout(requested: int | None, default: int | None) -> int | None:
@@ -365,16 +367,26 @@ def _run_in_sandbox(
     timeout: int | None,
     max_output_bytes: int,
     workspace: Path,
+    yield_time: float | None = None,
+    stdin_mode: str = "none",
 ) -> ExecuteResponse:
     """在持久沙箱里为一条命令启动新的 shell。
 
     取消和超时只杀掉该命令的进程组。Worker 若未及时确认 kill，视为已损坏，
     下一次 execute 会换新沙箱；本条命令不会重发。
+
+    ``yield_time`` 为秒：到期后返回 ``execution_id`` 与当前输出，进程继续运行。
     """
+    from agent.execution.lifecycle import LiveExecution, execution_registry
+    from agent.execution.ownership import execution_agent_scope, execution_thread_id
+
+    if yield_time is not None and yield_time < 0:
+        raise ValueError(f"yield_time must be non-negative, got {yield_time}")
+    mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
     try:
-        handle = sandbox.start_command(command)
+        handle = sandbox.start_command(command, stdin_mode=mode)
     except SandboxLostError as exc:
         pool.discard(sandbox, str(exc))
         return LocalExecuteResponse(
@@ -385,6 +397,7 @@ def _run_in_sandbox(
         ctx.register_process(handle)
 
     deadline = time.monotonic() + timeout if timeout is not None else None
+    yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
     cancelled = False
     timed_out = False
     kill_sent_at: float | None = None
@@ -394,6 +407,7 @@ def _run_in_sandbox(
     collector = _OutputCollector(
         tool_call_id=tool_call_id, max_output_bytes=max_output_bytes, workspace_root=workspace,
     )
+    adopted = False
     try:
         while True:
             now = time.monotonic()
@@ -405,12 +419,40 @@ def _run_in_sandbox(
                 if cancelled or timed_out:
                     handle.kill()
                     kill_sent_at = now
+                elif yield_deadline is not None and now >= yield_deadline:
+                    live = LiveExecution(
+                        execution_id=handle.execution_id,
+                        handle=handle,
+                        pool=pool,
+                        collector=collector,
+                        thread_id=execution_thread_id(),
+                        agent_scope=execution_agent_scope(),
+                        timeout=timeout,
+                        deadline=deadline,
+                        workspace=workspace,
+                        max_output_bytes=max_output_bytes,
+                    )
+                    # Seed unread with output collected so far.
+                    seeded = bytes(collector.tail_bytes).decode("utf-8", errors="replace")
+                    if seeded:
+                        live._unread.append(seeded)
+                    execution_registry().register(live)
+                    adopted = True
+                    if ctx is not None:
+                        ctx.clear_process()
+                    return live.to_response(include_unread=True)
             elif now - kill_sent_at >= KILL_CONFIRM_SECONDS:
                 pool.discard(sandbox, "sandbox worker did not confirm a command kill")
                 break
             wait = 0.1
-            if deadline is not None and kill_sent_at is None:
-                wait = max(0.0, min(wait, deadline - now))
+            if kill_sent_at is None:
+                limits = []
+                if deadline is not None:
+                    limits.append(deadline - now)
+                if yield_deadline is not None:
+                    limits.append(yield_deadline - now)
+                if limits:
+                    wait = max(0.0, min(wait, *limits))
             event = handle.next_event(wait)
             if event is None:
                 continue
@@ -433,20 +475,25 @@ def _run_in_sandbox(
                 break
         collector.flush()
     finally:
-        if ctx is not None:
-            ctx.clear_process()
-        handle.release()
-        collector.close()
+        if not adopted:
+            if ctx is not None:
+                ctx.clear_process()
+            handle.release()
+            collector.close()
 
     if spawn_error is not None and not (cancelled or timed_out):
         return LocalExecuteResponse(
             f"Error executing command ({spawn_error})", 1, False, termination_reason="spawn_error",
+            execution_id=handle.execution_id, running=False,
         )
-    return collector.response(
+    response = collector.response(
         exit_code=exit_code, timeout=timeout,
         cancelled=cancelled or (ctx is not None and ctx.cancelled and not timed_out),
         timed_out=timed_out, failure=failure,
     )
+    response.execution_id = handle.execution_id
+    response.running = False
+    return response
 
 
 def _kill_process_group_pid(pid: int | None) -> None:

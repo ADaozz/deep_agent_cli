@@ -91,6 +91,8 @@ class CommandExecutionPreview:
     truncated: bool = False
     log_path: str | None = None
     log_error: str | None = None
+    execution_id: str | None = None
+    interactive: bool = False
 
 
 @dataclass(frozen=True)
@@ -662,7 +664,7 @@ def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
         status: CommandExecutionStatus = "waiting"
     elif block.status == "interrupted":
         status = "interrupted"
-    elif block.status == "running":
+    elif block.status == "running" or artifact.get("running") is True:
         status = "running"
     elif reason == "cancelled":
         status = "cancelled"
@@ -678,14 +680,22 @@ def normalize_command_execution(block: ToolBlock) -> CommandExecutionPreview:
     host_path = artifact.get("host_log_path")
     log_path = agent_path or host_path
     log_error = artifact.get("log_error")
+    execution_id = artifact.get("execution_id")
+    args = block.arguments if isinstance(block.arguments, dict) else {}
+    interactive = bool(args.get("interactive") or args.get("tty")) or (
+        block.name == "write_stdin"
+    )
+    command = str(args.get("command") or args.get("execution_id") or "…")
     return CommandExecutionPreview(
-        command=str(block.arguments.get("command") or "…"),
+        command=command,
         status=status,
         exit_code=exit_code,
         termination_reason=reason,
         truncated=artifact.get("truncated") is True,
         log_path=str(log_path) if log_path else None,
         log_error=str(log_error) if log_error else None,
+        execution_id=str(execution_id) if execution_id else None,
+        interactive=interactive,
     )
 
 
@@ -755,8 +765,13 @@ def _failure_heading(phrase: str, *, exit_code: object = None) -> str:
 def _command_title(execution: CommandExecutionPreview) -> str:
     command = execution.command
     status = execution.status
+    suffix = ""
+    if execution.execution_id and status in {"running", "waiting", "interrupted"}:
+        suffix = f" · {execution.execution_id}"
+        if execution.interactive:
+            suffix += " · interactive"
     if status in {"running", "waiting", "interrupted"}:
-        return f"Running {command}"
+        return f"Running {command}{suffix}"
     if status == "succeeded":
         return f"Ran {command}"
     if status == "failed":
@@ -767,7 +782,7 @@ def _command_title(execution: CommandExecutionPreview) -> str:
         return f"Cancelled {command}"
     if status == "spawn_error":
         return f"Failed to start {command}"
-    return f"Running {command}"
+    return f"Running {command}{suffix}"
 
 
 def _finalize_title(block: ToolBlock, preview: ToolPreview) -> ToolPreview:
@@ -948,6 +963,7 @@ _PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "delete": build_delete_preview,
 
     "execute": build_execute_preview,
+    "write_stdin": build_execute_preview,
 
     "web_search": build_web_search_preview,
     "web_fetch": build_web_fetch_preview,

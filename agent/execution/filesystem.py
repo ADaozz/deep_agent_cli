@@ -888,8 +888,26 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
     def id(self) -> str:
         return self.executor.id
 
-    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        return self.executor.execute(command, timeout=timeout)
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse:
+        return self.executor.execute(
+            command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+        )
 
-    async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        return await self.executor.aexecute(command, timeout=timeout)
+    async def aexecute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse:
+        return await self.executor.aexecute(
+            command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+        )
