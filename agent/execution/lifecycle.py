@@ -1,16 +1,20 @@
-"""Unified command lifecycle for sync execute and yielded write_stdin polls."""
+"""Unified command lifecycle for sync execute and yielded write_stdin polls.
+
+Only the background pump consumes ``RemoteCommand`` events. Tools wait on
+session state and take unread snapshots.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import threading
 import time
-from typing import Literal
+from typing import Any, Literal
 
 from agent.execution.ownership import execution_thread_id
 from agent.execution.pool import RemoteCommand, SandboxPool
 from agent.execution.process import KILL_CONFIRM_SECONDS, LocalExecuteResponse, _OutputCollector
-from agent.runtime.cancellation import emit_tool_output, get_cancel_context
+from agent.runtime.cancellation import ToolOutputEmitter, get_cancel_context, get_output_emitter
 
 
 StdinAction = Literal["write", "close", "cancel"]
@@ -21,9 +25,17 @@ def format_running_content(output: str, execution_id: str) -> str:
     return f"{body}\n\n[running execution_id={execution_id}]"
 
 
+def write_stdin_is_side_effect(args: dict[str, Any] | None) -> bool:
+    """Shared Ask/Auto predicate: empty write polls are not side effects."""
+    payload = args or {}
+    action = str(payload.get("action") or "write")
+    chars = str(payload.get("chars") or "")
+    return not (action == "write" and chars == "")
+
+
 @dataclass
 class CommandSession:
-    """One RemoteCommand with shared timeout/cancel/event handling."""
+    """One RemoteCommand with a single pump-owned event loop."""
 
     handle: RemoteCommand
     pool: SandboxPool
@@ -33,7 +45,8 @@ class CommandSession:
     deadline: float | None
     network: bool
     tool_call_id: str
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    emit: ToolOutputEmitter | None = None
+    _cv: threading.Condition = field(default_factory=threading.Condition, repr=False)
     _done: bool = False
     _exit_code: int | None = None
     _cancelled: bool = False
@@ -44,6 +57,10 @@ class CommandSession:
     _pump: threading.Thread | None = field(default=None, repr=False)
     _registry: ExecutionRegistry | None = field(default=None, repr=False)
     _finish_emitted: bool = field(default=False, repr=False)
+    _resources_released: bool = field(default=False, repr=False)
+    _yielded: bool = False
+    _result_consumed: bool = False
+    _terminal: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def execution_id(self) -> str:
@@ -52,10 +69,13 @@ class CommandSession:
     def owns(self, thread_id: str) -> bool:
         return self.thread_id == thread_id
 
-    def start_background_pump(self, registry: ExecutionRegistry) -> None:
-        self._registry = registry
+    def start_pump(self, registry: ExecutionRegistry | None = None) -> None:
+        if registry is not None:
+            self._registry = registry
         if self._pump is not None:
             return
+        if self.emit is None:
+            self.emit = get_output_emitter()
         self._pump = threading.Thread(
             target=self._pump_loop, name=f"exec-pump-{self.execution_id}", daemon=True,
         )
@@ -64,45 +84,72 @@ class CommandSession:
     def _pump_loop(self) -> None:
         try:
             while True:
-                with self._lock:
+                with self._cv:
                     if self._done:
                         break
-                self.drive(wait=0.1)
-                with self._lock:
+                self._drive(wait=0.1)
+                with self._cv:
                     if self._done:
                         break
         finally:
-            with self._lock:
-                finished = self._done
-            if finished:
-                self._emit_finished()
+            self._release_resources()
+            self._emit_finished()
+            with self._cv:
+                self._cv.notify_all()
 
     def join_pump(self, timeout: float | None = 2.0) -> None:
         pump = self._pump
         if pump is not None and pump is not threading.current_thread():
             pump.join(timeout=timeout)
 
+    def _emit_output(self, content: str = "", *, stream: str, result: Any = None) -> None:
+        # Prefer the emitter captured at session start; fall back to the live ContextVar
+        # so pump threads still publish when the tool thread had the emitter set.
+        emitter = self.emit or get_output_emitter()
+        if emitter is None:
+            return
+        if not content and result is None:
+            return
+        emitter(self.tool_call_id, content, stream, result=result, name="execute")
+
+    def _terminal_result(self) -> dict[str, Any]:
+        with self._cv:
+            if self._terminal is not None:
+                return dict(self._terminal)
+            if self._spawn_error is not None:
+                reason, exit_code = "spawn_error", self._exit_code if self._exit_code is not None else 1
+            elif self._timed_out:
+                reason, exit_code = "timeout", self._exit_code if self._exit_code is not None else 124
+            elif self._cancelled:
+                reason, exit_code = "cancelled", self._exit_code if self._exit_code is not None else 130
+            elif self._failure is not None:
+                reason, exit_code = "sandbox_lost", self._exit_code if self._exit_code is not None else 125
+            else:
+                reason, exit_code = None, self._exit_code
+            payload = {
+                "execution_id": self.execution_id,
+                "running": False,
+                "exit_code": exit_code,
+                "termination_reason": reason,
+                "truncated": self.collector.truncated,
+                "network": self.network,
+            }
+            self._terminal = payload
+            return dict(payload)
+
     def _emit_finished(self) -> None:
-        # Only the background pump emits the terminal TUI update, once.
-        with self._lock:
+        with self._cv:
             if self._finish_emitted:
                 return
             self._finish_emitted = True
-        pending = self.collector.take_pending()
-        if pending:
-            emit_tool_output(self.tool_call_id, pending, stream="merged")
-        response = self.to_response(include_pending=False)
-        payload = (
-            f"\n\n[finished execution_id={self.execution_id} "
-            f"exit_code={response.exit_code} reason={response.termination_reason or 'exit'}]"
-        )
-        emit_tool_output(self.tool_call_id, payload, stream="execution_finished")
-        if self._registry is not None:
-            self._registry.discard(self.execution_id)
+        # Leave unread bytes in the collector for the agent final poll; TUI already
+        # received streamed deltas. Only publish structured terminal state here.
+        result = self._terminal_result()
+        self._emit_output("", stream="execution_finished", result=result)
 
-    def drive(self, *, wait: float) -> bool:
-        """Advance one wait slice. Returns True when the command has finished."""
-        with self._lock:
+    def _drive(self, *, wait: float) -> bool:
+        """Pump-only: advance one wait slice. Returns True when finished."""
+        with self._cv:
             if self._done:
                 return True
             now = time.monotonic()
@@ -115,6 +162,7 @@ class CommandSession:
                 if self._cancelled or self._timed_out:
                     self.handle.kill()
                     self._kill_sent_at = now
+                    self._cv.notify_all()
             elif now - self._kill_sent_at >= KILL_CONFIRM_SECONDS:
                 self.pool.discard(self.handle.sandbox, "sandbox worker did not confirm a command kill")
                 self._failure = "Sandbox worker did not confirm a command kill"
@@ -125,12 +173,13 @@ class CommandSession:
                 wait = max(0.0, min(wait, self.deadline - now))
         event = self.handle.next_event(wait)
         if event is None:
-            with self._lock:
+            with self._cv:
                 return self._done
         kind, payload = event
-        with self._lock:
+        with self._cv:
             if kind == "out":
                 self.collector.append(payload)
+                self._cv.notify_all()
             elif kind == "exit":
                 self._exit_code = int(payload)
                 self.collector.flush()
@@ -152,6 +201,14 @@ class CommandSession:
         if self._done:
             return
         self._done = True
+        self._terminal_result()
+        self._cv.notify_all()
+
+    def _release_resources(self) -> None:
+        with self._cv:
+            if self._resources_released:
+                return
+            self._resources_released = True
         try:
             self.handle.release()
         except Exception:  # noqa: BLE001
@@ -159,46 +216,43 @@ class CommandSession:
         self.collector.close()
 
     def wait_until(self, yield_deadline: float | None) -> LocalExecuteResponse:
-        """Block until the process ends, or until yield_deadline (monotonic) if set."""
-        while True:
-            with self._lock:
-                if self._done:
-                    break
-            now = time.monotonic()
-            if yield_deadline is not None and now >= yield_deadline:
-                return self.to_response(include_pending=True)
-            wait = 0.1
-            if yield_deadline is not None:
-                wait = max(0.0, min(wait, yield_deadline - now))
-            self.drive(wait=wait)
-            with self._lock:
-                if self._done:
-                    break
-        return self.to_response(include_pending=True)
+        """Wait for process end or yield_deadline. Never consumes RemoteCommand events."""
+        self.start_pump(self._registry)
+        with self._cv:
+            while not self._done:
+                now = time.monotonic()
+                if yield_deadline is not None and now >= yield_deadline:
+                    self._yielded = True
+                    return self._snapshot_locked(include_pending=True)
+                timeout = 0.1
+                if yield_deadline is not None:
+                    timeout = max(0.0, min(timeout, yield_deadline - now))
+                self._cv.wait(timeout=timeout)
+            return self._snapshot_locked(include_pending=True)
 
     def write(self, data: str) -> None:
-        with self._lock:
+        with self._cv:
             if self._done:
                 raise ValueError("execution has already finished")
         self.handle.write_stdin(data.encode("utf-8"))
 
     def close_stdin(self) -> None:
-        with self._lock:
+        with self._cv:
             if self._done:
                 raise ValueError("execution has already finished")
         self.handle.close_stdin()
 
     def cancel(self) -> None:
-        with self._lock:
+        with self._cv:
             if self._done:
                 return
             self._cancelled = True
             if self._kill_sent_at is None:
                 self.handle.kill()
                 self._kill_sent_at = time.monotonic()
+            self._cv.notify_all()
 
     def apply_stdin(self, *, chars: str, action: StdinAction) -> None:
-        """Apply a write_stdin action, surfacing write failures to the caller."""
         if action == "cancel":
             if chars:
                 raise ValueError("cancel cannot include chars")
@@ -214,15 +268,25 @@ class CommandSession:
         if chars:
             self.write(chars)
 
+    def mark_result_consumed(self) -> None:
+        with self._cv:
+            self._result_consumed = True
+        if self._registry is not None:
+            self._registry.discard(self.execution_id)
+
     def to_response(self, *, include_pending: bool) -> LocalExecuteResponse:
-        with self._lock:
-            done = self._done
-            cancelled = self._cancelled
-            timed_out = self._timed_out
-            failure = self._failure
-            spawn_error = self._spawn_error
-            exit_code = self._exit_code
-            truncated = self.collector.truncated
+        with self._cv:
+            return self._snapshot_locked(include_pending=include_pending)
+
+    def _snapshot_locked(self, *, include_pending: bool) -> LocalExecuteResponse:
+        done = self._done
+        cancelled = self._cancelled
+        timed_out = self._timed_out
+        failure = self._failure
+        spawn_error = self._spawn_error
+        exit_code = self._exit_code
+        truncated = self.collector.truncated
+        yielded = self._yielded
         pending = self.collector.take_pending() if include_pending else ""
         if spawn_error is not None and not (cancelled or timed_out):
             return LocalExecuteResponse(
@@ -233,16 +297,17 @@ class CommandSession:
             )
         if done:
             response = self.collector.response(
-                exit_code=int(exit_code or 0), timeout=self.timeout,
-                cancelled=cancelled and not timed_out, timed_out=timed_out, failure=failure,
+                exit_code=int(exit_code or 0),
+                timeout=self.timeout,
+                cancelled=cancelled and not timed_out,
+                timed_out=timed_out,
+                failure=failure,
+                unread_only=yielded,
+                pending=pending if include_pending else "",
             )
-            if pending and pending not in response.output:
-                body = pending.rstrip()
-                if response.output and response.output != "<no output>":
-                    # Final tool content prefers unread delta + standard suffixes from response.
-                    response.output = f"{body}\n\n{response.output}" if body else response.output
-                elif body:
-                    response.output = body
+            if yielded and include_pending and pending and pending not in response.output:
+                # pending already applied via unread_only; keep response as-is
+                pass
             response.execution_id = self.execution_id
             response.running = False
             return response
@@ -256,12 +321,8 @@ class CommandSession:
         )
 
 
-# Backwards-compatible alias used by older tests/imports.
-LiveExecution = CommandSession
-
-
 class ExecutionRegistry:
-    """Per-SandboxPool map of yielded executions."""
+    """Per-SandboxPool map of live and retained terminal executions."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -270,7 +331,7 @@ class ExecutionRegistry:
     def register(self, session: CommandSession) -> CommandSession:
         with self._lock:
             self._items[session.execution_id] = session
-        session.start_background_pump(self)
+        session.start_pump(self)
         return session
 
     def get(self, execution_id: str) -> CommandSession | None:
@@ -282,7 +343,13 @@ class ExecutionRegistry:
         session = self.get(execution_id)
         if session is None or session.handle.execution_id != execution_id:
             raise KeyError(f"Unknown or expired execution_id: {execution_id}")
-        if session.handle.sandbox.lost_reason is not None and not session._done:
+        with session._cv:
+            consumed = session._result_consumed
+            done = session._done
+            lost = session.handle.sandbox.lost_reason is not None and not done
+        if consumed:
+            raise KeyError(f"Unknown or expired execution_id: {execution_id}")
+        if lost:
             raise KeyError(f"Unknown or expired execution_id: {execution_id}")
         if not session.owns(owner):
             raise PermissionError("execution_id belongs to another session or agent")
@@ -310,4 +377,7 @@ def interact(
     action: StdinAction = "write",
 ) -> LocalExecuteResponse:
     session.apply_stdin(chars=chars, action=action)
-    return session.wait_until(time.monotonic() + max(0.0, yield_time))
+    response = session.wait_until(time.monotonic() + max(0.0, yield_time))
+    if not response.running:
+        session.mark_result_consumed()
+    return response

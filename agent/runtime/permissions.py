@@ -34,14 +34,11 @@ def host_decision_rule() -> dict[str, list[str]]:
 
 def write_stdin_requires_approval(request: Any) -> bool:
     """Ask/HITL ``when`` predicate: empty output polls skip approval."""
+    from agent.execution.lifecycle import write_stdin_is_side_effect
+
     args = getattr(request, "tool_call", None) or {}
-    if isinstance(args, dict):
-        payload = args.get("args") or {}
-    else:
-        payload = {}
-    action = str(payload.get("action") or "write")
-    chars = str(payload.get("chars") or "")
-    return not (action == "write" and chars == "")
+    payload = args.get("args") if isinstance(args, dict) else {}
+    return write_stdin_is_side_effect(payload if isinstance(payload, dict) else {})
 
 
 def ask_interrupt_on() -> dict[str, Any]:

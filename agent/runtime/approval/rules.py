@@ -46,12 +46,11 @@ def static_rule(
     if name == EXECUTE_TOOL:
         return ALLOW_SANDBOXED if sandbox_mode == "restricted" and not network_requested(args) else None
     if name == WRITE_STDIN_TOOL:
-        action = str(args.get("action") or "write")
-        chars = str(args.get("chars") or "")
-        if action == "write" and not chars:
-            return ALLOW  # output poll only
+        from agent.execution.lifecycle import write_stdin_is_side_effect
         from agent.tools.execute import lookup_execution_network
 
+        if not write_stdin_is_side_effect(args):
+            return ALLOW  # output poll only
         network = lookup_execution_network(backend, str(args.get("execution_id") or ""))
         if network is None:
             # Unknown id: treat as networked so Auto cannot skip Flash review.

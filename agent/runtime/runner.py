@@ -1423,7 +1423,30 @@ class AgentRunner:
         config = self._run_config(on_delta, on_event)
         self._seen_tool_calls.clear()
         run_control = self.control.begin_run()
-        set_output_emitter(self._emit_tool_output)
+
+        def emit_tool_output_event(
+            tool_call_id: str,
+            content: str = "",
+            stream: str = "merged",
+            *,
+            result: Any = None,
+            name: str = "",
+        ) -> None:
+            # Close over this run's handler so background pumps can still publish
+            # after invoke clears ``self._event_handler``.
+            _emit(event_handler, RunEvent(
+                type="tool_output_delta",
+                tool_call_id=tool_call_id,
+                content=content,
+                stream=stream,
+                result=result,
+                name=name or "execute",
+            ))
+
+        set_output_emitter(emit_tool_output_event)
+        backend = bubblewrap_backend(self.prepared.backend)
+        if backend is not None:
+            backend.pool.output_emitter = emit_tool_output_event
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         environment_token = set_environment_cache(self._environment)
@@ -1499,6 +1522,9 @@ class AgentRunner:
             self._busy = False
             self.control.end_run()
             set_output_emitter(None)
+            backend = bubblewrap_backend(self.prepared.backend)
+            if backend is not None:
+                backend.pool.output_emitter = None
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)
@@ -1626,12 +1652,22 @@ class AgentRunner:
         _emit(event_handler, RunEvent(type="run_cancelled", content=error, is_error=not closed))
         return result
 
-    def _emit_tool_output(self, tool_call_id: str, content: str, stream: str) -> None:
+    def _emit_tool_output(
+        self,
+        tool_call_id: str,
+        content: str = "",
+        stream: str = "merged",
+        *,
+        result: Any = None,
+        name: str = "",
+    ) -> None:
         _emit(self._event_handler or self.on_event, RunEvent(
             type="tool_output_delta",
             tool_call_id=tool_call_id,
             content=content,
             stream=stream,
+            result=result,
+            name=name or "execute",
         ))
 
     def _on_control_event(self, event_type: str, payload: dict[str, Any]) -> None:

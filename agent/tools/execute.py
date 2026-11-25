@@ -191,8 +191,6 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
                     "termination_reason": "stdin_error",
                 },
             )
-        if not response.running:
-            registry.discard(execution_id)
         output = response.output or ""
         if not response.running and response.exit_code not in (0, None):
             suffix = f"\n\nExit code: {response.exit_code}"

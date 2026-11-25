@@ -11,12 +11,14 @@ from pathlib import Path
 import selectors
 import signal
 import subprocess
+import threading
 import time
+from typing import Any
 import uuid
 
 from deepagents.backends.protocol import ExecuteResponse
 
-from agent.runtime.cancellation import emit_tool_output, get_cancel_context
+from agent.runtime.cancellation import ToolOutputEmitter, emit_tool_output, get_cancel_context, get_output_emitter
 from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxPool
 from agent.execution.policy import sandbox_workspace_root
 from agent.execution.service_observation import OWNER_VARIABLE, begin_command, end_command
@@ -100,21 +102,42 @@ def _decode_tail_snapshot(data: bytes) -> str:
 
 
 class _OutputCollector:
-    """收集一条命令合并后的 stdout/stderr：流式推送、截断并写日志。"""
+    """收集一条命令合并后的 stdout/stderr：流式推送、截断并写日志。
 
-    def __init__(self, *, tool_call_id: str, max_output_bytes: int, workspace_root: Path) -> None:
+    超过 ``max_output_bytes`` 后仍把新增输出写入有界 ``_pending``，供轮询读取。
+    append / take_pending / snapshot 共用同一把锁。
+    """
+
+    def __init__(
+        self,
+        *,
+        tool_call_id: str,
+        max_output_bytes: int,
+        workspace_root: Path,
+        emit: ToolOutputEmitter | None = None,
+    ) -> None:
         self.tool_call_id = tool_call_id
         self.max_output_bytes = max_output_bytes
         self.workspace_root = workspace_root
+        self._emit = emit
         self.decoder: IncrementalDecoder = getincrementaldecoder("utf-8")(errors="replace")
         self.tail_bytes = bytearray()
         self.total_bytes = 0
         self.truncated = False
         self._pending = ""
+        self._lock = threading.RLock()
         self.log_fd: int | None = None
         self.log_directory_fd: int | None = None
         self.log_name: str | None = None
         self.log_error: str | None = None
+
+    def _emit_output(self, content: str, *, stream: str) -> None:
+        if not content:
+            return
+        if self._emit is not None:
+            self._emit(self.tool_call_id, content, stream, name="execute")
+        else:
+            emit_tool_output(self.tool_call_id, content, stream=stream, name="execute")
 
     def _discard_log(self, exc: OSError) -> None:
         self.log_error = f"{type(exc).__name__}: {exc}"
@@ -130,68 +153,86 @@ class _OutputCollector:
             except OSError:
                 pass
 
+    def _bound_pending(self) -> None:
+        max_output_bytes = self.max_output_bytes
+        if len(self._pending) > max_output_bytes:
+            self._pending = self._pending[-max_output_bytes:]
+
     def append(self, raw: bytes) -> None:
         if not raw:
             return
-        max_output_bytes = self.max_output_bytes
-        remaining = max(0, max_output_bytes - self.total_bytes)
-        accepted = raw[:remaining] if remaining > 0 else b""
-        if accepted:
-            text = self.decoder.decode(accepted)
-            if text:
-                emit_tool_output(self.tool_call_id, text, stream="merged")
-                self._pending += text
-                if len(self._pending) > max_output_bytes:
-                    self._pending = self._pending[-max_output_bytes:]
-        if not self.truncated and self.total_bytes + len(raw) > max_output_bytes:
-            self.truncated = True
-            if self.log_fd is None and self.log_error is None:
+        with self._lock:
+            max_output_bytes = self.max_output_bytes
+            already_truncated = self.truncated
+            if not already_truncated and self.total_bytes + len(raw) > max_output_bytes:
+                self.truncated = True
+                if self.log_fd is None and self.log_error is None:
+                    try:
+                        self.log_fd, self.log_directory_fd, self.log_name = _create_exec_log(self.workspace_root)
+                        _write_all(self.log_fd, self.tail_bytes)
+                        _write_all(self.log_fd, raw)
+                    except OSError as exc:
+                        self._discard_log(exc)
+            elif self.log_fd is not None:
                 try:
-                    self.log_fd, self.log_directory_fd, self.log_name = _create_exec_log(self.workspace_root)
-                    _write_all(self.log_fd, self.tail_bytes)
                     _write_all(self.log_fd, raw)
                 except OSError as exc:
                     self._discard_log(exc)
-        elif self.log_fd is not None:
-            try:
-                _write_all(self.log_fd, raw)
-            except OSError as exc:
-                self._discard_log(exc)
-        self.total_bytes += len(raw)
-        self.tail_bytes.extend(raw)
-        if len(self.tail_bytes) > max_output_bytes:
-            del self.tail_bytes[:-max_output_bytes]
-            _drop_partial_character_head(self.tail_bytes)
-        if self.truncated:
-            # 每个分块都用最新字节替换有界内存视图；完整流继续写入工作区日志。
-            current_tail = _decode_tail_snapshot(bytes(self.tail_bytes))
-            emit_tool_output(self.tool_call_id, current_tail, stream="tail_snapshot")
+            # Always decode new bytes into the unread window, even after truncation.
+            text = self.decoder.decode(raw)
+            if text:
+                self._pending += text
+                self._bound_pending()
+                if not self.truncated:
+                    self._emit_output(text, stream="merged")
+            self.total_bytes += len(raw)
+            self.tail_bytes.extend(raw)
+            if len(self.tail_bytes) > max_output_bytes:
+                del self.tail_bytes[:-max_output_bytes]
+                _drop_partial_character_head(self.tail_bytes)
+            if self.truncated:
+                current_tail = _decode_tail_snapshot(bytes(self.tail_bytes))
+                self._emit_output(current_tail, stream="tail_snapshot")
 
     def flush(self) -> None:
         """刷新解码器，处理末尾不完整的多字节序列。"""
-        if not self.truncated:
+        with self._lock:
             tail = self.decoder.decode(b"", final=True)
-            if tail:
-                emit_tool_output(self.tool_call_id, tail, stream="merged")
-                self._pending += tail
+            if not tail:
+                return
+            self._pending += tail
+            self._bound_pending()
+            if not self.truncated:
+                self._emit_output(tail, stream="merged")
 
     def take_pending(self) -> str:
         """Return and clear decoded text produced since the previous take."""
-        text = self._pending
-        self._pending = ""
-        return text
+        with self._lock:
+            text = self._pending
+            self._pending = ""
+            return text
+
+    def snapshot_meta(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "truncated": self.truncated,
+                "max_output_bytes": self.max_output_bytes,
+                "pending_len": len(self._pending),
+                "total_bytes": self.total_bytes,
+            }
 
     def close(self) -> None:
-        if self.log_fd is not None:
-            try:
-                os.fsync(self.log_fd)
-                os.close(self.log_fd)
-                self.log_fd = None
-            except OSError as exc:
-                self._discard_log(exc)
-        if self.log_directory_fd is not None:
-            os.close(self.log_directory_fd)
-            self.log_directory_fd = None
+        with self._lock:
+            if self.log_fd is not None:
+                try:
+                    os.fsync(self.log_fd)
+                    os.close(self.log_fd)
+                    self.log_fd = None
+                except OSError as exc:
+                    self._discard_log(exc)
+            if self.log_directory_fd is not None:
+                os.close(self.log_directory_fd)
+                self.log_directory_fd = None
 
     def response(
         self,
@@ -201,28 +242,40 @@ class _OutputCollector:
         cancelled: bool = False,
         timed_out: bool = False,
         failure: str | None = None,
+        unread_only: bool = False,
+        pending: str | None = None,
     ) -> LocalExecuteResponse:
-        max_output_bytes = self.max_output_bytes
-        truncated = self.truncated
-        output = bytes(self.tail_bytes).decode("utf-8", errors="replace") if self.tail_bytes else ""
-        host_log_path: str | None = None
-        agent_log_path: str | None = None
+        with self._lock:
+            max_output_bytes = self.max_output_bytes
+            truncated = self.truncated
+            if unread_only:
+                body = (pending if pending is not None else self._pending).rstrip()
+                if pending is None:
+                    self._pending = ""
+                output = body if body else "<no new output>"
+            else:
+                output = bytes(self.tail_bytes).decode("utf-8", errors="replace") if self.tail_bytes else ""
+            host_log_path: str | None = None
+            agent_log_path: str | None = None
+            log_error = self.log_error
+            log_name = self.log_name
         if truncated:
             detail = f"Output truncated: showing the last {max_output_bytes} bytes."
-            if self.log_error is not None:
-                detail += f"\nFull output could not be saved: {self.log_error}"
-            elif self.log_name is not None:
-                relative_log_path = Path(".deep-agent/logs/exec") / self.log_name
+            if log_error is not None:
+                detail += f"\nFull output could not be saved: {log_error}"
+            elif log_name is not None:
+                relative_log_path = Path(".deep-agent/logs/exec") / log_name
                 host_log_path = str(self.workspace_root / relative_log_path)
                 agent_log_path = f"{sandbox_workspace_root(self.workspace_root)}/{relative_log_path.as_posix()}"
                 detail += f"\nFull output saved to: {host_log_path}"
                 detail += f"\nAgent path: {agent_log_path}"
-            output = f"{output}\n\n[{detail}]"
+            if not unread_only:
+                output = f"{output}\n\n[{detail}]"
 
         result_metadata = {
             "host_log_path": host_log_path,
             "agent_log_path": agent_log_path,
-            "log_error": self.log_error,
+            "log_error": log_error,
             "max_output_bytes": max_output_bytes,
         }
 
@@ -244,7 +297,7 @@ class _OutputCollector:
                 termination_reason="sandbox_lost", **result_metadata,
             )
 
-        if not output:
+        if not unread_only and not output:
             output = "<no output>"
         if exit_code:
             output = f"{output.rstrip()}\n\nExit code: {exit_code}"
@@ -388,7 +441,7 @@ def _run_in_sandbox(
     下一次 execute 会换新沙箱；本条命令不会重发。
 
     ``yield_time`` 为秒：到期后返回 ``execution_id`` 与当前输出，进程继续运行。
-    同步与 yield 共用同一套 ``CommandSession.drive`` 生命周期。
+    同步与 yield 都只等待 ``CommandSession`` 状态；事件由后台 pump 独占消费。
     """
     from agent.execution.lifecycle import CommandSession
     from agent.execution.ownership import execution_thread_id
@@ -398,6 +451,9 @@ def _run_in_sandbox(
     mode = stdin_mode if stdin_mode in {"none", "pipe", "pty"} else "none"
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
+    # Prefer the ContextVar emitter; fall back to the pool's run-scoped emitter so
+    # tool workers that miss the ContextVar still publish, and pumps survive clear.
+    emit = get_output_emitter() or getattr(pool, "output_emitter", None)
     try:
         handle = sandbox.start_command(command, stdin_mode=mode)
     except SandboxLostError as exc:
@@ -410,7 +466,10 @@ def _run_in_sandbox(
         ctx.register_process(handle)
 
     collector = _OutputCollector(
-        tool_call_id=tool_call_id, max_output_bytes=max_output_bytes, workspace_root=workspace,
+        tool_call_id=tool_call_id,
+        max_output_bytes=max_output_bytes,
+        workspace_root=workspace,
+        emit=emit,
     )
     session = CommandSession(
         handle=handle,
@@ -421,13 +480,14 @@ def _run_in_sandbox(
         deadline=time.monotonic() + timeout if timeout is not None else None,
         network=network,
         tool_call_id=tool_call_id,
+        emit=emit,
     )
+    pool.executions.register(session)
     yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
     try:
         response = session.wait_until(yield_deadline)
-        if response.running:
-            pool.executions.register(session)
-            return response
+        if not response.running:
+            session.mark_result_consumed()
         return response
     finally:
         if ctx is not None:

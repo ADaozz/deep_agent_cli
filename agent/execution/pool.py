@@ -124,16 +124,22 @@ class RemoteCommand:
         if self.stdin_mode == "none":
             raise ValueError("execution does not accept stdin")
         with self._write_lock:
+            if self.released or self.sandbox.lost_reason is not None:
+                raise OSError(self.sandbox.lost_reason or "execution has finished")
             self._write_done.clear()
             self._write_ok = False
             self._write_error = ""
-            self.sandbox._send({
-                "op": "write",
-                "id": self.request_id,
-                "data": base64.b64encode(data).decode("ascii"),
-            })
-            if not self._write_done.wait(5.0):
-                raise TimeoutError("stdin write timed out")
+            try:
+                self.sandbox._send({
+                    "op": "write",
+                    "id": self.request_id,
+                    "data": base64.b64encode(data).decode("ascii"),
+                })
+            except SandboxLostError as exc:
+                raise OSError(str(exc)) from exc
+            # Pre-start writes ACK only after the worker actually drains them.
+            if not self._write_done.wait(15.0):
+                raise TimeoutError("stdin write timed out waiting for acknowledgment")
             if not self._write_ok:
                 raise OSError(self._write_error or "stdin write failed")
 
@@ -146,8 +152,10 @@ class RemoteCommand:
         if self.stdin_mode == "none":
             raise ValueError("execution does not accept stdin")
         if self.stdin_mode == "pty":
-            # Closing the PTY master is not a portable EOF; callers should write ^D when needed.
+            # Closing the PTY master is not a portable EOF; callers send terminal EOF bytes if needed.
             return
+        if self.released or self.sandbox.lost_reason is not None:
+            raise OSError(self.sandbox.lost_reason or "execution has finished")
         self.sandbox._send({"op": "close_stdin", "id": self.request_id})
 
     def resize(self, rows: int, cols: int) -> None:
@@ -395,6 +403,8 @@ class SandboxPool:
         self._lock = threading.RLock()
         self._sandboxes: dict[bool, PersistentSandbox] = {}
         self.executions = ExecutionRegistry()
+        # Set by Runner for the active run so background pumps outlive ContextVar.
+        self.output_emitter: Callable[..., None] | None = None
         _POOLS.add(self)
 
     def sandbox(self, network: bool) -> PersistentSandbox | None:

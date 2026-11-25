@@ -281,31 +281,21 @@ class CliState:
                 self.blocks.append(tool)
             touch(tool)
             if event.stream == "execution_finished" and tool.name == "execute":
-                tool.output += event.content
+                if event.content:
+                    tool.output += event.content
                 artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
-                tool.artifact = {**artifact, "running": False}
-                tool.status = "completed"
-                tool.is_error = False
-                finished = event.content or ""
-                if "exit_code=" in finished:
-                    try:
-                        fragment = finished.rsplit("exit_code=", 1)[1].split(None, 1)[0]
-                        tool.exit_code = int(fragment)
-                        tool.artifact = {**tool.artifact, "exit_code": tool.exit_code}
-                        if tool.exit_code not in (0, None):
-                            tool.is_error = True
-                            tool.status = "error"
-                    except ValueError:
-                        pass
-                if "reason=cancelled" in finished or "reason=timeout" in finished:
-                    reason = "cancelled" if "reason=cancelled" in finished else "timeout"
-                    tool.artifact = {**tool.artifact, "termination_reason": reason}
-                    if reason == "cancelled":
-                        tool.exit_code = 130
-                    elif reason == "timeout":
-                        tool.exit_code = 124
-                    tool.is_error = True
-                    tool.status = "error"
+                result = event.result if isinstance(event.result, dict) else {}
+                merged = {**artifact, **result, "running": False}
+                tool.artifact = merged
+                code = merged.get("exit_code")
+                tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+                reason = merged.get("termination_reason")
+                failed = (
+                    reason in {"cancelled", "timeout", "spawn_error", "sandbox_lost"}
+                    or (tool.exit_code not in (0, None))
+                )
+                tool.is_error = failed
+                tool.status = "error" if failed else "completed"
             elif event.stream == "tail_snapshot" and tool.name == "execute":
                 tool.output = event.content
                 artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
@@ -341,6 +331,19 @@ class CliState:
                 self._finish_task_card(tool)
                 return
             completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
+            already_finished = (
+                isinstance(tool.artifact, dict)
+                and tool.artifact.get("running") is False
+                and tool.status in {"completed", "error"}
+            )
+            if (
+                event.name == "execute"
+                and completed_artifact is not None
+                and completed_artifact.get("running") is True
+                and already_finished
+            ):
+                # Structured finish arrived before the yielded execute tool_completed.
+                return
             had_tail_snapshot = (
                 event.name == "execute" and isinstance(tool.artifact, dict)
                 and tool.artifact.get("truncated") is True

@@ -10,6 +10,8 @@ from uuid import uuid4
 
 
 CancelCallback = Callable[[], None]
+# tool_call_id, content, stream, optional structured result / name for RunEvent.
+ToolOutputEmitter = Callable[..., None]
 
 
 @dataclass
@@ -61,7 +63,7 @@ class ToolCancelContext:
 
 
 _CURRENT: ContextVar[ToolCancelContext | None] = ContextVar("deep_agent_cancel_ctx", default=None)
-_OUTPUT_EMITTER: ContextVar[Callable[[str, str, str], None] | None] = ContextVar(
+_OUTPUT_EMITTER: ContextVar[ToolOutputEmitter | None] = ContextVar(
     "deep_agent_tool_output_emitter", default=None,
 )
 
@@ -78,18 +80,28 @@ def get_cancel_context() -> ToolCancelContext | None:
     return _CURRENT.get()
 
 
-def set_output_emitter(emitter: Callable[[str, str, str], None] | None) -> Token:
+def set_output_emitter(emitter: ToolOutputEmitter | None) -> Token:
     return _OUTPUT_EMITTER.set(emitter)
 
 
-def get_output_emitter() -> Callable[[str, str, str], None] | None:
+def get_output_emitter() -> ToolOutputEmitter | None:
     return _OUTPUT_EMITTER.get()
 
 
-def emit_tool_output(tool_call_id: str, content: str, *, stream: str = "merged") -> None:
+def emit_tool_output(
+    tool_call_id: str,
+    content: str = "",
+    *,
+    stream: str = "merged",
+    result: Any = None,
+    name: str = "",
+) -> None:
     emitter = get_output_emitter()
-    if emitter is not None and content:
-        emitter(tool_call_id, content, stream)
+    if emitter is None:
+        return
+    if not content and result is None:
+        return
+    emitter(tool_call_id, content, stream, result=result, name=name)
 
 
 def _kill_process_group(process: Any) -> None:
