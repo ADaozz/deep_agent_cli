@@ -242,7 +242,7 @@ def build_agent(
     if supports_execute and "execute" in allowed:
         tools.append(build_execute_tool(fs_backend, permission=permission))
         if "write_stdin" in allowed:
-            tools.append(build_write_stdin_tool())
+            tools.append(build_write_stdin_tool(fs_backend))
     skill_sources = list(spec.skills) if spec.skills is not None else (
         _default_skill_sources(fs_backend) if spec.backend is None else None
     )

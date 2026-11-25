@@ -175,13 +175,15 @@ class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecut
         effective_timeout = _effective_timeout(timeout, self.config.timeout_seconds)
         pool = self.pool
         try:
-            return pool.run(get_execute_network(), lambda sandbox: _run_in_sandbox(
+            network = get_execute_network()
+            return pool.run(network, lambda sandbox: _run_in_sandbox(
                 pool, sandbox, command,
                 timeout=effective_timeout,
                 max_output_bytes=self.config.max_output_bytes,
                 workspace=self.config.workspace,
                 yield_time=yield_time,
                 stdin_mode=stdin_mode,
+                network=network,
             ))
         except SandboxStartError as exc:
             return LocalExecuteResponse(

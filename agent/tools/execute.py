@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from pydantic import Field
 
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -92,6 +92,14 @@ def _artifact_from_response(response) -> dict[str, object]:
     }
 
 
+def _execution_pool(backend: SandboxBackendProtocol):
+    executor = getattr(backend, "executor", backend)
+    pool = getattr(executor, "pool", None)
+    if pool is None:
+        raise RuntimeError("write_stdin requires a sandboxed execution pool")
+    return pool
+
+
 def build_execute_tool(
     backend: SandboxBackendProtocol,
     *,
@@ -150,7 +158,7 @@ def build_execute_tool(
     )
 
 
-def build_write_stdin_tool() -> BaseTool:
+def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
     """Interact with a yielded execution owned by the current session/agent."""
 
     def write_stdin(
@@ -162,19 +170,29 @@ def build_write_stdin_tool() -> BaseTool:
             Field(description="write input, close PIPE stdin, or cancel the execution."),
         ] = "write",
     ) -> tuple[str, dict[str, object]]:
-        from agent.execution.lifecycle import execution_registry, interact
+        from agent.execution.lifecycle import interact
 
         if yield_time < 0:
             raise ValueError("yield_time must be non-negative")
-        if action == "write" and chars == "" and yield_time == 0:
-            # Empty poll with zero wait is allowed; just return current unread.
-            pass
         if action in {"close", "cancel"} and chars:
             raise ValueError(f"{action} cannot include chars")
-        live = execution_registry().require(execution_id)
-        response = interact(live, chars=chars, yield_time=yield_time, action=action)
+        registry = _execution_pool(backend).executions
+        live = registry.require(execution_id)
+        try:
+            response = interact(live, chars=chars, yield_time=yield_time, action=action)
+        except (OSError, TimeoutError, ValueError) as exc:
+            return (
+                f"Error writing stdin: {exc}",
+                {
+                    "exit_code": None,
+                    "truncated": False,
+                    "execution_id": execution_id,
+                    "running": True,
+                    "termination_reason": "stdin_error",
+                },
+            )
         if not response.running:
-            execution_registry().discard(execution_id)
+            registry.discard(execution_id)
         output = response.output or ""
         if not response.running and response.exit_code not in (0, None):
             suffix = f"\n\nExit code: {response.exit_code}"
@@ -193,3 +211,12 @@ def build_write_stdin_tool() -> BaseTool:
             "Never pass sensitive credentials through this tool."
         ),
     )
+
+
+def lookup_execution_network(backend: Any, execution_id: str) -> bool | None:
+    """Return the yielded execution's network flag, or None when unknown."""
+    try:
+        session = _execution_pool(backend).executions.get(execution_id)
+    except Exception:  # noqa: BLE001
+        return None
+    return None if session is None else bool(session.network)

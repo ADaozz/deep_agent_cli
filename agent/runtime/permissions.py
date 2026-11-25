@@ -32,10 +32,27 @@ def host_decision_rule() -> dict[str, list[str]]:
     return {"allowed_decisions": ["approve", "reject"]}
 
 
+def write_stdin_requires_approval(request: Any) -> bool:
+    """Ask/HITL ``when`` predicate: empty output polls skip approval."""
+    args = getattr(request, "tool_call", None) or {}
+    if isinstance(args, dict):
+        payload = args.get("args") or {}
+    else:
+        payload = {}
+    action = str(payload.get("action") or "write")
+    chars = str(payload.get("chars") or "")
+    return not (action == "write" and chars == "")
+
+
 def ask_interrupt_on() -> dict[str, Any]:
     """Ask 模式 interrupt_on：每次新建，避免共享可变 allowed_decisions。"""
+    write_stdin_rule = {
+        **host_decision_rule(),
+        "when": write_stdin_requires_approval,
+    }
     return {
-        **{name: host_decision_rule() for name in (EXECUTE_TOOL, WRITE_STDIN_TOOL, *WEB_TOOLS)},
+        **{name: host_decision_rule() for name in (EXECUTE_TOOL, *WEB_TOOLS)},
+        WRITE_STDIN_TOOL: write_stdin_rule,
         **{name: True for name in FILE_MUTATION_TOOLS},
     }
 
@@ -200,5 +217,6 @@ __all__ = [
     "permission_mode_from_interrupt_on",
     "permission_mode_label",
     "permission_mode_option_label",
+    "write_stdin_requires_approval",
     "permission_unavailable_reason",
 ]

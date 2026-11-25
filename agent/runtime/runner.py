@@ -1037,9 +1037,7 @@ class AgentRunner:
         if drained:
             self._operation_lock.release()
         # 卡住的命令不得在 close 之后继续占用沙箱，即便租约必须保留。
-        from agent.execution.lifecycle import execution_registry
-
-        execution_registry().shutdown()
+        # ExecutionRegistry 挂在本 Runner 的 SandboxPool 上，随 pool.shutdown 清理。
         self._end_sandbox_session("agent session closed")
         if not drained:
             # The active graph may still be unwinding an MCP call. Keep its
@@ -1553,13 +1551,13 @@ class AgentRunner:
         run_control: Any,
         event_handler: RunEventHandler | None,
     ) -> RunResult:
-        from agent.execution.ownership import reset_execution_ownership, set_execution_ownership
+        from agent.execution.ownership import reset_execution_thread_id, set_execution_thread_id
 
-        ownership = set_execution_ownership(thread_id=self.thread_id, agent_scope="root")
+        ownership = set_execution_thread_id(self.thread_id)
         try:
             return self._stream_once_owned(graph_input, config, run_control, event_handler)
         finally:
-            reset_execution_ownership(ownership)
+            reset_execution_thread_id(ownership)
 
     def _stream_once_owned(
         self,

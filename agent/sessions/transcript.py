@@ -75,6 +75,8 @@ def classify_tool_result(
     termination = payload.get("termination_reason")
     # execute: structured artifact wins over free-text phrases in command output.
     if name == "execute":
+        if payload.get("running") is True:
+            return "success"
         exit_code = payload.get("exit_code")
         if termination == "cancelled":
             return "cancelled"
@@ -133,10 +135,14 @@ def messages_to_transcript(
             if thinking or text:
                 blocks.append(TranscriptBlock(kind="assistant", content=text, thinking=thinking))
             for call in message.tool_calls or []:
+                name = str(call.get("name") or "tool")
+                if name == "write_stdin":
+                    # Model-visible tool record stays in messages; TUI cards stay on execute.
+                    continue
                 block = TranscriptBlock(
                     kind="tool",
                     tool_call_id=str(call.get("id") or ""),
-                    name=str(call.get("name") or "tool"),
+                    name=name,
                     arguments=call.get("args") if isinstance(call.get("args"), dict) else {},
                     status="running",
                     message_id=message.id or "",
@@ -149,12 +155,26 @@ def messages_to_transcript(
                     kind="turn_summary", elapsed_seconds=timing[0], finished_at=timing[1],
                 ))
         elif isinstance(message, ToolMessage):
+            if getattr(message, "name", None) == "write_stdin":
+                continue
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)
             block = tools.get(tool_call_id)
             is_task = message.name == "start_task" or (block is not None and block.name == "start_task")
             artifact = getattr(message, "artifact", None)
+            if (
+                getattr(message, "name", None) == "execute"
+                and isinstance(artifact, dict)
+                and artifact.get("running") is True
+            ):
+                if block is not None:
+                    block.content = content
+                    block.artifact = artifact
+                    block.status = "running"
+                    block.is_error = False
+                    block.exit_code = None
+                continue
             status = (
                 subagent_card_status(is_error=is_error, artifact=artifact)
                 if is_task else ("error" if is_error else "completed")

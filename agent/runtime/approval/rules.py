@@ -50,6 +50,12 @@ def static_rule(
         chars = str(args.get("chars") or "")
         if action == "write" and not chars:
             return ALLOW  # output poll only
-        return ALLOW_SANDBOXED if sandbox_mode == "restricted" else None
+        from agent.tools.execute import lookup_execution_network
+
+        network = lookup_execution_network(backend, str(args.get("execution_id") or ""))
+        if network is None:
+            # Unknown id: treat as networked so Auto cannot skip Flash review.
+            network = True
+        return ALLOW_SANDBOXED if sandbox_mode == "restricted" and not network else None
     # Untrusted host MCP tools and MCP server changes take effect outside the sandbox.
     return MANUAL

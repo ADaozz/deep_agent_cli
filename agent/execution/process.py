@@ -110,6 +110,7 @@ class _OutputCollector:
         self.tail_bytes = bytearray()
         self.total_bytes = 0
         self.truncated = False
+        self._pending = ""
         self.log_fd: int | None = None
         self.log_directory_fd: int | None = None
         self.log_name: str | None = None
@@ -139,6 +140,9 @@ class _OutputCollector:
             text = self.decoder.decode(accepted)
             if text:
                 emit_tool_output(self.tool_call_id, text, stream="merged")
+                self._pending += text
+                if len(self._pending) > max_output_bytes:
+                    self._pending = self._pending[-max_output_bytes:]
         if not self.truncated and self.total_bytes + len(raw) > max_output_bytes:
             self.truncated = True
             if self.log_fd is None and self.log_error is None:
@@ -169,6 +173,13 @@ class _OutputCollector:
             tail = self.decoder.decode(b"", final=True)
             if tail:
                 emit_tool_output(self.tool_call_id, tail, stream="merged")
+                self._pending += tail
+
+    def take_pending(self) -> str:
+        """Return and clear decoded text produced since the previous take."""
+        text = self._pending
+        self._pending = ""
+        return text
 
     def close(self) -> None:
         if self.log_fd is not None:
@@ -369,6 +380,7 @@ def _run_in_sandbox(
     workspace: Path,
     yield_time: float | None = None,
     stdin_mode: str = "none",
+    network: bool = False,
 ) -> ExecuteResponse:
     """在持久沙箱里为一条命令启动新的 shell。
 
@@ -376,9 +388,10 @@ def _run_in_sandbox(
     下一次 execute 会换新沙箱；本条命令不会重发。
 
     ``yield_time`` 为秒：到期后返回 ``execution_id`` 与当前输出，进程继续运行。
+    同步与 yield 共用同一套 ``CommandSession.drive`` 生命周期。
     """
-    from agent.execution.lifecycle import LiveExecution, execution_registry
-    from agent.execution.ownership import execution_agent_scope, execution_thread_id
+    from agent.execution.lifecycle import CommandSession
+    from agent.execution.ownership import execution_thread_id
 
     if yield_time is not None and yield_time < 0:
         raise ValueError(f"yield_time must be non-negative, got {yield_time}")
@@ -396,104 +409,29 @@ def _run_in_sandbox(
     if ctx is not None:
         ctx.register_process(handle)
 
-    deadline = time.monotonic() + timeout if timeout is not None else None
-    yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
-    cancelled = False
-    timed_out = False
-    kill_sent_at: float | None = None
-    exit_code = 0
-    failure: str | None = None
-    spawn_error: str | None = None
     collector = _OutputCollector(
         tool_call_id=tool_call_id, max_output_bytes=max_output_bytes, workspace_root=workspace,
     )
-    adopted = False
-    try:
-        while True:
-            now = time.monotonic()
-            if kill_sent_at is None:
-                if ctx is not None and ctx.cancelled:
-                    cancelled = True
-                elif deadline is not None and now >= deadline:
-                    timed_out = True
-                if cancelled or timed_out:
-                    handle.kill()
-                    kill_sent_at = now
-                elif yield_deadline is not None and now >= yield_deadline:
-                    live = LiveExecution(
-                        execution_id=handle.execution_id,
-                        handle=handle,
-                        pool=pool,
-                        collector=collector,
-                        thread_id=execution_thread_id(),
-                        agent_scope=execution_agent_scope(),
-                        timeout=timeout,
-                        deadline=deadline,
-                        workspace=workspace,
-                        max_output_bytes=max_output_bytes,
-                    )
-                    # Seed unread with output collected so far.
-                    seeded = bytes(collector.tail_bytes).decode("utf-8", errors="replace")
-                    if seeded:
-                        live._unread.append(seeded)
-                    execution_registry().register(live)
-                    adopted = True
-                    if ctx is not None:
-                        ctx.clear_process()
-                    return live.to_response(include_unread=True)
-            elif now - kill_sent_at >= KILL_CONFIRM_SECONDS:
-                pool.discard(sandbox, "sandbox worker did not confirm a command kill")
-                break
-            wait = 0.1
-            if kill_sent_at is None:
-                limits = []
-                if deadline is not None:
-                    limits.append(deadline - now)
-                if yield_deadline is not None:
-                    limits.append(yield_deadline - now)
-                if limits:
-                    wait = max(0.0, min(wait, *limits))
-            event = handle.next_event(wait)
-            if event is None:
-                continue
-            kind, payload = event
-            if kind == "out":
-                collector.append(payload)
-            elif kind == "exit":
-                exit_code = int(payload)
-                break
-            elif kind == "spawn_error":
-                spawn_error = str(payload)
-                break
-            else:
-                failure = (
-                    f"Sandbox worker stopped while this command was running ({payload}). "
-                    "The command was not retried; the next execute starts a fresh sandbox."
-                )
-                exit_code = 125
-                pool.discard(sandbox, str(payload))
-                break
-        collector.flush()
-    finally:
-        if not adopted:
-            if ctx is not None:
-                ctx.clear_process()
-            handle.release()
-            collector.close()
-
-    if spawn_error is not None and not (cancelled or timed_out):
-        return LocalExecuteResponse(
-            f"Error executing command ({spawn_error})", 1, False, termination_reason="spawn_error",
-            execution_id=handle.execution_id, running=False,
-        )
-    response = collector.response(
-        exit_code=exit_code, timeout=timeout,
-        cancelled=cancelled or (ctx is not None and ctx.cancelled and not timed_out),
-        timed_out=timed_out, failure=failure,
+    session = CommandSession(
+        handle=handle,
+        pool=pool,
+        collector=collector,
+        thread_id=execution_thread_id(),
+        timeout=timeout,
+        deadline=time.monotonic() + timeout if timeout is not None else None,
+        network=network,
+        tool_call_id=tool_call_id,
     )
-    response.execution_id = handle.execution_id
-    response.running = False
-    return response
+    yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
+    try:
+        response = session.wait_until(yield_deadline)
+        if response.running:
+            pool.executions.register(session)
+            return response
+        return response
+    finally:
+        if ctx is not None:
+            ctx.clear_process()
 
 
 def _kill_process_group_pid(pid: int | None) -> None:

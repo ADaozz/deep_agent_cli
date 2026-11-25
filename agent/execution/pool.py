@@ -100,6 +100,10 @@ class RemoteCommand:
         self.released = False
         self.kill_requested = False
         self.owner_token = ""
+        self._write_lock = threading.Lock()
+        self._write_done = threading.Event()
+        self._write_ok = False
+        self._write_error = ""
 
     @property
     def execution_id(self) -> str:
@@ -119,11 +123,24 @@ class RemoteCommand:
     def write_stdin(self, data: bytes) -> None:
         if self.stdin_mode == "none":
             raise ValueError("execution does not accept stdin")
-        self.sandbox._send({
-            "op": "write",
-            "id": self.request_id,
-            "data": base64.b64encode(data).decode("ascii"),
-        })
+        with self._write_lock:
+            self._write_done.clear()
+            self._write_ok = False
+            self._write_error = ""
+            self.sandbox._send({
+                "op": "write",
+                "id": self.request_id,
+                "data": base64.b64encode(data).decode("ascii"),
+            })
+            if not self._write_done.wait(5.0):
+                raise TimeoutError("stdin write timed out")
+            if not self._write_ok:
+                raise OSError(self._write_error or "stdin write failed")
+
+    def _complete_write(self, *, ok: bool, error: str = "") -> None:
+        self._write_ok = ok
+        self._write_error = error
+        self._write_done.set()
 
     def close_stdin(self) -> None:
         if self.stdin_mode == "none":
@@ -340,6 +357,8 @@ class PersistentSandbox:
                     handle._deliver(("exit", int(message["code"])))
                 elif op == "spawn_error":
                     handle._deliver(("spawn_error", str(message.get("message", ""))))
+                elif op == "write_status":
+                    handle._complete_write(ok=bool(message.get("ok")), error=str(message.get("error") or ""))
         except OSError:
             pass
         except (ValueError, KeyError, TypeError):
@@ -370,9 +389,12 @@ class SandboxPool:
     """
 
     def __init__(self, launch_args: Callable[[bool], list[str]]) -> None:
+        from agent.execution.lifecycle import ExecutionRegistry
+
         self._launch_args = launch_args
         self._lock = threading.RLock()
         self._sandboxes: dict[bool, PersistentSandbox] = {}
+        self.executions = ExecutionRegistry()
         _POOLS.add(self)
 
     def sandbox(self, network: bool) -> PersistentSandbox | None:
@@ -406,6 +428,7 @@ class SandboxPool:
 
     def shutdown(self, reason: str = "agent session ended") -> None:
         """销毁本 Pool 的全部沙箱。"""
+        self.executions.shutdown()
         with self._lock:
             sandboxes = list(self._sandboxes.values())
             self._sandboxes.clear()

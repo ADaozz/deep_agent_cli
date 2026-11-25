@@ -249,6 +249,10 @@ class CliState:
             else:
                 block.content = event.content
         elif event.type == "tool_started":
+            # write_stdin updates the owning execute card; it is not shown as its own card.
+            if event.name == "write_stdin":
+                self.active_block = None
+                return
             tool = self._tool_by_id(event.tool_call_id)
             if tool is None:
                 self.blocks.append(ToolBlock(
@@ -269,12 +273,40 @@ class CliState:
                     self._paint_task_card(created)
             self.active_block = None
         elif event.type == "tool_output_delta":
+            if event.name == "write_stdin":
+                return
             tool = self._tool(event.tool_call_id) or self._running_tool()
             if tool is None:
                 tool = ToolBlock(event.tool_call_id, event.name or "tool", {})
                 self.blocks.append(tool)
             touch(tool)
-            if event.stream == "tail_snapshot" and tool.name == "execute":
+            if event.stream == "execution_finished" and tool.name == "execute":
+                tool.output += event.content
+                artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
+                tool.artifact = {**artifact, "running": False}
+                tool.status = "completed"
+                tool.is_error = False
+                finished = event.content or ""
+                if "exit_code=" in finished:
+                    try:
+                        fragment = finished.rsplit("exit_code=", 1)[1].split(None, 1)[0]
+                        tool.exit_code = int(fragment)
+                        tool.artifact = {**tool.artifact, "exit_code": tool.exit_code}
+                        if tool.exit_code not in (0, None):
+                            tool.is_error = True
+                            tool.status = "error"
+                    except ValueError:
+                        pass
+                if "reason=cancelled" in finished or "reason=timeout" in finished:
+                    reason = "cancelled" if "reason=cancelled" in finished else "timeout"
+                    tool.artifact = {**tool.artifact, "termination_reason": reason}
+                    if reason == "cancelled":
+                        tool.exit_code = 130
+                    elif reason == "timeout":
+                        tool.exit_code = 124
+                    tool.is_error = True
+                    tool.status = "error"
+            elif event.stream == "tail_snapshot" and tool.name == "execute":
                 tool.output = event.content
                 artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
                 tool.artifact = {**artifact, "truncated": True}
@@ -283,6 +315,9 @@ class CliState:
         elif event.type == "assistant_completed":
             self.active_block = None
         elif event.type == "tool_completed":
+            if event.name == "write_stdin":
+                # Keep the underlying ToolMessage, but never surface a separate card.
+                return
             tool = self._tool(event.tool_call_id)
             if tool is None:
                 tool = ToolBlock(event.tool_call_id, event.name, {})
@@ -320,18 +355,27 @@ class CliState:
                     tool.output = event.content
             elif event.content and (not tool.output or event.content.startswith(tool.output)):
                 tool.output = event.content
-            tool.is_error = event.is_error
-            tool.status = "error" if event.is_error else "completed"
-            if is_task_tool(tool.name):
-                tool.output = task_result_text(
-                    artifact=event.artifact, content=event.content, status="",
-                )
-                tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
-                tool.is_error = tool.status in {"error", "cancelled"}
-                self._finish_task_card(tool)
-            if event.name == "execute" and completed_artifact is not None:
-                code = completed_artifact.get("exit_code")
-                tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+            if (
+                event.name == "execute"
+                and completed_artifact is not None
+                and completed_artifact.get("running") is True
+            ):
+                tool.is_error = False
+                tool.status = "running"
+                tool.exit_code = None
+            else:
+                tool.is_error = event.is_error
+                tool.status = "error" if event.is_error else "completed"
+                if is_task_tool(tool.name):
+                    tool.output = task_result_text(
+                        artifact=event.artifact, content=event.content, status="",
+                    )
+                    tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
+                    tool.is_error = tool.status in {"error", "cancelled"}
+                    self._finish_task_card(tool)
+                if event.name == "execute" and completed_artifact is not None:
+                    code = completed_artifact.get("exit_code")
+                    tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         elif event.type == "subagent_finished" and isinstance(event.result, dict):
             tool = self._tool_by_id(str(event.result.get("tool_call_id") or ""))
             if tool is not None and is_background_launch(tool.name, tool.arguments):
