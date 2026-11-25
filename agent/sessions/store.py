@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS session_turn_timings (
     finished_at TEXT NOT NULL,
     PRIMARY KEY (session_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS session_tool_display (
+    session_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    mcp_server TEXT NOT NULL,
+    mcp_remote TEXT NOT NULL,
+    PRIMARY KEY (session_id, tool_call_id)
+);
 """
 
 
@@ -298,6 +305,23 @@ class SessionStore:
             ).fetchall()
         return {row[0]: (row[1], _parse_dt(row[2])) for row in rows}
 
+    def save_tool_display(self, session_id: str, tool_call_id: str, server: str, remote: str) -> None:
+        """Remember MCP display identity for one tool call. Empty values are ignored."""
+        if not session_id or not tool_call_id or not server or not remote:
+            return
+        with self.checkpointer.lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_tool_display "
+                "(session_id, tool_call_id, mcp_server, mcp_remote) "
+                "SELECT id, ?, ?, ? FROM session_catalog WHERE id = ?",
+                (tool_call_id, server, remote, session_id),
+            )
+            self._conn.commit()
+
+    def tool_display(self, session_id: str) -> dict[str, tuple[str, str]]:
+        with self.checkpointer.lock:
+            return read_tool_display(self._conn, session_id)
+
     def list_sessions(self, *, limit: int = 50) -> list[SessionInfo]:
         with self.checkpointer.lock:
             rows = self._conn.execute(
@@ -332,6 +356,18 @@ class SessionStore:
         if len(rows) != 1:
             return None
         return _session_info(rows[0])
+
+
+def read_tool_display(connection: Any, session_id: str) -> dict[str, tuple[str, str]]:
+    """MCP display identity stored with the session. A missing table stays empty."""
+    try:
+        rows = connection.execute(
+            "SELECT tool_call_id, mcp_server, mcp_remote FROM session_tool_display WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {row[0]: (row[1], row[2]) for row in rows if row[0] and row[1] and row[2]}
 
 
 def _session_info(row: Any) -> SessionInfo:

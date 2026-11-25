@@ -201,8 +201,6 @@ class AgentRunner:
         self._close_completed = False
         self.mcp = mcp_manager
         self._runtime: SessionRuntime | None = None
-        # Optional read of display identity already stored with tool history.
-        self.display_identity_source: Callable[[str], Mapping[str, tuple[str, str]]] | None = None
 
         self.session_store = session_store
         if self.session_store is None and enable_sessions:
@@ -818,10 +816,7 @@ class AgentRunner:
         info = self._runtime.resolve(session_id)
         if info is None:
             return None
-        identities = None
-        if self.display_identity_source is not None:
-            identities = self.display_identity_source(info.id)
-        return read_snapshot(self.prepared.graph, info, self.session_store, identities=identities)
+        return read_snapshot(self.prepared.graph, info, self.session_store)
 
     @_exclusive_operation
     def switch_session(self, session_id: str) -> SessionSnapshot:
@@ -1577,10 +1572,12 @@ class AgentRunner:
                         if name == "start_task":
                             self._subagent_tool_ids.add(call_id)
                         server, remote = mcp_event_identity(self._bound_tools(), name)
-                        _emit(event_handler, RunEvent(
+                        resumed = RunEvent(
                             "tool_resumed", tool_call_id=call_id, message_id=message.id or "", name=name,
                             arguments=call["args"], mcp_server=server, mcp_remote=remote,
-                        ))
+                        )
+                        self._remember_tool_display(resumed)
+                        _emit(event_handler, resumed)
                     break
         last_message_id = _last_message_id(state_values)
         execution = GraphExecution(
@@ -1639,6 +1636,16 @@ class AgentRunner:
         if reason in {StopReason.ABORTED, StopReason.ERROR}:
             self._resume_context = RecoveryContext.for_stop_reason(reason)
 
+    def _remember_tool_display(self, event: RunEvent) -> None:
+        """Store MCP display identity with the session, not the companion database."""
+        if self.session_store is None or self._runtime is None or not self._runtime.thread_id:
+            return
+        if event.type not in {"tool_started", "tool_completed", "tool_resumed"}:
+            return
+        self.session_store.save_tool_display(
+            self._runtime.thread_id, event.tool_call_id, event.mcp_server, event.mcp_remote,
+        )
+
     def _bound_tools(self) -> Mapping[str, Any]:
         """Tools registered on the graph that is executing this run."""
         nodes = getattr(self.prepared.graph, "nodes", None)
@@ -1648,6 +1655,8 @@ class AgentRunner:
 
     def _emit_update_events(self, chunk: Any, handler: RunEventHandler | None, resume_calls=None) -> None:
         events, saw_input_usage = update_tool_events(chunk, self._seen_tool_calls, self._bound_tools())
+        for event in events:
+            self._remember_tool_display(event)
         # 图更新可能省略 Usage，不能覆盖同次调用已收到的流式输入用量。
         if saw_input_usage:
             self._context_usage_invalidated = False

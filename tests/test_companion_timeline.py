@@ -198,7 +198,8 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     from langchain_core.messages import AIMessage
 
     from agent.companion.chart import ActivityHeatmap, tool_health_labels
-    from agent.companion.timeline import ToolObservation, recorded_mcp_identities, restore_session, transact
+    from agent.companion.timeline import ToolObservation, restore_session, transact
+    from agent.sessions.store import SessionStore
     from agent.mcp.names import external_tool_name, unique_mcp_identity
     from agent.runtime.events import mcp_event_identity, update_tool_events
     from agent.sessions.transcript import messages_to_transcript
@@ -228,6 +229,13 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     assert fitted["mcp__alpha__searchtoolname"].endswith("alph")
     assert fitted["mcp__alpine__searchtoolname"].endswith("alpi")
     assert "…" in fitted["mcp__alpha__searchtoolname"]
+    numbered_fit = tool_health_labels([
+        obs("mcp__alpha__searchtoolname", "alpha", "searchtoolname"),
+        obs("mcp__alpine__searchtoolname", "alpine", "searchtoolname"),
+    ], 5)
+    assert numbered_fit["mcp__alpha__searchtoolname"].endswith(" · 1")
+    assert numbered_fit["mcp__alpine__searchtoolname"].endswith(" · 2")
+    assert "alph" not in numbered_fit["mcp__alpha__searchtoolname"]
     numbered = tool_health_labels([
         obs("mcp__ab__search", "ab", "search"),
         obs("mcp__abx__search", "ab", "search"),
@@ -280,13 +288,18 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     assert c.timeline.series["fixed model", "default", beta].counts["success"] == 3
     assert ("fixed model", "default", "search") not in c.timeline.series
     transact(c.database, c.timeline.pending)
-    assert recorded_mcp_identities(c.database, "s")["0"] == ("my__srv", "search")
     restored = restore_session(c.database, "s", c.window)
     assert restored.recent_tool_calls[0].mcp_remote == "search"
-    blocks = messages_to_transcript(
-        [AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}])],
-        identities=recorded_mcp_identities(c.database, "s"),
-    )
+    store = SessionStore(tmp_path / "session.sqlite3")
+    try:
+        store.create_session(session_id="s")
+        store.save_tool_display("s", "0", "my__srv", "search")
+        blocks = messages_to_transcript(
+            [AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}])],
+            identities=store.tool_display("s"),
+        )
+    finally:
+        store.close()
     assert (blocks[0].mcp_server, blocks[0].mcp_remote) == ("my__srv", "search")
 
 

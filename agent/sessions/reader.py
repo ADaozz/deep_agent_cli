@@ -13,10 +13,9 @@ from agent.runtime.events import classify_interrupt
 
 
 def read_snapshot(
-    graph: Any, info: SessionInfo, repository: SessionRepository | None, *,
-    identities: dict[str, tuple[str, str]] | None = None,
+    graph: Any, info: SessionInfo, repository: SessionRepository | None,
 ) -> SessionSnapshot:
-    transcript, interrupt, _ = read_transcript(graph, info.id, repository=repository, identities=identities)
+    transcript, interrupt, _ = read_transcript(graph, info.id, repository=repository)
     return SessionSnapshot(
         info=info,
         transcript=transcript,
@@ -42,6 +41,8 @@ def read_transcript(
     truncated = max_messages is not None and len(messages) > max_messages
     if truncated:
         messages = messages[-max_messages:]
+    if identities is None and repository is not None:
+        identities = repository.tool_display(thread_id)
     transcript = messages_to_transcript(
         messages, include_thinking=include_thinking,
         turn_timings=repository.turn_timings(thread_id) if repository is not None else None,

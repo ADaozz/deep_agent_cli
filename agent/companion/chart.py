@@ -152,11 +152,54 @@ def _fit_health_label(remote: str, suffix: str, width: int) -> str:
     return _truncate_cells(remote, width - get_cwidth(suffix)) + suffix
 
 
+def _labels_conflict(labels: dict[str, str]) -> bool:
+    values = list(labels.values())
+    return len(values) != len(set(values))
+
+
+def _abbreviation_labels(
+    names: list[str], servers: dict[str, str], short: dict[str, str], width: int,
+) -> tuple[dict[str, str], bool]:
+    fitted: dict[str, str] = {}
+    preserved = True
+    for name in names:
+        suffix = f" · {servers[name]}"
+        label = _fit_health_label(short[name], suffix, width)
+        if not label.endswith(suffix):
+            preserved = False
+        fitted[name] = label
+    return fitted, preserved
+
+
+def _numbered_labels(
+    names: list[str], short: dict[str, str], occupied: set[str], width: int,
+) -> dict[str, str]:
+    """Number rows whose server abbreviation cannot stay unique in the final label."""
+    fitted: dict[str, str] = {}
+    used = set(occupied)
+    number = 1
+    for name in sorted(names):
+        label = ""
+        while number < len(names) + len(occupied) + 2:
+            suffix = f" · {number}"
+            number += 1
+            if get_cwidth(suffix) <= width:
+                label = _fit_health_label(short[name], suffix, width)
+            else:
+                label = _truncate_cells(str(number - 1), width)
+            if label not in used:
+                break
+        fitted[name] = label
+        used.add(label)
+    return fitted
+
+
 def tool_health_labels(calls: Iterable[object], width: int) -> dict[str, str]:
     """Row labels for Tool Health. Counts stay keyed by the registered name.
 
     An external MCP tool shows its remote name. A server abbreviation is added
     only when another tool in the same window would otherwise use that label.
+    If the fitted label drops that abbreviation or collides, the row uses a number.
     """
     calls = list(calls)
     names = {str(getattr(obs, "tool_name", "") or "") for obs in calls}
@@ -164,17 +207,28 @@ def tool_health_labels(calls: Iterable[object], width: int) -> dict[str, str]:
     parsed = {name: _recorded_identity(name, calls) for name in names}
     short = {name: identity[1] if identity else name for name, identity in parsed.items()}
     shared = {label for label, count in Counter(short.values()).items() if count > 1}
-    colliding = [
-        (name, parsed[name][0])
-        for name, label in short.items()
-        if parsed[name] is not None and label in shared
-    ]
-    servers = _distinct_servers(colliding)
-    labels: dict[str, str] = {}
-    for name, identity in parsed.items():
-        remote = short[name]
-        suffix = f" · {servers[name]}" if name in servers else ""
-        labels[name] = _fit_health_label(remote, suffix, width)
+    groups: dict[str, list[str]] = {}
+    for name, label in short.items():
+        if parsed[name] is not None and label in shared:
+            groups.setdefault(label, []).append(name)
+    colliding = {name for group in groups.values() for name in group}
+    labels = {
+        name: _fit_health_label(short[name], "", width)
+        for name in names
+        if name not in colliding
+    }
+    for group_names in groups.values():
+        identities = [parsed[name] for name in group_names]
+        servers = _distinct_servers([
+            (name, identity[0])
+            for name, identity in zip(group_names, identities, strict=True)
+            if identity is not None
+        ])
+        abbreviated, preserved = _abbreviation_labels(group_names, servers, short, width)
+        if preserved and not _labels_conflict({**labels, **abbreviated}):
+            labels.update(abbreviated)
+        else:
+            labels.update(_numbered_labels(group_names, short, set(labels.values()), width))
     return labels
 
 

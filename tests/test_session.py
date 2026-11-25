@@ -69,6 +69,24 @@ def test_turn_timings_survive_restart_and_restore_after_each_answer(tmp_path: Pa
         store.close()
 
 
+def test_tool_display_survives_restart_without_companion(tmp_path: Path) -> None:
+    path = tmp_path / "display.sqlite3"
+    store = SessionStore(path)
+    store.create_session(session_id="s")
+    store.save_tool_display("s", "call", "my__srv", "search")
+    store.close()
+    store = SessionStore(path)
+    try:
+        assert store.tool_display("s") == {"call": ("my__srv", "search")}
+        blocks = messages_to_transcript([
+            AIMessage(content="", tool_calls=[{"id": "call", "name": "mcp__my__srv__search", "args": {}}]),
+        ], identities=store.tool_display("s"))
+        assert (blocks[0].mcp_server, blocks[0].mcp_remote) == ("my__srv", "search")
+        assert blocks[0].name == "mcp__my__srv__search"
+    finally:
+        store.close()
+
+
 def test_draft_restarts_and_new_sessions_do_not_persist(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "draft.sqlite3")
     identifiers = set()

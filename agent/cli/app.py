@@ -47,12 +47,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agent.companion.chart import ActivityHeatmap
 from agent.companion.controller import Companion
 from agent.companion.diagnostic_io import readonly_database
-from agent.companion.timeline import recorded_mcp_identities
 from agent.companion.session_inspector import build_session_inspector
 from agent.companion.theme import ACCENT as COMPANION_ACCENT
 from agent.companion.theme import BORDER as COMPANION_BORDER
 from agent.companion.panel import build_panel, geometry
 from agent.sessions.reader import read_transcript
+from agent.sessions.store import read_tool_display
 from agent.cli.widgets import (
     EDITOR_PADDING_LINES,
     EDITOR_PROMPT,
@@ -230,9 +230,6 @@ class CliApplication:
                 companion_provider=lambda: self.companion,
                 secrets=runner.summary_secrets,
             ),
-        )
-        self.runner.display_identity_source = lambda session_id: recorded_mcp_identities(
-            self.companion.database, session_id,
         )
 
         self.slash_completer = SlashCompleter(
@@ -1331,7 +1328,7 @@ class CliApplication:
             graph = self.runner.prepared.graph.copy({"checkpointer": saver})
             blocks, _, truncated = read_transcript(
                 graph, thread_id, max_messages=400, include_thinking=False,
-                identities=recorded_mcp_identities(self.companion.database, thread_id),
+                identities=read_tool_display(database, thread_id),
             )
             return blocks, truncated
 
