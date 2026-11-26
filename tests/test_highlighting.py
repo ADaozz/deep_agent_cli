@@ -93,4 +93,12 @@ def test_custom_theme_renderer_is_isolated() -> None:
 def test_parse_numbered_change() -> None:
     assert parse_numbered_change("  12- hello") == ("  ", 12, "delete", "hello")
     assert parse_numbered_change("   3+") == ("   ", 3, "add", "")
+    assert parse_numbered_change("   ?+ unknown") == ("   ", None, "add", "unknown")
     assert parse_numbered_change("plain") is None
+
+
+def test_unknown_line_still_lexes_its_body() -> None:
+    highlighter = code_renderer.diff_for_path("demo.py")
+    styled = highlighter.style_body("add", 0, "def foo():")
+    assert styled.plain == "def foo():"
+    assert any(span.style and span.style.color for span in styled.spans)

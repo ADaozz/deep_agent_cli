@@ -28,7 +28,9 @@ from agent.cli.previews import (
     CommandExecutionPreview,
     EXPAND_HINT,
     TASK_EXPAND_HINT,
+    NUMBER_GUTTER,
     ToolPreview,
+    UNKNOWN_LINE_NUMBER,
     hidden_output_notice,
     aggregate_file_mutations,
     build_tool_preview,
@@ -59,8 +61,6 @@ DIFF_DELETE_STAT = "#c50f1f"
 DIFF_TRAIL_BG = "#0c0c0c"
 # Shared style for tree leaders (Ran └ output, explore and SubAgent ├ / │ / └).
 TREE_BRANCH_STYLE = "dim"
-# format_numbered_change gutter. A 1-digit number's digit sits on the tree text column.
-_NUMBER_GUTTER = 4
 
 # PreviewLine style -> Rich style mapping for line-oriented mutation bodies.
 _PREVIEW_LINE_STYLES: dict[str, str] = {
@@ -621,12 +621,13 @@ def _diff_row(
         mark = "-" if diff_kind == "delete" else "+"
         text = Text()
         text.append(indent)
-        text.append(str(number), Style(color="white", bgcolor=bg))
+        text.append(UNKNOWN_LINE_NUMBER if number is None else str(number), Style(color="white", bgcolor=bg))
         text.append(mark, Style(color=marker_fg, bgcolor=bg))
         # format_numbered_change: space before body only when body is non-empty.
         if body:
             text.append(" ", Style(color="white", bgcolor=bg))
-            styled = highlighter.style_body(diff_kind, number, body)
+            # An unknown line has no cached style; the body is still lexed alone.
+            styled = highlighter.style_body(diff_kind, number or 0, body)
             styled.stylize(Style(bgcolor=bg), 0, len(styled))
             text.append_text(styled)
     rows = list(text.wrap(console, available, overflow="fold"))
@@ -1131,21 +1132,15 @@ def _command_card(
     return Padding(Group(*body), (0 if after_user else 1, 0, 0, 0), expand=False)
 
 
-def _mutation_highlighters(preview: ToolPreview):
-    """Primary highlighter plus per-path map for multi-file └ sections."""
+def _mutation_highlighter(preview: ToolPreview):
+    """Body highlighter: the parsed snippet when present, otherwise the path rules."""
     mutation = preview.file_mutation
-    by_path = {}
     if mutation is not None and mutation.diff is not None and mutation.diff.full_diff:
-        primary = code_renderer.diff_from_unified(
+        return code_renderer.diff_from_unified(
             mutation.diff.full_diff, path=mutation.diff.path, language=preview.syntax,
         )
-        by_path[mutation.path] = primary
-        return primary, by_path
     path = mutation.path if mutation is not None else preview.target
-    primary = code_renderer.diff_for_path(path, language=preview.syntax)
-    if path:
-        by_path[path] = primary
-    return primary, by_path
+    return code_renderer.diff_for_path(path, language=preview.syntax)
 
 
 def _section_has_counts(operation: str, added: int, deleted: int) -> bool:
@@ -1154,84 +1149,71 @@ def _section_has_counts(operation: str, added: int, deleted: int) -> bool:
     return operation in {"create", "modify", "overwrite"}
 
 
+def _diff_frame(*, last: bool) -> tuple[str, str, int, int]:
+    """One diff sibling: title branch, spine, title column, number-slot column.
+
+    The number slot from ``format_numbered_change`` ends on the title text
+    column, so a 1-digit number's digit sits there. Its first column is also
+    where a body row starts, which lets a single-path card put ``└`` in the
+    glyph column instead of padding ahead of the number.
+    """
+    branch, spine, text_at = _tree_frame(last=last)
+    return branch, spine, text_at, max(0, text_at - (NUMBER_GUTTER - 1))
+
+
 def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
-    """Create/Edit/Overwrite tree. Single path uses └; multiple use ├ / │ / └."""
+    """Create/Edit/Overwrite tree. One path starts at └; more use ├ / │ / └."""
     mutation = preview.file_mutation
     if mutation is None:
         return []
     console = Console(width=max(20, width))
     body: list[Any] = []
     sections = mutation.sections
-    primary, _by_path = _mutation_highlighters(preview)
-
-    if len(sections) == 1:
-        # The card title already names the path; the body is the last sibling.
-        section = sections[0]
-        branch, _spine, _text_at = _tree_frame(last=True)
-        gutter = len(branch)
-        content_width = max(2, width - gutter)
-        highlighter = (
-            primary if mutation.diff is not None and mutation.diff.full_diff
-            else code_renderer.diff_for_path(section.path)
-        )
-        for index, line in enumerate(section.lines):
-            first = index == 0
-            if line.style in {"add", "delete"}:
-                rows = _diff_row(line.text, line.style, content_width, highlighter=highlighter)
-                for row_index, row in enumerate(rows):
-                    if first and row_index == 0:
-                        body.append(Text.assemble((branch, TREE_BRANCH_STYLE), row))
-                    else:
-                        body.append(_frame_text(row, spine="", column=gutter))
-            elif line.text:
-                text = Text(line.text, style=_PREVIEW_LINE_STYLES[line.style])
-                if first:
-                    body.extend(_wrap_card_line(
-                        Text.assemble((branch, TREE_BRANCH_STYLE), text),
-                        console, width, indent=gutter,
-                    ))
-                else:
-                    body.extend(_wrap_card_line(
-                        _frame_text(text, spine="", column=gutter),
-                        console, width, indent=gutter,
-                    ))
-        for line in mutation.footer:
-            body.extend(_wrap_card_line(
-                Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style]), console, width,
-            ))
-        return body
-
+    single = len(sections) == 1
+    primary = _mutation_highlighter(preview)
     last = len(sections) - 1
+
     for index, section in enumerate(sections):
-        branch, spine, text_at = _tree_frame(last=index == last)
-        # Number gutter is 4 columns; shift so a 1-digit number lands on text_at.
-        gutter = max(0, text_at - (_NUMBER_GUTTER - 1))
-        label = Text(section.path)
-        if _section_has_counts(mutation.operation, section.added, section.deleted):
-            label.append(" (")
-            label.append(f"+{section.added}", style=DIFF_ADD_STAT)
-            label.append(" ")
-            label.append(f"-{section.deleted}", style=DIFF_DELETE_STAT)
-            label.append(")")
-        title = Text.assemble((branch, TREE_BRANCH_STYLE), label)
-        body.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
-        highlighter = code_renderer.diff_for_path(section.path)
-        content_width = max(2, width - gutter)
+        branch, spine, text_at, column = _diff_frame(last=index == last)
+        # The card title already names a single path, so that body opens on the
+        # glyph row; multi-path cards name every path before its rows.
+        if not single:
+            label = Text(section.path)
+            if _section_has_counts(mutation.operation, section.added, section.deleted):
+                label.append(" (")
+                label.append(f"+{section.added}", style=DIFF_ADD_STAT)
+                label.append(" ")
+                label.append(f"-{section.deleted}", style=DIFF_DELETE_STAT)
+                label.append(")")
+            title = Text.assemble((branch, TREE_BRANCH_STYLE), label)
+            body.extend(_wrap_card_line(title, console, width, indent=text_at, spine=spine))
+        highlighter = primary if single else code_renderer.diff_for_path(section.path)
+        content_width = max(2, width - column)
+        rows: list[Text] = []
         for line in section.lines:
             if line.style in {"add", "delete"}:
-                rows = _diff_row(line.text, line.style, content_width, highlighter=highlighter)
-                body.extend(_frame_text(row, spine=spine, column=gutter) for row in rows)
+                rows.extend(
+                    _frame_text(row, spine=spine, column=column)
+                    for row in _diff_row(line.text, line.style, content_width, highlighter=highlighter)
+                )
             elif line.text:
-                body.extend(_framed(
+                rows.extend(_framed(
                     Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]),
-                    spine=spine, column=gutter, console=console, width=width,
+                    spine=spine, column=column, console=console, width=width,
                 ))
+        if single and rows:
+            # Same glyph column, same number slot: swap the blank gutter prefix
+            # for └ without adding padding.
+            rows[0] = Text.assemble((branch[:column], TREE_BRANCH_STYLE), rows[0][column:])
+        body.extend(rows)
+
     for line in mutation.footer:
         if not line.text:
             body.append(Text(""))
             continue
-        text = Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style])
-        body.extend(text.wrap(console, max(1, width - 2), overflow="fold"))
+        body.extend(_wrap_card_line(
+            Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style]), console, width,
+        ))
     return body
 
 
@@ -1241,7 +1223,7 @@ def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
         return _mutation_tree(preview, width)
     body: list[Any] = []
     console = Console(width=max(20, width))
-    primary, _by_path = _mutation_highlighters(preview)
+    primary = _mutation_highlighter(preview)
     for line in preview.lines:
         if not line.text:
             body.append(Text(""))

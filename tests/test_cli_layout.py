@@ -3,7 +3,7 @@
 from langchain_core.messages import AIMessage
 from deepagents.backends import StateBackend
 from prompt_toolkit.application.current import set_app
-from prompt_toolkit.data_structures import Point
+from prompt_toolkit.data_structures import Point, Size
 from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent
@@ -576,9 +576,104 @@ def test_status_line_is_above_editor_and_footer_does_not_repeat_it() -> None:
     _with_painted_app("working-position", scenario)
 
 
+def _queue_layout(app: CliApplication):
+    windows = {window.content: window for window in app.application.layout.find_all_windows()}
+    positions = app.application.renderer._last_screen.visible_windows_to_write_positions
+    return windows, positions
+
+
+def test_queue_messages_sit_above_the_working_status_line() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.run_events._apply_event(RunEvent(type="run_started"))
+        app.runner.control.steer("first follow-up")
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        queue = positions[windows[app.queue_control]]
+        assert queue.ypos + queue.height == status.ypos
+        assert status.ypos < editor.ypos
+        # One row between the status line and the editor is input-box chrome.
+        gap = editor.ypos - status.ypos
+        baseline = (status.ypos, editor.ypos, gap)
+        one = (queue.ypos, queue.height)
+
+        app.runner.control.steer("second follow-up")
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        queue = positions[windows[app.queue_control]]
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        assert queue.height == one[1] + 1
+        assert queue.ypos + queue.height == status.ypos
+        assert (status.ypos, editor.ypos, gap) == baseline
+
+        app.runner.control.pop_steering()
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        queue = positions[windows[app.queue_control]]
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        assert (queue.ypos, queue.height) == one
+        assert (status.ypos, editor.ypos, gap) == baseline
+
+        app.runner.control.pop_steering()
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        assert windows[app.queue_control] not in positions
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        assert (status.ypos, editor.ypos, gap) == baseline
+        assert "Working" in "".join(value for _, value in app._status_text())
+
+    _with_painted_app("queue-above-status", scenario)
+
+
+def test_long_queue_keeps_status_attached_across_resize() -> None:
+    def scenario(app: CliApplication) -> None:
+        size = [Size(rows=24, columns=60)]
+        app.application.output.get_size = lambda: size[0]
+        app.run_events._apply_event(RunEvent(type="run_started"))
+        for index in range(6):
+            app.runner.control.steer(f"queued message {index} " + "长消息" * 8)
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        queue = positions[windows[app.queue_control]]
+        rows = app._queue_preview_cache[2]
+        assert rows > 24 // 3
+        assert app._queue_height().max == max(1, 24 // 3)
+        assert 1 <= queue.height <= max(1, 24 // 3)
+        assert queue.height < rows
+        assert queue.ypos + queue.height == status.ypos
+        assert status.ypos < editor.ypos
+
+        # On a short terminal the queue yields rows instead of pushing Working.
+        size[0] = Size(rows=12, columns=40)
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        queue = positions[windows[app.queue_control]]
+        assert 1 <= queue.height <= max(1, 12 // 3)
+        assert queue.ypos + queue.height == status.ypos
+        assert status.ypos < editor.ypos
+        screen = app.application.renderer._last_screen
+        text = "\n".join(
+            "".join(screen.data_buffer[y][x].char for x in range(40)).rstrip()
+            for y in range(12)
+        )
+        assert "Window too small" not in text
+        assert "Working" in text
+
+    _with_painted_app("queue-resize", scenario, lines=5)
+
+
 @pytest.mark.parametrize("steering,follow_up", [(1, 0), (0, 1), (1, 2)])
 def test_completed_status_shows_pending_queue_and_hides_when_drained(monkeypatch, steering, follow_up) -> None:
     runner = AgentRunner(
+
         model=scripted_model([AIMessage(content="unused")]),
         backend=StateBackend(), thread_id="completed-queue",
     )
@@ -1439,3 +1534,54 @@ def test_process_stdin_sync_and_async_share_result_handling(monkeypatch) -> None
 
         assert asyncio.run(dispatch()) is False
         assert handled == [("exec-1", "ack failed"), ("exec-1", "ack failed")]
+
+
+def test_queue_keeps_working_above_process_input_banner() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.run_events._apply_event(RunEvent(type="run_started"))
+        app.attach_process_input("exec-1", "pipe")
+        app.runner.control.steer("queued while attached")
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        queue = positions[windows[app.queue_control]]
+        status = positions[windows[app.status_control]]
+        editor = positions[windows[app.editor_control]]
+        assert queue.ypos + queue.height == status.ypos
+        assert status.ypos < editor.ypos
+        screen = app.application.renderer._last_screen
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(app._width()))
+            for y in range(app.application.output.get_size().rows)
+        ]
+        banner = next(y for y, row in enumerate(rows) if "Process stdin" in row)
+        assert status.ypos < banner < editor.ypos
+        assert "Window too small" not in "\n".join(rows)
+
+    _with_painted_app("queue-process-input", scenario)
+
+
+def test_queue_stays_below_the_approval_panel() -> None:
+    def scenario(app: CliApplication) -> None:
+        app.run_events._apply_event(RunEvent(type="run_started"))
+        app.runner.control.steer("queued during approval")
+        app.dialogs.current = InteractionController.approval([{
+            "id": "call-1", "name": "execute", "args": {"command": "ls"},
+        }])
+        app.state.status = "Waiting for input"
+        _paint(app)
+        windows, positions = _queue_layout(app)
+        dialog = positions[windows[app.interaction_control]]
+        queue = positions[windows[app.queue_control]]
+        status = positions[windows[app.status_control]]
+        assert dialog.ypos + dialog.height <= queue.ypos
+        assert queue.ypos < status.ypos
+        screen = app.application.renderer._last_screen
+        rows = [
+            "".join(screen.data_buffer[y][x].char for x in range(app._width())).rstrip()
+            for y in range(app.application.output.get_size().rows)
+        ]
+        assert any("Approve tool call?" in row for row in rows[:dialog.ypos + dialog.height])
+        assert "queued during approval" in "\n".join(rows)
+        assert "Window too small" not in "\n".join(rows)
+
+    _with_painted_app("queue-approval", scenario)

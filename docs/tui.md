@@ -115,7 +115,7 @@ MCP 服务端日志、OAuth 客户端日志及相关 SDK 警告只写后台文�
 - **Steering**（`Enter`）：在下一次模型调用之前或模型提出的工具调用开始之前交给 Agent。若模型返回时已有 steering 在排队，这批尚未进入审批或执行的工具调用会被丢弃，模型带着新输入重新推理。已经在等待审批的调用仍需处理，已经开始执行的工具会先完成。
 - **Follow-up**（`Alt+Enter`）：当前任务结束后作为新一轮输入执行。
 - 已有排队消息时，后续输入继续追加到队尾；steering 不会越过更早入队的 follow-up。
-- 排队消息显示在 TUI 的独立区域，标题为 `Messages to be submitted after next tool call (press esc to restore to input, enter twice to interrupt and send immediately)`，下方按 `↳ 消息` 逐条显示。可滚动查看；实际取用后才进入对话记录。按 Esc 或 Alt+Up 撤回队列到输入框，不中断当前任务；与 Ctrl+C 使用相同的 1 秒双击窗口；连续按两次 Enter，中断当前任务并在停止后发送队列，同时在对话区显示 `• Model interrupted to submit steer instructions.`。任务结束交接期间收到的消息也会自动继续处理。
+- 排队消息显示在 TUI 的独立区域，位于 Working 状态栏上方，标题为 `Messages to be submitted after next tool call (press esc to restore to input, enter twice to interrupt and send immediately)`，下方按 `↳ 消息` 逐条显示。状态栏始终紧贴输入框：消息出现、增加或撤回时只改变排队区自身，不会把 Working 顶离输入框；短终端下排队区优先让出行高。可滚动查看；实际取用后才进入对话记录。按 Esc 或 Alt+Up 撤回队列到输入框，不中断当前任务；与 Ctrl+C 使用相同的 1 秒双击窗口；连续按两次 Enter，中断当前任务并在停止后发送队列，同时在对话区显示 `• Model interrupted to submit steer instructions.`。任务结束交接期间收到的消息也会自动继续处理。
 - **取消**（`Esc`）：终止正在运行的命令（向进程组发送 `SIGKILL`），结束本轮。
 - 切换或新建会话时，未生效的 steering / follow-up 会退回输入框。
 
@@ -201,7 +201,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 - **命令输出**：运行中显示 `Running <命令>`，成功后变为 `Ran <命令>`。命令正文默认保留前 4 个显示行（`ui.head_lines`），实时输出保留按当前终端宽度折行后的最后 4 个显示行（`ui.tail_lines`），标题和隐藏提示另计，`Ctrl+O` 展开。失败时显示退出码和简短错误。
 - **探索类工具**只有 `ls` 和 `read`。连续调用合并为一张卡片：有运行中的成员时标题是 `Exploring N items`，全部成功后是 `Explored N items`；存在等待、失败或中断且没有运行中成员时用中性 `Explore` 并附状态提示。每一行与展开后的单卡使用同一标题：运行中是 `Listing` / `Reading`，成功后是 `Listed` / `Read`。历史会话里的 `grep`、`glob` 不再进入这张卡片，按工具名单独显示。
 - **其他工具标题**同样由预览层按状态给出。网页搜索是 `Searching Web "..."` / `Searched Web "..."`，抓取是 `Fetching` / `Fetched`。外部 MCP 是 `Calling MCP <服务> · <工具>` / `Called MCP <服务> · <工具>`，不按远程工具名分叉。`mcp_list` 是 `Listing MCP Servers` / `Listed MCP Servers`；`mcp_add` 与 `mcp_remove` 是 `Adding` / `Added`、`Removing` / `Removed`，只看工具状态，不从返回文本判断服务器是否真的变更。`request_human_input` 等待用户时是 `Asking <问题>`，成功后是 `Asked <问题>`，不再另附 `waiting for input`。`cancel_task` 成功后是 `Requested Task Cancellation`，表示取消请求已经返回，不表示子任务已经停止。失败、取消、中断和等待审批不使用成功过去式；失败标题只写一次 `Failed`。
-- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。`Edited` / `Wrote` 标题带 `(+n -m)`；`Created` 仅在新建文件附带非空内容时带 `(+n -0)` 并显示内容预览。单文件摘要行与 diff 块之间无空行。连续成功的同语义变更若涉及多个路径，合并为 `Edited N files (+total)` / `Created N files` / `Wrote N files`。单文件和多文件的 `Created` / `Edited` / `Wrote` 共用同一套灰色树干：单文件正文以 `└` 起始；多文件路径行使用 `├` / `└`，非最后一个文件的 diff 行左侧保留 `│`，最后一个文件和单文件内容只缩进、不再画竖线。同一路径的所有 Edit（包括在多文件组中重复出现的路径）合并为一个 diff 区域，不再显示 `Edit N` 或逐次标题：全部变更行按实际文件行号升序排列，同一行号新增在前、删除在后，排序后再统一应用 `ui.head_lines` 预算。行号来自 Edit 执行时记录的匹配起始位置；历史会话缺少该元数据时退回该次替换片段的相对行号，不伪造绝对行号。某路径有未展示的行时，在行号槽显示灰色 `⋮`，卡片底部汇总隐藏行数；单文件和多文件一致。`Ctrl+R` 与 `Ctrl+O` 共用同一条原卡片展开：显示全部变更行，保留树形连接线、行号和增删底色，不再画 `⋮`、隐藏提示或 unified diff 头，周围消息留在原处；再按一次收起。文件变更卡片、`read` 展开与助手 Markdown 围栏共用独立的 `CodeRenderer`（Pygments Lexer + `VSCodeDarkPlusStyle`，对齐 VS Code Dark+）；diff 在保留增删底色的同时叠加 token 前景色，旧/新两侧分别词法以免串色。
+- **文件变更**：运行中显示 `Editing`、`Writing`、`Deleting`，成功后分别显示 `Edited`、`Created` / `Wrote`、`Deleted`。`Edited` / `Wrote` 标题带 `(+n -m)`；`Created` 仅在新建文件附带非空内容时带 `(+n -0)` 并显示内容预览。单文件摘要行与 diff 块之间无空行。连续成功的同语义变更若涉及多个路径，合并为 `Edited N files (+total)` / `Created N files` / `Wrote N files`。单文件和多文件的 `Created` / `Edited` / `Wrote` 共用同一套灰色树干：单文件正文以 `└` 起始；多文件路径行使用 `├` / `└`，非最后一个文件的 diff 行左侧保留 `│`，最后一个文件和单文件内容只缩进、不再画竖线。同一路径的所有 Edit（包括在多文件组中重复出现的路径）合并为一个 diff 区域，不再显示 `Edit N` 或逐次标题：全部变更行按实际文件行号升序排列，同一行号新增在前、删除在后，排序后再统一应用 `ui.head_lines` 预算。行号来自 Edit 执行时记录的每个实际匹配位置；`replace_all` 的全部匹配都按真实文件行号展示，后续匹配的新增行计入前面匹配的增删行差。历史会话缺少该元数据时统一显示未知行号 `?`，不把片段相对行号当作真实文件行号，并保留原始变更顺序；已知行号仍按文件位置排序。某路径有未展示的行时，在行号槽显示灰色 `⋮`，卡片底部汇总隐藏行数；单文件和多文件一致。`Ctrl+R` 与 `Ctrl+O` 共用同一条原卡片展开：显示全部变更行，保留树形连接线、行号和增删底色，不再画 `⋮`、隐藏提示或 unified diff 头，周围消息留在原处；再按一次收起。文件变更卡片、`read` 展开与助手 Markdown 围栏共用独立的 `CodeRenderer`（Pygments Lexer + `VSCodeDarkPlusStyle`，对齐 VS Code Dark+）；diff 在保留增删底色的同时叠加 token 前景色，旧/新两侧分别词法以免串色。
 - 每轮结束显示 `Worked for <耗时> · <结束时间>`，时区由 `ui.timezone` 决定。耗时写入会话数据库，恢复会话时重建历史回合的耗时行；升级前未记录耗时的旧回合不补算。
 
 所有折叠行数可在配置的 `ui` 部分调整，见 [configuration.md](configuration.md#界面ui)。
@@ -209,7 +209,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 ## 状态栏与底栏
 
 - `/status details` 按“模型 + 推理强度”分组，例如 `deepseek-flash-low`；每组下方仅缩进显示 5% low / 5% top / Average TPS 三项。状态栏不显示性能指标，任务完成后照常隐藏。
-- 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、运行中的 SubAgent 数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。排队内容在独立区域显示。
+- 输入框上方的状态栏显示运行状态（如 `Working…  Esc to cancel`）、运行中的 SubAgent 数量和提示；运行时旁边轮换显示 `working_messages.yaml` 中的文案。排队内容显示在状态栏上方的独立区域，不改变状态栏与输入框的位置。
 - 权限或模型切换排队、输入清空、复制成功等临时提示在该位置显示 1 秒后恢复原状态；工作中、取消中、交互选择和待审批状态持续显示。临时提示自动消失不会删除聊天记录中的相关消息。
 - 底栏第一行：工作区路径、当前模型、会话中文摘要（无摘要时显示 thread_id）。当前用户家目录缩写为 `~/`，例如 `/home/neo/project` 显示为 `~/project`；仅改变显示，不改变实际访问路径。
 - 底栏第二行：运行状态、执行模式、权限模式；右侧为上下文占用。

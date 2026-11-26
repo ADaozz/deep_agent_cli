@@ -1154,6 +1154,7 @@ def test_edit_counts_are_colored_and_changed_lines_are_numbered(monkeypatch) -> 
             "old_string": "first\nsecond\nthird",
             "new_string": "first\nchanged\nthird",
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = render_transcript(CliState(blocks=[block]), 100)
@@ -1172,6 +1173,7 @@ def test_consecutive_edits_to_same_file_share_one_card_and_review() -> None:
     blocks = [ToolBlock(
         tool_call_id=f"edit-{index}", name="edit",
         arguments={"file_path": path, "old_string": f"old {index}", "new_string": f"entry {index}"},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     ) for index in range(4)]
     state = CliState(blocks=blocks)
@@ -1198,6 +1200,7 @@ def test_grouped_edits_use_one_sorted_file_line_body() -> None:
     blocks = [ToolBlock(
         f"edit-{index}", "edit",
         {"file_path": "/workspace/App.vue", "old_string": old, "new_string": new},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     ) for index, (old, new) in enumerate([
         ("context\nold first", "context\nnew first"),
@@ -1383,6 +1386,7 @@ def test_diff_background_covers_line_number_through_content_and_leaves_trail(mon
             "old_string": "old",
             "new_string": "x" * 80,
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     write = ToolBlock(
@@ -1436,7 +1440,10 @@ def test_edit_changed_rows_use_content_width_without_context(monkeypatch) -> Non
         "old_string": "keep\nold\nend",
         "new_string": "keep\nnew\nend",
     }
-    block = ToolBlock("edit-width", "edit", args, status="completed")
+    block = ToolBlock(
+        "edit-width", "edit", args,
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed",
+    )
     rendered = render_transcript(CliState(blocks=[block], diffs_expanded=True), 50)
     plain = _plain(rendered)
     assert re.search(r"(?m)^\s+2- old", plain)
@@ -1533,6 +1540,7 @@ def test_edit_preview_pure_deletion_over_budget() -> None:
         tool_call_id="edit-del",
         name="edit",
         arguments={"file_path": "/workspace/f.md", "old_string": old, "new_string": ""},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     state = CliState(blocks=[block])
@@ -1679,6 +1687,7 @@ def test_edit_preview_many_deletions_keep_one_addition() -> None:
         tool_call_id="edit-floor-plus",
         name="edit",
         arguments={"file_path": "/workspace/file.md", "old_string": old, "new_string": "replaced"},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     state = CliState(blocks=[block])
@@ -1709,6 +1718,7 @@ def test_edit_preview_many_additions_keep_one_deletion() -> None:
         tool_call_id="edit-floor-minus",
         name="edit",
         arguments={"file_path": "/workspace/file.md", "old_string": "keep", "new_string": new},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
@@ -1733,6 +1743,7 @@ def test_edit_preview_under_budget_shows_all_without_hidden_hint() -> None:
         tool_call_id="edit-small",
         name="edit",
         arguments={"file_path": "/workspace/notes.md", "old_string": "l1\nl2\nl3", "new_string": "n1\nn2"},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=8)))
@@ -1762,6 +1773,7 @@ def test_edit_preview_pairs_same_number_add_before_delete() -> None:
                 "after"
             ),
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     lines = build_tool_preview(block).lines
@@ -1783,6 +1795,7 @@ def test_edit_preview_hunk_jumps_stay_unmarked() -> None:
             "old_string": f"old1\n{keep}\nold2",
             "new_string": f"new1\n{keep}\nnew2",
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
@@ -1802,6 +1815,7 @@ def test_edit_preview_single_hunk_never_shows_separator() -> None:
         tool_call_id="edit-single-hunk",
         name="edit",
         arguments={"file_path": "/workspace/notes.md", "old_string": "a\nb\nc", "new_string": "a\nb\nx"},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block).lines]
@@ -1819,6 +1833,7 @@ def test_edit_preview_hunk_jumps_do_not_consume_budget() -> None:
             "old_string": f"A\n{keep_p}\nB1\nB2\n{keep_q}\nD",
             "new_string": f"A2\n{keep_p}\nB\n{keep_q}\nD1\nD2",
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
@@ -1838,6 +1853,7 @@ def test_edit_preview_hidden_count_counts_only_changed_lines() -> None:
         tool_call_id="edit-hidden-count",
         name="edit",
         arguments={"file_path": "/workspace/file.md", "old_string": old, "new_string": keep},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     texts = [_without_diff_number(line.text) for line in build_tool_preview(block, limits=UiDisplayLimits(head_lines=8)).lines]
@@ -3057,3 +3073,81 @@ def test_historical_grep_and_glob_use_generic_preview() -> None:
         ToolBlock("gl", "glob", {"pattern": "**/*.py"}, status="running"),
     ]), 100))
     assert "Exploring" not in rendered and "Explored" not in rendered
+
+
+def test_single_and_multi_file_cards_share_diff_alignment() -> None:
+    edit = {"file_path": "/workspace/app.py", "old_string": "b", "new_string": "B"}
+    cards = {
+        "single-edit": [ToolBlock(
+            "e", "edit", edit,
+            artifact={"edit_start_lines": [7], "edit_occurrences": 1}, status="completed",
+        )],
+        "single-create": [ToolBlock(
+            "c", "write", {"file_path": "/workspace/app.py", "content": "x\ny"},
+            artifact={"operation": "create"}, status="completed",
+        )],
+        "single-overwrite": [ToolBlock(
+            "o", "write", {"file_path": "/workspace/app.py", "content": "x\ny"},
+            artifact={"operation": "overwrite"}, status="completed",
+        )],
+    }
+    multi = {
+        "multi-edit": [
+            ToolBlock("e1", "edit", edit,
+                      artifact={"edit_start_lines": [7], "edit_occurrences": 1}, status="completed"),
+            ToolBlock("e2", "edit",
+                      {"file_path": "/workspace/other.py", "old_string": "c", "new_string": "C"},
+                      artifact={"edit_start_lines": [12], "edit_occurrences": 1}, status="completed"),
+        ],
+        "multi-create": [
+            ToolBlock("c1", "write", {"file_path": "/workspace/a.py", "content": "x"},
+                      artifact={"operation": "create"}, status="completed"),
+            ToolBlock("c2", "write", {"file_path": "/workspace/b.py", "content": "y"},
+                      artifact={"operation": "create"}, status="completed"),
+        ],
+        "multi-overwrite": [
+            ToolBlock("o1", "write", {"file_path": "/workspace/a.py", "content": "x"},
+                      artifact={"operation": "overwrite"}, status="completed"),
+            ToolBlock("o2", "write", {"file_path": "/workspace/b.py", "content": "y"},
+                      artifact={"operation": "overwrite"}, status="completed"),
+        ],
+    }
+
+    def body_line(blocks: list[ToolBlock], needle: str) -> str:
+        rendered = _plain(render_transcript(CliState(blocks=blocks), 60))
+        return next(line for line in rendered.splitlines() if needle in line)
+
+    # The glyph row starts the number slot directly; no extra spacer.
+    single_edit = body_line(cards["single-edit"], "7+ B")
+    assert "  └   7+ B" in _plain(render_transcript(CliState(blocks=cards["single-edit"]), 60))
+    multi_edit = body_line(multi["multi-edit"], "7+ B")
+    assert single_edit.replace("└", "│") == multi_edit
+
+    samples = [
+        (cards["single-edit"], "7", "+", "B"),
+        (cards["single-create"], "1", "+", "x"),
+        (cards["single-overwrite"], "1", "+", "x"),
+        (multi["multi-edit"], "7", "+", "B"),
+        (multi["multi-create"], "1", "+", "x"),
+        (multi["multi-overwrite"], "1", "+", "x"),
+        (multi["multi-edit"], "12", "+", "C"),
+        (multi["multi-create"], "1", "+", "y"),
+    ]
+    positions = set()
+    for blocks, number, mark, body in samples:
+        needle = f"{number}{mark} {body}"
+        line = body_line(blocks, needle)
+        at = line.index(needle)
+        marker_at = at + len(number)
+        content_at = marker_at + 2
+        assert line[marker_at] == mark
+        assert line[marker_at - 1] == number[-1]
+        assert line[content_at] == body
+        positions.add((marker_at, content_at))
+    assert positions == {(7, 9)}
+
+    wide_lines = _plain(render_transcript(CliState(blocks=multi["multi-edit"]), 36)).splitlines()
+    card_at = next(i for i, line in enumerate(wide_lines) if "Edited 2 files" in line)
+    assert all(len(line) < 36 for line in wide_lines[card_at:])
+    assert any("│" in line for line in wide_lines[card_at:])
+    assert any("└" in line for line in wide_lines[card_at:])

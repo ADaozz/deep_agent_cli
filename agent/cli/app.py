@@ -538,6 +538,9 @@ class CliApplication:
                 ),
                 filter=interaction_visible,
             ),
+            # Queue sits above the status line so Working stays next to the
+            # editor: growing or draining messages never moves it.
+            ConditionalContainer(self.queue_window, filter=Condition(self._queue_expanded)),
             ConditionalContainer(
                 Window(
                     self.status_control,
@@ -549,7 +552,6 @@ class CliApplication:
                 ),
                 filter=Condition(self._status_visible),
             ),
-            ConditionalContainer(self.queue_window, filter=Condition(self._queue_expanded)),
             ConditionalContainer(
                 self.interaction_bottom_divider_window,
                 filter=interaction_visible | Condition(lambda: self.state.status == "Waiting for input"),
@@ -1560,7 +1562,9 @@ class CliApplication:
         self._queue_text()
         rows = self.application.output.get_size().rows
         height = min(self._queue_preview_cache[2], max(1, rows // 3))
-        return Dimension.exact(height)
+        # Preferred, not exact: the queue sits above the status line and must
+        # yield rows on a short terminal so Working stays next to the editor.
+        return Dimension(min=1, preferred=height, max=height)
 
     def _queue_offset(self, maximum: int) -> int:
         self._queue_scroll = max(0, min(self._queue_scroll, maximum))

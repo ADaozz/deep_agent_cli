@@ -63,17 +63,31 @@ _MOUNT_DELETE = "Permission denied: cannot delete a sandbox mount point"
 
 @dataclass
 class _LineEditResult(EditResult):
-    """EditResult carrying the real first-line position of the replaced text."""
+    """EditResult carrying the real start line of every replaced match."""
 
-    edit_start_line: int | None = None
+    edit_start_lines: tuple[int, ...] = ()
+
+
+def _match_start_lines(content: str, old_string: str) -> list[int]:
+    """Start line of every non-overlapping match, in `str.replace` order."""
+    if not old_string:
+        return []
+    lines: list[int] = []
+    index = content.find(old_string)
+    while index != -1:
+        lines.append(content.count("\n", 0, index) + 1)
+        index = content.find(old_string, index + len(old_string))
+    return lines
 
 
 class LineNumberedFilesystemBackend(FilesystemBackend):
-    """FilesystemBackend that reports where the edit match actually started.
+    """FilesystemBackend that reports where each edit match actually started.
 
-    The edit still reads and writes the file exactly once. The start line is
-    derived from the content already in hand, never from a second read or a
-    stored snapshot.
+    Read, replace, and write keep the upstream `FilesystemBackend.edit`
+    semantics: the decision comes from the same `perform_string_replacement`
+    helper, the file is read and written exactly once, and error text is
+    unchanged. The only addition is the match start lines, derived from the
+    content already in hand — never a second read or a stored snapshot.
     """
 
     def edit(
@@ -93,7 +107,7 @@ class LineNumberedFilesystemBackend(FilesystemBackend):
                 return EditResult(error=f"Error: File '{file_path}' not found")
 
             # Same secure read as FilesystemBackend.edit; the content is reused
-            # for both replacement and the actual start line.
+            # for both replacement and the actual match positions.
             fd = os.open(resolved_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -106,8 +120,7 @@ class LineNumberedFilesystemBackend(FilesystemBackend):
                 return EditResult(error=result)
 
             new_content, occurrences = result
-            index = content.find(old_string)
-            start_line = content.count("\n", 0, index) + 1 if index >= 0 else None
+            start_lines = tuple(_match_start_lines(content, old_string))
 
             flags = os.O_WRONLY | os.O_TRUNC
             if hasattr(os, "O_NOFOLLOW"):
@@ -116,9 +129,9 @@ class LineNumberedFilesystemBackend(FilesystemBackend):
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(new_content)
 
-            record_edit_position(start_line=start_line, occurrences=int(occurrences))
+            record_edit_position(start_lines=start_lines, occurrences=int(occurrences))
             return _LineEditResult(
-                path=file_path, occurrences=int(occurrences), edit_start_line=start_line,
+                path=file_path, occurrences=int(occurrences), edit_start_lines=start_lines,
             )
         except (OSError, UnicodeDecodeError, UnicodeEncodeError) as e:
             return EditResult(error=f"Error editing file '{file_path}': {e}")

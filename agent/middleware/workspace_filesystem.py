@@ -130,11 +130,11 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
 
     @staticmethod
     def _edit_artifact(result: Any, capture: EditPositionCapture) -> Any:
-        """Pass the backend's real match position through structured metadata."""
-        if not isinstance(result, ToolMessage) or result.status == "error" or capture.start_line is None:
+        """Pass the backend's real match positions through structured metadata."""
+        if not isinstance(result, ToolMessage) or result.status == "error" or not capture.start_lines:
             return result
         artifact = dict(result.artifact) if isinstance(result.artifact, Mapping) else {}
-        artifact["edit_start_line"] = capture.start_line
+        artifact["edit_start_lines"] = list(capture.start_lines)
         if capture.occurrences is not None:
             artifact["edit_occurrences"] = capture.occurrences
         return result.model_copy(update={"artifact": artifact})
