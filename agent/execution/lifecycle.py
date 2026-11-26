@@ -57,6 +57,8 @@ class CommandSession:
     has_injected_secrets: bool = False
     emit: ToolOutputEmitter | None = None
     cancel_context: ToolCancelContext | None = field(default=None, repr=False)
+    on_release_redaction_hold: Callable[[], Any] | None = field(default=None, repr=False)
+    _hold_released: bool = field(default=False, repr=False)
     _execution_id: str = field(init=False, default="")
     _stdin_mode: str = field(init=False, default="none")
     _cv: threading.Condition = field(default_factory=threading.Condition, repr=False)
@@ -151,6 +153,20 @@ class CommandSession:
                     self._emit_finished()
                 except Exception:  # noqa: BLE001
                     pass
+                self._release_redaction_hold()
+
+    def _release_redaction_hold(self) -> None:
+        with self._cv:
+            if self._hold_released:
+                return
+            self._hold_released = True
+            callback = self.on_release_redaction_hold
+            self.on_release_redaction_hold = None
+        if callable(callback):
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _terminate_unconfirmed_process(self) -> None:
         """Kill and confirm termination before releasing handle when pump fails mid-run."""

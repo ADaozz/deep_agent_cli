@@ -172,15 +172,8 @@ def _consumer_matches(authorized: Iterable[str], requested: str | None, scope: S
     allowed = set(authorized)
     if scope == "sandbox":
         return requested == "sandbox" and ("sandbox" in allowed or "*" in allowed)
-    # Host scope: exact match (e.g. "mcp:github@https://...") or server-level grant
-    if requested in allowed or "host:*" in allowed:
-        return True
-    if requested.startswith("mcp:"):
-        # Allow exact "mcp:<server>@<target>" or explicit "mcp:<server>" grant.
-        server_prefix, _, _target = requested.partition("@")
-        if server_prefix in allowed:
-            return True
-    return False
+    # Host scope requires exact target/fingerprint consumer match (or explicit host:*).
+    return requested in allowed or "host:*" in allowed
 
 
 class SecretStore:
@@ -205,9 +198,14 @@ class SecretStore:
         self._environ = os.environ if environ is None else environ
         self._lock = threading.RLock()
         self._session_entries: dict[str, dict[str, _SecretRecord]] = {}
-        # Keep retired values in memory for the process lifetime so running background
-        # processes cannot leak a recently rotated or deleted credential before exit.
-        self._retired_refs: list[SecretRef] = []
+        # In-memory cache of persistent records keyed by name -> ((ino, mtime_ns, size), record).
+        # Avoids repeated disk locks & Fernet decryptions on hot-path streaming redaction.
+        self._persistent_cache: dict[str, tuple[tuple[int, int, int], _SecretRecord]] = {}
+        self._persistent_loaded = False
+        # Deduplicated retired credentials retained while active turns/executions hold a reference;
+        # reclaimed once all redaction holds release or via prune_retired().
+        self._retired_refs: dict[tuple[str, str], SecretRef] = {}
+        self._redaction_holds = 0
 
     def _file_lock(self):
         if self.directory.exists() and self.directory.is_symlink():
@@ -291,6 +289,9 @@ class SecretStore:
             os.chmod(temp_path, 0o600)
             os.replace(temp_path, target)
             os.chmod(target, 0o600)
+            st = os.lstat(target)
+            self._persistent_cache[record.name] = ((st.st_ino, st.st_mtime_ns, st.st_size), record)
+            self._persistent_loaded = True
         except BaseException:
             try:
                 os.unlink(temp_path)
@@ -300,7 +301,92 @@ class SecretStore:
 
     def _retire_locked(self, name: str, value: str) -> None:
         if value:
-            self._retired_refs.append(SecretRef(name=name, value=value, raw=False))
+            self._retired_refs[(name, value)] = SecretRef(name=name, value=value, raw=False)
+
+    def _refresh_persistent_cache_locked(self) -> dict[str, _SecretRecord]:
+        """Refresh persistent cache using cheap stat keys; decrypt only new/modified entries."""
+        if not self.entries_dir.is_dir():
+            self._persistent_cache.clear()
+            self._persistent_loaded = True
+            return {}
+        try:
+            with self._file_lock():
+                fernet: Fernet | None = None
+                seen: set[str] = set()
+                for path in sorted(self.entries_dir.glob("*.enc")):
+                    name = path.stem
+                    if not valid_secret_name(name):
+                        continue
+                    seen.add(name)
+                    try:
+                        st = os.lstat(path)
+                    except OSError:
+                        continue
+                    if path.is_symlink():
+                        continue
+                    stat_key = (st.st_ino, st.st_mtime_ns, st.st_size)
+                    cached = self._persistent_cache.get(name)
+                    if cached is not None and cached[0] == stat_key:
+                        continue
+                    try:
+                        if fernet is None:
+                            fernet = load_or_create_fernet(self.directory)
+                        rec = self._read_persistent_locked(name, fernet)
+                        if rec is not None:
+                            if cached is not None and cached[1].value != rec.value:
+                                self._retire_locked(cached[1].name, cached[1].value)
+                            self._persistent_cache[name] = (stat_key, rec)
+                    except OSError:
+                        # Keep any previously cached record so transient disk errors do not drop redaction.
+                        continue
+                for stale in list(self._persistent_cache):
+                    if stale not in seen:
+                        old_rec = self._persistent_cache.pop(stale)[1]
+                        self._retire_locked(old_rec.name, old_rec.value)
+                self._persistent_loaded = True
+        except OSError:
+            # Keep last-known in-memory cache intact on store-level I/O failure.
+            pass
+        return {name: entry[1] for name, entry in self._persistent_cache.items()}
+
+    def acquire_redaction_hold(self) -> None:
+        """Pin retired secret values while a turn or execution can still emit them."""
+        with self._lock:
+            self._redaction_holds += 1
+
+    def release_redaction_hold(self) -> int:
+        """Release a hold and reclaim retired secret refs once zero holds remain."""
+        with self._lock:
+            if self._redaction_holds > 0:
+                self._redaction_holds -= 1
+            if self._redaction_holds == 0 and self._retired_refs:
+                reclaimed = len(self._retired_refs)
+                self._retired_refs.clear()
+                return reclaimed
+            return 0
+
+    def prune_retired(self, *, force: bool = False) -> int:
+        """Reclaim retired secret references when safe (no active redaction holds, or forced)."""
+        with self._lock:
+            if not force and self._redaction_holds > 0:
+                return 0
+            reclaimed = len(self._retired_refs)
+            self._retired_refs.clear()
+            return reclaimed
+
+    @property
+    def retired_count(self) -> int:
+        with self._lock:
+            return len(self._retired_refs)
+
+    def has_session_secret(self, name: str) -> bool:
+        """Metadata-only check for whether ``name`` exists in any active session's memory."""
+        try:
+            validated = validate_secret_name(name)
+        except ValueError:
+            return False
+        with self._lock:
+            return any(validated in bucket for bucket in self._session_entries.values())
 
     def get_metadata(
         self,
@@ -485,9 +571,12 @@ class SecretStore:
                         try:
                             if prior_bytes is None:
                                 path.unlink(missing_ok=True)
+                                self._persistent_cache.pop(name, None)
                             else:
                                 path.write_bytes(prior_bytes)
                                 os.chmod(path, 0o600)
+                                self._persistent_cache.pop(name, None)
+                                self._persistent_loaded = False
                         except OSError:
                             pass
                     raise
@@ -533,6 +622,34 @@ class SecretStore:
                             self._write_persistent_locked(rec, fernet)
                         return True
         return False
+
+    def revoke_consumer(
+        self,
+        name: str,
+        consumer: str,
+        *,
+        session_id: str | None = None,
+    ) -> bool:
+        """Revoke ``consumer`` authorization from a managed credential."""
+        validated = validate_secret_name(name)
+        if not consumer:
+            return False
+        revoked = False
+        with self._lock:
+            if session_id:
+                rec = self._session_entries.get(session_id, {}).get(validated)
+                if rec is not None and consumer in rec.consumers:
+                    rec.consumers = tuple(c for c in rec.consumers if c != consumer)
+                    revoked = True
+            if self.entries_dir.is_dir():
+                with self._file_lock():
+                    fernet = load_or_create_fernet(self.directory)
+                    rec = self._read_persistent_locked(validated, fernet)
+                    if rec is not None and consumer in rec.consumers:
+                        rec.consumers = tuple(c for c in rec.consumers if c != consumer)
+                        self._write_persistent_locked(rec, fernet)
+                        revoked = True
+        return revoked
 
     def resolve_secret(
         self,
@@ -603,18 +720,11 @@ class SecretStore:
         """Return all authorized ``sandbox``-scoped managed credentials for ``session_id``."""
         merged: dict[str, str] = {}
         with self._lock:
-            if self.entries_dir.is_dir():
-                with self._file_lock():
-                    fernet = load_or_create_fernet(self.directory)
-                    for path in sorted(self.entries_dir.glob("*.enc")):
-                        name = path.stem
-                        if not valid_secret_name(name):
-                            continue
-                        rec = self._read_persistent_locked(name, fernet)
-                        if rec is not None and rec.scope == "sandbox" and _consumer_matches(
-                            rec.consumers, "sandbox", "sandbox"
-                        ):
-                            merged[rec.name] = rec.value
+            pers_records = self._refresh_persistent_cache_locked()
+            for name in sorted(pers_records):
+                rec = pers_records[name]
+                if rec.scope == "sandbox" and _consumer_matches(rec.consumers, "sandbox", "sandbox"):
+                    merged[rec.name] = rec.value
             if session_id:
                 for name, rec in sorted(self._session_entries.get(session_id, {}).items()):
                     if rec.scope == "sandbox" and _consumer_matches(rec.consumers, "sandbox", "sandbox"):
@@ -643,15 +753,22 @@ class SecretStore:
             if storage in (None, "persistent") and self.entries_dir.is_dir():
                 with self._file_lock():
                     path = self._entry_path(validated)
+                    cached = self._persistent_cache.pop(validated, None)
                     if path.exists():
+                        retired_val = ""
                         try:
                             old = self._read_persistent_locked(validated)
                             if old is not None:
-                                self._retire_locked(validated, old.value)
+                                retired_val = old.value
                         except OSError:
-                            pass
+                            if cached is not None:
+                                retired_val = cached[1].value
+                        if retired_val:
+                            self._retire_locked(validated, retired_val)
                         path.unlink(missing_ok=True)
                         removed = True
+                    elif cached is not None:
+                        self._retire_locked(validated, cached[1].value)
         return removed
 
     def list_secrets(self, *, session_id: str | None = None) -> list[SecretMetadata]:
@@ -660,16 +777,9 @@ class SecretStore:
             if session_id:
                 for name in sorted(self._session_entries.get(session_id, {})):
                     items.append(self._session_entries[session_id][name].metadata())
-            if self.entries_dir.is_dir():
-                with self._file_lock():
-                    fernet = load_or_create_fernet(self.directory)
-                    for path in sorted(self.entries_dir.glob("*.enc")):
-                        name = path.stem
-                        if not valid_secret_name(name):
-                            continue
-                        rec = self._read_persistent_locked(name, fernet)
-                        if rec is not None:
-                            items.append(rec.metadata())
+            pers_records = self._refresh_persistent_cache_locked()
+            for name in sorted(pers_records):
+                items.append(pers_records[name].metadata())
         return items
 
     def clear_session(self, session_id: str) -> int:
@@ -696,10 +806,12 @@ class SecretStore:
         session_id: str | None = None,
         min_length: int = 1,
     ) -> tuple[SecretRef, ...]:
-        """Return ``SecretRef`` placeholders for active and in-process retired credentials."""
+        """Return ``SecretRef`` placeholders from memory (zero disk decrypt per output chunk)."""
         refs: list[SecretRef] = []
         floor = max(1, min_length)
         with self._lock:
+            if not self._persistent_loaded and self.entries_dir.is_dir():
+                self._refresh_persistent_cache_locked()
             if session_id:
                 for rec in self._session_entries.get(session_id, {}).values():
                     if len(rec.value) >= floor:
@@ -710,20 +822,10 @@ class SecretStore:
                 for rec in bucket.values():
                     if len(rec.value) >= floor:
                         refs.append(SecretRef(name=rec.name, value=rec.value, raw=False))
-            if self.entries_dir.is_dir():
-                try:
-                    with self._file_lock():
-                        fernet = load_or_create_fernet(self.directory)
-                        for path in sorted(self.entries_dir.glob("*.enc")):
-                            name = path.stem
-                            if not valid_secret_name(name):
-                                continue
-                            rec = self._read_persistent_locked(name, fernet)
-                            if rec is not None and len(rec.value) >= floor:
-                                refs.append(SecretRef(name=rec.name, value=rec.value, raw=False))
-                except OSError:
-                    pass
-            for retired in self._retired_refs:
+            for _stat_key, rec in self._persistent_cache.values():
+                if len(rec.value) >= floor:
+                    refs.append(SecretRef(name=rec.name, value=rec.value, raw=False))
+            for retired in self._retired_refs.values():
                 if len(retired.value) >= floor:
                     refs.append(retired)
         return tuple(refs)

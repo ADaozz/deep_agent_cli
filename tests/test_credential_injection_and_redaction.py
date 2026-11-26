@@ -122,7 +122,7 @@ def test_mcp_http_bearer_and_stdio_resolve_authorized_secrets_and_env_fallback(
     with pytest.raises(MCPAuthError, match="not authorized"):
         build_transport(bad_scope_srv, [], oauth_callback_timeout=5, secret_store=store)
 
-    # 6) Session-scoped secret is NEVER cached/resolved by global persistent MCP
+    # 6) Session-scoped secret is NEVER cached/resolved by global persistent MCP and gives clear storage guidance
     store.set_secret(
         "SESSION_ONLY_TOK",
         "sess-only-999",
@@ -137,7 +137,7 @@ def test_mcp_http_bearer_and_stdio_resolve_authorized_secrets_and_env_fallback(
         url="https://api.example/mcp",
         auth=MCPAuth(type="bearer", token_env="SESSION_ONLY_TOK"),
     )
-    with pytest.raises(MCPAuthError, match="Environment variable SESSION_ONLY_TOK is not set"):
+    with pytest.raises(MCPAuthError, match="Session memory only.*Persistent host credential"):
         build_transport(sess_srv, [], oauth_callback_timeout=5, secret_store=store)
 
 

@@ -46,6 +46,10 @@ class SandboxLostError(RuntimeError):
     """沙箱 Worker 已失效；正在执行的命令不得自动重试。"""
 
 
+class SandboxIsolationError(PermissionError):
+    """拒绝在共享持久沙箱中跨会话共享或注入凭据（同 PID 命名空间 /proc 边界）。"""
+
+
 class StdinWriteUncertainError(TimeoutError):
     """stdin 写入结果不确定（ACK 超时、部分写入后失败或进程/沙箱中断）；不得自动重试。"""
 
@@ -283,6 +287,12 @@ class PersistentSandbox:
         self._commands: dict[int, RemoteCommand] = {}
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
+        # Atomic launch boundary: serializes cross-session isolation check, Worker
+        # PID-namespace verification, start_command, and ExecutionRegistry registration.
+        self._launch_lock = threading.Lock()
+        self._tainted_sessions: set[str] = set()
+        self._secret_tainted_sessions: set[str] = set()
+        self._idle_waiters: dict[int, tuple[threading.Event, list[bool]]] = {}
         self._ready = threading.Event()
         self._stderr: deque[bytes] = deque()
         self._stderr_size = 0
@@ -328,6 +338,82 @@ class PersistentSandbox:
         if timed_out:
             raise SandboxStartError(f"sandbox worker did not become ready within {timeout:g}s: {detail}")
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
+
+    def verify_pid_namespace_idle(self, *, timeout: float = 2.0) -> bool:
+        """Ask Worker PID 1 whether /proc contains zero non-Worker processes (fail-closed)."""
+        with self._lock:
+            if self.lost_reason is not None:
+                return False
+            req_id = next(self._ids)
+            event = threading.Event()
+            box: list[bool] = [False]
+            self._idle_waiters[req_id] = (event, box)
+        try:
+            self._send({"op": "check_idle", "id": req_id})
+        except SandboxLostError:
+            with self._lock:
+                self._idle_waiters.pop(req_id, None)
+            return False
+        completed = event.wait(max(0.0, timeout))
+        with self._lock:
+            self._idle_waiters.pop(req_id, None)
+            return bool(completed and box[0])
+
+    def launch_isolated_command(
+        self,
+        pool: "SandboxPool",
+        *,
+        root_session_id: str,
+        has_secrets: bool,
+        command: str,
+        stdin_mode: str,
+        env: dict[str, str] | None,
+        build_session: Callable[[RemoteCommand], Any],
+    ) -> Any:
+        """Atomically enforce cross-session /proc isolation, start process, and register session."""
+        with self._launch_lock:
+            other_active = pool.executions.has_active_other_root_session(self.id, root_session_id)
+            other_active_secrets = pool.executions.has_active_other_root_session(
+                self.id, root_session_id, require_secrets=True,
+            )
+            other_tainted = any(sid != root_session_id for sid in self._tainted_sessions)
+            other_secret_tainted = any(sid != root_session_id for sid in self._secret_tainted_sessions)
+
+            if has_secrets and other_active:
+                raise SandboxIsolationError(
+                    "cannot inject sandbox credentials while another session has an active "
+                    "process in the shared sandbox (same PID namespace /proc boundary)"
+                )
+            if other_active_secrets:
+                raise SandboxIsolationError(
+                    "cannot start a command in the shared sandbox while another session's "
+                    "credential-bearing process is still running (same PID namespace /proc boundary)"
+                )
+            if (has_secrets and other_tainted) or other_secret_tainted:
+                # Even if an earlier shell exited, surviving background children (e.g. nohup ... &)
+                # share this Worker's PID namespace and /proc/<pid>/environ. Fail closed unless
+                # Worker PID 1 positively confirms /proc has zero other processes.
+                if not self.verify_pid_namespace_idle():
+                    raise SandboxIsolationError(
+                        "cannot share sandbox across sessions while surviving background "
+                        "processes remain or PID namespace isolation cannot be confirmed "
+                        "(same PID namespace /proc boundary)"
+                    )
+                self._tainted_sessions.clear()
+                self._secret_tainted_sessions.clear()
+
+            handle = self.start_command(command, stdin_mode=stdin_mode, env=env)
+            self._tainted_sessions.add(root_session_id)
+            if has_secrets:
+                self._secret_tainted_sessions.add(root_session_id)
+            try:
+                session = build_session(handle)
+                pool.executions.register(session)
+            except BaseException:
+                handle.kill()
+                handle.release()
+                raise
+            return session
 
     def start_command(
         self,
@@ -423,6 +509,11 @@ class PersistentSandbox:
                 self.lost_reason = reason
                 self.generation += 1
             commands = list(self._commands.values())
+            waiters = list(self._idle_waiters.values())
+            self._idle_waiters.clear()
+        for event, box in waiters:
+            box[0] = False
+            event.set()
         for handle in commands:
             handle._fail_pending_writes(self.lost_reason or reason)
             try:
@@ -444,6 +535,15 @@ class PersistentSandbox:
                     break
                 if op == "ready":
                     self._ready.set()
+                    continue
+                if op == "idle_status":
+                    req_id = int(message.get("id", -1))
+                    with self._lock:
+                        waiter = self._idle_waiters.get(req_id)
+                    if waiter is not None:
+                        event, box = waiter
+                        box[0] = bool(message.get("idle"))
+                        event.set()
                     continue
                 with self._lock:
                     handle = self._commands.get(int(message.get("id", -1)))

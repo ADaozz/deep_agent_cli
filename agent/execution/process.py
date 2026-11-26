@@ -28,7 +28,7 @@ from agent.runtime.cancellation import (
     get_cancel_context,
     get_output_emitter,
 )
-from agent.execution.pool import PersistentSandbox, SandboxLostError, SandboxPool
+from agent.execution.pool import PersistentSandbox, SandboxIsolationError, SandboxLostError, SandboxPool
 from agent.execution.policy import sandbox_workspace_root
 from agent.execution.service_observation import OWNER_VARIABLE, begin_command, end_command
 
@@ -548,6 +548,7 @@ def _run_in_sandbox(
     sandbox_mode: str = "restricted",
     sandbox_env_provider: Callable[[str], dict[str, str]] | None = None,
     redaction_provider: Callable[[], Iterable[SecretRef]] | None = None,
+    redaction_hold_hooks: tuple[Callable[[], None], Callable[[], Any]] | None = None,
 ) -> ExecuteResponse:
     """在持久沙箱里为一条命令启动新的 shell。
 
@@ -570,69 +571,111 @@ def _run_in_sandbox(
         if sandbox_env_provider is not None and session_root
         else {}
     )
-    # Linux resets PR_SET_DUMPABLE across execve('/bin/sh'), so concurrent processes
-    # inside the same shared Worker PID namespace share /proc/<pid>/environ visibility.
-    # Refuse cross-root-session sharing whenever sandbox credentials are involved.
-    if extra_env and pool.executions.has_active_other_root_session(sandbox.id, session_root):
-        return LocalExecuteResponse(
-            "Error: cannot inject sandbox credentials while another session has an active "
-            "process in the shared sandbox (same PID namespace /proc boundary).",
-            1,
-            False,
-            termination_reason="spawn_error",
-        )
-    if pool.executions.has_active_other_root_session(sandbox.id, session_root, require_secrets=True):
-        return LocalExecuteResponse(
-            "Error: cannot start a command in the shared sandbox while another session's "
-            "credential-bearing process is still running (same PID namespace /proc boundary).",
-            1,
-            False,
-            termination_reason="spawn_error",
-        )
+    # Pin injected credentials + start-time known refs on this execution so later
+    # store read errors, deletion, or rotation never drop redaction for this process.
+    pinned_list: list[SecretRef] = [
+        SecretRef(name=k, value=v, raw=False) for k, v in extra_env.items() if k and v
+    ]
+    if redaction_provider is not None:
+        try:
+            for item in redaction_provider():
+                if isinstance(item, SecretRef) and item.value:
+                    pinned_list.append(item)
+        except Exception:  # noqa: BLE001
+            pass
+    pinned_refs: tuple[SecretRef, ...] = tuple(pinned_list)
+
+    effective_redactor: Callable[[], Iterable[SecretRef]] | None
+    if pinned_refs or redaction_provider is not None:
+        def _effective_refs(
+            _pinned: tuple[SecretRef, ...] = pinned_refs,
+            _dynamic: Callable[[], Iterable[SecretRef]] | None = redaction_provider,
+        ) -> tuple[SecretRef, ...]:
+            if _dynamic is None:
+                return _pinned
+            try:
+                dyn = tuple(_dynamic())
+            except Exception:  # noqa: BLE001
+                return _pinned
+            if not dyn:
+                return _pinned
+            return (*_pinned, *dyn) if _pinned else dyn
+        effective_redactor = _effective_refs
+    else:
+        effective_redactor = None
+
+    safe_command = replace_known_secrets(command, pinned_refs) if pinned_refs else command
     ctx = get_cancel_context()
     tool_call_id = ctx.tool_call_id if ctx is not None else ""
     emit = get_output_emitter()
+
+    acquire_hold = redaction_hold_hooks[0] if redaction_hold_hooks is not None else None
+    release_hold = redaction_hold_hooks[1] if redaction_hold_hooks is not None else None
+    hold_acquired = False
+    if acquire_hold is not None:
+        acquire_hold()
+        hold_acquired = True
+
+    def _build_session(handle):
+        collector = _OutputCollector(
+            tool_call_id=tool_call_id,
+            max_output_bytes=max_output_bytes,
+            workspace_root=workspace,
+            emit=emit,
+            execution_id=handle.execution_id,
+            thread_id=thread_id,
+            redaction_provider=effective_redactor,
+        )
+        return CommandSession(
+            handle=handle,
+            pool=pool,
+            collector=collector,
+            thread_id=thread_id,
+            timeout=timeout,
+            deadline=time.monotonic() + timeout if timeout is not None else None,
+            network=network,
+            tool_call_id=tool_call_id,
+            sandbox_mode=sandbox_mode,
+            command=safe_command[:200],
+            root_session_id=session_root,
+            has_injected_secrets=bool(extra_env),
+            emit=emit,
+            cancel_context=ctx,
+            on_release_redaction_hold=release_hold if hold_acquired else None,
+        )
+
     try:
-        handle = sandbox.start_command(command, stdin_mode=mode, env=extra_env or None)
+        session = sandbox.launch_isolated_command(
+            pool,
+            root_session_id=session_root,
+            has_secrets=bool(extra_env),
+            command=command,
+            stdin_mode=mode,
+            env=extra_env or None,
+            build_session=_build_session,
+        )
+    except SandboxIsolationError as exc:
+        if hold_acquired and release_hold is not None:
+            release_hold()
+        return LocalExecuteResponse(
+            f"Error: {exc}.",
+            1,
+            False,
+            termination_reason="spawn_error",
+        )
     except SandboxLostError as exc:
+        if hold_acquired and release_hold is not None:
+            release_hold()
         pool.discard(sandbox, str(exc))
         return LocalExecuteResponse(
             f"Error: sandbox is unavailable ({exc}). The command was not run.", 125, False,
             termination_reason="sandbox_lost",
         )
+    except BaseException:
+        if hold_acquired and release_hold is not None:
+            release_hold()
+        raise
 
-    collector = _OutputCollector(
-        tool_call_id=tool_call_id,
-        max_output_bytes=max_output_bytes,
-        workspace_root=workspace,
-        emit=emit,
-        execution_id=handle.execution_id,
-        thread_id=thread_id,
-        redaction_provider=redaction_provider,
-    )
-    safe_command = command
-    if redaction_provider is not None:
-        try:
-            safe_command = replace_known_secrets(command, tuple(redaction_provider()))
-        except Exception:  # noqa: BLE001
-            pass
-    session = CommandSession(
-        handle=handle,
-        pool=pool,
-        collector=collector,
-        thread_id=thread_id,
-        timeout=timeout,
-        deadline=time.monotonic() + timeout if timeout is not None else None,
-        network=network,
-        tool_call_id=tool_call_id,
-        sandbox_mode=sandbox_mode,
-        command=safe_command[:200],
-        root_session_id=session_root,
-        has_injected_secrets=bool(extra_env),
-        emit=emit,
-        cancel_context=ctx,
-    )
-    pool.executions.register(session)
     yield_deadline = time.monotonic() + yield_time if yield_time is not None else None
     try:
         response = session.wait_until(yield_deadline)

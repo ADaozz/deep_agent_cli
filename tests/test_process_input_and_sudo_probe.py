@@ -63,9 +63,10 @@ def test_direct_process_input_pipe_detach_eof_and_no_fabricated_messages(tmp_pat
                 assert "pipe" in banner
                 assert "Process stdin" in banner
 
-                # 2) Enter submits directly to Worker queue without creating chat messages or history entries
+                # 2) Enter submits asynchronously to Worker queue without creating chat messages or history entries
                 app.buffer.text = "yes"
                 app.run_dispatch._submit_buffer("steer")
+                await app.flush_process_input()
                 assert app.buffer.text == ""
                 assert "yes" not in list(app.buffer.history.get_strings())
                 assert app.state.blocks == blocks_before
@@ -84,6 +85,7 @@ def test_direct_process_input_pipe_detach_eof_and_no_fabricated_messages(tmp_pat
                 app.handle_stdin_command(exec_id)
                 assert app.attached_execution_id == exec_id
                 assert app.send_attached_input(action="close") is True
+                await app.flush_process_input()
                 finished = runner.prepared.backend.write_stdin(exec_id, chars="", yield_time=2.0, thread_id="direct-pipe")
                 assert not finished.running
                 assert "EOF_DONE" in finished.output

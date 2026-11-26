@@ -339,7 +339,7 @@ llm:
 展示侧、流式命令输出、执行日志落盘、截断窗口、审批卡、Auto 证据、会话标题、SubAgent 日志与 MCP 输出会对**已知字面量**做精确替换：
 
 1. 配置里解析出的模型 `api_key` → `$llm.models.…` 路径名（如 `$llm.models.deepseek.api_key`）。
-2. `SecretStore` 托管凭据（含会话内、加密持久化以及进程生命周期内已轮换或删除的退役凭据）→ `$<凭据名>`；命令流式输出使用精确前缀重叠缓冲，跨块拆分及截断边界均在落盘与展示前完成替换。
+2. `SecretStore` 托管凭据（含会话内、加密持久化以及已轮换或删除的退役凭据）→ `$<凭据名>`；命令启动时即固定本次实际注入凭据的脱敏引用（后续持久化读取异常、删除或轮换不会导致运行中进程失防），流式输出直接复用内存缓存与 `StreamingSecretRedactor` 前缀重叠缓冲（不逐块读盘解密），并在落盘与展示前完成替换。退役凭据引用在所有持有保护的活动进程与回合结束后自动回收。
 3. 可选字典 `redaction.replacements`：字面值 → 自定义展示名（不必带 `$`）。
 
 ```yaml
@@ -352,7 +352,7 @@ redaction:
 |---|---|---|
 | `replacements` | `{}` | 精确匹配的字面量 → 展示名；键与值均须非空。类型错误时启动失败 |
 
-未经 `SecretStore` 托管的沙箱 `env_set` / `env_allowlist`、以及沿用宿主环境变量的 MCP bearer / `env_passthrough` 值**不会**自动加入替换表；需要遮盖时把对应字面量写进 `replacements` 或改用 `/secrets` 托管。托管的持久化 `host` 凭据可供经用户 `/mcp add` 或人工审批通过的 MCP 目标（`mcp:<name>@<target>`）解析，全局 `MCPManager` 不缓存会话级凭据；凭据更新或删除后相关 MCP 连接自动失效待重连。仍不对自由文本中的 JWT / `sk-` 等形态做正则或熵值猜测遮盖。
+未经 `SecretStore` 托管的沙箱 `env_set` / `env_allowlist`、以及沿用宿主环境变量的 MCP bearer / `env_passthrough` 值**不会**自动加入替换表；需要遮盖时把对应字面量写进 `replacements` 或改用 `/secrets` 托管。全局 `MCPManager` 只消费经过用户 `/mcp add` 或人工审批授权的持久化（`Persistent`）`host` 凭据或宿主机环境变量，不消费会话级（`Session`）凭据；消费者身份绑定完整配置指纹 `MCPServerConfig.fingerprint()`（含 stdio `command` 与完整 `args`/`argv`、HTTP `url` 与鉴权配置），删除服务或修改配置/参数后自动吊销原消费者授权，凭据更新或删除后相关 MCP 连接自动失效待重连。仍不对自由文本中的 JWT / `sk-` 等形态做正则或熵值猜测遮盖。
 
 ## 界面（`ui`）
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
@@ -207,6 +208,8 @@ class CliApplication:
         self._secret_draft: dict[str, str] = {}
         self._attached_execution: tuple[str, str] | None = None
         self._attached_pty_size: tuple[int, int] | None = None
+        self._stdin_queue: deque[tuple[str, str, str, str]] = deque()
+        self._stdin_task: asyncio.Task[None] | None = None
         # None = stick to bottom (follow new output); int = pinned scroll row.
         self._queue_scroll = 0
         self._queue_preview_cache: tuple[Any, FormattedText, int] | None = None
@@ -1093,19 +1096,45 @@ class CliApplication:
         self.set_status(f"Process input mode: {execution_id} ({stdin_mode}) · Esc to detach", transient=False)
         self.application.invalidate()
 
-    def detach_process_input(self, *, announce: bool = True, reason: str = "") -> None:
+    def _drop_queued_stdin(self, execution_id: str | None = None, *, cancel_task: bool = False) -> None:
+        if execution_id is None:
+            self._stdin_queue.clear()
+        else:
+            self._stdin_queue = deque(
+                item for item in self._stdin_queue if item[0] != execution_id
+            )
+        if cancel_task and self._stdin_task is not None and not self._stdin_task.done():
+            self._stdin_task.cancel()
+            self._stdin_task = None
+
+    def detach_process_input(
+        self,
+        *,
+        announce: bool = True,
+        reason: str = "",
+        drop_pending: bool = False,
+    ) -> None:
         if self._attached_execution is None:
+            if drop_pending:
+                self._drop_queued_stdin(None, cancel_task=True)
             return
         exec_id = self._attached_execution[0]
         self._attached_execution = None
         self._attached_pty_size = None
+        if drop_pending:
+            self._drop_queued_stdin(exec_id, cancel_task=True)
         if announce:
             self.set_status(reason or f"Detached from process {exec_id} (still running)")
         self.application.invalidate()
 
     def _on_execution_finished(self, execution_id: str) -> None:
+        if execution_id:
+            self._drop_queued_stdin(execution_id)
         if execution_id and self.attached_execution_id == execution_id:
-            self.detach_process_input(reason=f"Process {execution_id} finished · returned to chat input")
+            self.detach_process_input(
+                reason=f"Process {execution_id} finished · returned to chat input",
+                drop_pending=True,
+            )
 
     def handle_stdin_command(self, arg: str) -> None:
         text = arg.strip()
@@ -1162,36 +1191,125 @@ class CliApplication:
         )
         self.set_status("Select process · Enter attach · Esc cancel", transient=False)
 
-    def send_attached_input(self, *, chars: str = "", action: str = "write") -> bool:
-        if self._attached_execution is None:
-            return False
-        exec_id, mode = self._attached_execution
-        try:
-            self.runner.send_execution_input(exec_id, chars=chars, action=action)
-        except KeyError:
-            self.detach_process_input(reason=f"Process {exec_id} finished · returned to chat input")
-            return False
-        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
-            message = str(exc)
-            self.state.add_system(f"Process input error ({exec_id}): {message}", error=True)
-            if any(tok in message.lower() for tok in ("already finished", "not running", "has finished")):
-                self.detach_process_input(reason=f"Process {exec_id} ended · returned to chat input")
-            else:
-                self.set_status(f"Process input error: {message}")
-            return False
+    def _report_stdin_sent(self, exec_id: str, mode: str, chars: str, action: str) -> None:
         if action == "close" or chars == "\x04":
             self.set_status(f"Sent EOF to {exec_id} ({mode})")
         elif action == "cancel" or chars == "\x03":
             self.set_status(f"Sent interrupt to {exec_id} ({mode})")
         else:
             self.set_status(f"Sent input to {exec_id} ({mode})")
+
+    def _handle_stdin_error(self, exec_id: str, exc: Exception) -> bool:
+        message = str(exc)
+        self.state.add_system(f"Process input error ({exec_id}): {message}", error=True)
+        if any(tok in message.lower() for tok in ("already finished", "not running", "has finished")):
+            self._drop_queued_stdin(exec_id)
+            if self.attached_execution_id == exec_id:
+                self.detach_process_input(
+                    reason=f"Process {exec_id} ended · returned to chat input",
+                    drop_pending=False,
+                )
+        else:
+            self.set_status(f"Process input error: {message}")
+        return False
+
+    def _deliver_stdin_sync(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
+        try:
+            self.runner.send_execution_input(exec_id, chars=chars, action=action)
+        except KeyError:
+            self._drop_queued_stdin(exec_id)
+            if self.attached_execution_id == exec_id:
+                self.detach_process_input(reason=f"Process {exec_id} finished · returned to chat input")
+            return False
+        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
+            return self._handle_stdin_error(exec_id, exc)
+        self._report_stdin_sent(exec_id, mode, chars, action)
+        return True
+
+    async def _dispatch_stdin_item(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
+        try:
+            await asyncio.to_thread(
+                self.runner.send_execution_input, exec_id, chars=chars, action=action,
+            )
+        except asyncio.CancelledError:
+            raise
+        except KeyError:
+            self._drop_queued_stdin(exec_id)
+            if self.attached_execution_id == exec_id:
+                self.detach_process_input(
+                    reason=f"Process {exec_id} finished · returned to chat input",
+                    drop_pending=False,
+                )
+            return False
+        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
+            if not self.lifecycle.exiting:
+                self._handle_stdin_error(exec_id, exc)
+            return False
+        if not self.lifecycle.exiting:
+            self._report_stdin_sent(exec_id, mode, chars, action)
+        return True
+
+    async def _drain_stdin_queue(self) -> None:
+        try:
+            while self._stdin_queue:
+                if self.lifecycle.exiting:
+                    self._stdin_queue.clear()
+                    return
+                exec_id, mode, chars, action = self._stdin_queue.popleft()
+                ok = await self._dispatch_stdin_item(exec_id, mode, chars, action)
+                if not ok and self.attached_execution_id != exec_id:
+                    self._drop_queued_stdin(exec_id)
+        finally:
+            if self._stdin_task is asyncio.current_task():
+                self._stdin_task = None
+
+    async def flush_process_input(self) -> None:
+        """Await queued async process stdin deliveries until the queue drains."""
+        while self._stdin_task is not None and not self._stdin_task.done():
+            task = self._stdin_task
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                break
+
+    def send_attached_input(self, *, chars: str = "", action: str = "write") -> bool:
+        if self._attached_execution is None or self.lifecycle.exiting:
+            return False
+        exec_id, mode = self._attached_execution
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self.run_view.loop
+        if loop is None or not loop.is_running():
+            return self._deliver_stdin_sync(exec_id, mode, chars, action)
+        if action == "cancel" or (action == "write" and chars == "\x03"):
+            # Dispatch process interrupt immediately without blocking behind a stalled write ACK.
+            self._drop_queued_stdin(exec_id)
+            self.set_status(f"Interrupting {exec_id} ({mode})…")
+            self.lifecycle.spawn(
+                self._dispatch_stdin_item(exec_id, mode, chars if action == "write" else "", action),
+                stop=TaskStop.CANCEL,
+                name="process-stdin-cancel",
+            )
+            return True
+        self._stdin_queue.append((exec_id, mode, chars, action))
+        if action == "close" or chars == "\x04":
+            self.set_status(f"Sending EOF to {exec_id} ({mode})…")
+        else:
+            self.set_status(f"Sending input to {exec_id} ({mode})…")
+        if self._stdin_task is None or self._stdin_task.done():
+            self._stdin_task = self.lifecycle.spawn(
+                self._drain_stdin_queue(),
+                stop=TaskStop.CANCEL,
+                name="process-stdin",
+            )
         return True
 
     def reset_session_view(self) -> None:
         """Drop editor chrome that belonged to the previous session."""
         self.companion.sync_session()
         self.lain_buffer.reset()
-        self.detach_process_input(announce=False)
+        self.detach_process_input(announce=False, drop_pending=True)
         self._clear_secret_buffer()
         self._secret_draft = {}
         self.skills._clear_skill_draft()
@@ -1344,7 +1462,7 @@ class CliApplication:
 
     def exit(self) -> None:
         """Ask the lifecycle to leave. Resource shutdown happens after the prompt loop."""
-        self.detach_process_input(announce=False)
+        self.detach_process_input(announce=False, drop_pending=True)
         self._clear_secret_buffer()
         self._secret_draft = {}
         if self.dialogs.current is not None:

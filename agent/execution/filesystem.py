@@ -1018,7 +1018,12 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         if callable(fn):
             fn(execution_id, rows, cols, thread_id=thread_id)
 
-    def set_secret_provider(self, sandbox_env_provider=None, redaction_provider=None) -> None:
+    def set_secret_provider(
+        self,
+        sandbox_env_provider=None,
+        redaction_provider=None,
+        redaction_hold_hooks=None,
+    ) -> None:
         fn = getattr(self.executor, "set_secret_provider", None)
         if callable(fn):
-            fn(sandbox_env_provider, redaction_provider)
+            fn(sandbox_env_provider, redaction_provider, redaction_hold_hooks)

@@ -7,6 +7,7 @@ from agent.redaction import SecretRef, replace_known_secrets
 
 from contextlib import contextmanager
 from functools import partial
+import hashlib
 from pathlib import Path
 import asyncio
 import os
@@ -39,10 +40,9 @@ from agent.tools.catalog import NATIVE_TOOL_NAMES
 
 
 def mcp_secret_consumer(server: MCPServerConfig) -> str:
-    """Stable consumer identity bound to server name AND target URL/command."""
-    if server.transport == "stdio":
-        return f"mcp:{server.name}@stdio:{server.command or ''}"
-    return f"mcp:{server.name}@{server.url or ''}"
+    """Consumer identity bound to server name AND full MCPServerConfig.fingerprint() (including stdio argv)."""
+    digest = hashlib.sha256(server.fingerprint().encode("utf-8")).hexdigest()[:24]
+    return f"mcp:{server.name}@{server.transport}:{digest}"
 
 
 def mcp_secret_names(server: MCPServerConfig) -> tuple[str, ...]:
@@ -142,6 +142,12 @@ def _resolve_mcp_credential(
     except ValueError as exc:
         raise MCPAuthError(f"Invalid credential reference {name}: {exc}") from None
     if resolved is None:
+        has_session = getattr(secret_store, "has_session_secret", None)
+        if callable(has_session) and has_session(name):
+            raise MCPAuthError(
+                f"Credential {name} is stored in Session memory only; global MCP servers require "
+                f"an authorized Persistent host credential (/secrets set {name}) or a host environment variable"
+            )
         return None
     if resolved.storage != "environment":
         secrets.append(SecretRef(name=name, value=resolved.value, raw=False))
@@ -168,7 +174,10 @@ def build_transport(
             token_env = server.auth.token_env or ""
             token = _resolve_mcp_credential(token_env, server, secret_store, secrets) or ""
             if not token:
-                raise MCPAuthError(f"Environment variable {token_env} is not set")
+                raise MCPAuthError(
+                    f"Environment variable {token_env} is not set "
+                    "(set the host environment variable or store an authorized Persistent host credential via /secrets)"
+                )
             auth = BearerAuth(token)
         elif server.auth is not None and server.auth.type == "oauth":
             from agent.mcp.oauth_storage import oauth_token_storage
@@ -200,7 +209,10 @@ def build_transport(
         else:
             env[name] = resolved_val
     if missing:
-        raise MCPAuthError("Environment variable " + ", ".join(missing) + " is not set")
+        raise MCPAuthError(
+            "Environment variable " + ", ".join(missing) + " is not set "
+            "(set the host environment variable or store an authorized Persistent host credential via /secrets)"
+        )
     from agent.models.http import apply_http_environment
 
     env = apply_http_environment(env, os.environ, trust_env=trust_env)

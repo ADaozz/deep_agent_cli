@@ -496,7 +496,11 @@ class InteractionController:
             else:
                 secret_name = str(field.get("secret_name") or "")
                 secret_scope = str(field.get("secret_scope") or "host")
-                scope_label = "Host" if secret_scope == "host" else "Sandbox"
+                scope_label = (
+                    "Host (global MCP requires Persistent storage or host env)"
+                    if secret_scope == "host"
+                    else "Sandbox"
+                )
                 if secret_name:
                     parts.append(Text(f"Reference: {secret_name}", style="cyan"))
                 parts.append(Text(f"Scope: {scope_label}", style="dim"))
@@ -511,10 +515,17 @@ class InteractionController:
         options = [] if self.custom_entry or is_secret else field.get("options") or []
         if is_secret and self.source != "runtime_auth":
             selected_storage = self.current_secret_storage()
-            storage_choices = (
-                ("session", "Session", "Memory only for this session"),
-                ("persistent", "Persistent", "Encrypted in ~/.deep-agent/secrets"),
-            )
+            secret_scope = str(field.get("secret_scope") or "host")
+            if secret_scope == "host":
+                storage_choices = (
+                    ("session", "Session", "Memory only for this session (not used by global MCP)"),
+                    ("persistent", "Persistent", "Encrypted in ~/.deep-agent/secrets (required for global MCP)"),
+                )
+            else:
+                storage_choices = (
+                    ("session", "Session", "Memory only for this session"),
+                    ("persistent", "Persistent", "Encrypted in ~/.deep-agent/secrets"),
+                )
             for value, choice_label, desc in storage_choices:
                 pointer = "→" if value == selected_storage else " "
                 style = "bold cyan" if value == selected_storage else ""

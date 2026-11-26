@@ -155,14 +155,35 @@ class MCPManager:
             except Exception:  # noqa: BLE001 — wrong scope or missing secret stays rejected on connect
                 continue
 
+    def _revoke_server_secrets(self, server: MCPServerConfig) -> None:
+        """Revoke consumer authorization when a server is removed or its config changes."""
+        store = self._secret_store
+        if store is None:
+            return
+        revoke = getattr(store, "revoke_consumer", None)
+        if not callable(revoke):
+            return
+        consumer = mcp_secret_consumer(server)
+        for cred_name in mcp_secret_names(server):
+            try:
+                revoke(cred_name, consumer, session_id=None)
+            except Exception:  # noqa: BLE001
+                continue
+
     def load(self) -> None:
         """Read the catalog. A later load marks the toolset dirty without rewriting the file."""
+        stale_servers: list[MCPServerConfig] = []
         with self._lock:
             if self._closed:
                 return
             # Serialize disk reads with our writes, so a slow reload cannot
             # resurrect a configuration removed while it was being read.
+            previous_servers = dict(self._document.servers)
             document = load_mcp_file(self.path)
+            for prev_name, prev_cfg in previous_servers.items():
+                new_cfg = document.servers.get(prev_name)
+                if new_cfg is None or new_cfg.fingerprint() != prev_cfg.fingerprint():
+                    stale_servers.append(prev_cfg)
             for name in self._versions:
                 self._versions[name] += 1
             for state in self._states.values():
@@ -179,6 +200,8 @@ class MCPManager:
                 )
                 for name, server in document.servers.items()
             }
+        for old_server in stale_servers:
+            self._revoke_server_secrets(old_server)
         self._close_unpublished()
 
     def set_enabled(self, enabled: bool) -> MCPResult:
@@ -431,6 +454,8 @@ class MCPManager:
             if state is not None and state.client is not None:
                 self._retired.append(state.client)
             self._revision += 1
+        if removed_server is not None:
+            self._revoke_server_secrets(removed_server)
         self._close_unpublished()
         return MCPResult(
             True, True,

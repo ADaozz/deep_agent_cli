@@ -732,7 +732,14 @@ class AgentRunner:
         """Bind store-level sandbox credential & redaction providers onto the active backend."""
         bind = getattr(self.prepared.backend, "set_secret_provider", None)
         if callable(bind):
-            bind(self.secret_store.sandbox_env_for_session, self.summary_secrets)
+            bind(
+                self.secret_store.sandbox_env_for_session,
+                self.summary_secrets,
+                (
+                    self.secret_store.acquire_redaction_hold,
+                    self.secret_store.release_redaction_hold,
+                ),
+            )
 
     def _ensure_approval_guard(self, thread_id: str | None) -> None:
         """Rebuild when Ask needs a different Auto replay guard for ``thread_id`` than the current graph has."""
@@ -1081,6 +1088,7 @@ class AgentRunner:
             self._runtime.adopt(snapshot.info.id, lease)
         else:
             self._runtime.bind(snapshot.info.id)
+        self.secret_store.prune_retired()
         self.configuration.pending_reasoning_effort = info.pending_reasoning_effort
         self._context_usage_invalidated = False
         self.configuration.pending_model_id = info.pending_model_id
@@ -1198,6 +1206,7 @@ class AgentRunner:
             manager.reap_closed()
         self._close_mcp()
         self.secret_store.clear_all_sessions()
+        self.secret_store.prune_retired(force=True)
         self._committed_secret_interactions.clear()
         self._close_completed = True
         self._runtime.close()
@@ -1744,6 +1753,7 @@ class AgentRunner:
 
         set_output_emitter(emit_tool_output_event)
         root_session_token = set_root_session_id(self.thread_id)
+        self.secret_store.acquire_redaction_hold()
         attachment_token = set_attachment_store(self.attachment_store)
         recovery_token = set_recovery_context(self._resume_context)
         environment_token = set_environment_cache(self._environment)
@@ -1820,6 +1830,7 @@ class AgentRunner:
             self.control.end_run()
             set_output_emitter(None)
             reset_root_session_id(root_session_token)
+            self.secret_store.release_redaction_hold()
             reset_stream_owner(stream_owner_token)
             reset_attachment_store(attachment_token)
             reset_recovery_context(recovery_token)

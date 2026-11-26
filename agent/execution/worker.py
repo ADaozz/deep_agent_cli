@@ -68,6 +68,7 @@ _pty_masters: dict[int, int] = {}
 _inputs: dict[int, "_InputQueue"] = {}
 _killed_before_start: set[int] = set()
 _control_out = -1
+_baseline_pids: frozenset[int] = frozenset()
 
 # Child-side helper: new process, single-threaded — safe for setsid + TIOCSCTTY.
 # argv: status_fd, slave_fd, command. Writes one status byte then execs.
@@ -685,6 +686,36 @@ def _kill(request_id):
         _kill_group(process.pid)
 
 
+def _check_idle(request_id):
+    """Verify no active commands and no surviving child/orphan PIDs exist in /proc."""
+    with _running_lock:
+        if _running or _inputs:
+            _send({"op": "idle_status", "id": request_id, "idle": False, "other_pids": max(len(_running), len(_inputs))})
+            return
+        # No managed Popen exists; safely reap any direct dead zombies.
+        while True:
+            try:
+                pid, _status = os.waitpid(-1, os.WNOHANG)
+                if pid <= 0:
+                    break
+            except (ChildProcessError, OSError):
+                break
+        baseline = _baseline_pids or frozenset({os.getpid()})
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            # Fail closed: cannot verify PID namespace is clean.
+            _send({"op": "idle_status", "id": request_id, "idle": False, "other_pids": -1})
+            return
+        other = 0
+        for name in entries:
+            if not name.isdigit():
+                continue
+            if int(name) not in baseline:
+                other += 1
+        _send({"op": "idle_status", "id": request_id, "idle": other == 0, "other_pids": other})
+
+
 def _shutdown():
     with _running_lock:
         for process in _running.values():
@@ -702,7 +733,11 @@ def _harden():
 
 
 def main():
-    global _control_out
+    global _control_out, _baseline_pids
+    # Inside bwrap --unshare-pid, PID 1 is bwrap's init reaper and Worker is PID 2.
+    # Capture only Worker (and bwrap init PID 1 when parent) before any command starts.
+    my_pid = os.getpid()
+    _baseline_pids = frozenset({my_pid, 1} if os.getppid() == 1 else {my_pid})
     control_in = os.dup(0)
     _control_out = os.dup(1)
     null = os.open(os.devnull, os.O_RDWR)
@@ -759,6 +794,8 @@ def main():
                 _resize(request_id, message.get("rows", 24), message.get("cols", 80))
             elif op == "kill":
                 _kill(request_id)
+            elif op == "check_idle":
+                _check_idle(request_id)
 
 
 if __name__ == "__main__":
