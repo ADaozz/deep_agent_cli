@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from agent.bootstrap.config import Settings, require_keybindings_outside_workspace, resolve_config_path
 from agent.cli.display import UiDisplayLimits
 from agent.models.client import ResponsesChatOpenAI, build_chat_model
+from agent.models.profile import ModelProfile
 
 _MODEL_YAML = "llm:\n  default: local/test\n  models:\n    local:\n      models:\n        test: {}\n"
 
@@ -712,6 +713,88 @@ def test_invalid_group_efforts_are_checked_even_when_model_overrides() -> None:
         Settings.from_mapping({"llm": {"default": "local/test", "models": {
             "local": {"reasoning_efforts": "low", "models": {"test": {"reasoning_efforts": []}}},
         }}})
+
+
+def test_headers_inherit_replace_and_clear() -> None:
+    settings = Settings.from_mapping({"llm": {"default": "local/inherit", "models": {
+        "local": {
+            "headers": {"User-Agent": "deep-agent/1", "x-opencode-session": "{session_id}"},
+            "models": {
+                "inherit": {},
+                "override": {"headers": {"User-Agent": "custom/2", "X-Trace": 7}},
+                "empty": {"headers": {}},
+                "null": {"headers": None},
+            },
+        },
+        "other": {"models": {"plain": {}}},
+    }}})
+    assert settings.get_profile("local/inherit").headers == (
+        ("User-Agent", "deep-agent/1"), ("x-opencode-session", "{session_id}"),
+    )
+    assert settings.get_profile("local/override").headers == (
+        ("User-Agent", "custom/2"), ("X-Trace", "7"),
+    )
+    for name in ("local/empty", "local/null", "other/plain"):
+        assert settings.get_profile(name).headers == ()
+
+
+@pytest.mark.parametrize("value", ["X: y", ["X"], 1])
+def test_invalid_headers_are_rejected(value) -> None:
+    with pytest.raises(ValueError, match="headers must be a mapping"):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"headers": value, "models": {"test": {}}},
+        }}})
+
+
+@pytest.mark.parametrize("value,match", [
+    ({"": "v"}, "header names"),
+    ({" padded": "v"}, "header names"),
+    ({"bad name": "v"}, "valid HTTP header name"),
+    ({"X-Test": "line\nbreak"}, "newlines"),
+    ({"X-Test": {"nested": 1}}, "must be a string"),
+    ({"X-Test": "ok", "x-test": "dup"}, "duplicate header"),
+])
+def test_invalid_header_entries_are_rejected(value, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        Settings.from_mapping({"llm": {"default": "local/test", "models": {
+            "local": {"models": {"test": {"headers": value}}},
+        }}})
+
+
+def test_headers_are_not_a_top_level_llm_field() -> None:
+    with pytest.raises(ValueError, match="llm.headers is unsupported"):
+        Settings.from_mapping({"llm": {
+            "default": "local/test", "headers": {"X-Test": "v"},
+            "models": {"local": {"models": {"test": {}}}},
+        }})
+
+
+def test_profile_resolves_session_header_placeholder() -> None:
+    profile = ModelProfile("local/test", "test", headers={
+        "User-Agent": "deep-agent/1", "x-opencode-session": "{session_id}",
+    })
+    assert profile.has_session_headers is True
+    assert profile.resolved_headers("session-a") == {
+        "User-Agent": "deep-agent/1", "x-opencode-session": "session-a",
+    }
+    # No identity yet: the session-dependent header is not sent empty or literal.
+    assert profile.resolved_headers(None) == {"User-Agent": "deep-agent/1"}
+    assert ModelProfile("local/plain", "test").has_session_headers is False
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+def test_build_chat_model_passes_resolved_headers_to_both_clients(api: str) -> None:
+    profile = ModelProfile(
+        "local/test", "test", api=api,
+        headers={"User-Agent": "deep-agent/1", "x-opencode-session": "{session_id}"},
+    )
+    expected = {"User-Agent": "deep-agent/1", "x-opencode-session": "session-a"}
+    model = build_chat_model(profile, session_id="session-a")
+    assert model.default_headers == expected
+    sync = getattr(model.root_client, "_target", model.root_client)
+    asynchronous = getattr(model.root_async_client, "_target", model.root_async_client)
+    assert sync._custom_headers == expected
+    assert asynchronous._custom_headers == expected
 
 
 @pytest.mark.parametrize("api", ["responses", "chat_completions"])

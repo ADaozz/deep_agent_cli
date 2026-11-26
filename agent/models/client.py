@@ -531,12 +531,19 @@ def build_chat_model(
     reasoning_effort: str | None = None,
     trust_env: bool = False,
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    session_id: str | None = None,
 ) -> ChatOpenAI:
-    """Build a chat client from a ModelProfile."""
+    """Build a chat client from a ModelProfile.
+
+    ``session_id`` resolves the configured ``{session_id}`` header placeholder.
+    Every client owns its headers; session switches rebuild the model instead
+    of mutating a shared client.
+    """
     if profile.source == "deepseek" and not profile.api_key:
         raise ValueError("Missing llm.models.deepseek.api_key")
     if reasoning_effort is not None and reasoning_effort not in profile.reasoning_efforts:
         raise ValueError(f"Unsupported reasoning effort for {profile.id}: {reasoning_effort}")
+    headers = profile.resolved_headers(session_id)
     if profile.api == "responses":
         adapter = ResponsesChatOpenAI
         protocol_kwargs = {
@@ -559,9 +566,11 @@ def build_chat_model(
         # first bytes, including response headers.
         stream_chunk_timeout=profile.stream_chunk_timeout,
         http_socket_options=(), http_client=httpx.Client(trust_env=trust_env),
-        http_async_client=httpx.AsyncClient(trust_env=trust_env), **protocol_kwargs,
+        http_async_client=httpx.AsyncClient(trust_env=trust_env),
+        default_headers=headers or None, **protocol_kwargs,
     )
     object.__setattr__(model, "_deep_agent_model_id", profile.id)
+    object.__setattr__(model, "_deep_agent_session_id", session_id)
     if attachment_store is not None:
         model.set_attachment_store(attachment_store)
     if profile.context_window > 0:

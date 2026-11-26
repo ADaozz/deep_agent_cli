@@ -259,7 +259,7 @@ class AgentRunner:
         self.configuration.current_model_id = profile.id
         initial_model = model or (prepared.model if prepared is not None else build_chat_model(
             profile, attachment_store=self.attachment_store, trust_env=cfg.trust_env,
-            timeout=cfg.request_timeout,
+            timeout=cfg.request_timeout, session_id=thread_id,
         ))
         object.__setattr__(initial_model, "_deep_agent_model_id", self.configuration.current_model_id)
         self._spec = prepared.spec if prepared is not None else AgentSpec(
@@ -330,6 +330,10 @@ class AgentRunner:
                 self.configuration.pending_reasoning_effort = saved.pending_reasoning_effort
                 self.configuration.pending_model_id = saved.pending_model_id
                 self.configuration.pending_permission_mode = parse_permission_mode(saved.pending_permission_mode or "")
+        # The initial model may predate the resolved thread (draft or prepared
+        # model); bind session headers before the first request, not by mutating
+        # an existing client.
+        self._ensure_model_session()
         try:
             self._ensure_approval_guard(self.thread_id)
         except Exception:
@@ -527,6 +531,7 @@ class AgentRunner:
                             trust_env=self._spec.trust_env,
                             reasoning_effort=None if target_effort == "default" else target_effort,
                             timeout=self.settings.request_timeout,
+                            session_id=self.thread_id,
                         )
                     self._rebuild_prepared(model=chat, permission_mode=target_mode)
                     applied_mcp = mcp_dirty
@@ -714,6 +719,7 @@ class AgentRunner:
                 reasoning_effort=None if self.configuration.reasoning_effort == "default" else self.configuration.reasoning_effort,
                 attachment_store=self.attachment_store,
                 timeout=self.settings.request_timeout,
+                session_id=self._runtime.thread_id if self._runtime is not None else None,
             )
         if thread_id is ...:
             thread_id = self._runtime.thread_id if self._runtime is not None else None
@@ -740,6 +746,48 @@ class AgentRunner:
                     self.secret_store.release_redaction_hold,
                 ),
             )
+
+    def _session_model(self, thread_id: str | None) -> BaseChatModel | None:
+        """A new client for ``thread_id`` when the current profile needs rebinding.
+
+        Returning a fresh model — never mutating ``default_headers`` on the live
+        client — keeps concurrent SubAgents on their own session identities.
+        """
+        if self.settings is None:
+            return None
+        # Only models built from a profile can be rebuilt from it; an injected
+        # custom BaseChatModel has no session binding and must be preserved.
+        if not hasattr(self._chat_model, "_deep_agent_session_id"):
+            return None
+        model_id = getattr(self._chat_model, "_deep_agent_model_id", None)
+        if not isinstance(model_id, str) or not model_id:
+            return None
+        try:
+            profile = self.settings.get_profile(model_id)
+        except KeyError:
+            return None
+        if not profile.has_session_headers:
+            return None
+        expected = profile.resolved_headers(thread_id)
+        if dict(getattr(self._chat_model, "default_headers", None) or {}) == expected:
+            return None
+        effort = self.configuration.reasoning_effort
+        return build_chat_model(
+            profile, attachment_store=self.attachment_store,
+            trust_env=self._spec.trust_env,
+            reasoning_effort=None if effort == "default" else effort,
+            timeout=self.settings.request_timeout, session_id=thread_id,
+        )
+
+    def _ensure_model_session(self, thread_id: str | None = ...) -> None:
+        """Rebuild the active model when its session headers no longer match."""
+        if self._runtime is None:
+            return
+        if thread_id is ...:
+            thread_id = self._runtime.thread_id
+        model = self._session_model(thread_id)
+        if model is not None:
+            self._rebuild_prepared(model=model, thread_id=thread_id)
 
     def _ensure_approval_guard(self, thread_id: str | None) -> None:
         """Rebuild when Ask needs a different Auto replay guard for ``thread_id`` than the current graph has."""
@@ -1125,23 +1173,28 @@ class AgentRunner:
     def _apply_restore_plan(self, plan: RestorePlan, *, thread_id: str | None = ...) -> None:
         if thread_id is ...:
             thread_id = self._runtime.thread_id if self._runtime is not None else None
+        profile: ModelProfile | None = None
+        model: BaseChatModel | None = None
         if self.settings is not None and plan.model_id and (
             plan.model_id != self.configuration.current_model_id or plan.reasoning_effort != self.configuration.reasoning_effort
         ):
             profile = self.settings.get_profile(plan.model_id)
-            self._rebuild_prepared(
-                model=build_chat_model(
-                    profile, attachment_store=self.attachment_store,
-                    trust_env=self._spec.trust_env,
-                    reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
-                    timeout=self.settings.request_timeout,
-                ),
-                permission_mode=plan.permission_mode,
-                thread_id=thread_id,
+            model = build_chat_model(
+                profile, attachment_store=self.attachment_store,
+                trust_env=self._spec.trust_env,
+                reasoning_effort=None if plan.reasoning_effort == "default" else plan.reasoning_effort,
+                timeout=self.settings.request_timeout, session_id=thread_id,
             )
+        else:
+            # Same profile, different thread: a new client carries the new
+            # session header, the old shared client is left untouched.
+            model = self._session_model(thread_id)
+        if model is not None or plan.permission_mode is not self.configuration.permission_mode:
+            self._rebuild_prepared(
+                model=model, permission_mode=plan.permission_mode, thread_id=thread_id,
+            )
+        if profile is not None:
             self.configuration.current_model_id = profile.id
-        elif plan.permission_mode is not self.configuration.permission_mode:
-            self._rebuild_prepared(permission_mode=plan.permission_mode, thread_id=thread_id)
         self.configuration.reasoning_effort = plan.reasoning_effort
         self.configuration.permission_mode = self.prepared.permission_mode or plan.permission_mode
 
@@ -1160,11 +1213,13 @@ class AgentRunner:
         self.configuration.pending_sandbox_mode = None
         # New sessions have no Auto history; drop any Ask replay guard before the lease commit.
         self._ensure_approval_guard(None)
-        return self._runtime.create_new(
+        info = self._runtime.create_new(
             title=title, model_id=self.configuration.current_model_id,
             permission_mode=self.configuration.permission_mode.value,
             reasoning_effort=self.configuration.reasoning_effort,
         )
+        self._ensure_model_session()
+        return info
 
     def close(self) -> None:
         """Forbid new operations, drain an active run, then drop the lease.
@@ -1318,6 +1373,9 @@ class AgentRunner:
                 model_id=self.configuration.current_model_id, permission_mode=self.configuration.permission_mode.value,
                 reasoning_effort=self.configuration.reasoning_effort,
             )
+            # A blank draft gets its real thread ID here; bind headers before
+            # the graph writes or sends its first request.
+            self._ensure_model_session()
             summary = None
             if (self.settings is not None and isinstance(self._chat_model, ChatOpenAI)
                     and self._summary_eligibility.needs_inspection(self.thread_id)):

@@ -165,6 +165,9 @@ class SubAgentManager:
                 )
             run_id = uuid4().hex
             child = RunController()
+            # The child's own stable conversation identity for request headers;
+            # it is also the checkpoint thread it runs under.
+            child.session_id = run_id
             child.begin_run()
             child.on_model_streams_idle = self.reap_closed
             owner.register_child(child)

@@ -171,6 +171,7 @@ llm:
 | `input` | `[text]` | 支持图片输入时写 `[text, image]`；必须包含 `text` |
 | `context_window` | `0` | 模型输入窗口，可写 `128000`、`128k`、`1m`。`0` 表示未知：底栏不显示占用百分比，压缩阈值使用 Deep Agents 的默认值 |
 | `reasoning_efforts` | `[]` | 推理强度可选值，见下文 |
+| `headers` | `{}` | 附加 HTTP 请求头，见[请求头](#请求头headers)。模型级覆盖来源级 |
 
 不再支持的写法会直接报错：`llm.model`、放在 `llm` 顶层的 `base_url` / `api_key` 等字段，以及不分来源的扁平 `llm.models.<模型>`。这些旧布局需要手动改写。旧协议字段也不再接受，见下文。
 
@@ -188,6 +189,37 @@ llm:
 HTTP 首字节超时由 `llm.timeout` 配置，默认 60 秒，所有模型共用，不能写在来源或单个模型上。它限制建立连接，以及等到第一批响应数据。响应开始之后，只要仍有数据到达，整轮生成可以超过 60 秒。完全没有字节时，它会先于 `stream_chunk_timeout` 触发。必须为正数。
 
 重试重新发起当前模型调用，清除失败尝试的临时文本、思考内容和工具参数，已完成的工具不会重跑；Esc 在请求和退避等待期间均可取消，取消不触发重试。重试只覆盖模型请求，不覆盖工具执行。
+
+### 请求头（`headers`）
+
+`headers` 是来源级或模型级的请求头映射，用于需要客户端标识或会话标识的 OpenAI 兼容端点：
+
+```yaml
+llm:
+  default: opencode-go/kimi-k3
+  models:
+    opencode-go:
+      base_url: https://opencode.ai/inference/go/openai/v1
+      api_key: ${OPENCODE_API_KEY}
+      api: chat_completions
+      headers:
+        User-Agent: deep-agent/0.4.0
+        x-opencode-session: "{session_id}"
+      models:
+        kimi-k3: {}
+```
+
+- 继承规则与其他模型字段一致：模型项省略 `headers` 时继承来源；写了就整表替换，不逐项合并；写 `null` 或 `{}` 清除继承。
+- 名称必须是合法的 HTTP 头名称，值必须是字符串（数字和布尔以外的标量会转为字符串）；名称大小写不敏感，不能出现仅大小写不同的重复项。值中的换行和 NUL 会被拒绝。
+- 值中的 `{session_id}` 是运行时占位符，不属于配置期变量，也没有其他 `{...}` 语法。它替换为当前会话标识：
+  - Root Agent 使用当前 LangGraph `thread_id`，即会话列表中显示的会话 ID。
+  - 每个 SubAgent 使用自己稳定且唯一的 `run_id`（也是它的 checkpoint thread），并发子任务不会互相串用。
+  - 会话标题摘要请求使用被摘要会话的 ID；该请求是独立的非流式调用，不继承主 Agent 的客户端。
+  - 同一会话内的多轮请求、工具调用、重试、上下文压缩和会话恢复保持同一 ID；`/new` 或切换会话后使用目标会话的 ID。
+- 空白草稿会话在首条消息写入前还没有 ID，此时不发送含 `{session_id}` 的头；首条消息确定 ID 后按新 ID 发送。没有提供会话标识的独立 `build_chat_model()` 调用同样会省略该头。
+- 请求头在构建模型客户端时写入该客户端的 `default_headers`，同时覆盖同步与异步、流式与非流式请求。切换会话时创建绑定新 ID 的模型和客户端，不修改正在共享的客户端请求头；因此并发 SubAgent 不会共享会话值。
+
+以上机制是通用的 HTTP 能力，不包含 OpenCode 专用 Provider、适配器或独立请求链路。OpenCode Go 的要求是发送自己的 User-Agent，并为每段对话提供稳定的 `x-opencode-session`；Go 的 OpenAI 兼容端点、模型列表和隐私设置见[官方文档](https://opencode.ai/docs/console/go/#where-can-i-use-it)。示例中的模型 ID 和端点可能随服务更新，使用前请核对官方模型列表；Go 的 Responses 模型可把 `api` 改为 `responses`，不支持的模型不会因为配置了请求头而变得可用。
 
 ### 已移除的配置字段
 

@@ -19,6 +19,7 @@ from agent.models.catalog import ModelCatalog
 from agent.models.profile import (
     InputKind,
     ModelProfile,
+    _model_headers,
     _model_max_retries,
     _model_stream_chunk_timeout,
 )
@@ -472,7 +473,7 @@ def _llm_profiles_from_mapping(llm: Mapping[str, Any]) -> tuple[tuple[ModelProfi
     _reject_removed_protocol_fields(llm, field_name="llm")
     source_fields = {
         "model", "api_key", "base_url", "input", "api", "context_window", "source",
-        "reasoning_efforts", "max_retries", "stream_chunk_timeout",
+        "reasoning_efforts", "max_retries", "stream_chunk_timeout", "headers",
     }
     unsupported = source_fields.intersection(llm)
     if unsupported:
@@ -504,6 +505,7 @@ def _grouped_llm_profiles(
                 f"llm.models.{source}.timeout is not per model; set llm.timeout once for every model"
             )
         _model_reasoning_efforts(group.get("reasoning_efforts"), field_name=f"llm.models.{source}.reasoning_efforts")
+        _model_headers(group.get("headers"), field_name=f"llm.models.{source}.headers")
         if source == "deepseek":
             deepseek_key = _optional_secret(group.get("api_key"), field_name="llm.models.deepseek.api_key", allow_missing=True)
         for model_key, item in group["models"].items():
@@ -542,6 +544,7 @@ def _grouped_llm_profiles(
                 stream_chunk_timeout=_model_stream_chunk_timeout(
                     inherited("stream_chunk_timeout"), field_name=f"{field}.stream_chunk_timeout",
                 ),
+                headers=_model_headers(inherited("headers"), field_name=f"{field}.headers"),
                 source=source,
             ))
     default = llm.get("default")

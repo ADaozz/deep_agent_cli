@@ -68,6 +68,9 @@ class RunController:
         self._pending_config_check: Callable[[], bool] = lambda: False
         # Fired when tracked model streams become idle (all closed); used to reap closing slots.
         self.on_model_streams_idle: Callable[[], None] | None = None
+        # LangGraph thread this run writes: a SubAgent run_id. Empty for Root;
+        # the runner binds Root model headers to its session thread directly.
+        self.session_id: str = ""
 
     def register_child(self, child: RunController) -> None:
         with self._lock:

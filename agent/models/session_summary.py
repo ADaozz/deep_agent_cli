@@ -45,6 +45,7 @@ async def generate_session_summary(
     user = redact_summary_input(request.user_request, secrets)[:2000]
     model = build_chat_model(
         replace(profile, max_retries=0), streaming=False, trust_env=trust_env, timeout=8,
+        session_id=request.thread_id,
     )
     try:
         async with asyncio.timeout(SUMMARY_TIMEOUT_SECONDS):

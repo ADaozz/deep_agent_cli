@@ -50,6 +50,7 @@ class Connection:
     path: str
     body: dict[str, Any]
     opened_at: float
+    headers: dict[str, str] = field(default_factory=dict)
     chunks_sent: int = 0
     closed_by_client_at: float | None = None
     finished_at: float | None = None
@@ -151,7 +152,10 @@ class ScriptedSSEServer:
     # -- serving --------------------------------------------------------------------
     def _serve(self, handler: BaseHTTPRequestHandler, body: dict[str, Any]) -> None:
         expected = "/v1/chat/completions" if self.api == "chat_completions" else "/v1/responses"
-        connection = Connection(handler.path, body, time.monotonic())
+        connection = Connection(
+            handler.path, body, time.monotonic(),
+            headers={name.lower(): value for name, value in handler.headers.items()},
+        )
         # Optional non-streaming title requests do not consume scripted coding turns.
         is_summary = "Generate a concise Chinese session title" in json.dumps(body, ensure_ascii=False)
         if body.get("stream") is not True and is_summary and handler.path == expected:

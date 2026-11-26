@@ -339,11 +339,11 @@ def build_agent(
             effort = None if effort in (None, "default") else effort
             if cfg.subagents.model is not None or isinstance(model, ProtocolChatOpenAI):
                 profile = cfg.get_profile(cfg.subagents.model or getattr(model, "_deep_agent_model_id", cfg.llm_default))
-                # Each task owns a fresh client. Never inherit the parent's
-                # configured effort, including when it uses the same profile.
+                # Each task owns a fresh client and its own run_id session, so
+                # concurrent SubAgents never share a session header value.
                 child_model = build_chat_model(
                     profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
-                    reasoning_effort=effort,
+                    reasoning_effort=effort, session_id=controller.session_id or None,
                 )
             else:
                 # Injected custom models (including scripted test doubles) have
@@ -506,7 +506,7 @@ def create_agent(
                 raise ValueError(f"Cannot override the default approval rule for {name}")
         effective_interrupt_on = {**defaults, **interrupt_on}
     return build_agent(
-        spec, model or _default_model(cfg), permission, checkpointer,
+        spec, model or _default_model(cfg, session_id=thread_id), permission, checkpointer,
         run_controller or RunController(), should_pause or (lambda: False),
         interrupt_on_override=effective_interrupt_on,
         mcp=mcp if role == "main" else None,
@@ -515,9 +515,10 @@ def create_agent(
     )
 
 
-def _default_model(cfg: Settings) -> BaseChatModel:
+def _default_model(cfg: Settings, *, session_id: str | None = None) -> BaseChatModel:
     return build_chat_model(
         cfg.active_profile, streaming=True, trust_env=cfg.trust_env, timeout=cfg.request_timeout,
+        session_id=session_id,
     )
 
 

@@ -117,6 +117,21 @@ llm:
     #       input: [text, image]
     #       context_window: 262144
     #
+    # --- OpenCode Go：OpenAI 兼容端点 ---
+    # https://opencode.ai/docs/console/go/#where-can-i-use-it
+    # Go 要求客户端发送自己的 User-Agent，并为每段对话提供稳定的 x-opencode-session。
+    # headers 是通用能力，不是 OpenCode 专用 Provider；模型 ID 和可用协议请按官方列表调整。
+    # opencode-go:
+    #   base_url: https://opencode.ai/inference/go/openai/v1
+    #   api_key: ${OPENCODE_API_KEY}
+    #   api: chat_completions
+    #   headers:
+    #     User-Agent: deep-agent/0.4.0
+    #     x-opencode-session: "{session_id}"
+    #   models:
+    #     kimi-k3: {}
+    #     qwen3.8-max: {}
+    #
     # --- DeepSeek 官方：Chat Completions API ---
     # https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
     deepseek:
@@ -143,6 +158,8 @@ llm:
     # reasoning_efforts 列表不要包含 default；命令行始终提供该选项。
     # 子智能体的 subagents.reasoning_effort 可单独填写 default。
     # Responses 使用 reasoning.effort 参数；Chat Completions 使用 reasoning_effort 参数。
+    # headers 同样可在来源级或模型级声明；模型级写了就整表替换，null 或 {} 清除继承。
+    # 值中的 {session_id} 会替换为当前会话 ID（Root 用 thread_id，SubAgent 用自己的 run_id）。
 
 
 sandbox:
