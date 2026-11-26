@@ -12,10 +12,9 @@ import logging
 from pathlib import Path
 import uuid
 
-from deepagents.backends import FilesystemBackend
 from deepagents.backends.protocol import BackendProtocol, ExecuteResponse, SandboxBackendProtocol
 
-from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.filesystem import LineNumberedFilesystemBackend, WorkspaceCompositeBackend
 from agent.execution.layout import WORKER_SANDBOX_PATH
 from agent.execution.ports import ManagedExecutor
 from agent.execution.layout import (
@@ -55,7 +54,7 @@ class BackendSelection:
     warning: str = ""
 
 
-class BubblewrapBackend(FilesystemBackend, SandboxBackendProtocol, ManagedExecutor):
+class BubblewrapBackend(LineNumberedFilesystemBackend, SandboxBackendProtocol, ManagedExecutor):
     """文件系统 backend，命令执行由 Bubblewrap 隔离。"""
 
     supports_interactive_execution = True

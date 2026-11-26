@@ -11,6 +11,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
 
 from agent.execution.filesystem import WorkspaceCompositeBackend
+from agent.execution.mutations import (
+    EditPositionCapture,
+    reset_edit_capture,
+    set_edit_capture,
+)
 from agent.tools.catalog import FILE_MUTATION_TOOLS
 
 
@@ -123,12 +128,37 @@ class WorkspaceFilesystemMiddleware(FilesystemMiddleware):
             return result.model_copy(update={"name": name})
         return result
 
+    @staticmethod
+    def _edit_artifact(result: Any, capture: EditPositionCapture) -> Any:
+        """Pass the backend's real match position through structured metadata."""
+        if not isinstance(result, ToolMessage) or result.status == "error" or capture.start_line is None:
+            return result
+        artifact = dict(result.artifact) if isinstance(result.artifact, Mapping) else {}
+        artifact["edit_start_line"] = capture.start_line
+        if capture.occurrences is not None:
+            artifact["edit_occurrences"] = capture.occurrences
+        return result.model_copy(update={"artifact": artifact})
+
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
-        result = super().wrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        capture = EditPositionCapture()
+        token = set_edit_capture(capture) if request.tool_call.get("name") in {"edit", "edit_file"} else None
+        try:
+            result = super().wrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        finally:
+            if token is not None:
+                reset_edit_capture(token)
+        result = self._edit_artifact(result, capture)
         return self._name_result(result, request.tool_call["name"])
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
-        result = await super().awrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        capture = EditPositionCapture()
+        token = set_edit_capture(capture) if request.tool_call.get("name") in {"edit", "edit_file"} else None
+        try:
+            result = await super().awrap_tool_call(self._filesystem_request(request), lambda _: handler(request))
+        finally:
+            if token is not None:
+                reset_edit_capture(token)
+        result = self._edit_artifact(result, capture)
         return self._name_result(result, request.tool_call["name"])
 
     @property

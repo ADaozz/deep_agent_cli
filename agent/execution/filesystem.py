@@ -6,11 +6,16 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime
 import logging
+import os
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 from deepagents.backends import CompositeBackend, FilesystemBackend
-from deepagents.backends.utils import InvalidGlobPatternError, compile_grep_include_glob
+from deepagents.backends.utils import (
+    InvalidGlobPatternError,
+    compile_grep_include_glob,
+    perform_string_replacement,
+)
 from deepagents.backends.protocol import (
     BackendProtocol,
     DeleteResult,
@@ -29,6 +34,7 @@ from deepagents.backends.protocol import (
 
 from agent.execution.policy import sandbox_workspace_root
 from agent.execution.types import SANDBOX_ROOT, SKILLS_ROOT
+from agent.execution.mutations import record_edit_position
 from agent.execution.policy import SandboxConfig, SandboxMode
 from agent.execution.layout import (
     CONFIG_DENIED,
@@ -53,6 +59,69 @@ _PATH_ESCAPE = "Permission denied: path escapes its authorized mount"
 
 
 _MOUNT_DELETE = "Permission denied: cannot delete a sandbox mount point"
+
+
+@dataclass
+class _LineEditResult(EditResult):
+    """EditResult carrying the real first-line position of the replaced text."""
+
+    edit_start_line: int | None = None
+
+
+class LineNumberedFilesystemBackend(FilesystemBackend):
+    """FilesystemBackend that reports where the edit match actually started.
+
+    The edit still reads and writes the file exactly once. The start line is
+    derived from the content already in hand, never from a second read or a
+    stored snapshot.
+    """
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,  # noqa: FBT001, FBT002
+    ) -> EditResult:
+        try:
+            resolved_path = self._resolve_path(file_path)
+        except (OSError, RuntimeError) as e:
+            return EditResult(error=f"Error editing file '{file_path}': {e}")
+
+        try:
+            if not resolved_path.exists() or not resolved_path.is_file():
+                return EditResult(error=f"Error: File '{file_path}' not found")
+
+            # Same secure read as FilesystemBackend.edit; the content is reused
+            # for both replacement and the actual start line.
+            fd = os.open(resolved_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            old_string = old_string.replace("\r\n", "\n").replace("\r", "\n")
+            new_string = new_string.replace("\r\n", "\n").replace("\r", "\n")
+
+            result = perform_string_replacement(content, old_string, new_string, replace_all)
+            if isinstance(result, str):
+                return EditResult(error=result)
+
+            new_content, occurrences = result
+            index = content.find(old_string)
+            start_line = content.count("\n", 0, index) + 1 if index >= 0 else None
+
+            flags = os.O_WRONLY | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(resolved_path, flags)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+                f.write(new_content)
+
+            record_edit_position(start_line=start_line, occurrences=int(occurrences))
+            return _LineEditResult(
+                path=file_path, occurrences=int(occurrences), edit_start_line=start_line,
+            )
+        except (OSError, UnicodeDecodeError, UnicodeEncodeError) as e:
+            return EditResult(error=f"Error editing file '{file_path}': {e}")
 
 
 def _permission_denied(directories: tuple[str, ...], files: tuple[str, ...] = ()) -> str:
@@ -216,7 +285,7 @@ class _ExactFileBackend(BackendProtocol):
         self.max_file_size_bytes = 10 * 1024 * 1024
         self.denies_mutation = read_only
         self.mutation_error = "Permission denied: mount is read-only"
-        self._files = FilesystemBackend(root_dir=self.host_dir, virtual_mode=True, max_file_size_mb=10)
+        self._files = LineNumberedFilesystemBackend(root_dir=self.host_dir, virtual_mode=True, max_file_size_mb=10)
         self._virtual = f"/{self.filename}"
 
     def _exact(self, path: str) -> bool:
@@ -300,7 +369,7 @@ def _directory_backend(point: _MountPoint, executor: SandboxBackendProtocol) -> 
         return executor
     if point.read_only:
         return _ReadOnlyFilesystemBackend(point.source, reason="mount is read-only")
-    return FilesystemBackend(root_dir=point.source, virtual_mode=True, max_file_size_mb=10)
+    return LineNumberedFilesystemBackend(root_dir=point.source, virtual_mode=True, max_file_size_mb=10)
 
 
 class _DeniedBackend(BackendProtocol):

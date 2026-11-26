@@ -450,11 +450,6 @@ def _file_mutation_group(
     full = expanded or files_full
     mutations = [item for block in blocks if (item := normalize_file_mutation(block, limits=limits, full=full)) is not None]
     mutation = aggregate_file_mutations(mutations, expanded=full, limits=limits)
-    # A single created path stays one file card. Edit and overwrite keep the aggregate.
-    if len(mutation.paths) == 1 and mutation.operation == "create":
-        return _tool(
-            blocks[-1], expanded, width, limits=limits, after_user=after_user, files_full=files_full,
-        )
     preview = file_tool_preview(mutation)
     return render_tool_preview(blocks[-1], preview, expanded=False, width=width, limits=limits, after_user=after_user)
 
@@ -1160,14 +1155,54 @@ def _section_has_counts(operation: str, added: int, deleted: int) -> bool:
 
 
 def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
-    """Multi-file card. Same short ├ / │ / └ spine as a nested SubAgent."""
+    """Create/Edit/Overwrite tree. Single path uses └; multiple use ├ / │ / └."""
     mutation = preview.file_mutation
     if mutation is None:
         return []
     console = Console(width=max(20, width))
     body: list[Any] = []
-    last = len(mutation.sections) - 1
-    for index, section in enumerate(mutation.sections):
+    sections = mutation.sections
+    primary, _by_path = _mutation_highlighters(preview)
+
+    if len(sections) == 1:
+        # The card title already names the path; the body is the last sibling.
+        section = sections[0]
+        branch, _spine, _text_at = _tree_frame(last=True)
+        gutter = len(branch)
+        content_width = max(2, width - gutter)
+        highlighter = (
+            primary if mutation.diff is not None and mutation.diff.full_diff
+            else code_renderer.diff_for_path(section.path)
+        )
+        for index, line in enumerate(section.lines):
+            first = index == 0
+            if line.style in {"add", "delete"}:
+                rows = _diff_row(line.text, line.style, content_width, highlighter=highlighter)
+                for row_index, row in enumerate(rows):
+                    if first and row_index == 0:
+                        body.append(Text.assemble((branch, TREE_BRANCH_STYLE), row))
+                    else:
+                        body.append(_frame_text(row, spine="", column=gutter))
+            elif line.text:
+                text = Text(line.text, style=_PREVIEW_LINE_STYLES[line.style])
+                if first:
+                    body.extend(_wrap_card_line(
+                        Text.assemble((branch, TREE_BRANCH_STYLE), text),
+                        console, width, indent=gutter,
+                    ))
+                else:
+                    body.extend(_wrap_card_line(
+                        _frame_text(text, spine="", column=gutter),
+                        console, width, indent=gutter,
+                    ))
+        for line in mutation.footer:
+            body.extend(_wrap_card_line(
+                Text(f"  {line.text}", style=_PREVIEW_LINE_STYLES[line.style]), console, width,
+            ))
+        return body
+
+    last = len(sections) - 1
+    for index, section in enumerate(sections):
         branch, spine, text_at = _tree_frame(last=index == last)
         # Number gutter is 4 columns; shift so a 1-digit number lands on text_at.
         gutter = max(0, text_at - (_NUMBER_GUTTER - 1))
@@ -1191,7 +1226,7 @@ def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
                     Text(line.text, style=_PREVIEW_LINE_STYLES[line.style]),
                     spine=spine, column=gutter, console=console, width=width,
                 ))
-    for line in preview.lines:
+    for line in mutation.footer:
         if not line.text:
             body.append(Text(""))
             continue
@@ -1202,7 +1237,7 @@ def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
 
 def _mutation_body(preview: ToolPreview, width: int = 80) -> list[Any]:
     mutation = preview.file_mutation
-    if mutation is not None and len(mutation.sections) > 1:
+    if mutation is not None and mutation.sections:
         return _mutation_tree(preview, width)
     body: list[Any] = []
     console = Console(width=max(20, width))

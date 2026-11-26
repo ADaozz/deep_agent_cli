@@ -134,7 +134,7 @@ def test_file_preview_and_create_list_limits() -> None:
     write = ToolBlock("write", "write", {"file_path": "notes", "content": "一\n二\n三\n四"})
     preview = build_tool_preview(write, limits=configured)
     assert len([line for line in preview.lines if line.style == "add"]) == 2
-    assert any("2 lines hidden" in line.text for line in preview.lines)
+    assert any("2 changed lines hidden" in line.text for line in preview.lines)
     edit = ToolBlock("edit", "edit", {
         "file_path": "notes", "old_string": "旧一\n旧二\n旧三", "new_string": "新一\n新二\n新三",
     }, status="completed")
