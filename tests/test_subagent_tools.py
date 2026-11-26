@@ -27,9 +27,9 @@ def test_start_task_description_points_at_read_task_for_capacity():
         assert "Maximum concurrent" not in text
         assert "Remaining delegation depth" not in text
     background = start_task_description(allow_background=True)
-    assert "If the parent agent is idle, the result automatically starts a new agent turn." in background
+    assert "start a new turn if the parent is idle" in background
     assert "Do not poll or wait for background tasks." in background
-    assert "may be launched in the same response" in background
+    assert "Both modes can run concurrently" in background
 
 
 def test_node_sets_are_common_tools_plus_the_node_specific_ones():

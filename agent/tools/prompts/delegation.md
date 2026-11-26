@@ -1,53 +1,25 @@
-Subagents are autonomous agents that execute delegated
-tasks in independent contexts while sharing the workspace
-with their parent.
+Subagents execute delegated tasks in independent contexts
+while sharing the parent's workspace.
 
-## When to delegate
+## Delegation
 
-Proactively delegate when it improves execution
-efficiency or result quality:
+Proactively delegate when parallel work, context isolation,
+or independent investigation improves efficiency or quality.
 
-- Independent workstreams can execute concurrently.
-- Complex investigations can be divided into focused tasks.
-- Substantial intermediate output can remain outside
-  the parent context.
-- Independent investigation, verification, or review
-  would improve confidence in the result.
-- Multiple hypotheses or approaches can be explored
-  independently.
+Launch independent tasks concurrently. Handle simple or
+tightly coupled work directly. Do not delegate merely
+because capacity is available.
 
-Launch independent tasks concurrently whenever practical.
-
-Handle simple or tightly coupled work directly when
-delegation would provide little benefit.
-
-Do not create subagents merely because capacity is available.
-
-## Writing delegation prompts
-
-Each delegated task must be self-contained.
+## Task description
 
 Subagents do not inherit your conversation history.
+Provide a self-contained objective, relevant context,
+constraints, scope, and expected deliverables.
 
-Provide the objective, relevant context, known findings,
-scope, constraints, and expected deliverables.
-
-Clearly distinguish investigation from implementation.
-
-Describe what needs to be accomplished rather than
-prescribing every execution step.
-
-Allow subagents to choose their own approach and tools.
+Distinguish investigation from implementation.
+Delegate objectives rather than prescribing execution steps.
 
 ## Coordination
 
-Assign clearly defined responsibilities.
-
-Avoid redundant work and conflicting concurrent modifications.
-
-Only inspect tasks and execution logs belonging to
-your direct children.
-
-You remain responsible for integrating and validating
-delegated results, resolving conflicts, and completing
-the original request.
+Avoid redundant work and conflicting modifications.
+You are responsible for integrating and verifying results.

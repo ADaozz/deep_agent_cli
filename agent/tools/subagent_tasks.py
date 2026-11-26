@@ -21,26 +21,11 @@ _INJECTED = frozenset({"runtime"})
 _PREVIEW = 200
 
 READ_TASK_DESCRIPTION = """\
-List your direct child tasks or inspect a specific task.
-
-Omit run_id to list direct children.
-
-Set include_logs=true with a specific run_id to inspect
-its execution logs.
-
-Use offset and limit to paginate task lists
-or execution logs.
-
-Use this tool to inspect available capacity, investigate
-failures, review execution details, or retrieve
-historical results.
-
-The response includes the current subagent capacity.
+List direct child tasks, inspect execution logs,
+retrieve historical results, and check available capacity.
 
 Background results are delivered automatically.
-Do not use this tool to poll or wait for completion.
-
-Only your direct child tasks are accessible."""
+Do not use this tool to poll or wait for completion."""
 
 CANCEL_TASK_DESCRIPTION = """\
 Request cancellation of a background subagent belonging

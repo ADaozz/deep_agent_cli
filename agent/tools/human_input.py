@@ -49,11 +49,18 @@ class FieldSpec(BaseModel):
     placeholder: str = Field(default="", description="Optional input placeholder.")
     secret_name: str | None = Field(
         default=None,
-        description="Required when type is 'secret': environment/credential reference name (e.g. GITHUB_TOKEN). Only this name is returned to you.",
+        description=(
+            "Required for secret fields: reference name returned to you "
+            "(e.g. GITHUB_TOKEN), never the secret value."
+        ),
     )
     secret_scope: SecretScope | None = Field(
         default=None,
-        description="Required when type is 'secret': 'host' (trusted host consumers such as MCP) or 'sandbox' (authorized sandbox commands).",
+        description=(
+            "Required for secret fields: "
+            "host for trusted host consumers such as MCP; "
+            "sandbox for command environment variables."
+        ),
     )
     options: list[FieldOption] = Field(
         default_factory=list,
@@ -183,10 +190,12 @@ def _plain(value: Any) -> Any:
 
 def _request_description() -> str:
     return (
-        "Request user input only when missing information or a decision prevents meaningful progress. "
-        "Resolve ordinary technical details independently using the available context and tools. "
-        "Do not use this tool for permission approvals. "
-        "Provide structured options when a choice is required. "
-        "For API keys, tokens, or passwords, use a field with type='secret', secret_name, and secret_scope ('host' or 'sandbox') so only the credential reference is returned to you. "
-        "Pass fields, recommendation, and impact as JSON values, not serialized strings."
+        "Request user input when missing information or a decision "
+        "prevents meaningful progress. Do not use for permission approvals. "
+        "Use structured fields for choices and sensitive credentials. "
+        "For credentials, use type='secret'. Only the reference name "
+        "is returned, never the secret value. "
+        "Use the returned reference in authorized credential consumers. "
+        "Never ask the user to provide credentials as plain text. "
+        "Pass nested arguments as JSON values, not serialized strings."
     )

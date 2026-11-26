@@ -16,21 +16,18 @@ if TYPE_CHECKING:
 
 
 _SYNC_COMMON = (
-    "Execute a shell command in the sandbox working directory ({workspace_root}). "
-    "Each call starts a new shell. Working-directory changes and shell variables do not persist between calls. "
-    "The sandbox environment is reused for the session. Files in /tmp and /home, and background processes, "
-    "persist across calls and sandbox restarts. "
+    "Execute a shell command in the sandbox at {workspace_root}. "
+    "Each call starts a new shell; cwd changes and shell variables do not persist. "
+    "Files persist across calls, but running processes do not survive sandbox restarts. "
     "In restricted mode system directories are read-only. In full-access mode the real filesystem is writable, "
     "except the agent install and configuration directories. "
     "Networked and offline commands run in separate sandboxes that share the workspace ({workspace_root}) "
-    "and declared extra mounts. Commands that depend on each other's /tmp files or background processes "
+    "and declared extra mounts. Commands that depend on each other's /tmp files or running processes "
     "must use the same network value."
 )
 _INTERACTIVE_GUIDANCE = (
-    " Use yield_time to return control while a process is running. "
-    "Enable interactive when stdin is required. "
-    "Enable tty only for programs that require a terminal. "
-    "Use write_stdin to interact with an active execution."
+    " Use yield_time for long-running or interactive commands. "
+    "If execution continues, the result includes an execution_id for subsequent write_stdin calls."
 )
 _ASK_POLICY = (
     " Ask mode requires approval before each execute. "
@@ -122,12 +119,12 @@ def build_execute_tool(
     interactive_capable = supports_interactive_execution(backend)
 
     def execute_interactive(
-        command: Annotated[str, Field(description="Shell command to run.")],
-        timeout: Annotated[int | None, Field(description="Timeout in seconds for the whole process lifetime. Overrides sandbox.timeout_seconds when set.")] = None,
-        network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
-        yield_time: Annotated[float | None, Field(description="Seconds to wait before returning while the process keeps running. Null keeps the previous synchronous behavior.")] = None,
-        tty: Annotated[bool, Field(description="Allocate a PTY with correct controlling-terminal semantics. Implies interactive input.")] = False,
-        interactive: Annotated[bool, Field(description="Keep a writable stdin PIPE for write_stdin.")] = False,
+        command: Annotated[str, Field(description="Shell command to execute.")],
+        timeout: Annotated[int | None, Field(description="Maximum process lifetime in seconds. Omit to use the configured timeout.")] = None,
+        network: Annotated[bool, Field(description="Enable network access for this command. Always enabled in Allow mode.")] = False,
+        yield_time: Annotated[float | None, Field(description="Seconds to wait before returning. Omit to wait until completion.")] = None,
+        tty: Annotated[bool, Field(description="Allocate a PTY. Implies interactive input.")] = False,
+        interactive: Annotated[bool, Field(description="Keep stdin open for subsequent input.")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)
         mode = _stdin_mode(interactive=interactive, tty=tty)
@@ -144,9 +141,9 @@ def build_execute_tool(
         return output, _artifact_from_response(response)
 
     def execute_sync(
-        command: Annotated[str, Field(description="Shell command to run.")],
-        timeout: Annotated[int | None, Field(description="Timeout in seconds for the whole process lifetime. Overrides sandbox.timeout_seconds when set.")] = None,
-        network: Annotated[bool, Field(description="Use the networked sandbox. Allow mode is always networked.")] = False,
+        command: Annotated[str, Field(description="Shell command to execute.")],
+        timeout: Annotated[int | None, Field(description="Maximum process lifetime in seconds. Omit to use the configured timeout.")] = None,
+        network: Annotated[bool, Field(description="Enable network access for this command. Always enabled in Allow mode.")] = False,
     ) -> tuple[str, dict[str, object]]:
         token = set_execute_network(network or network_by_default)
         try:
@@ -174,12 +171,25 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
         raise ValueError("Backend does not support interactive execution")
 
     def write_stdin(
-        execution_id: Annotated[str, Field(description="Active execution id returned by execute.")],
-        chars: Annotated[str, Field(description="Bytes to write. Empty polls for new output.")] = "",
+        execution_id: Annotated[str, Field(description="Execution ID returned by execute.")],
+        chars: Annotated[
+            str,
+            Field(
+                description=(
+                    "Input text. Empty polls output; include \\n to submit a line. "
+                    "Send \\x03 for PTY Ctrl+C."
+                ),
+            ),
+        ] = "",
         yield_time: Annotated[float, Field(description="Seconds to wait for new output after the action.")] = 1.0,
         action: Annotated[
             Literal["write", "close", "cancel"],
-            Field(description="write input, close PIPE stdin, or cancel the execution."),
+            Field(
+                description=(
+                    "write: send input or poll; close: close PIPE stdin; "
+                    "cancel: terminate execution. Leave chars empty for close and cancel."
+                ),
+            ),
         ] = "write",
     ) -> tuple[str, dict[str, object]]:
         from agent.execution.pool import StdinWriteUncertainError
@@ -236,9 +246,10 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
         name="write_stdin",
         response_format="content_and_artifact",
         description=(
-            "Interact with an active execution. "
-            "Empty chars polls new output. "
-            "Non-empty chars writes input to the process. "
-            "Never pass sensitive credentials through this tool."
+            "Interact with an execution returned by execute. "
+            "Returns new output and the current execution state. "
+            "Use the same execution_id until completion. "
+            "Never send credentials through this tool. "
+            "Do not retry input automatically if delivery is uncertain."
         ),
     )

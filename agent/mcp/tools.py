@@ -15,6 +15,19 @@ _NOT_YET = (
     "Do not claim the server tools are available before this result returns. "
     "New tools register at the next safe point after this call ends."
 )
+_MCP_ADD_DESCRIPTION = (
+    "Add an MCP server on the host, outside the sandbox. "
+    "New tools become available at the next safe point. "
+    "Use credential reference names, never raw secrets. "
+    "If credentials are missing, request them using "
+    "request_human_input with secret_scope='host'. "
+    "Global MCP servers require persistent credentials "
+    "or existing host environment variables. "
+    "For OAuth, let the user complete browser authorization. "
+    "Do not repeatedly add or remove servers to force authorization. "
+    "A stdio command runs on the host. Tell the user the full command. "
+    "This operation is subject to the current permission and approval policy."
+)
 
 
 def build_management_tools(manager: MCPManager) -> list[BaseTool]:
@@ -29,17 +42,15 @@ def build_management_tools(manager: MCPManager) -> list[BaseTool]:
         command: Annotated[str, Field(description="stdio command executed on the host.")] = "",
         argv: Annotated[list[str] | None, Field(description="Argument array for the stdio command.")] = None,
         auth_type: Annotated[str, Field(description="Authentication: none, bearer, or oauth.")] = "none",
-        token_env: Annotated[str, Field(description="Environment variable name that holds the bearer token, not the token.")] = "",
-        env_passthrough: Annotated[list[str] | None, Field(description="Host environment variable names passed to the stdio process.")] = None,
+        token_env: Annotated[
+            str,
+            Field(description="Bearer credential reference or host environment variable name. Never the token value."),
+        ] = "",
+        env_passthrough: Annotated[
+            list[str] | None,
+            Field(description="Credential or host environment variable names passed to the stdio process."),
+        ] = None,
     ) -> str:
-        """Add a host MCP server. This operation is subject to the current permission and approval policy.
-
-        transport is streamable_http or stdio. Bearer auth takes the environment variable name token_env, not the secret.
-        A stdio command runs on the host, outside the sandbox. Tell the user the full command.
-        Tools from a new server register at the next safe point after this call ends.
-        OAuth reuses and refreshes a cached grant. When refresh fails, a browser opens for the user.
-        Do not confirm authorization for the user, and do not add or remove the server repeatedly to force it.
-        """
         result = manager.add_from_fields(
             name=name,
             transport=transport,
@@ -62,6 +73,8 @@ def build_management_tools(manager: MCPManager) -> list[BaseTool]:
         return result.message
 
     list_tool = StructuredTool.from_function(mcp_list, name=MCP_LIST)
-    add_tool = StructuredTool.from_function(mcp_add, name=MCP_ADD)
+    add_tool = StructuredTool.from_function(
+        mcp_add, name=MCP_ADD, description=_MCP_ADD_DESCRIPTION,
+    )
     remove_tool = StructuredTool.from_function(mcp_remove, name=MCP_REMOVE)
     return [list_tool, add_tool, remove_tool]
