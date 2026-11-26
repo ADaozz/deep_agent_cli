@@ -142,6 +142,10 @@ class CommandSession:
             if not confirmed:
                 self._terminate_unconfirmed_process()
         finally:
+            sandbox = None
+            with self._cv:
+                if self.handle is not None:
+                    sandbox = self.handle.sandbox
             try:
                 self._release_resources()
             finally:
@@ -153,18 +157,35 @@ class CommandSession:
                     self._emit_finished()
                 except Exception:  # noqa: BLE001
                     pass
-                self._release_redaction_hold()
+                self._release_redaction_hold(sandbox)
 
-    def _release_redaction_hold(self) -> None:
+    def _release_redaction_hold(self, sandbox: Any | None = None) -> None:
         with self._cv:
             if self._hold_released:
                 return
             self._hold_released = True
             callback = self.on_release_redaction_hold
             self.on_release_redaction_hold = None
+            defer = bool(self.has_injected_secrets and sandbox is not None and callable(callback))
+        if defer:
+            # CommandSession end ≠ credential-bearing orphans gone; reuse sandbox
+            # taint + check_idle to release when the PID namespace is actually clear.
+            try:
+                sandbox.defer_redaction_release(callback)
+            except Exception:  # noqa: BLE001
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
         if callable(callback):
             try:
                 callback()
+            except Exception:  # noqa: BLE001
+                pass
+        if sandbox is not None:
+            try:
+                sandbox.try_reclaim_secret_taint()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -437,8 +458,17 @@ class CommandSession:
             return
         if action != "write":
             raise ValueError(f"unsupported write_stdin action: {action}")
-        if chars:
-            self.write(chars, timeout=write_timeout)
+        if not chars:
+            return
+        # PTY Ctrl+C must not wait for prior normal-input ACK (FIFO still applies to other writes).
+        if chars == "\x03" and self.stdin_mode == "pty":
+            with self._cv:
+                if self._done or self.handle is None:
+                    raise ValueError("execution has already finished")
+                handle = self.handle
+            handle.interrupt()
+            return
+        self.write(chars, timeout=write_timeout)
 
     def mark_result_consumed(self) -> None:
         with self._cv:

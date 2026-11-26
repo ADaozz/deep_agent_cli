@@ -10,6 +10,7 @@
                 | {"op": "write", "id": N, "write_id": str, "data": base64}
                 | {"op": "close_stdin", "id": N}
                 | {"op": "resize", "id": N, "rows": int, "cols": int}
+                | {"op": "interrupt", "id": N}
                 | {"op": "kill", "id": N}
 Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64, "stream"?: str}
                 | {"op": "exit", "id": N, "code": int}
@@ -670,6 +671,25 @@ def _resize(request_id, rows, cols):
         pass
 
 
+def _interrupt(request_id):
+    """Write VINTR (Ctrl+C) directly to the PTY master, bypassing the stdin FIFO.
+
+    A blocked prior write must not delay terminal interrupt. Does not SIGKILL.
+    """
+    with _running_lock:
+        master = _pty_masters.get(request_id)
+        mode = _stdin_modes.get(request_id, "none")
+        state = _inputs.get(request_id)
+    if mode != "pty" or master is None:
+        return
+    try:
+        os.write(master, b"\x03")
+    except OSError:
+        return
+    if state is not None:
+        state.wake()
+
+
 def _kill(request_id):
     with _running_lock:
         state = _inputs.get(request_id)
@@ -792,6 +812,8 @@ def main():
                 _close_stdin(request_id)
             elif op == "resize":
                 _resize(request_id, message.get("rows", 24), message.get("cols", 80))
+            elif op == "interrupt":
+                _interrupt(request_id)
             elif op == "kill":
                 _kill(request_id)
             elif op == "check_idle":

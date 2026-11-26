@@ -717,14 +717,42 @@ class SecretStore:
         return None
 
     def sandbox_env_for_session(self, session_id: str | None) -> dict[str, str]:
-        """Return all authorized ``sandbox``-scoped managed credentials for ``session_id``."""
+        """Return all authorized ``sandbox``-scoped managed credentials for ``session_id``.
+
+        Persistent entries use fresh disk reads (same fail-closed principle as
+        ``resolve_secret`` / MCP). Last-known ``_persistent_cache`` values are
+        never used for injection when reads fail or auth cannot be verified.
+        Redaction continues to use the fail-open cache via ``redaction_refs``.
+        """
         merged: dict[str, str] = {}
         with self._lock:
-            pers_records = self._refresh_persistent_cache_locked()
-            for name in sorted(pers_records):
-                rec = pers_records[name]
-                if rec.scope == "sandbox" and _consumer_matches(rec.consumers, "sandbox", "sandbox"):
-                    merged[rec.name] = rec.value
+            if self.entries_dir.is_dir():
+                try:
+                    with self._file_lock():
+                        fernet: Fernet | None = None
+                        names: list[str] = []
+                        for path in sorted(self.entries_dir.glob("*.enc")):
+                            name = path.stem
+                            if not valid_secret_name(name) or path.is_symlink():
+                                continue
+                            names.append(name)
+                        for name in names:
+                            try:
+                                if fernet is None:
+                                    fernet = load_or_create_fernet(self.directory)
+                                rec = self._read_persistent_locked(name, fernet)
+                            except OSError:
+                                # Fail closed for injection: skip unverifiable entries.
+                                continue
+                            if (
+                                rec is not None
+                                and rec.scope == "sandbox"
+                                and _consumer_matches(rec.consumers, "sandbox", "sandbox")
+                            ):
+                                merged[rec.name] = rec.value
+                except OSError:
+                    # Store-level lock/IO failure: inject no persistent credentials.
+                    pass
             if session_id:
                 for name, rec in sorted(self._session_entries.get(session_id, {}).items()):
                     if rec.scope == "sandbox" and _consumer_matches(rec.consumers, "sandbox", "sandbox"):

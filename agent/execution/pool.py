@@ -149,6 +149,19 @@ class RemoteCommand:
     # agent.runtime.cancellation 调用此方法，而不是对宿主 PID 发 killpg。
     cancel_execution = kill
 
+    def interrupt(self) -> None:
+        """Send terminal interrupt (Ctrl+C / VINTR) without waiting for prior stdin ACK.
+
+        Unlike ``write_stdin``, this does not take ``_write_lock`` or wait for a
+        ``write_status`` acknowledgment, so a blocked FIFO write cannot stall Ctrl+C.
+        """
+        if self.stdin_mode != "pty":
+            raise ValueError("interrupt requires pty stdin mode")
+        try:
+            self.sandbox._send({"op": "interrupt", "id": self.request_id})
+        except SandboxLostError:
+            pass
+
     def write_stdin(self, data: bytes, *, timeout: float = 15.0) -> None:
         if self.stdin_mode == "none":
             raise ValueError("execution does not accept stdin")
@@ -292,6 +305,9 @@ class PersistentSandbox:
         self._launch_lock = threading.Lock()
         self._tainted_sessions: set[str] = set()
         self._secret_tainted_sessions: set[str] = set()
+        # Redaction-hold releases deferred until secret-bearing orphans are gone
+        # (check_idle) or this sandbox stops — not a separate process tracker.
+        self._deferred_redaction_releases: list[Callable[[], Any]] = []
         self._idle_waiters: dict[int, tuple[threading.Event, list[bool]]] = {}
         self._ready = threading.Event()
         self._stderr: deque[bytes] = deque()
@@ -338,6 +354,43 @@ class PersistentSandbox:
         if timed_out:
             raise SandboxStartError(f"sandbox worker did not become ready within {timeout:g}s: {detail}")
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
+
+    def defer_redaction_release(self, callback: Callable[[], Any]) -> None:
+        """Defer a redaction-hold release until secret taint clears or sandbox stops."""
+        if not callable(callback):
+            return
+        with self._launch_lock:
+            self._deferred_redaction_releases.append(callback)
+            self._try_reclaim_secret_taint_locked()
+
+    def try_reclaim_secret_taint(self) -> bool:
+        """Clear taint and drain deferred redaction holds once the PID namespace is idle."""
+        with self._launch_lock:
+            return self._try_reclaim_secret_taint_locked()
+
+    def _try_reclaim_secret_taint_locked(self) -> bool:
+        if not self._deferred_redaction_releases and not self._secret_tainted_sessions:
+            return True
+        if self.lost_reason is not None or not self.alive:
+            self._tainted_sessions.clear()
+            self._secret_tainted_sessions.clear()
+            self._drain_deferred_redaction_releases_locked()
+            return True
+        if not self.verify_pid_namespace_idle():
+            return False
+        self._tainted_sessions.clear()
+        self._secret_tainted_sessions.clear()
+        self._drain_deferred_redaction_releases_locked()
+        return True
+
+    def _drain_deferred_redaction_releases_locked(self) -> None:
+        callbacks = self._deferred_redaction_releases
+        self._deferred_redaction_releases = []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                pass
 
     def verify_pid_namespace_idle(self, *, timeout: float = 2.0) -> bool:
         """Ask Worker PID 1 whether /proc contains zero non-Worker processes (fail-closed)."""
@@ -401,6 +454,10 @@ class PersistentSandbox:
                     )
                 self._tainted_sessions.clear()
                 self._secret_tainted_sessions.clear()
+                self._drain_deferred_redaction_releases_locked()
+            elif self._deferred_redaction_releases:
+                # Same-session reuse path: reclaim holds once orphans are gone.
+                self._try_reclaim_secret_taint_locked()
 
             handle = self.start_command(command, stdin_mode=stdin_mode, env=env)
             self._tainted_sessions.add(root_session_id)
@@ -455,6 +512,10 @@ class PersistentSandbox:
 
     def stop(self, reason: str = "sandbox stopped", timeout: float = STOP_TIMEOUT_SECONDS) -> None:
         """关闭控制通道并回收整个沙箱。"""
+        with self._launch_lock:
+            self._tainted_sessions.clear()
+            self._secret_tainted_sessions.clear()
+            self._drain_deferred_redaction_releases_locked()
         self._mark_lost(reason)
         process = self.process
         if process is None:

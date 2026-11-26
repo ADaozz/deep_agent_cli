@@ -348,6 +348,65 @@ def test_pty_ctrl_c_interrupts_foreground(backend: WorkspaceCompositeBackend) ->
     assert done_art["exit_code"] == 130
 
 
+def test_pty_ctrl_c_bypasses_blocked_stdin_ack(backend: WorkspaceCompositeBackend) -> None:
+    """Real PTY: Ctrl+C must not wait for a prior blocked write's ACK (not SIGKILL)."""
+    execute = build_execute_tool(backend)
+    write = build_write_stdin_tool(backend)
+    first, artifact = execute.func(
+        command=(
+            "python3 -c '"
+            "import signal, time; "
+            "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "print(\"READY\", flush=True); "
+            "time.sleep(30)"
+            "'"
+        ),
+        network=False, yield_time=0.5, tty=True, timeout=15,
+    )
+    assert artifact["running"] is True
+    execution_id = str(artifact["execution_id"])
+    seen = first
+    deadline = time.monotonic() + 5.0
+    while "READY" not in seen and time.monotonic() < deadline:
+        chunk, art = write.func(execution_id=execution_id, chars="", yield_time=0.2)
+        seen += chunk
+        assert art["running"] is True
+    assert "READY" in seen
+
+    session = backend.executor.pool.executions.get(execution_id)
+    assert session is not None and session.handle is not None
+    handle = session.handle
+
+    # Child does not read stdin; flood the PTY so a normal write blocks waiting for ACK.
+    flood_result: dict[str, Any] = {}
+
+    def flood_stdin() -> None:
+        try:
+            handle.write_stdin(b"X" * (256 * 1024), timeout=10.0)
+            flood_result["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            flood_result["error"] = exc
+
+    flood_thread = threading.Thread(target=flood_stdin, daemon=True)
+    flood_thread.start()
+    _wait_until(
+        lambda: handle._write_lock.locked() or bool(handle._pending_acks),
+        timeout=3.0,
+    )
+
+    # Interrupt via the normal write_stdin tool path (\\x03 → RemoteCommand.interrupt).
+    started = time.monotonic()
+    _done, done_art = write.func(execution_id=execution_id, chars="\x03", yield_time=3.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.5, f"Ctrl+C waited on prior ACK ({elapsed:.2f}s)"
+    assert done_art["running"] is False
+    assert done_art["termination_reason"] is None
+    assert done_art["exit_code"] == 130
+
+    flood_thread.join(timeout=2.0)
+    assert "ok" not in flood_result
+
+
 def test_retained_terminal_result_and_incremental_polls(backend: WorkspaceCompositeBackend) -> None:
     execute = build_execute_tool(backend)
     write = build_write_stdin_tool(backend)

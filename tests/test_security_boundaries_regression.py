@@ -167,7 +167,9 @@ def test_surviving_background_subprocess_blocks_cross_session_sharing_both_direc
     finally:
         backend2.executor.pool.shutdown("dir2 finished")
 
-    # Direction 3: Fail-closed when PID namespace idle verification cannot confirm cleanliness
+    # Direction 3: Fail-closed when PID namespace idle verification cannot confirm cleanliness.
+    # Leave a secret-bearing orphan so taint remains after CommandSession end, then force
+    # verify_pid_namespace_idle to fail closed for the cross-session launch.
     backend3 = _require_bwrap(tmp_path / "d3")
     store3 = SecretStore(tmp_path / "cfg3", environ={})
     store3.set_secret("FC_SECRET", "fc_secret_777", scope="sandbox", storage="session", session_id="sess-a")
@@ -176,13 +178,14 @@ def test_surviving_background_subprocess_blocks_cross_session_sharing_both_direc
         ta = set_execution_thread_id("sess-a")
         ra = set_root_session_id("sess-a")
         try:
-            assert backend3.execute("echo clean", timeout=10).exit_code == 0
+            assert backend3.execute("nohup sleep 20 >/dev/null 2>&1 &", timeout=10).exit_code == 0
         finally:
             reset_root_session_id(ra)
             reset_execution_thread_id(ta)
 
         sandbox = backend3.executor.pool.sandbox(False)
         assert sandbox is not None
+        assert "sess-a" in sandbox._secret_tainted_sessions
         monkeypatch.setattr(sandbox, "verify_pid_namespace_idle", lambda **kwargs: False)
 
         tb = set_execution_thread_id("sess-b")
@@ -360,8 +363,8 @@ def test_execution_redaction_survives_store_corruption_and_avoids_per_chunk_decr
         assert secret_val not in done.output
         assert "OUT:$PINNED_KEY" in done.output
 
-        # Wait briefly for pump thread's post-exit _release_redaction_hold to complete
-        deadline = time.monotonic() + 2.0
+        # No orphans: deferred hold reclaims via sandbox idle check after pump exit.
+        deadline = time.monotonic() + 3.0
         while store.retired_count > 0 and time.monotonic() < deadline:
             time.sleep(0.02)
         assert store.retired_count == 0
@@ -369,6 +372,92 @@ def test_execution_redaction_survives_store_corruption_and_avoids_per_chunk_decr
         reset_root_session_id(r_tok)
         reset_execution_thread_id(t_tok)
         backend.executor.pool.shutdown("pin test finished")
+
+
+def test_sandbox_injection_fail_closed_while_redaction_keeps_last_known(tmp_path: Path) -> None:
+    """Injection uses fresh verified reads; redaction may keep last-known cache."""
+    store = SecretStore(tmp_path / "cfg", environ={})
+    secret_val = "inject_fail_closed_secret_aabbcc"
+    store.set_secret("INJECT_KEY", secret_val, scope="sandbox", storage="persistent")
+
+    # Warm fail-open cache used by redaction.
+    assert any(r.value == secret_val for r in store.redaction_refs())
+    assert store.sandbox_env_for_session("sess-inject")["INJECT_KEY"] == secret_val
+
+    # Corrupt on-disk entry (auth/value no longer verifiable).
+    entry = tmp_path / "cfg" / "secrets" / "entries" / "INJECT_KEY.enc"
+    entry.write_bytes(b"corrupted-ciphertext-not-fernet")
+
+    # Redaction still masks via last-known cache.
+    assert any(r.value == secret_val for r in store.redaction_refs())
+    # New-process injection must NOT reuse the expired cache.
+    assert store.sandbox_env_for_session("sess-inject") == {}
+
+    backend = _require_bwrap(tmp_path / "inj")
+    backend.set_secret_provider(
+        store.sandbox_env_for_session,
+        lambda: store.redaction_refs(session_id="sess-inject"),
+        (store.acquire_redaction_hold, store.release_redaction_hold),
+    )
+    t_tok = set_execution_thread_id("sess-inject")
+    r_tok = set_root_session_id("sess-inject")
+    try:
+        result = backend.execute(
+            'python3 -c "import os; print(os.environ.get(\'INJECT_KEY\', \'MISSING\'))"',
+            timeout=10,
+        )
+        assert result.exit_code == 0
+        assert "MISSING" in result.output
+        assert secret_val not in result.output
+    finally:
+        reset_root_session_id(r_tok)
+        reset_execution_thread_id(t_tok)
+        backend.executor.pool.shutdown("inject fail-closed finished")
+
+
+def test_retired_redaction_hold_waits_for_orphan_idle_or_sandbox_stop(tmp_path: Path) -> None:
+    """Secret-bearing nohup orphans keep redaction holds until idle/taint clear or stop."""
+    backend = _require_bwrap(tmp_path)
+    store = SecretStore(tmp_path / "cfg", environ={})
+    secret_val = "orphan_hold_secret_778899"
+    store.set_secret("ORPHAN_HOLD", secret_val, scope="sandbox", storage="persistent")
+    backend.set_secret_provider(
+        store.sandbox_env_for_session,
+        lambda: store.redaction_refs(),
+        (store.acquire_redaction_hold, store.release_redaction_hold),
+    )
+
+    t_tok = set_execution_thread_id("sess-orphan-hold")
+    r_tok = set_root_session_id("sess-orphan-hold")
+    try:
+        launched = backend.execute("nohup sleep 30 >/dev/null 2>&1 &", timeout=10)
+        assert launched.exit_code == 0
+        assert not launched.running
+        assert backend.list_active_executions("sess-orphan-hold") == []
+
+        store.set_secret(
+            "ORPHAN_HOLD", "rotated_orphan_hold_001", scope="sandbox", storage="persistent", overwrite=True,
+        )
+        store.delete_secret("ORPHAN_HOLD")
+        assert store.retired_count >= 1
+        # Shell ended, but orphan still holds env — prune must stay blocked.
+        time.sleep(0.15)
+        assert store.prune_retired() == 0
+        assert store.retired_count >= 1
+
+        # Namespace teardown releases deferred holds (orphans die with the sandbox).
+        backend.executor.pool.shutdown("orphan hold test finished")
+        deadline = time.monotonic() + 3.0
+        while store.retired_count > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert store.retired_count == 0
+    finally:
+        reset_root_session_id(r_tok)
+        reset_execution_thread_id(t_tok)
+        try:
+            backend.executor.pool.shutdown("orphan hold cleanup")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
