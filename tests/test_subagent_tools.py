@@ -26,10 +26,24 @@ def test_start_task_description_points_at_read_task_for_capacity():
         assert "wait_task" not in text
         assert "Maximum concurrent" not in text
         assert "Remaining delegation depth" not in text
+        assert "self-contained objective" in text
+        assert "do not inherit your conversation history" in text.lower()
     background = start_task_description(allow_background=True)
     assert "start a new turn if the parent is idle" in background
     assert "Do not poll or wait for background tasks." in background
     assert "Both modes can run concurrently" in background
+
+
+def test_start_task_field_descriptions_avoid_delegation_policy_duplication():
+    assert StartTaskSchema.model_fields["description"].description == "Task description for the subagent."
+    assert StartTaskSchema.model_fields["run_in_background"].description == (
+        "False: synchronous. True: background."
+    )
+    assert StartTaskSyncSchema.model_fields["description"].description == (
+        "Task description for the subagent."
+    )
+    assert "does not inherit" not in StartTaskSchema.model_fields["description"].description
+    assert "automatically deliver" not in StartTaskSchema.model_fields["run_in_background"].description
 
 
 def test_node_sets_are_common_tools_plus_the_node_specific_ones():

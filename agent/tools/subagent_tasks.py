@@ -38,16 +38,8 @@ that the task has already stopped."""
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
 _CAPACITY = "Call `read_task()` to read the current subagent capacity."
-_DESCRIPTION = (
-    "A self-contained task description including the objective, "
-    "relevant context, constraints, and expected deliverables. "
-    "The subagent does not inherit your conversation history."
-)
-_BACKGROUND = (
-    "False: execute synchronously and return the final result. "
-    "True: execute independently in the background, return the run_id immediately, "
-    "and automatically deliver the final result upon completion."
-)
+_DESCRIPTION = "Task description for the subagent."
+_BACKGROUND = "False: synchronous. True: background."
 
 
 def start_task_description(*, allow_background: bool) -> str:

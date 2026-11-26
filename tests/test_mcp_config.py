@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +15,14 @@ from agent.mcp.config import (
     server_from_fields,
 )
 from agent.mcp.manager import MCPManager
+from agent.mcp.tools import build_management_tools
+
+
+def test_mcp_add_description_scopes_persistent_credentials() -> None:
+    add = next(tool for tool in build_management_tools(MagicMock()) if tool.name == "mcp_add")
+    assert "bearer or stdio credential" in add.description
+    assert "Global MCP servers require persistent credentials" not in add.description
+    assert "OAuth" in add.description
 
 
 def test_server_fields_reject_plaintext_token_and_bad_url() -> None:

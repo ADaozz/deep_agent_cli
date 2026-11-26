@@ -177,7 +177,7 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             Field(
                 description=(
                     "Input text. Empty polls output; include \\n to submit a line. "
-                    "Send \\x03 for PTY Ctrl+C."
+                    "Send \\u0003 for PTY Ctrl+C."
                 ),
             ),
         ] = "",
@@ -186,7 +186,7 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             Literal["write", "close", "cancel"],
             Field(
                 description=(
-                    "write: send input or poll; close: close PIPE stdin; "
+                    "write: send input; close: close PIPE stdin; "
                     "cancel: terminate execution. Leave chars empty for close and cancel."
                 ),
             ),

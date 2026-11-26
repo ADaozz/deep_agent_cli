@@ -78,6 +78,12 @@ def test_grep_and_glob_are_not_registered(tmp_path: Path, monkeypatch, permissio
     assert set(execute.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
     write_stdin = next(tool for tool in schemas[-1] if tool.name == "write_stdin")
     assert set(write_stdin.args) == {"execution_id", "chars", "yield_time", "action"}
+    chars_desc = write_stdin.args["chars"]["description"]
+    action_desc = write_stdin.args["action"]["description"]
+    assert r"\u0003" in chars_desc
+    assert r"\x03" not in chars_desc
+    assert "Empty polls output" in chars_desc
+    assert "or poll" not in action_desc
     expected = _SEARCH_GUIDANCE if implementation.resolve_rg() else _SEARCH_UNAVAILABLE
     assert expected in execute.description
 
