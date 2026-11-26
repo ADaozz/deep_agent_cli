@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="210" viewBox="0 0 960 210" role="img" aria-labelledby="t d">
   <title id="t">Deep Agent CLI</title>
-  <desc id="d">Deep Agent CLI 项目标题：让 Agent 自主工作，让执行始终可见。</desc>
+  <desc id="d">Deep Agent CLI：面向 Linux 与 WSL2 的终端 Agent。</desc>
   <defs><marker id="a-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#f18ab6"/></marker><marker id="a-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#b7a8c6"/></marker><marker id="a-observe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#6fb3bf"/></marker></defs>
   <rect width="960" height="210" rx="14" fill="#0f0c13"/>
   <rect x="1" y="1" width="958" height="208" rx="13" fill="none" stroke="#3a2d46"/>
   <text x="48" y="52" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#a08e9b">~/project <tspan fill="#f18ab6">›</tspan> deep-agent</text>
   <text x="46" y="108" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="46" font-weight="700" fill="#f18ab6" letter-spacing="-1">Deep Agent CLI</text>
   <rect x="424" y="74" width="20" height="38" rx="2" fill="#f18ab6" opacity="0.9"/>
-  <text x="48" y="150" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="22" font-weight="600" fill="#efe4ec">让 Agent 自主工作，让执行始终可见。</text>
-  <text x="48" y="182" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" letter-spacing="0.5" fill="#a08e9b">terminal-native  ·  observable  ·  interruptible  ·  bounded</text>
+  <text x="48" y="150" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="21" font-weight="600" fill="#efe4ec">面向 Linux 与 WSL2 的终端 Agent</text>
+  <text x="48" y="182" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" letter-spacing="0.4" fill="#a08e9b">Bubblewrap Sandbox  ·  Interactive PTY/Pipe  ·  SubAgents  ·  MCP</text>
   <circle cx="700" cy="52" r="2.6" fill="#f18ab6" opacity="0.9"/>
   <circle cx="717" cy="52" r="2.6" fill="#3a2d46" opacity="0.6"/>
   <circle cx="734" cy="52" r="2.6" fill="#f18ab6" opacity="0.9"/>
