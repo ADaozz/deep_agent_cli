@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" role="img" aria-labelledby="t d">
+  <title id="t">交互式执行生命周期</title>
+  <desc id="d">execute 经 CommandSession 与 RemoteCommand 进入沙箱内的持久 Worker，启动 Pipe 或 PTY 子进程；输出增量回到 TUI；yield_time 到期后进程继续运行，write_stdin 与 /stdin 通过单一写队列输入；超时、取消或退出后清理。</desc>
+  <defs><marker id="a-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#f18ab6"/></marker><marker id="a-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#b7a8c6"/></marker><marker id="a-observe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#6fb3bf"/></marker></defs>
+  <rect width="980" height="560" rx="14" fill="#0f0c13"/>
+  <rect x="20" y="42" width="940" height="232" rx="12" fill="#130f19" stroke="#2d2238" stroke-width="1.2"/>
+  <text x="34" y="61" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" letter-spacing="0.6" fill="#f18ab6" opacity="0.85">宿主 · deep-agent 进程</text>
+  <rect x="20" y="294" width="940" height="198" rx="12" fill="#130f19" stroke="#2d2238" stroke-width="1.2"/>
+  <text x="34" y="313" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" letter-spacing="0.6" fill="#f18ab6" opacity="0.85">Bubblewrap · 持久 Worker（无网 / 有网各一）</text>
+  <rect x="38" y="82" width="138" height="80" rx="10" fill="#21182a" stroke="#f18ab6" stroke-width="1.4"/>
+  <text x="50" y="106" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">execute</text>
+  <text x="50" y="127" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">command · network</text>
+  <text x="50" y="145" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">yield_time</text>
+  <rect x="212" y="82" width="162" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="224" y="106" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">CommandSession</text>
+  <text x="224" y="127" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">所有权 · 注册</text>
+  <text x="224" y="145" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">前台 / 后台</text>
+  <rect x="412" y="82" width="162" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="424" y="106" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">RemoteCommand</text>
+  <text x="424" y="127" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">下发 · 读取</text>
+  <rect x="792" y="82" width="150" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="804" y="106" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">TUI 工具卡片</text>
+  <text x="804" y="127" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">实时输出 · 脱敏</text>
+  <text x="804" y="145" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Running → Ran</text>
+  <rect x="38" y="184" width="138" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="50" y="208" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">write_stdin</text>
+  <text x="50" y="229" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">或用户 /stdin</text>
+  <rect x="212" y="184" width="162" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="224" y="208" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">单一写队列</text>
+  <text x="224" y="229" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">≤ 1 MiB · ACK</text>
+  <rect x="608" y="184" width="334" height="62" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="620" y="208" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">yield_time 到期</text>
+  <text x="620" y="229" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">返回 execution_id 与当前输出，进程继续运行</text>
+  <rect x="412" y="338" width="150" height="80" rx="10" fill="#21182a" stroke="#f18ab6" stroke-width="1.4"/>
+  <text x="424" y="362" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Worker</text>
+  <text x="424" y="383" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">常驻 · 管道通道</text>
+  <rect x="602" y="338" width="164" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="614" y="362" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">子进程</text>
+  <text x="614" y="383" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">/bin/sh -lc</text>
+  <text x="614" y="401" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Pipe 或 PTY</text>
+  <rect x="796" y="332" width="146" height="114" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="808" y="356" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">终态</text>
+  <text x="808" y="377" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">退出码</text>
+  <text x="808" y="395" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">124 超时</text>
+  <text x="808" y="413" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">130 取消</text>
+  <text x="808" y="431" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">sandbox_lost</text>
+  <path d="M176 122 H212" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M374 122 H412" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M476 162 V338" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <text x="484" y="250" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#f18ab6">命令</text>
+  <path d="M562 378 H602" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M602 403 H562" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="582" y="438" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">stdout / stderr</text>
+  <path d="M522 338 V162" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="532" y="294" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">增量</text>
+  <path d="M574 122 H792" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="683" y="114" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">输出流</text>
+  <path d="M176 219 H212" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <path d="M374 219 H444 V162" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M766 378 H796" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="30" y="520" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">取消只终止当前命令的进程组（含其后台子进程），Worker 继续可用；Worker 丢失不会自动重放命令。</text>
+  <path d="M30 545 H64" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <text x="76" y="549" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">控制流</text>
+  <path d="M150 545 H184" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="196" y="549" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">数据流</text>
+</svg>

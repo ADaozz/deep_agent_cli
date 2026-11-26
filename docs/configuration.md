@@ -39,7 +39,7 @@ companion:
 - `source_read_lines` 设置源码读取的默认行数和单次行数上限，默认 50，可设为 1–200。工具可以请求更少的行数，返回内容也受字符数限制。
 - `gifs` 独立配置 `idle`、`observing`、`curious`、`focused`、`concerned` 和 `relieved` 的动画。
 
-省略配置项会使用默认值。提示词和动画路径也可设为 `null` 以使用内置文件。侧栏交互、Markdown 渲染与诊断数据边界见 [终端界面 · Lain Companion](tui.md#lain-companion) 和 [统计口径](companion-phase2.md)。
+省略配置项会使用默认值。提示词和动画路径也可设为 `null` 以使用内置文件。侧栏交互、Markdown 渲染与诊断数据边界见 [终端界面 · Lain Companion](tui.md#lain-companion) 和 [Lain Companion](companion.md)。
 
 ## 全局网络环境（`trust_env`）
 

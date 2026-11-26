@@ -1,5 +1,9 @@
 # 沙箱与权限
 
+<div align="center">
+  <img src="../assets/readme/permissions.svg" alt="权限与沙箱流程" width="960" />
+</div>
+
 工作区在沙箱里的路径就是它的真实绝对路径。例如 Workspace 为 `/mnt/d/test` 时，`restricted` 和 `full-access` 的工作区路径、`pwd` 和文件工具都使用 `/mnt/d/test`。切换模式不改变这条路径。每次命令调用都从该目录开始，上次调用的 `cd` 不会延续。
 
 | 项目 | `restricted` | `full-access` |

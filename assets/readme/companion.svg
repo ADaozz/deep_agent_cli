@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="500" viewBox="0 0 980 500" role="img" aria-labelledby="t d">
+  <title id="t">Lain Companion 架构</title>
+  <desc id="d">Lain 只读观察主 Agent 的运行事件，本地采样资源、Git 与服务并维护 Tool Health；仅在用户提问时通过独立模型与只读宿主 RPC 回答，不参与主 Agent 调度。</desc>
+  <defs><marker id="a-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#f18ab6"/></marker><marker id="a-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#b7a8c6"/></marker><marker id="a-observe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#6fb3bf"/></marker></defs>
+  <rect width="980" height="500" rx="14" fill="#0f0c13"/>
+  <rect x="30" y="160" width="150" height="90" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="42" y="184" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">主 Agent</text>
+  <text x="42" y="205" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Runtime 事件</text>
+  <text x="42" y="223" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">工具开始 / 完成</text>
+  <rect x="230" y="30" width="360" height="290" rx="12" fill="#130f19" stroke="#2d2238" stroke-width="1.2"/>
+  <text x="244" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" letter-spacing="0.6" fill="#f18ab6" opacity="0.85">本地监控（无需模型）</text>
+  <rect x="250" y="70" width="150" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="262" y="94" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">采样</text>
+  <text x="262" y="115" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">资源 ~2s</text>
+  <text x="262" y="133" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Git · 服务</text>
+  <rect x="420" y="70" width="150" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="432" y="94" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Timeline</text>
+  <text x="432" y="115" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">SQLite</text>
+  <text x="432" y="133" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">按会话保存</text>
+  <rect x="250" y="160" width="150" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="262" y="184" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Tool Health</text>
+  <text x="262" y="205" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">最近 60 次</text>
+  <text x="262" y="223" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">热力图</text>
+  <rect x="420" y="160" width="150" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="432" y="184" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">表情状态</text>
+  <text x="432" y="205" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">宿主本地决定</text>
+  <text x="432" y="223" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">GIF 动画</text>
+  <rect x="640" y="30" width="310" height="290" rx="12" fill="#130f19" stroke="#2d2238" stroke-width="1.2"/>
+  <text x="654" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" letter-spacing="0.6" fill="#f18ab6" opacity="0.85">Talk To Lain（仅用户提问）</text>
+  <rect x="660" y="70" width="270" height="56" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="672" y="94" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">用户提问</text>
+  <text x="672" y="115" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Ctrl+→ 或 /lain</text>
+  <rect x="660" y="146" width="270" height="56" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="672" y="170" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Companion 模型</text>
+  <text x="672" y="191" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">独立客户端</text>
+  <rect x="660" y="222" width="270" height="78" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="672" y="246" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">只读 RPC 工具</text>
+  <text x="672" y="267" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">源码 · 会话统计 · 工具明细</text>
+  <text x="672" y="285" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">失败与重试 · 资源 · Git</text>
+  <rect x="230" y="350" width="720" height="80" rx="10" fill="#21182a" stroke="#f18ab6" stroke-width="1.4"/>
+  <text x="242" y="374" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">边界</text>
+  <text x="242" y="395" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">Lain 只观察和回答：不参与主 Agent 调度，不修改任务，不执行命令。</text>
+  <text x="242" y="413" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">仓库与会话内容作为数据提供；只对已知密钥做精确替换。</text>
+  <path d="M180 205 H230" fill="none" stroke="#6fb3bf" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a-observe)"/>
+  <text x="205" y="195" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#6fb3bf">RunEvent</text>
+  <path d="M795 126 V146" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M795 202 V222" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M660 262 H590" fill="none" stroke="#6fb3bf" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a-observe)"/>
+  <text x="625" y="254" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#6fb3bf">只读读取</text>
+  <text x="30" y="470" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">未配置模型凭据时，本地监控与动画仍可使用。</text>
+  <path d="M30 490 H64" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <text x="76" y="494" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">控制流</text>
+  <path d="M150 490 H184" stroke="#6fb3bf" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a-observe)"/>
+  <text x="196" y="494" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">只读观察</text>
+</svg>

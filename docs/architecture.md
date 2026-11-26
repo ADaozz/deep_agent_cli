@@ -2,7 +2,7 @@
 
 `deep_agent_cli` 使用 Deep Agents 和 LangGraph 执行 Agent 图。Harness 负责将模型、工具、工作区、人工干预、沙箱、会话和终端界面组织成可控制、可恢复的运行系统，不另行实现推理循环。使用入口是交互式 CLI；嵌入其他 Python 程序时走 [Python API](library.md)。
 
-本文描述当前实现与扩展边界。配置和操作说明见 [README](../README.md)、[沙箱与权限](sandbox.md)；Python 接入见 [library.md](library.md)。
+本文描述当前实现与扩展边界。配置与专题机制见 [文档总览](README.md)、[沙箱与权限](sandbox.md)、[交互式命令执行](execution.md)、[安全凭据管理](secrets.md)、[SubAgent 委派](subagents.md) 与 [Python API](library.md)。
 
 代码按领域目录组织；状态归属、依赖约束和模块接口见 [领域设计](domain-design.md)。
 
@@ -20,26 +20,9 @@ Harness 的职责包括图装配、运行控制、工具审批、命令隔离、
 
 ## 分层
 
-```mermaid
-flowchart TB
-    CLI["TUI / CLI · agent/cli"] --> RUN["AgentRunner"]
-    RUN <--> CONTROL["RunController · 取消 / 暂停 / 消息队列"]
-    RUN <--> SESSION["SessionRuntime / SessionStore / 会话租约"]
-    SESSION --> DB["SQLite checkpoint / catalog / 附件"]
-    RUN --> FACTORY["factory.build_agent"]
-    FACTORY --> GRAPH["Deep Agents / LangGraph"]
-    GRAPH --> MODEL["LLM 协议适配"]
-    GRAPH --> TOOLS["工具与 Middleware"]
-    GRAPH --> TASK["start_task / SubAgentRuntime"]
-    TASK --> MANAGER["SubAgentManager · 并发 / 取消"]
-    MANAGER --> CHILD["CompiledSubAgent · isolated"]
-    CHILD --> FILES
-    CHILD --> EXEC
-    CHILD --> LOGS["独立 JSONL 日志"]
-    TOOLS --> FILES["WorkspaceCompositeBackend · 文件路径路由"]
-    TOOLS --> EXEC["BubblewrapBackend / SandboxPool"]
-    EXEC --> WORKER["持久 Worker · Shell / argv 子进程"]
-```
+<div align="center">
+  <img src="../assets/readme/runtime.svg" alt="Agent 运行架构" width="960" />
+</div>
 
 文件与进程是两条不同的访问通路：普通文件工具在宿主 Python 进程中通过 Backend 访问授权路径；Shell 命令在 Bubblewrap 内运行。模型工具表不包含 `grep` 和 `glob`。代码搜索和文件发现通过 `execute` 调用沙箱 `PATH` 上的 `rg`。
 
@@ -51,7 +34,8 @@ flowchart TB
 | 图装配 | `agent/bootstrap/factory.py`、`middleware/` | 工具、中间件、Backend 与 Deep Agents 的接线 |
 | 模型适配 | `agent/models/` | API 协议、思考流、工具调用、附件与 usage |
 | 工具 | `agent/tools/`、上游文件工具、`agent/mcp/` | Schema、参数校验、结果与 artifact；MCP 在宿主注入 |
-| 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久进程、超时与清理 |
+| 文件与执行环境 | `agent/execution/` | 工作区真实路径、命名空间、持久 Worker、Pipe/PTY、超时与清理 |
+| 安全凭据 | `agent/secrets/`、`agent/redaction.py` | 会话内存与 Fernet 持久化存储、作用域与消费者绑定、流式精确脱敏 |
 | 会话状态 | `agent/sessions/` | Checkpoint、元数据、附件、独占租约、恢复与会话标题 |
 | Companion | `agent/companion/` | 侧栏监控、原始事件与统计、独立对话 Worker 与宿主只读 RPC |
 
@@ -79,6 +63,7 @@ flowchart TB
 | `ls`、`read` | Deep Agents 文件系统中间件 | 免审批 |
 | `write`、`edit`、`delete` | Deep Agents 文件系统中间件 | 执行前审批 |
 | `execute` | Backend 支持命令执行时注册 | 每次审批 |
+| `write_stdin` | Backend 支持交互式命令时注册 | 写入/关闭/取消按审批规则；空轮询不视为副作用 |
 | `web_search`、`web_fetch` | 配置 `llm.models.deepseek.api_key` 时注册 | 每次审批 |
 | `request_human_input` | 仅向主 Agent 注册 | 独立的人工输入中断 |
 | `start_task` | 能继续派发、且权限为 `auto` 或 `allow` | 任务正文是 `description`。Root 可传 `run_in_background`；同步子 Agent 只能同步派发 |
@@ -305,7 +290,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 `grep` 和 `glob` 不在模型工具表中。模型用 `execute` 运行 `rg -n` 和 `rg --files -g`；这条命令的审批、网络和持久沙箱与其他 `execute` 相同。没有单独的本地搜索实现。
 
-`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 先找当前 Python 环境里的 `rg`，再找系统 `PATH`。定位与安装见 [search.md](search.md)。
+`ripgrep-bin` 随 Python 依赖安装。`resolve_rg()` 先找当前 Python 环境里的 `rg`，再找系统 `PATH`。定位与安装见 [交互式命令执行与代码搜索](execution.md#内建代码搜索rg)。
 
 沙箱启动时将宿主 `rg` 只读挂载到 `/run/deep-agent/rg`，持久 Worker 与一次性命令共用这套挂载。自定义或继承 PATH 后仍将 `/run/deep-agent` 放在最前。`ask` 的无网实例和 `allow` 的有网实例挂载同一份二进制，模型直接执行 `rg`。宿主找不到 `rg` 时不挂载该路径，并在启动日志和 `execute` 说明中写明 `rg` 不可用。
 
@@ -351,7 +336,7 @@ Bubblewrap 在 `restricted` 下内置的系统运行时挂载（`/usr`、`/lib` 
 
 TUI 使用 Runner 的公开操作和结构化事件，负责终端输入、展示、审批、提问及选择器。操作与显示见 [tui.md](tui.md)。
 
-宽终端下右侧挂载 Lain Companion：订阅同一套 RunEvent 做本地统计与热力图，对话走独立 Worker 与 Companion 模型，经宿主 RPC 只读访问工作区与当前 Session（含 `session_evidence`、`inspect_current_session`）。聊天气泡复用主转录区的 Rich Markdown 渲染；不执行写入、Shell 或主 Agent 工具。配置与统计口径见 [configuration.md](configuration.md#lain-侧栏companion)、[companion-phase2.md](companion-phase2.md)。
+宽终端下右侧挂载 Lain Companion：订阅同一套 RunEvent 做本地统计与热力图，对话走独立 Worker 与 Companion 模型，经宿主 RPC 只读访问工作区与当前 Session（含 `session_evidence`、`inspect_current_session`）。聊天气泡复用主转录区的 Rich Markdown 渲染；不执行写入、Shell 或主 Agent 工具。配置与统计口径见 [configuration.md](configuration.md#lain-侧栏companion)、[companion.md](companion.md)。
 
 ## 观察与验证
 

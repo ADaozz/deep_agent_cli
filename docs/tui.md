@@ -24,6 +24,7 @@ deep-agent --version
 | 命令 | 作用 |
 |---|---|
 | `/help` | 命令和快捷键列表 |
+| `/lain [问题\|stats]` | 开关或向右侧 Lain Companion 提问；`/lain stats` 查看上轮工具明细（无需模型），见 [companion.md](companion.md) |
 | `/status` | 查看模型、目录、权限、会话信息和上下文剩余量 |
 | `/status details` | 运行状态、模型与推理强度、输入能力、工具数及其名称、按模型与强度分组的会话 TPS 统计 |
 | `/new` | 继承当前模型、推理强度、权限和沙箱模式，新建空会话（首次发送消息后才保存） |
@@ -31,9 +32,9 @@ deep-agent --version
 | `/model` | 依次选择来源、模型、推理强度；`/model <来源>` 或 `/model <来源/模型>` 跳过前几步 |
 | `/skill` | 打开技能选择器，把技能块插入输入框；不接受参数 |
 | `/permission ask\|auto\|allow` | 切换权限模式，见 [sandbox.md](sandbox.md#权限模式) |
-| `/mcp` | 查看 MCP 全局开关和宿主服务。`/mcp enable` 打开并自动连接；`/mcp disable` 关闭连接和工具，但保留配置与 OAuth 缓存。`/mcp add` 逐步填写；`/mcp remove <name>` 删除；`/mcp test <name>` 重连；`/mcp tools <name>` 查看工具。关闭期间只能查询和 `/mcp enable`。工具审批统一由 `/permission` 控制；服务在宿主运行，不受 Bubblewrap 限制 |
-| `/secrets` | 管理宿主 `SecretStore` 凭据：`/secrets` 或 `/secrets list` 仅列出元数据（名称、作用域、存储方式、授权消费者，不显示明文）；`/secrets set [name]`、`/secrets update [name]` 使用独立掩码输入框写入/更新；`/secrets delete [name]` 确认后删除 |
-| `/stdin [execution_id\|off]` | 进入当前会话运行中交互进程（`pipe` / `pty`）的直输模式；多个活动进程时弹出选择列表，`/stdin off` 或 `Esc` 脱离直输模式而不终止进程 |
+| `/mcp` | 查看和管理宿主 MCP 服务（`enable`/`disable`/`add`/`remove`/`test`/`tools`），见 [mcp.md](mcp.md) |
+| `/secrets` | 管理宿主 `SecretStore` 凭据（`list`/`set`/`update`/`delete`，掩码输入），见 [secrets.md](secrets.md) |
+| `/stdin [execution_id\|off]` | 进入当前会话运行中交互进程（`pipe` / `pty`）的直输模式，`/stdin off` 或 `Esc` 脱离，见 [execution.md](execution.md) |
 | `/sandbox restricted\|full-access` | 切换文件系统模式。`full-access` 写入当前真实环境，见 [sandbox.md](sandbox.md#文件系统模式) |
 | `/compact` | 手动压缩上下文 |
 | `/image <路径>` | 为下一条消息附加图片；`/image clipboard` 从剪贴板读取；`/image` 列出；`/image clear` 清空 |
@@ -219,7 +220,7 @@ Esc 取消当前 Run 时会传播到全部关联子任务（包括后台任务�
 
 终端至少 120 列、32 行时，右侧 28% 的区域显示六种 Lain 表情、CPU / GPU / RAM / DISK、Git、Services、Tool Health 工具调用热力图和聊天。DISK 显示工作区所在文件系统的使用率。Git 每 5 秒刷新，显示分支与状态。Services 无服务时显示 `0 running`，有服务时显示名称、PID 和监听端口，`ns:` 标记沙箱内 PID。聊天区占据剩余高度，输入框固定在底部。可用鼠标左键拖选侧栏文字，松开时复制到剪贴板。
 
-按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。热力图按每 3 次完成调用分组，展示最近 60 次中的活跃度及失败位置。聊天问题最多 4,000 字。聊天气泡与主转录区共用 Rich Markdown → ANSI 渲染路径，列表、加粗等按 Markdown 显示。模型回复按原文展示（去掉控制字符后，最长 1600 字），不再做句数或汉字过滤。对话侧可只读检查当前主会话：`inspect_current_session` 提供 `recent_tools` / `tool_detail` / `recent_messages`，与统计类 `session_evidence` 配合排查失败。日常采集保留原始工具事件、失败分类、资源采样、Git 记录和统计图表，不在本地生成诊断结论；只有用户提问才会调用独立的 `deepseek/deepseek-flash`。Lain Worker 使用启动时由主进程传入的 `llm.models.deepseek.api_key`。缺少凭据时仍可查看本地统计、动画和曲线。[统计口径、权限边界与验收截图](companion-phase2.md)
+按 `Ctrl+→` 进入玲音聊天，`Enter` 发送，`Ctrl+←` 或 `Esc` 返回主输入；也可以输入 `/lain <问题>`。`/lain stats` 查看上轮工具明细。完整统计口径、Tool Health 规则、只读 RPC 权限边界与 GIF 渲染器对比见 [Lain Companion](companion.md)。
 
 ### `/status details` 性能统计口径
 

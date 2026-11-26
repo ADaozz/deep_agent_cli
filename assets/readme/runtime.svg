@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="520" viewBox="0 0 980 520" role="img" aria-labelledby="t d">
+  <title id="t">Agent 运行架构</title>
+  <desc id="d">CLI 与 Python API 进入 AgentRunner；Runner 通过 RunController、SessionStore 与 Deep Agents/LangGraph 图协作，图内含模型适配、中间件与工具，事件以 RunEvent 回到调用方。</desc>
+  <defs><marker id="a-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#f18ab6"/></marker><marker id="a-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#b7a8c6"/></marker><marker id="a-observe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L10 5 L0 9 z" fill="#6fb3bf"/></marker></defs>
+  <rect width="980" height="520" rx="14" fill="#0f0c13"/>
+  <rect x="24" y="50" width="146" height="60" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="36" y="74" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Python API</text>
+  <text x="36" y="95" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">on_event 回调</text>
+  <rect x="24" y="150" width="146" height="100" rx="10" fill="#21182a" stroke="#f18ab6" stroke-width="1.4"/>
+  <text x="36" y="174" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">CLI / TUI</text>
+  <text x="36" y="195" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">渲染运行事件</text>
+  <text x="36" y="213" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">审批 · 提问 · 队列</text>
+  <rect x="24" y="310" width="146" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4" stroke-dasharray="5 4"/>
+  <text x="36" y="334" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Lain Companion</text>
+  <text x="36" y="355" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">消费 RunEvent</text>
+  <rect x="230" y="40" width="192" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="242" y="64" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">RunController</text>
+  <text x="242" y="85" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">取消 · 暂停</text>
+  <text x="242" y="103" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">steering / follow-up</text>
+  <rect x="230" y="150" width="192" height="90" rx="10" fill="#21182a" stroke="#f18ab6" stroke-width="1.4"/>
+  <text x="242" y="174" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">AgentRunner</text>
+  <text x="242" y="195" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">invoke · approve · resume</text>
+  <text x="242" y="213" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">单操作互斥</text>
+  <rect x="230" y="290" width="192" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="242" y="314" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">SessionStore</text>
+  <text x="242" y="335" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">SQLite checkpoint</text>
+  <text x="242" y="353" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">附件 · 会话租约</text>
+  <rect x="494" y="30" width="262" height="400" rx="12" fill="#130f19" stroke="#2d2238" stroke-width="1.2"/>
+  <text x="508" y="49" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="11" letter-spacing="0.6" fill="#f18ab6" opacity="0.85">Deep Agents / LangGraph</text>
+  <rect x="512" y="66" width="226" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="524" y="90" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">模型适配</text>
+  <text x="524" y="111" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">agent/models</text>
+  <text x="524" y="129" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">chat_completions · responses</text>
+  <rect x="512" y="156" width="226" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="524" y="180" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">Middleware</text>
+  <text x="524" y="201" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">权限审批 · steering</text>
+  <text x="524" y="219" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">压缩 · 附件 · 取消</text>
+  <rect x="512" y="256" width="226" height="80" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="524" y="280" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">工具注册</text>
+  <text x="524" y="301" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">原生文件 · execute</text>
+  <text x="524" y="319" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">MCP · start_task</text>
+  <rect x="796" y="66" width="160" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="808" y="90" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">模型服务</text>
+  <text x="808" y="111" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">HTTP 流式</text>
+  <rect x="796" y="166" width="160" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="808" y="190" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">SubAgentRuntime</text>
+  <text x="808" y="211" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">独立 checkpoint</text>
+  <rect x="796" y="266" width="160" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="808" y="290" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">执行 Backend</text>
+  <text x="808" y="311" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">SandboxPool</text>
+  <rect x="796" y="356" width="160" height="70" rx="10" fill="#18131e" stroke="#3a2d46" stroke-width="1.4"/>
+  <text x="808" y="380" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" font-weight="600" fill="#efe4ec">MCP 服务</text>
+  <text x="808" y="401" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">宿主进程内连接</text>
+  <path d="M170 80 H200 V172 H230" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M170 172 H230" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M230 214 H170" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="200" y="234" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">RunEvent</text>
+  <path d="M326 110 V150" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M422 180 H494" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <text x="458" y="171" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#f18ab6">build_agent</text>
+  <path d="M494 218 H422" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="458" y="237" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">事件 · 中断</text>
+  <path d="M326 240 V290" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <path d="M494 340 H458 V330 H422" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="458" y="358" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#b7a8c6">checkpoint</text>
+  <path d="M738 100 H796" fill="none" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <path d="M738 292 H796" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M738 262 H768 V201 H796" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M738 316 H772 V391 H796" fill="none" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <path d="M97 250 V310" fill="none" stroke="#6fb3bf" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a-observe)"/>
+  <text x="24" y="470" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" fill="#a08e9b">TUI 只消费 RunEvent；核心 Runtime 不依赖终端格式。</text>
+  <path d="M30 500 H64" stroke="#f18ab6" stroke-width="1.6" marker-end="url(#a-control)"/>
+  <text x="76" y="504" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">控制流</text>
+  <path d="M150 500 H184" stroke="#b7a8c6" stroke-width="1.6" marker-end="url(#a-data)"/>
+  <text x="196" y="504" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">数据流</text>
+  <path d="M270 500 H304" stroke="#6fb3bf" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a-observe)"/>
+  <text x="316" y="504" text-anchor="start" font-family="system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="11" fill="#a08e9b">只读观察</text>
+</svg>
