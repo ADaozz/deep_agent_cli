@@ -447,6 +447,48 @@ def test_tool_result_classification_ignores_error_topic_bodies() -> None:
     ))
 
 
+def test_write_stdin_outcome_uses_structured_error_and_message_status() -> None:
+    from agent.sessions.transcript import classify_tool_result, tool_message_is_error
+
+    # Command output that happens to start with Error: is not a stdin failure.
+    command_output = ToolMessage(
+        content="Error: command output, not a write failure",
+        tool_call_id="stdin-ok",
+        name="write_stdin",
+        artifact={"execution_id": "exec-1", "running": False, "exit_code": 0},
+    )
+    assert not tool_message_is_error(command_output)
+    assert classify_tool_result(
+        status="success",
+        content=command_output.content,
+        name="write_stdin",
+        artifact=command_output.artifact,
+    ) == "success"
+    assert not tool_message_is_error(ToolMessage(
+        content="Error: no structured execution id here",
+        tool_call_id="stdin-no-id",
+        name="write_stdin",
+        artifact={},
+    ))
+
+    stdin_failure = ToolMessage(
+        content="normal command output",
+        tool_call_id="stdin-failed",
+        name="write_stdin",
+        artifact={"execution_id": "exec-1", "stdin_error": "error"},
+    )
+    assert tool_message_is_error(stdin_failure)
+
+    status_failure = ToolMessage(
+        content="normal command output",
+        tool_call_id="stdin-status",
+        name="write_stdin",
+        status="error",
+        artifact={"execution_id": "exec-1"},
+    )
+    assert tool_message_is_error(status_failure)
+
+
 def test_reasoning_catalog_round_trip_preserves_explicit_default(tmp_path: Path) -> None:
     path = tmp_path / "catalog.sqlite3"
     store = SessionStore(path)

@@ -161,15 +161,28 @@ class RemoteCommand:
         if self.released or self.sandbox.lost_reason is not None:
             raise OSError(self.sandbox.lost_reason or "execution has finished")
         write_id = f"{self.request_id}-int-{next(self._write_ids)}"
+        self._send_with_ack(
+            {"op": "interrupt", "id": self.request_id, "write_id": write_id},
+            write_id=write_id,
+            timeout=timeout,
+            action="interrupt",
+        )
+
+    def _send_with_ack(
+        self,
+        message: dict[str, Any],
+        *,
+        write_id: str,
+        timeout: float,
+        action: str,
+        sent_bytes: int | None = None,
+    ) -> None:
+        """Send one stdin-channel request and wait for its own worker acknowledgment."""
         pending = _PendingWriteAck()
         with self._ack_lock:
             self._pending_acks[write_id] = pending
         try:
-            self.sandbox._send({
-                "op": "interrupt",
-                "id": self.request_id,
-                "write_id": write_id,
-            })
+            self.sandbox._send(message)
         except SandboxLostError as exc:
             with self._ack_lock:
                 self._pending_acks.pop(write_id, None)
@@ -182,27 +195,38 @@ class RemoteCommand:
             error = pending.error
             written = pending.written
             uncertain = pending.uncertain
+        detail = f"{action} {write_id}"
         if not completed:
+            hint = (
+                "outcome is unknown (Ctrl+C may or may not have been delivered)"
+                if sent_bytes is None
+                else "outcome is unknown (bytes may have been partially or fully written and were not retried)"
+            )
             raise StdinWriteUncertainError(
                 write_id,
-                f"interrupt {write_id} timed out after {timeout:g}s waiting for acknowledgment; "
-                "outcome is unknown (Ctrl+C may or may not have been delivered)",
+                f"{detail} timed out after {timeout:g}s waiting for acknowledgment; {hint}",
             )
         if not ok:
             if written > 0:
+                amount = (
+                    f"{written} byte(s)" if sent_bytes is None
+                    else f"{written} of {sent_bytes} bytes"
+                )
+                retry = "" if sent_bytes is None else " and was not retried"
                 raise StdinWriteUncertainError(
                     write_id,
-                    f"interrupt {write_id} partially wrote {written} byte(s) before failing "
-                    f"({error or 'interrupt failed'}); outcome is uncertain",
+                    f"{detail} partially wrote {amount} before failing "
+                    f"({error or f'{action} failed'}); outcome is uncertain{retry}",
                     written_bytes=written,
                 )
             if uncertain:
+                retry = "" if sent_bytes is None else " and was not retried"
                 raise StdinWriteUncertainError(
                     write_id,
-                    f"interrupt {write_id} interrupted before worker acknowledgment "
-                    f"({error or 'execution ended'}); outcome is unknown",
+                    f"{detail} interrupted before worker acknowledgment "
+                    f"({error or 'execution ended'}); outcome is unknown{retry}",
                 )
-            raise OSError(error or "interrupt failed")
+            raise OSError(error or f"{action} failed")
 
     def write_stdin(self, data: bytes, *, timeout: float = 15.0) -> None:
         if self.stdin_mode == "none":
@@ -211,50 +235,18 @@ class RemoteCommand:
             if self.released or self.sandbox.lost_reason is not None:
                 raise OSError(self.sandbox.lost_reason or "execution has finished")
             write_id = f"{self.request_id}-{next(self._write_ids)}"
-            pending = _PendingWriteAck()
-            with self._ack_lock:
-                self._pending_acks[write_id] = pending
-            try:
-                self.sandbox._send({
+            self._send_with_ack(
+                {
                     "op": "write",
                     "id": self.request_id,
                     "write_id": write_id,
                     "data": base64.b64encode(data).decode("ascii"),
-                })
-            except SandboxLostError as exc:
-                with self._ack_lock:
-                    self._pending_acks.pop(write_id, None)
-                raise OSError(str(exc)) from exc
-            # Pre-start and partial writes ACK only after the worker writes all bytes.
-            completed = pending.event.wait(max(0.0, timeout))
-            with self._ack_lock:
-                self._pending_acks.pop(write_id, None)
-                completed = completed or pending.event.is_set()
-                ok = pending.ok
-                error = pending.error
-                written = pending.written
-                uncertain = pending.uncertain
-            if not completed:
-                raise StdinWriteUncertainError(
-                    write_id,
-                    f"stdin write {write_id} timed out after {timeout:g}s waiting for acknowledgment; "
-                    "outcome is unknown (bytes may have been partially or fully written and were not retried)",
-                )
-            if not ok:
-                if written > 0:
-                    raise StdinWriteUncertainError(
-                        write_id,
-                        f"stdin write {write_id} partially wrote {written} of {len(data)} bytes before "
-                        f"failing ({error or 'stdin write failed'}); outcome is uncertain and was not retried",
-                        written_bytes=written,
-                    )
-                if uncertain:
-                    raise StdinWriteUncertainError(
-                        write_id,
-                        f"stdin write {write_id} interrupted before worker acknowledgment "
-                        f"({error or 'execution ended'}); outcome is unknown and was not retried",
-                    )
-                raise OSError(error or "stdin write failed")
+                },
+                write_id=write_id,
+                timeout=timeout,
+                action="stdin write",
+                sent_bytes=len(data),
+            )
 
     def _complete_write(
         self,

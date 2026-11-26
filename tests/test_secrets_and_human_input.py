@@ -161,6 +161,38 @@ def test_secret_store_priority_and_env_fallback(tmp_path: Path) -> None:
         )
 
 
+def test_sandbox_env_batch_reuses_single_secret_resolution_priority_and_auth(
+    tmp_path: Path,
+) -> None:
+    store = SecretStore(tmp_path, environ={"ENV_ONLY": "from-env"})
+    store.set_secret("PERSIST", "persistent", scope="sandbox", storage="persistent")
+    store.set_secret(
+        "HOST_ONLY", "host", scope="host", storage="persistent", consumers=("host:*",),
+    )
+    store.set_secret(
+        "PERSIST", "session", scope="sandbox", storage="session",
+        session_id="sid", overwrite=True,
+    )
+    store.set_secret(
+        "SHADOW", "persistent-sandbox", scope="sandbox", storage="persistent",
+    )
+    store.set_secret(
+        "SHADOW", "session-host", scope="host", storage="session",
+        session_id="sid", overwrite=True,
+    )
+
+    env = store.sandbox_env_for_session("sid")
+    assert env == {"PERSIST": "session"}
+    for name in ("PERSIST", "HOST_ONLY", "SHADOW", "ENV_ONLY"):
+        try:
+            resolved = store.resolve_secret(
+                name, scope="sandbox", session_id="sid", consumer="sandbox",
+            )
+        except SecretAccessError:
+            resolved = None
+        assert env.get(name) == (resolved.value if resolved is not None else None)
+
+
 def test_secret_store_overwrite_guard_atomic_rollback_and_retired_redaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

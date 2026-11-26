@@ -100,7 +100,7 @@ followup = runner.deliver_notifications()   # 没有可送达的结果或存在�
 
 `subagents_changed` 事件的 `result["count"]` 是实际运行数量（同步与后台合计）。子任务不采集 Token、TPS、TTFT 或压缩状态，思考、中间回答和内部工具调用不进入主界面。模型增量、思考和原始工具输出不写入摘要，也不转发给主 Runner 的流式回调。摘要仅记录起止、工具操作与状态、耗时及有界最终结果；正常 task 最终结果返回保持完整。
 
-`execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。
+`execute` 的 `tool_completed` 事件中，`result` 包含 `exit_code`、`truncated`、`host_log_path`、`agent_log_path`、`termination_reason`；`content` 是发给模型的文本。所有工具的 `ToolMessage.artifact` 原样放在 `RunEvent.artifact` 中。`execute` / `write_stdin` 的 artifact 还包含本次调用的原始增量输出 `output` 和统一截断元数据，TUI 实时展示与历史恢复直接使用这些结构化字段，不从模型可见的 `content` 反解。
 
 ## 自定义工具与审批
 

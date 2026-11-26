@@ -2418,6 +2418,27 @@ def test_execute_completion_uses_artifact_instead_of_output_text() -> None:
     assert state.blocks[-1].exit_code == 2
 
 
+def test_execute_live_output_uses_artifact_raw_output() -> None:
+    state = CliState()
+    state.apply(RunEvent(type="tool_started", tool_call_id="exec-raw", name="execute"))
+    state.apply(RunEvent(
+        type="tool_completed", tool_call_id="exec-raw", name="execute",
+        content="raw line\n\nExit code: 2",
+        artifact={
+            "output": "raw line",
+            "exit_code": 2,
+            "truncated": False,
+            "termination_reason": None,
+        },
+        is_error=True,
+    ))
+    block = state.blocks[-1]
+    assert isinstance(block, ToolBlock)
+    assert block.output == "raw line"
+    assert block.exit_code == 2
+    assert block.is_error
+
+
 def test_cli_state_stores_generic_tool_artifact() -> None:
     state = CliState()
     state.apply(RunEvent(

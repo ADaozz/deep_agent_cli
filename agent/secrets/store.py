@@ -651,6 +651,51 @@ class SecretStore:
                         revoked = True
         return revoked
 
+    def _resolve_record_locked(
+        self,
+        record: _SecretRecord,
+        *,
+        target_scope: SecretScope,
+        consumer: str | None,
+        allow_session: bool,
+    ) -> ResolvedSecret:
+        """Apply scope/consumer/session rules shared by single and batch resolution."""
+        if record.storage == "session" and not allow_session:
+            raise SecretAccessError(
+                f"Session credential {record.name} cannot be used by a persistent global consumer"
+            )
+        if record.scope != target_scope:
+            raise SecretAccessError(
+                f"Credential {record.name} has scope '{record.scope}' and cannot be used in '{target_scope}'"
+            )
+        if not _consumer_matches(record.consumers, consumer, target_scope):
+            raise SecretAccessError(
+                f"Credential {record.name} is not authorized for consumer {consumer!r}"
+            )
+        return ResolvedSecret(
+            name=record.name,
+            value=record.value,
+            scope=record.scope,
+            storage=record.storage,
+            consumers=record.consumers,
+        )
+
+    def _stored_names_locked(self, session_id: str | None) -> list[str]:
+        """Names visible to a resolution pass: session plus persistent entries."""
+        names = set(self._session_entries.get(session_id, {})) if session_id else set()
+        if self.entries_dir.is_dir():
+            try:
+                with self._file_lock():
+                    for path in sorted(self.entries_dir.glob("*.enc")):
+                        try:
+                            names.add(validate_secret_name(path.stem))
+                        except ValueError:
+                            continue
+            except OSError:
+                # Store-level lock/IO failure still leaves session credentials usable.
+                pass
+        return sorted(names)
+
     def resolve_secret(
         self,
         name: str,
@@ -667,43 +712,21 @@ class SecretStore:
             if session_id:
                 sess_rec = self._session_entries.get(session_id, {}).get(validated)
                 if sess_rec is not None:
-                    if not allow_session:
-                        raise SecretAccessError(
-                            f"Session credential {validated} cannot be used by a persistent global consumer"
-                        )
-                    if sess_rec.scope != target_scope:
-                        raise SecretAccessError(
-                            f"Credential {validated} has scope '{sess_rec.scope}' and cannot be used in '{target_scope}'"
-                        )
-                    if not _consumer_matches(sess_rec.consumers, consumer, target_scope):
-                        raise SecretAccessError(
-                            f"Credential {validated} is not authorized for consumer {consumer!r}"
-                        )
-                    return ResolvedSecret(
-                        name=validated,
-                        value=sess_rec.value,
-                        scope=sess_rec.scope,
-                        storage="session",
-                        consumers=sess_rec.consumers,
+                    return self._resolve_record_locked(
+                        sess_rec,
+                        target_scope=target_scope,
+                        consumer=consumer,
+                        allow_session=allow_session,
                     )
             if self.entries_dir.is_dir():
                 with self._file_lock():
                     pers_rec = self._read_persistent_locked(validated)
                 if pers_rec is not None:
-                    if pers_rec.scope != target_scope:
-                        raise SecretAccessError(
-                            f"Credential {validated} has scope '{pers_rec.scope}' and cannot be used in '{target_scope}'"
-                        )
-                    if not _consumer_matches(pers_rec.consumers, consumer, target_scope):
-                        raise SecretAccessError(
-                            f"Credential {validated} is not authorized for consumer {consumer!r}"
-                        )
-                    return ResolvedSecret(
-                        name=validated,
-                        value=pers_rec.value,
-                        scope=pers_rec.scope,
-                        storage="persistent",
-                        consumers=pers_rec.consumers,
+                    return self._resolve_record_locked(
+                        pers_rec,
+                        target_scope=target_scope,
+                        consumer=consumer,
+                        allow_session=True,
                     )
             if allow_env:
                 env_val = self._environ.get(validated)
@@ -717,46 +740,24 @@ class SecretStore:
         return None
 
     def sandbox_env_for_session(self, session_id: str | None) -> dict[str, str]:
-        """Return all authorized ``sandbox``-scoped managed credentials for ``session_id``.
+        """Return all authorized ``sandbox`` credentials using single-secret resolution.
 
-        Persistent entries use fresh disk reads (same fail-closed principle as
-        ``resolve_secret`` / MCP). Last-known ``_persistent_cache`` values are
-        never used for injection when reads fail or auth cannot be verified.
-        Redaction continues to use the fail-open cache via ``redaction_refs``.
+        Persistent entries are re-read from disk per resolution, so injection stays
+        fail-closed. Redaction continues to use the fail-open ``_persistent_cache``
+        via ``redaction_refs`` and never shares this path.
         """
         merged: dict[str, str] = {}
         with self._lock:
-            if self.entries_dir.is_dir():
+            for name in self._stored_names_locked(session_id):
                 try:
-                    with self._file_lock():
-                        fernet: Fernet | None = None
-                        names: list[str] = []
-                        for path in sorted(self.entries_dir.glob("*.enc")):
-                            name = path.stem
-                            if not valid_secret_name(name) or path.is_symlink():
-                                continue
-                            names.append(name)
-                        for name in names:
-                            try:
-                                if fernet is None:
-                                    fernet = load_or_create_fernet(self.directory)
-                                rec = self._read_persistent_locked(name, fernet)
-                            except OSError:
-                                # Fail closed for injection: skip unverifiable entries.
-                                continue
-                            if (
-                                rec is not None
-                                and rec.scope == "sandbox"
-                                and _consumer_matches(rec.consumers, "sandbox", "sandbox")
-                            ):
-                                merged[rec.name] = rec.value
-                except OSError:
-                    # Store-level lock/IO failure: inject no persistent credentials.
-                    pass
-            if session_id:
-                for name, rec in sorted(self._session_entries.get(session_id, {}).items()):
-                    if rec.scope == "sandbox" and _consumer_matches(rec.consumers, "sandbox", "sandbox"):
-                        merged[name] = rec.value
+                    resolved = self.resolve_secret(
+                        name, scope="sandbox", session_id=session_id, consumer="sandbox",
+                    )
+                except (OSError, SecretAccessError, ValueError):
+                    # Fail closed: unexpected scope/consumer or unreadable entry is skipped.
+                    continue
+                if resolved is not None:
+                    merged[resolved.name] = resolved.value
         return merged
 
     def delete_secret(

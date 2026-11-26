@@ -8,7 +8,13 @@ from uuid import uuid4
 from agent.sessions.images import ImageAttachmentRef
 from agent.runtime.contracts import RunEvent, TurnTiming
 from agent.runtime.metrics import normalize_usage
-from agent.sessions.transcript import classify_tool_result, subagent_card_status, task_result_text
+from agent.sessions.transcript import (
+    _append_bounded_execution_output,
+    _execution_output,
+    classify_tool_result,
+    subagent_card_status,
+    task_result_text,
+)
 from agent.sessions.contracts import TranscriptBlock
 from agent.subagents.notifications import is_background_launch, is_task_tool
 
@@ -377,17 +383,24 @@ class CliState:
             if completed_artifact is not None:
                 tool.artifact = completed_artifact
             if event.name == "execute" and completed_artifact is not None:
+                artifact_output = _execution_output(completed_artifact)
+                cap_raw = completed_artifact.get("max_output_bytes")
+                cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
                 if completed_artifact.get("running") is True:
-                    if not tool.output and event.content:
-                        marker = f"[running execution_id={completed_artifact.get('execution_id') or ''}]"
-                        cleaned = event.content.replace(marker, "").strip()
-                        if cleaned and cleaned != "<no new output>":
-                            tool.output = cleaned
-                elif completed_artifact.get("truncated") and not had_tail_snapshot and event.content:
-                    # Without streamed output, the final result contains the tail.
-                    tool.output = event.content
-                elif not tool.output:
-                    tool.output = event.content
+                    replace_output = not tool.output
+                elif completed_artifact.get("truncated") and not had_tail_snapshot:
+                    replace_output = True
+                else:
+                    replace_output = not tool.output
+                if replace_output:
+                    if artifact_output is not None:
+                        tool.output, clipped = _append_bounded_execution_output(
+                            "", artifact_output, max_output_bytes=cap,
+                        )
+                        if clipped:
+                            tool.artifact = {**tool.artifact, "truncated": True}
+                    elif event.content:
+                        tool.output = event.content
             elif event.content and (not tool.output or event.content.startswith(tool.output)):
                 tool.output = event.content
             if (

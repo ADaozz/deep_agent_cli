@@ -546,6 +546,7 @@ class CommandSession:
                 max_output_bytes=term["max_output_bytes"],
                 execution_id=term["execution_id"],
                 running=False,
+                output_delta=body,
             )
         pending = self.collector.take_pending() if include_pending else ""
         meta = self.collector.log_metadata()
@@ -560,6 +561,7 @@ class CommandSession:
             max_output_bytes=meta["max_output_bytes"],
             execution_id=self.execution_id,
             running=True,
+            output_delta=pending,
         )
 
 

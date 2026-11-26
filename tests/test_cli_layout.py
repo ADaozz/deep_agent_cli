@@ -1412,3 +1412,30 @@ def test_status_context_meter_reports_remaining_capacity():
     assert "100% left" in format_context_meter({}, 258_000, empty_session=True)
     assert "0% left" in format_context_meter({"input_tokens": 300}, 250, empty_session=False)
     assert format_context_meter({}, 258_000, empty_session=False) == "Unknown (258K capacity)"
+
+
+def test_process_stdin_sync_and_async_share_result_handling(monkeypatch) -> None:
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="unused")]),
+        backend=StateBackend(),
+        thread_id="stdin-dispatch",
+    )
+    with create_pipe_input() as pipe:
+        app = CliApplication(runner, input=pipe, output=DummyOutput())
+        handled: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            app, "_handle_stdin_error",
+            lambda exec_id, exc: handled.append((exec_id, str(exc))) or False,
+        )
+
+        def fail(*_args, **_kwargs):
+            raise OSError("ack failed")
+
+        monkeypatch.setattr(runner, "send_execution_input", fail)
+        assert app._deliver_stdin_sync("exec-1", "pipe", "x", "write") is False
+
+        async def dispatch() -> bool:
+            return await app._dispatch_stdin_item("exec-1", "pipe", "x", "write")
+
+        assert asyncio.run(dispatch()) is False
+        assert handled == [("exec-1", "ack failed"), ("exec-1", "ack failed")]

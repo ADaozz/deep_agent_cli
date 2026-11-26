@@ -1213,41 +1213,44 @@ class CliApplication:
             self.set_status(f"Process input error: {message}")
         return False
 
-    def _deliver_stdin_sync(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
+    def _send_stdin(self, exec_id: str, chars: str, action: str) -> Exception | None:
+        """Run the blocking delivery; return the exception for shared handling."""
         try:
             self.runner.send_execution_input(exec_id, chars=chars, action=action)
-        except KeyError:
+        except KeyError as exc:
+            return exc
+        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
+            return exc
+        return None
+
+    def _finish_stdin(
+        self, exec_id: str, mode: str, chars: str, action: str, error: Exception | None,
+    ) -> bool:
+        """Shared sync/async result and exception handling."""
+        if isinstance(error, KeyError):
             self._drop_queued_stdin(exec_id)
             if self.attached_execution_id == exec_id:
                 self.detach_process_input(reason=f"Process {exec_id} finished · returned to chat input")
             return False
-        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
-            return self._handle_stdin_error(exec_id, exc)
-        self._report_stdin_sent(exec_id, mode, chars, action)
-        return True
-
-    async def _dispatch_stdin_item(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
-        try:
-            await asyncio.to_thread(
-                self.runner.send_execution_input, exec_id, chars=chars, action=action,
-            )
-        except asyncio.CancelledError:
-            raise
-        except KeyError:
-            self._drop_queued_stdin(exec_id)
-            if self.attached_execution_id == exec_id:
-                self.detach_process_input(
-                    reason=f"Process {exec_id} finished · returned to chat input",
-                    drop_pending=False,
-                )
-            return False
-        except (ValueError, OSError, TimeoutError, NotImplementedError) as exc:
+        if error is not None:
             if not self.lifecycle.exiting:
-                self._handle_stdin_error(exec_id, exc)
+                return self._handle_stdin_error(exec_id, error)
             return False
         if not self.lifecycle.exiting:
             self._report_stdin_sent(exec_id, mode, chars, action)
         return True
+
+    def _deliver_stdin_sync(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
+        return self._finish_stdin(
+            exec_id, mode, chars, action, self._send_stdin(exec_id, chars, action),
+        )
+
+    async def _dispatch_stdin_item(self, exec_id: str, mode: str, chars: str, action: str) -> bool:
+        try:
+            error = await asyncio.to_thread(self._send_stdin, exec_id, chars, action)
+        except asyncio.CancelledError:
+            raise
+        return self._finish_stdin(exec_id, mode, chars, action, error)
 
     async def _drain_stdin_queue(self) -> None:
         try:

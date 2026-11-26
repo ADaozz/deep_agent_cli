@@ -86,7 +86,7 @@ def _stdin_mode(*, interactive: bool, tty: bool) -> str:
 
 
 def _artifact_from_response(response) -> dict[str, object]:
-    return {
+    artifact: dict[str, object] = {
         "exit_code": response.exit_code,
         "truncated": response.truncated,
         "host_log_path": getattr(response, "host_log_path", None),
@@ -97,6 +97,10 @@ def _artifact_from_response(response) -> dict[str, object]:
         "execution_id": getattr(response, "execution_id", None),
         "running": bool(getattr(response, "running", False)),
     }
+    output_delta = getattr(response, "output_delta", None)
+    if isinstance(output_delta, str):
+        artifact["output"] = output_delta
+    return artifact
 
 
 def build_execute_tool(

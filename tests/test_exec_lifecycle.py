@@ -275,6 +275,7 @@ def test_interactive_pipe_via_tools(backend: WorkspaceCompositeBackend) -> None:
     assert done_art["running"] is False
     assert done_art["exit_code"] == 0
     assert done_art["termination_reason"] is None
+    assert done_art["output"] == "piped-line\n"
     assert done == "piped-line"
 
 
@@ -1290,6 +1291,61 @@ def test_pump_exception_kills_real_process_and_wakes_waiters(backend: WorkspaceC
         set_output_emitter(None)
 
 
+def test_yielded_execution_history_restores_exact_artifact_output(
+    backend: WorkspaceCompositeBackend,
+) -> None:
+    execute = build_execute_tool(backend)
+    write = build_write_stdin_tool(backend)
+    first, initial = execute.func(
+        command="printf A; sleep 0.05; printf B; sleep 0.05; printf C",
+        network=False, yield_time=0.01, interactive=True, timeout=15,
+    )
+    execution_id = str(initial["execution_id"])
+    messages = [
+        AIMessage(
+            id="ai-exec",
+            content="",
+            tool_calls=[{
+                "id": "call-exec",
+                "name": "execute",
+                "args": {"command": "stream", "interactive": True},
+            }],
+        ),
+        ToolMessage(
+            content=first, tool_call_id="call-exec", name="execute", artifact=initial,
+        ),
+    ]
+    polled: list[str] = [str(initial.get("output", ""))]
+    index = 0
+    while True:
+        text, artifact = write.func(execution_id=execution_id, chars="", yield_time=0.2)
+        polled.append(str(artifact.get("output", "")))
+        messages.extend([
+            AIMessage(
+                id=f"ai-stdin-{index}",
+                content="",
+                tool_calls=[{
+                    "id": f"ws-{index}",
+                    "name": "write_stdin",
+                    "args": {"execution_id": execution_id, "chars": ""},
+                }],
+            ),
+            ToolMessage(
+                content=text, tool_call_id=f"ws-{index}", name="write_stdin", artifact=artifact,
+            ),
+        ])
+        index += 1
+        if artifact.get("running") is False:
+            break
+
+    blocks = messages_to_transcript(messages)
+    restored = next(block for block in blocks if block.kind == "tool")
+    assert restored.content == "".join(polled)
+    assert restored.content == "ABC"
+    assert "[running execution_id=" not in restored.content
+    assert "<no new output>" not in restored.content
+
+
 def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_bytes() -> None:
     exec_id = "bwrap-offline-1:0:9"
     messages = [
@@ -1306,7 +1362,7 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
             content=f"chunk-A\n\n[running execution_id={exec_id}]",
             tool_call_id="call-exec",
             name="execute",
-            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000, "output": "chunk-A"},
         ),
         AIMessage(
             id="ai-2",
@@ -1322,19 +1378,19 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
             content=f"chunk-B\n\n[running execution_id={exec_id}]",
             tool_call_id="ws-1",
             name="write_stdin",
-            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000, "output": "chunk-B"},
         ),
         ToolMessage(
             content=f"<no new output>\n\n[running execution_id={exec_id}]",
             tool_call_id="ws-empty",
             name="write_stdin",
-            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000, "output": ""},
         ),
         ToolMessage(
             content=f"chunk-C\n\n[running execution_id={exec_id}]",
             tool_call_id="ws-2",
             name="write_stdin",
-            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000},
+            artifact={"execution_id": exec_id, "running": True, "max_output_bytes": 1000, "output": "chunk-C"},
         ),
         ToolMessage(
             content="chunk-D",
@@ -1347,6 +1403,7 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
                 "termination_reason": None,
                 "truncated": False,
                 "max_output_bytes": 1000,
+                "output": "chunk-D",
             },
         ),
     ]
@@ -1355,7 +1412,7 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
     tool_blocks = [b for b in blocks if b.kind == "tool"]
     assert len(tool_blocks) == 1
     restored = tool_blocks[0]
-    assert restored.content == "chunk-A\nchunk-B\nchunk-C\nchunk-D"
+    assert restored.content == "chunk-Achunk-Bchunk-Cchunk-D"
     assert "[running" not in restored.content
     assert "<no new output>" not in restored.content
     assert restored.status == "completed"
@@ -1367,7 +1424,7 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
     state.restore_executions(None, "sess-1")
     card = next(b for b in state.blocks if isinstance(b, ToolBlock))
     assert card.status == "completed"
-    assert card.output == "chunk-A\nchunk-B\nchunk-C\nchunk-D"
+    assert card.output == "chunk-Achunk-Bchunk-Cchunk-D"
 
     # With live Registry snapshot, snapshot wins cleanly without duplicating already-merged output.
     live_state = CliState()
@@ -1376,7 +1433,7 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
         {
             exec_id: {
                 "running": False,
-                "output": "chunk-A\nchunk-B\nchunk-C\nchunk-D\n",
+                "output": "chunk-Achunk-Bchunk-Cchunk-D",
                 "artifact": {
                     "execution_id": exec_id,
                     "running": False,
@@ -1400,13 +1457,19 @@ def test_session_restore_merges_all_incremental_write_stdin_outputs_and_bounds_b
             content=f"{'甲乙丙丁戊' * 4}\n\n[running execution_id=cap-1]",
             tool_call_id="c1",
             name="execute",
-            artifact={"execution_id": "cap-1", "running": True, "max_output_bytes": 20},
+            artifact={
+                "execution_id": "cap-1", "running": True, "max_output_bytes": 20,
+                "output": "甲乙丙丁戊" * 4,
+            },
         ),
         ToolMessage(
             content="己庚辛壬癸",
             tool_call_id="w1",
             name="write_stdin",
-            artifact={"execution_id": "cap-1", "running": False, "exit_code": 0, "max_output_bytes": 20},
+            artifact={
+                "execution_id": "cap-1", "running": False, "exit_code": 0,
+                "max_output_bytes": 20, "output": "己庚辛壬癸",
+            },
         ),
     ])
     capped_block = capped[0]

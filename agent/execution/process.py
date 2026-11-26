@@ -47,6 +47,9 @@ class LocalExecuteResponse(ExecuteResponse):
     max_output_bytes: int | None = None
     execution_id: str | None = None
     running: bool = False
+    # Exact unread output for this call, separate from the model-visible formatted
+    # ``output``. Artifact consumers (live TUI + history restore) use this raw text.
+    output_delta: str | None = None
 
 
 def _effective_timeout(requested: int | None, default: int | None) -> int | None:
@@ -531,6 +534,7 @@ def _run_process(
         log_error=meta["log_error"],
         termination_reason=reason,
         max_output_bytes=meta["max_output_bytes"],
+        output_delta=collector.tail_text(),
     )
 
 

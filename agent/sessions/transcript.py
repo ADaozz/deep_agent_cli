@@ -88,13 +88,12 @@ def classify_tool_result(
             return "failed"
         return "success"
     if name == "write_stdin":
-        if status == "error" or payload.get("stdin_error") or text.lstrip().startswith("error:"):
-            if termination == "cancelled" or "cancelled by user" in text:
+        if status == "error" or payload.get("stdin_error"):
+            if termination == "cancelled":
                 return "cancelled"
             return "failed"
-        if payload.get("execution_id"):
-            # Tool Call Outcome: write_stdin succeeded regardless of command output/exit_code.
-            return "success"
+        # Tool Call Outcome: stdin delivery succeeded regardless of command output.
+        return "success"
     if termination == "cancelled" or "cancelled by user" in text:
         return "cancelled"
     if status == "error" or text.lstrip().startswith("error:"):
@@ -102,32 +101,11 @@ def classify_tool_result(
     return "success"
 
 
-def _strip_running_marker(text: str, execution_id: str) -> str:
-    """Extract pure command output from a running execute/write_stdin ToolMessage."""
-    if not text:
-        return ""
-    marker = f"[running execution_id={execution_id}]"
-    cleaned = text
-    if cleaned.endswith(marker):
-        cleaned = cleaned[:-len(marker)].rstrip("\n")
-    else:
-        cleaned = cleaned.replace(f"\n\n{marker}", "").replace(marker, "").rstrip("\n")
-    if cleaned.strip() == "<no new output>":
-        return ""
-    return cleaned
-
-
-def _strip_terminal_empty_marker(text: str) -> str:
-    """Strip ``<no new output>`` placeholder from an incremental terminal write_stdin result."""
-    if not text:
-        return ""
-    stripped = text.strip()
-    if stripped in {"<no new output>", "<no output>"}:
-        return ""
-    for prefix in ("<no new output>\n\n", "<no output>\n\n"):
-        if text.startswith(prefix):
-            return text[len(prefix):]
-    return text
+def _execution_output(artifact: object) -> str | None:
+    """Return the raw per-call output stored in the ToolMessage artifact."""
+    if isinstance(artifact, dict) and isinstance(artifact.get("output"), str):
+        return artifact["output"]
+    return None
 
 
 def _append_bounded_execution_output(
@@ -136,10 +114,10 @@ def _append_bounded_execution_output(
     *,
     max_output_bytes: int | None,
 ) -> tuple[str, bool]:
-    """Append ``delta`` onto ``existing`` while honoring UTF-8 ``max_output_bytes``."""
+    """Append exact raw output while honoring UTF-8 ``max_output_bytes``."""
     if not delta:
         return existing, False
-    combined = f"{existing}\n{delta}" if existing else delta
+    combined = existing + delta
     if max_output_bytes is None or max_output_bytes <= 0:
         return combined, False
     raw = bytearray(combined.encode("utf-8"))
@@ -225,29 +203,19 @@ def messages_to_transcript(
                         merged = {**existing, **artifact}
                         cap_raw = merged.get("max_output_bytes")
                         cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
-                        raw_text = message_text(message)
+                        owner.content, clipped = _append_bounded_execution_output(
+                            owner.content, _execution_output(artifact) or "", max_output_bytes=cap,
+                        )
+                        if clipped:
+                            merged["truncated"] = True
                         if artifact.get("running") is False:
                             merged["running"] = False
-                            delta = _strip_terminal_empty_marker(raw_text)
-                            owner.content, clipped = _append_bounded_execution_output(
-                                owner.content, delta, max_output_bytes=cap,
-                            )
-                            if clipped:
-                                merged["truncated"] = True
-                            owner.artifact = merged
                             outcome = classify_tool_result(name="execute", artifact=merged)
                             owner.is_error = outcome != "success"
                             owner.status = "error" if owner.is_error else "completed"
                             code = merged.get("exit_code")
                             owner.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-                        else:
-                            delta = _strip_running_marker(raw_text, exec_id)
-                            owner.content, clipped = _append_bounded_execution_output(
-                                owner.content, delta, max_output_bytes=cap,
-                            )
-                            if clipped:
-                                merged["truncated"] = True
-                            owner.artifact = merged
+                        owner.artifact = merged
                 continue
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
@@ -263,9 +231,9 @@ def messages_to_transcript(
                     exec_id = str(artifact.get("execution_id") or "")
                     cap_raw = artifact.get("max_output_bytes")
                     cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
-                    cleaned = _strip_running_marker(content, exec_id)
+                    output = _execution_output(artifact)
                     bounded, clipped = _append_bounded_execution_output(
-                        "", cleaned, max_output_bytes=cap,
+                        "", content if output is None else output, max_output_bytes=cap,
                     )
                     block.content = bounded
                     block.artifact = {**artifact, "truncated": True} if clipped else dict(artifact)
@@ -286,6 +254,11 @@ def messages_to_transcript(
                 else None
             )
             exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+            display_content = content
+            if getattr(message, "name", None) == "execute" and isinstance(artifact, dict):
+                output = _execution_output(artifact)
+                if output is not None:
+                    display_content = output
             if block is not None and is_background_launch(block.name, block.arguments):
                 # A running launch leaves the card open. A tool error settles it.
                 card = subagent_card_status(is_error=is_error, artifact=artifact)
@@ -297,7 +270,7 @@ def messages_to_transcript(
                     continue
                 status, is_error = card, card in {"error", "cancelled"}
             if block is not None:
-                block.content = content
+                block.content = display_content
                 block.is_error = is_error
                 block.status = status
                 block.exit_code = exit_code
@@ -307,7 +280,7 @@ def messages_to_transcript(
                     kind="tool",
                     tool_call_id=tool_call_id,
                     name="start_task" if is_task else str(getattr(message, "name", "") or "tool"),
-                    content=content,
+                    content=display_content,
                     is_error=is_error,
                     status=status,
                     exit_code=exit_code,
