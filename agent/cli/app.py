@@ -192,6 +192,7 @@ class CliApplication:
         self._status_notice_handle: asyncio.TimerHandle | None = None
         self._status_before_notice = "Ready"
         self._status_notice: str | None = None
+        self._status_is_panel_hint = False
         self.lifecycle = AppLifecycle(
             state=self.state, runner=self.runner,
             notify_session_exit=lambda: self.sessions.notify_exit(),
@@ -402,6 +403,7 @@ class CliApplication:
         )
         self.interaction_control = _InteractionControl(
             text=self._interaction_text, focusable=False, on_scroll=self.transcript.scroll_transcript,
+            on_body_scroll=self._scroll_interaction_body,
             controller=lambda: self.dialogs.current,
             on_select_outside=self.transcript._select_below_transcript,
         )
@@ -875,7 +877,7 @@ class CliApplication:
             f"Or run deep-agent resume and select. Model: {model_name} · {self.runner.reasoning_effort()}"
         )
 
-    def set_status(self, text: str, *, transient: bool = True) -> None:
+    def set_status(self, text: str, *, transient: bool = True, panel_hint: bool = False) -> None:
         """临时提示显示一秒后恢复原状态，持续状态由调用方显式指定。"""
         previous = self.state.status
         if self._status_notice == previous:
@@ -888,6 +890,7 @@ class CliApplication:
             self._status_notice_handle.cancel()
             self._status_notice_handle = None
         self._status_notice = None
+        self._status_is_panel_hint = bool(panel_hint) and not transient
         self.state.status = text
         if transient:
             try:
@@ -1201,7 +1204,7 @@ class CliApplication:
                 ],
             }],
         )
-        self.set_status("Select process · Enter attach · Esc cancel", transient=False)
+        self.application.invalidate()
 
     def _report_stdin_sent(self, exec_id: str, mode: str, chars: str, action: str) -> None:
         if action == "close" or chars == "\x04":
@@ -1413,8 +1416,7 @@ class CliApplication:
             return
         if action is InputAction.EXIT_CUSTOM_ENTRY:
             assert self.dialogs.current is not None
-            self.dialogs.current.custom_entry = False
-            self.dialogs.current.error = ""
+            self.dialogs.current.exit_custom_entry()
             buffer.reset()
             self.drafts.pasted.clear()
             self.drafts.skill.clear()
@@ -1547,27 +1549,28 @@ class CliApplication:
             fragments.append(("class:attachments", f" ▣ Image #{index}  {ref.filename} · {size}\n"))
         return FormattedText(fragments)
 
-    def _status_duplicates_panel_hints(self, status: str) -> bool:
-        """True when an open interaction panel already displays these shortcut hints."""
+    def _scroll_interaction_body(self, delta: int) -> None:
         if self.dialogs.current is None:
+            return
+        self.dialogs.current.scroll_body(delta)
+        self.application.invalidate()
+
+    def _suppress_status_for_panel(self) -> bool:
+        """Hide redundant panel prompt status from real interaction state, never English substring matching."""
+        dialog = self.dialogs.current
+        if dialog is None or self.state.running:
             return False
-        markers = (
-            "Enter confirm",
-            "Enter submit",
-            "Esc cancel",
-            "Esc close",
-            "Esc back",
-            "F2 reopen",
-            "F2 to decide",
-            "↑↓ ",
-        )
-        return any(marker in status for marker in markers)
+        if self._status_notice is not None and self.state.status == self._status_notice:
+            return False
+        if self._status_is_panel_hint:
+            return True
+        return dialog.panel_mode == "picker" and dialog.kind not in {"pause", "permission_confirm"}
 
     def _status_visible(self) -> bool:
         status = self.state.status
-        interaction_hint = self._status_duplicates_panel_hints(status)
+        suppress = self._suppress_status_for_panel()
         return bool(
-            self.state.running or (status != "Ready" and not interaction_hint)
+            self.state.running or (status != "Ready" and not suppress)
             or self.state.subagent_count
             or self.runner.control.pending_steering_count()
             or self.runner.control.pending_follow_up_count()
@@ -1629,7 +1632,7 @@ class CliApplication:
             counter = _truncate_cells(f"{count} subagent" + ("s" if count != 1 else ""), width)
         left_width = max(0, width - get_cwidth(counter) - 1) if counter else width
         label = self.state.status if self.state.running or self.state.status != "Ready" else ""
-        if self._status_duplicates_panel_hints(label):
+        if self._suppress_status_for_panel():
             label = ""
         if (self.run_view.compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"

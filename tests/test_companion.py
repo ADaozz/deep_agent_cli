@@ -166,14 +166,14 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                     return "".join(screen.data_buffer[y][x].char for x in range(app._width(), 180))
 
                 assert expected_rate in side_row(chart_y)
-                assert expected_glyph in side_row(chart_y + 2)
+                assert expected_glyph in side_row(chart_y + 1)
 
             app.companion.event(RunEvent("tool_started", tool_call_id="live", name="read"), "fixed model")
             app.companion.event(RunEvent("tool_completed", tool_call_id="live"), "fixed model")
-            assert_live_cell("100% success", "■")
+            assert_live_cell("1 call · 100% success", "■")
             app.companion.event(RunEvent("tool_started", tool_call_id="live-failed", name="read"), "fixed model")
             app.companion.event(RunEvent("tool_completed", tool_call_id="live-failed", is_error=True), "fixed model")
-            assert_live_cell("50% success", "×")
+            assert_live_cell("2 calls · 50% success", "×")
             for i, name in enumerate(("read", "write", "execute", "search", "grep")):
                 app.companion.event(RunEvent("tool_started", tool_call_id=str(i), name=name), "fixed model")
                 app.companion.event(RunEvent("tool_completed", tool_call_id=str(i), is_error=i == 0), "fixed model")
@@ -194,7 +194,7 @@ def test_resizing_preserves_draft_and_clips_both_columns(draft, monkeypatch):
                              for y in range(rows)]
                 chat_y = next(y for y, row in enumerate(side_rows) if "Talk TO Lain" in row)
                 assert set(side_rows[chat_y - 1].strip()) == {"─"}
-                assert side_rows[chat_y - 2].strip().endswith("failed")
+                assert side_rows[chat_y - 2].strip().endswith("× Failed")
                 assert side_rows[chat_y + 1].strip() == "Watching current session..."
                 editor = next(pos for window, pos in screen.visible_windows_to_write_positions.items()
                               if window.content is app.lain_editor)
@@ -797,7 +797,9 @@ def test_missing_key_keeps_local_evidence_and_chart(tmp_path, monkeypatch):
         assert await c.worker_session() == "no key"
         c.event(RunEvent("tool_started", name="read", tool_call_id="id"),"fixed model")
         c.event(RunEvent("tool_completed", tool_call_id="id", is_error=True),"fixed model")
-        assert "1 call · 0 success · 1 failed" in str(ActivityHeatmap(c).draw(46, 9))
+        rendered = str(ActivityHeatmap(c).draw(46, 9))
+        assert "1 call · 0% success" in rendered
+        assert "0 success · 1 failed" not in rendered
         assert c.request_version == 0
         await c.finish()
     asyncio.run(run())

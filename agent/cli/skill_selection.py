@@ -63,7 +63,6 @@ class SkillSelection:
                      "options": [{"value": item["path"], "label": item["name"],
                                   "description": item["description"]} for item in skills]}],
         )
-        self.set_status("Select a skill · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
 

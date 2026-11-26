@@ -333,7 +333,9 @@ def test_multiple_mcp_approvals_keep_arguments_with_their_call():
         {"name": "mcp__alpha__write", "toolCallId": "first", "args": {"nonce": "FIRST"}},
         {"name": "mcp__beta__remove", "toolCallId": "second", "args": {"path": "/tmp/SECOND"}},
     ])
-    first, second = card.question.split("2. MCP tool: beta · remove")
+    # Without MCP metadata lookup, full registered tool names are preserved (never split from mcp__...).
+    first, second = card.question.split("2. MCP tool: mcp__beta__remove")
+    assert "1. MCP tool: mcp__alpha__write" in first
     assert "nonce: FIRST" in first and "/tmp/SECOND" not in first
     assert "path: /tmp/SECOND" in second and "FIRST" not in second
     assert card.question.count("Execution: Host (outside sandbox)") == 2

@@ -614,7 +614,7 @@ def test_human_input_host_secret_clearly_states_persistent_requirement_for_globa
     #    never claim global MCP supports session storage, and require explicit confirmation (default Cancel).
     bound = InteractionController.human(payload, secret_consumers={"GITHUB_TOKEN": ("github",)})
     bound_masked = render_interaction(bound, 120)
-    assert "Stored encrypted on this device for future sessions (GITHUB_TOKEN · MCP: github)." in bound_masked
+    assert "Confirm encrypted storage on this device in the next step (GITHUB_TOKEN · MCP: github)." in bound_masked
     assert "Available only for this session" not in bound_masked
     assert bound.accept_secret("ghp_demo") is False
     confirm_view = render_interaction(bound, 120)
@@ -722,3 +722,449 @@ def test_tui_stdin_non_blocking_ordered_cancel_and_process_exit(
     finally:
         ack_gate.set()
         runner.close()
+
+
+# ---------------------------------------------------------------------------
+# Item 6: Field isolation, internal confirmation security, approval completeness,
+# short-terminal scrolling, MCP identity unity, and Tool Health convergence
+# ---------------------------------------------------------------------------
+
+
+def test_reserved_field_ids_rejected_at_schema_and_runtime_normalization() -> None:
+    from pydantic import ValidationError
+    from agent.tools.human_input import FieldSpec, HumanInputArgs
+    from agent.tools.human_interaction import normalize_interaction_request, validate_field_id
+
+    for bad_id in ("__confirm_overwrite__", "__secret_storage__:tok", "__other__", "  __internal  "):
+        with pytest.raises(ValueError, match="reserved"):
+            validate_field_id(bad_id)
+        with pytest.raises(ValidationError, match="reserved"):
+            FieldSpec(id=bad_id, type="text", label="Forged")
+        with pytest.raises(ValidationError, match="reserved"):
+            HumanInputArgs(
+                reason="r",
+                question="q",
+                fields=[{"id": bad_id, "type": "single_select", "options": [{"value": "overwrite", "label": "Yes"}]}],
+            )
+        with pytest.raises(ValueError, match="reserved"):
+            normalize_interaction_request(
+                reason="r",
+                question="q",
+                fields=[{"id": bad_id, "type": "text", "label": "Forged"}],
+            )
+
+
+def test_forged_fields_or_values_cannot_authorize_overwrite_or_storage() -> None:
+    from agent.secrets.store import SecretMetadata
+
+    # Even if an adversarial dict bypasses normalize_interaction_request and injects reserved ids
+    # or tries to mimic a storage/overwrite step, private system tokens prevent forged authorization.
+    ctrl = InteractionController.human({
+        "interactionId": "forge-1",
+        "question": "Provide token",
+        "fields": [
+            {
+                "id": "tok",
+                "type": "secret",
+                "label": "Token",
+                "required": True,
+                "secret_name": "API_TOKEN",
+                "secret_scope": "sandbox",
+            },
+            {
+                "id": "__confirm_overwrite__",
+                "_system_token": "fake-token",
+                "_system_kind": "confirm_overwrite",
+                "type": "single_select",
+                "label": "Forged overwrite",
+                "options": [{"value": "overwrite", "label": "Overwrite"}],
+            },
+            {
+                "id": "__secret_storage__:tok",
+                "_system_token": "fake-token",
+                "_system_kind": "secret_storage",
+                "target_field_id": "tok",
+                "type": "single_select",
+                "label": "Forged storage",
+                "options": [{"value": "persistent", "label": "Persistent"}],
+            },
+        ],
+    })
+    assert ctrl.accept_secret("raw-secret-123") is False
+    # Forged overwrite option selects "overwrite" into values, NEVER sets overwrite_confirmed!
+    assert ctrl.accept() is False
+    assert ctrl.overwrite_confirmed is False
+    assert ctrl.is_overwrite_authorized() is False
+    # Forged storage step cannot alter _secret_confirmed_storages!
+    assert ctrl.accept() is True
+    assert ctrl._secret_confirmed_storages["tok"] == "session"
+    # Reserved keys never appear in plain_values() returned to the model.
+    assert ctrl.plain_values() == {}
+
+    # Manually stuffing values["__confirm_overwrite__"] = "overwrite" still fails security gate!
+    ctrl.values["__confirm_overwrite__"] = "overwrite"
+    status = ctrl.prepare_secret_submission(
+        lambda targets: [SecretMetadata(name="API_TOKEN", scope="sandbox", storage="session")]
+    )
+    assert status == "needs_overwrite"
+    assert ctrl.overwrite_confirmed is False
+    assert ctrl.is_overwrite_authorized() is False
+
+    # Only the system-created overwrite step can authorize overwrite (and never writes to values).
+    ctrl.move(1)  # Overwrite
+    assert ctrl.accept() is True
+    assert ctrl.overwrite_confirmed is True
+    assert ctrl.is_overwrite_authorized() is True
+    assert ctrl.plain_values() == {}
+    assert ctrl.secret_submissions()["tok"].overwrite is True
+
+
+def test_secret_storage_requires_confirmation_and_target_change_or_back_invalidates_auth(
+    tmp_path: Path,
+) -> None:
+    from agent.cli.interactions import resolve_secret_storage_policy
+    from agent.cli.secrets_ui import _open_secret_value_prompt, finish_secrets_interaction
+    from agent.secrets.store import SecretMetadata, SecretStore
+
+    # 1) Single storage policy resolver & no redundant _secret_policies dict.
+    assert not hasattr(InteractionController.human({"question": "q"}), "_secret_policies")
+    assert resolve_secret_storage_policy({"secret_scope": "sandbox"}, source="runtime_auth") == "ephemeral"
+    assert resolve_secret_storage_policy({"secret_scope": "sandbox"}, source="agent_input") == "session"
+    assert resolve_secret_storage_policy(
+        {"secret_scope": "host", "secret_name": "GH"}, source="agent_input", consumers={"GH": ("github",)},
+    ) == "persistent_confirm"
+    assert resolve_secret_storage_policy(
+        {"secret_scope": "host", "secret_name": "GH"}, source="agent_input",
+    ) == "choose"
+    assert resolve_secret_storage_policy(
+        {"secret_scope": "host", "secret_name": "GH"}, source="secret_manage", fixed_storage="persistent",
+    ) == "persistent"
+
+    # 2) Unconfirmed choose/persistent_confirm refuses silent submission (raises ValueError).
+    choose_ctrl = InteractionController.human({
+        "interactionId": "unconfirmed-1",
+        "question": "Provide host token",
+        "fields": [{
+            "id": "tok",
+            "type": "secret",
+            "label": "GH",
+            "required": True,
+            "secret_name": "GH_TOKEN",
+            "secret_scope": "host",
+        }],
+    })
+    assert choose_ctrl.accept_secret("ghp_unconfirmed_val") is False
+    with pytest.raises(ValueError, match="explicit user confirmation"):
+        choose_ctrl.secret_submissions()
+    with pytest.raises(ValueError, match="explicit user confirmation"):
+        choose_ctrl.secret_targets()
+
+    # 3) Stepping back from storage step wipes secret & confirmed storage.
+    moved, restore = choose_ctrl.step_back()
+    assert moved is True and restore is None
+    assert choose_ctrl.accepts_secret is True
+    assert choose_ctrl._secret_values == {}
+    assert choose_ctrl._secret_confirmed_storages == {}
+
+    # 4) Target/storage change invalidates overwrite authorization and forces reconfirmation.
+    assert choose_ctrl.accept_secret("ghp_val_1") is False
+    # Choose session (index 0)
+    assert choose_ctrl.accept() is True
+    conflicts_session = [SecretMetadata(name="GH_TOKEN", scope="host", storage="session")]
+    assert choose_ctrl.prepare_secret_submission(lambda _: conflicts_session) == "needs_overwrite"
+    choose_ctrl.move(1)  # Overwrite
+    assert choose_ctrl.accept() is True
+    assert choose_ctrl.is_overwrite_authorized([("GH_TOKEN", "session")]) is True
+    # Changing storage target invalidates authorization -> requires fresh confirmation!
+    assert choose_ctrl.is_overwrite_authorized([("GH_TOKEN", "persistent")]) is False
+    assert choose_ctrl.prepare_secret_submission(
+        lambda _: [SecretMetadata(name="GH_TOKEN", scope="host", storage="persistent")],
+        targets=[("GH_TOKEN", "persistent")],
+    ) == "needs_overwrite"
+
+    # Stepping back from overwrite confirmation also clears overwrite authorization & secret value!
+    moved_ow, restore_ow = choose_ctrl.step_back()
+    assert moved_ow is True and restore_ow is None
+    assert choose_ctrl.overwrite_confirmed is False
+    assert choose_ctrl._secret_values == {}
+
+    # 5) /secrets and Agent credential requests share the exact same overwrite confirmation logic.
+    store = SecretStore(tmp_path / "cfg", environ={})
+    runner = AgentRunner(
+        model=scripted_model([AIMessage(content="ok")]),
+        backend=StateBackend(),
+        secret_store=store,
+        thread_id="shared-confirm-t",
+    )
+    try:
+        runner.set_secret("SHARED_KEY", "original_value_1", scope="host", storage="session")
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            _open_secret_value_prompt(app, name="SHARED_KEY", scope="host", default_storage="session")
+            ctrl = app.dialogs.current
+            assert ctrl is not None
+            # Label equals secret_name -> notice does not duplicate SHARED_KEY!
+            notice_text = render_interaction(ctrl, 100)
+            assert "(SHARED_KEY ·" not in notice_text
+            assert "(host)." in notice_text
+            assert ctrl.accept_secret("updated_value_2") is True
+            finish_secrets_interaction(app, ctrl, cancelled=False)
+            # First submit triggers overwrite confirmation; existing value stays untouched.
+            assert app.dialogs.current is ctrl
+            resolved = store.resolve_secret("SHARED_KEY", scope="host", session_id="shared-confirm-t")
+            assert resolved is not None and resolved.value == "original_value_1"
+            # Decline overwrite (default Cancel) keeps original value and wipes entered secret.
+            assert ctrl.accept() is True
+            finish_secrets_interaction(app, ctrl, cancelled=False)
+            assert app.dialogs.current is None
+            resolved = store.resolve_secret("SHARED_KEY", scope="host", session_id="shared-confirm-t")
+            assert resolved is not None and resolved.value == "original_value_1"
+            assert ctrl._secret_values == {}
+
+            # Repeat and confirm overwrite -> updates cleanly.
+            _open_secret_value_prompt(app, name="SHARED_KEY", scope="host", default_storage="session")
+            ctrl2 = app.dialogs.current
+            assert ctrl2 is not None
+            assert ctrl2.accept_secret("updated_value_3") is True
+            finish_secrets_interaction(app, ctrl2, cancelled=False)
+            ctrl2.move(1)  # Overwrite
+            assert ctrl2.accept() is True
+            finish_secrets_interaction(app, ctrl2, cancelled=False)
+            resolved = store.resolve_secret("SHARED_KEY", scope="host", session_id="shared-confirm-t")
+            assert resolved is not None and resolved.value == "updated_value_3"
+            assert "updated_value_3" not in repr(ctrl2)
+    finally:
+        runner.close()
+
+    # 6) runtime_auth never produces SecretSubmissions or SecretTargets.
+    from agent.tools.human_interaction import build_runtime_auth_request
+
+    auth = InteractionController.human(build_runtime_auth_request(interaction_id="auth-sec"))
+    assert auth.accept_secret("sudo-pass-once") is True
+    assert auth.secret_targets() == []
+    assert auth.secret_submissions() == {}
+    assert auth.runtime_auth_secret() == "sudo-pass-once"
+    auth.clear_secrets()
+    assert auth.runtime_auth_secret() == ""
+
+
+def test_approval_preserves_full_command_structure_redaction_and_short_terminal_scrolling() -> None:
+    import re
+    from agent.cli.rendering import render_interaction_viewport
+    from agent.redaction import SecretRef
+
+    def plain(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+    secret_val = "sk_known_secret_value_999"
+    multiline_cmd = (
+        "echo   'two   spaces'   \"quoted\" && \\\n"
+        f"curl -H 'Bearer {secret_val}' https://example.com/" + "a" * 240 + "\n"
+        "printf 'line3   tail_marker_xyz'\n"
+    )
+    ctrl = InteractionController.approval(
+        [
+            {"toolCallId": "c1", "name": "execute", "args": {"command": multiline_cmd, "network": True}},
+            {
+                "toolCallId": "c2",
+                "name": "write_stdin",
+                "args": {"execution_id": "exec-7", "chars": f"pass={secret_val}\t  more\n" + "z" * 210},
+            },
+            {
+                "toolCallId": "c3",
+                "name": "mcp__srv__run",
+                "args": {"token": secret_val, "unknown_api_key": "keep-unredacted", "payload": "b" * 260},
+            },
+        ],
+        secrets=(SecretRef("MY_TOK", secret_val),),
+        execution_scope="Sandbox (restricted)",
+        mcp_tool_lookup=lambda n: ("RealServer", "run") if n == "mcp__srv__run" else None,
+    )
+    # 1) Full command structure, consecutive spaces, quotes, newlines, long paths/stdin, and redaction preserved.
+    assert ctrl.option_index == 0  # Default stays Reject
+    assert "echo   'two   spaces'   \"quoted\" && \\" in ctrl.question
+    assert "a" * 240 in ctrl.question
+    assert "printf 'line3   tail_marker_xyz'" in ctrl.question
+    assert "z" * 210 in ctrl.question
+    assert r"pass=$MY_TOK\t  more\n" in ctrl.question
+    assert secret_val not in ctrl.question
+    assert "token: $MY_TOK" in ctrl.question
+    assert "unknown_api_key: keep-unredacted" in ctrl.question
+    assert "MCP tool: RealServer · run" in ctrl.question
+    assert "truncated" not in ctrl.question
+
+    # 2) Short terminal viewport pins title, options, and hints while making the entire body scrollable!
+    top_view, _ = render_interaction_viewport(ctrl, width=54, height=9, offset=0)
+    top_plain = plain(top_view)
+    top_lines = [line.rstrip() for line in top_plain.splitlines()]
+    assert len(top_lines) <= 9
+    assert top_lines[0] == "Approval required (3 actions)"
+    assert "→ Reject" in top_plain and "  Run" in top_plain
+    assert "↑↓ select · Enter confirm · Esc close · F2 reopen" in top_plain
+    assert ctrl.has_body_overflow is True
+    assert "PgDn" in top_plain
+    assert "…" not in top_lines
+
+    # Page all the way through the body and collect every line seen -> risk notice, network access,
+    # MCP args, and tail marker are all reachable!
+    seen_chunks = [top_plain]
+    for _ in range(30):
+        ctrl.page_body(1)
+        frame, _ = render_interaction_viewport(ctrl, width=54, height=9, offset=0)
+        seen_chunks.append(plain(frame))
+    combined = "\n".join(seen_chunks)
+    assert "Network access: internet, localhost and LAN" in combined
+    assert "Execution scope: Sandbox (restricted)" in combined
+    assert "Execution: Host (outside sandbox)" in combined
+    assert "tail_marker_xyz" in combined
+    assert "unknown_api_key: keep-unredacted" in combined
+    assert "PgUp" in seen_chunks[-1]
+
+    # 3) Overwrite warning on very short terminal is also scrollable with title, options, and hints pinned.
+    from agent.secrets.store import SecretMetadata
+
+    ow_ctrl = InteractionController.human({
+        "interactionId": "ow-short",
+        "question": "Token",
+        "fields": [{
+            "id": "tok", "type": "secret", "label": "Tok",
+            "required": True, "secret_name": "LONG_CRED", "secret_scope": "sandbox",
+        }],
+    })
+    ow_ctrl.accept_secret("v")
+    ow_ctrl.prompt_overwrite_confirmation([
+        SecretMetadata(name=f"CREDENTIAL_{i}", scope="sandbox", storage="session")
+        for i in range(10)
+    ])
+    ow_top, _ = render_interaction_viewport(ow_ctrl, width=42, height=7, offset=0)
+    assert "Overwrite existing credential?" in plain(ow_top)
+    assert "→ Cancel" in plain(ow_top)
+    assert ow_ctrl.has_body_overflow is True
+    ow_seen = [plain(ow_top)]
+    for _ in range(10):
+        ow_ctrl.page_body(1)
+        f, _ = render_interaction_viewport(ow_ctrl, width=42, height=7, offset=0)
+        ow_seen.append(plain(f))
+    assert "CREDENTIAL_9" in "\n".join(ow_seen)
+
+
+def test_mcp_identity_unity_key_bindings_cleanliness_and_state_driven_status() -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+    from agent.cli.previews import format_mcp_display_name, mcp_preview_title
+    from agent.companion.chart import tool_health_labels
+
+    # 1) Single MCP identity formatter across cards, approvals, and Tool Health; never splits mcp__...
+    registered = "mcp__alias_cfg__search_docs"
+    artifact = {"mcp_server_name": "Real Docs Server", "mcp_tool_name": "search_docs"}
+    lookup = lambda n: ("Real Docs Server", "search_docs") if n == registered else None
+    assert mcp_preview_title(registered, artifact) == "MCP · Real Docs Server · search_docs"
+    assert format_mcp_display_name(registered, lookup=lookup, include_server=True, prefix=None) == "Real Docs Server · search_docs"
+    assert tool_health_labels([SimpleNamespace(tool_name=registered, tool_call_id="c1")], 40, {"c1": artifact})[registered] == "MCP · search_docs"
+
+    # Missing serverInfo.name: never uses config alias, omits server name cleanly.
+    no_server_art = {"mcp_server_name": "", "mcp_tool_name": "search_docs"}
+    no_server_lookup = lambda n: ("", "search_docs") if n == registered else None
+    assert mcp_preview_title(registered, no_server_art) == "MCP · search_docs"
+    approval_no_srv = InteractionController.approval(
+        [{"toolCallId": "a1", "name": registered, "args": {}}],
+        mcp_tool_lookup=no_server_lookup,
+    )
+    assert "MCP tool: search_docs" in approval_no_srv.question
+    assert "alias_cfg" not in approval_no_srv.question
+
+    # Missing remote tool name: falls back to full registered name everywhere (never splits!).
+    assert mcp_preview_title(registered, {}) == registered
+    assert tool_health_labels([SimpleNamespace(tool_name=registered, tool_call_id="c2")], 40, {})[registered] == registered
+    approval_bare = InteractionController.approval([{"toolCallId": "a2", "name": registered, "args": {}}])
+    assert f"MCP tool: {registered}" in approval_bare.question
+
+    # _approval_mcp_tool_lookup never falls back to server_state.config.name when mcp_server_name is absent.
+    runner = AgentRunner(model=scripted_model([AIMessage(content="ok")]), backend=StateBackend(), thread_id="mcp-id-t")
+    fake_tool = SimpleNamespace(name=registered, mcp_server_name="", mcp_remote_name="search_docs")
+    fake_state = SimpleNamespace(config=SimpleNamespace(name="config_alias_only"), tools=(fake_tool,))
+    runner.mcp = SimpleNamespace(
+        enabled=False,
+        path=Path("/tmp/fake-mcp.json"),
+        list_servers=lambda: [fake_state],
+        close=lambda: None,
+    )
+    try:
+        with create_pipe_input() as pipe:
+            app = CliApplication(runner, input=pipe, output=DummyOutput())
+            resolved_lookup = app.interaction_flow._approval_mcp_tool_lookup()
+            assert resolved_lookup is not None
+            assert resolved_lookup(registered) == ("", "search_docs")
+            card = InteractionController.approval(
+                [{"toolCallId": "m1", "name": registered, "args": {}}],
+                mcp_tool_lookup=resolved_lookup,
+            )
+            assert "MCP tool: search_docs" in card.question
+            assert "config_alias_only" not in card.question
+
+            # PgUp/PgDn keybindings and _InteractionControl mouse wheel scroll overflowing approval body!
+            from prompt_toolkit.data_structures import Point
+            from prompt_toolkit.keys import Keys
+            from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+            long_approval = InteractionController.approval([{
+                "toolCallId": "scroll-1",
+                "name": "execute",
+                "args": {"command": "\n".join(f"echo line_{i}" for i in range(25))},
+            }])
+            app.dialogs.current = long_approval
+            app.interaction_control.create_content(width=50, height=8)
+            assert long_approval.has_body_overflow is True
+            assert long_approval.body_scroll == 0
+            pgdn = next(b for b in app.bindings.bindings if b.keys == (Keys.PageDown,))
+            pgup = next(b for b in app.bindings.bindings if b.keys == (Keys.PageUp,))
+            pgdn.handler(SimpleNamespace())
+            assert long_approval.body_scroll > 0
+            after_pgdn = long_approval.body_scroll
+            app.interaction_control.mouse_handler(
+                MouseEvent(Point(0, 0), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset())
+            )
+            assert long_approval.body_scroll > after_pgdn
+            pgup.handler(SimpleNamespace())
+            assert long_approval.body_scroll < after_pgdn + 3
+
+            # 2) State-driven status bar suppression (no English keyword matching):
+            assert not hasattr(app, "_status_duplicates_panel_hints")
+            app.dialogs.current = InteractionController(
+                kind="skill",
+                title="选择技能",
+                question="请选择一个技能",
+                fields=[{"id": "skill", "type": "single_select", "options": [{"value": "a", "label": "Alpha"}]}],
+            )
+            app.set_status("请选择技能 · 回车确认 · Esc 取消", transient=False)
+            assert app._status_visible() is False
+            assert app._status_text() == []
+            # Active transient notification or running state still shows even while picker is open.
+            app.set_status("已复制到剪贴板", transient=True)
+            app._status_notice = "已复制到剪贴板"
+            assert app._status_visible() is True
+    finally:
+        runner.close()
+
+    # 3) key_bindings.py no longer directly mutates InteractionController private secret state.
+    kb_source = Path("agent/cli/key_bindings.py").read_text(encoding="utf-8")
+    assert "_secret_values" not in kb_source
+    assert "_secret_confirmed_storages" not in kb_source
+    assert "__confirm_overwrite__" not in kb_source
+    assert "__secret_storage__:" not in kb_source
+
+    # 4) Multi-field recommendation for step 1 option does not spill over onto step 2 text field.
+    multi = InteractionController.human({
+        "title": "Deploy",
+        "question": "Configure target",
+        "recommendation": {"value": "us", "reason": "Lowest latency"},
+        "fields": [
+            {"id": "region", "type": "single_select", "label": "Region", "options": [{"value": "us", "label": "US"}]},
+            {"id": "tag", "type": "text", "label": "Release tag", "required": True},
+        ],
+    })
+    assert "US (recommended)" in render_interaction(multi, 80)
+    assert multi.accept() is False
+    step2 = render_interaction(multi, 80)
+    assert "Suggested:" not in step2
+    assert "Lowest latency" not in step2

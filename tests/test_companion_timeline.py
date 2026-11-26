@@ -79,7 +79,7 @@ def test_heatmap_uses_tool_results_and_preserves_cumulative_statistics(tmp_path)
         await c.save_statistics()
         assert chart.draw(30, 8) == empty
         event("tool_completed", "a", content="timeout was handled")
-        assert chart.draw(30, 8)[2][-1] == ACTIVITY_CELLS[1]
+        assert chart.draw(30, 8)[1][-1] == ACTIVITY_CELLS[1]
         event("tool_started", "b")
         event("tool_completed", "b", artifact={"exit_code": 127})
         event("tool_started", "c")
@@ -87,10 +87,11 @@ def test_heatmap_uses_tool_results_and_preserves_cumulative_statistics(tmp_path)
         event("tool_started", "d")
         event("tool_started", "d")
         populated = chart.draw(30, 8)
-        assert populated[0][-1][1] == "50% success"
-        assert populated[1][0][1] == "Last 2 calls"
-        assert populated[2][-1] == FAILED_CELL
-        assert populated[-1][0][1] == "2 calls · 1 success · 1 failed"
+        assert populated[0][-1][1] == "2 calls · 50% success"
+        assert not any("Last " in text for row in populated for _, text in row)
+        assert populated[1][-1] == FAILED_CELL
+        assert "× Failed" in "".join(text for _, text in populated[-1])
+        assert not any("1 success · 1 failed" in text for row in populated for _, text in row)
         assert len(c.timeline.series["fixed model", "default", "read"].recent) == 2
         await c.save_statistics()
         restored = restore_session(c.database, "s", c.window)
@@ -135,17 +136,17 @@ def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
         _observe_tool(c.timeline, i, name, failed=i in (3, 4, 13, 14))
     chart = ActivityHeatmap(c)
     rows = chart.draw(30, 8)
-    assert len(rows) == 8
-    assert rows[0][-1][1] == "78.9% success"
-    assert rows[1][0][1] == "Last 19 calls"
+    assert len(rows) == 6
+    assert rows[0][-1][1] == "19 calls · 78.9% success"
+    assert not any("Last 19 calls" in text for row in rows for _, text in row)
     assert all(sum(get_cwidth(text) for _, text in row) <= 30 for row in rows)
-    matrix = rows[2:6]
+    matrix = rows[1:5]
     assert [row[0][1].strip() for row in matrix] == ["read", "甲乙丙工具执行…", "shell", "other"]
     assert len({get_cwidth(row[0][1]) for row in matrix}) == 1
     for width in (30, 47, 64):
         rendered_rows = chart.draw(width, 8)
         assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rendered_rows)
-        rendered_matrix = rendered_rows[2:6]
+        rendered_matrix = rendered_rows[1:5]
         # Labels are right-aligned with exactly two spaces before the left-aligned matrix.
         matrix_starts = {get_cwidth(row[0][1]) for row in rendered_matrix}
         assert len(matrix_starts) == 1
@@ -166,12 +167,12 @@ def test_heatmap_groups_top_tools_and_prioritizes_failures(tmp_path):
     assert all(len(row) == 7 for row in cells)
     assert all(set(row[2::2]) == {("", " ")} for row in matrix)
     assert all(get_cwidth(glyph) == 1 and glyph in "■×" for row in cells for _, glyph in row)
-    legend = rows[-2]
+    legend = rows[-1]
     assert [cell for cell in legend if cell[1] == "■"] == [
         ("#FFFFFF", "■"), ("#FFD5EC", "■"), ("#F7BDD7", "■"), ("#F18AB6", "■"),
     ]
     assert "× Failed" in "".join(text for _, text in legend)
-    assert rows[-1][0][1] == "19 calls·15 success·4 failed"
+    assert not any("15 success" in text for row in rows for _, text in row)
 
 
 def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp_path):
@@ -187,17 +188,19 @@ def test_heatmap_keeps_latest_60_across_models_and_restores_completion_order(tmp
         )
     assert [obs.finished_at for obs in c.timeline.recent_tool_calls] == list(range(5, 65))
     wide = chart.draw(64, 9)
-    assert wide[0][-1][1] == "90% success"
+    assert wide[0][-1][1] == "60 calls · 90% success"
     assert wide[1][0][1] == "Last 60 calls · 57 shown"
     assert wide[2][0][1].strip() == "execute"
     assert wide[2][1::2] == [FAILED_CELL] + [ACTIVITY_CELLS[3]] * 18
-    assert wide[-1][0][1] == "60 calls · 54 success · 6 failed"
+    assert "× Failed" in "".join(text for _, text in wide[-1])
+    assert not any("54 success" in text for row in wide for _, text in row)
     _observe_tool(c.timeline, -1, "old", failed=True)
     assert chart.draw(64, 9) is wide
     narrow = chart.draw(30, 9)
+    assert narrow[0][-1][1] == "60 calls · 90% success"
     assert narrow[1][0][1] == "Last 60 calls · 21 shown"
     assert narrow[2][1::2] == [ACTIVITY_CELLS[3]] * 7
-    assert narrow[-1][0][1] == "60 calls·54 success·6 failed"
+    assert "× Failed" in "".join(text for _, text in narrow[-1])
     transact(c.database, c.timeline.pending)
     c.timeline = restore_session(c.database, "s", c.window)
     assert chart.draw(64, 9) == wide
@@ -231,7 +234,8 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
         "1": {"mcp_tool_name": "lookup"},
     }
     labeled = tool_health_labels([obs(alpha, "0"), obs(beta, "1")], wide, identity)
-    assert labeled[alpha] == "MCP · Parallel · search"
+    # Tool Health omits server names and displays only "MCP · <tool_name>".
+    assert labeled[alpha] == "MCP · search"
     assert labeled[beta] == "MCP · lookup"
     duplicated = tool_health_labels([
         obs("mcp__alpha__search", "a"),
@@ -240,17 +244,16 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
         "a": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
         "b": {"mcp_server_name": "Parallel", "mcp_tool_name": "search"},
     })
-    assert duplicated["mcp__alpha__search"] == duplicated["mcp__alpine__search"] == "MCP · Parallel · search"
+    assert duplicated["mcp__alpha__search"] == duplicated["mcp__alpine__search"] == "MCP · search"
     narrow = tool_health_labels([obs(alpha, "0")], 8, identity)
-    assert narrow[alpha] == _truncate_cells("MCP · Parallel · search", 8)
-    assert "search" not in narrow[alpha]
+    assert narrow[alpha] == _truncate_cells("MCP · search", 8)
     registered = "mcp__parallel__web_search"
     upgraded = tool_health_labels(
         [obs(registered, "old"), obs(registered, "new")],
         8,
         {"new": {"mcp_server_name": "Parallel", "mcp_tool_name": "web_search"}},
     )
-    assert upgraded[registered] == _truncate_cells("MCP · Parallel · web_search", 8)
+    assert upgraded[registered] == _truncate_cells("MCP · web_search", 8)
 
     started, _ = update_tool_events(
         {"agent": {"messages": [AIMessage(content="", tool_calls=[
@@ -282,9 +285,12 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     chart = ActivityHeatmap(c, lambda: recorded)
     for index, name in enumerate([ambiguous] * 3 + [beta] * 3 + ["read"]):
         _observe_tool(c.timeline, index, name)
-    labels = [row[0][1].strip() for row in chart.draw(64, 9)[2:5]]
-    assert labels == ["MCP · Beta · search", "MCP · Parallel · search", "read"]
-    assert chart.draw(64, 9)[-1][0][1] == "7 calls · 7 success · 0 failed"
+    drawn = chart.draw(64, 9)
+    assert drawn[0][-1][1] == "7 calls · 100% success"
+    labels = [row[0][1].strip() for row in drawn[1:4]]
+    # Two different MCP servers sharing the remote tool name "search" remain separate rows & counts.
+    assert labels == ["MCP · search", "MCP · search", "read"]
+    assert "× Failed" in "".join(text for _, text in drawn[-1])
     assert c.timeline.series["fixed model", "default", ambiguous].counts["success"] == 3
     assert c.timeline.series["fixed model", "default", beta].counts["success"] == 3
     assert ("fixed model", "default", "search") not in c.timeline.series
@@ -294,7 +300,7 @@ def test_heatmap_shows_remote_mcp_names_without_merging_counts(tmp_path):
     bare = ActivityHeatmap(type("Holder", (), {"timeline": restored})())
     assert any(ambiguous in text for row in bare.draw(64, 9) for _, text in row)
     remembered = ActivityHeatmap(type("Holder", (), {"timeline": restored})(), lambda: recorded)
-    assert "MCP · Parallel · search" in [row[0][1].strip() for row in remembered.draw(64, 9)]
+    assert "MCP · search" in [row[0][1].strip() for row in remembered.draw(64, 9)]
     blocks = messages_to_transcript([
         AIMessage(content="", tool_calls=[{"id": "0", "name": ambiguous, "args": {}}]),
         ToolMessage(content="ok", tool_call_id="0", name=ambiguous, artifact=recorded["0"]),
@@ -317,7 +323,7 @@ def test_heatmap_layout_right_aligns_labels_tightly_and_centers_whole_block(tmp_
     for width in (26, 34, 46, 64):
         rows = short_chart.draw(width, 9)
         assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rows)
-        matrix = rows[2:5]
+        matrix = rows[1:4]
         labels = [row[0][1].strip() for row in matrix]
         assert labels == ["execute", "read", "edit"]
         # Effective label width is 7 ("execute"), matrix has 2 columns -> 2*2 - 1 = 3 cells.
@@ -348,7 +354,7 @@ def test_heatmap_layout_right_aligns_labels_tightly_and_centers_whole_block(tmp_
     for width in (26, 40, 64):
         rows = mix_chart.draw(width, 9)
         assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rows)
-        matrix = rows[2:5]
+        matrix = rows[1:4]
         # Every row's matrix starts at the exact same column and has exactly a 2-space gap after its label.
         starts = {get_cwidth(row[0][1]) for row in matrix}
         assert len(starts) == 1
@@ -362,10 +368,11 @@ def test_heatmap_layout_right_aligns_labels_tightly_and_centers_whole_block(tmp_
         block_left = min(len(row[0][1]) - len(row[0][1].lstrip()) for row in matrix)
         block_right = width - sum(get_cwidth(text) for _, text in matrix[0])
         assert abs(block_right - block_left) <= 1
-        # Preserves MCP preview title semantics and counts.
+        # Tool Health uses simplified MCP · <tool_name> (no server name) and puts stats in header.
         top_label = matrix[0][0][1].strip()
-        assert top_label.startswith("MCP · Parallel" if width >= 30 else "MCP · ")
-        assert rows[-1][0][1].startswith("6 calls")
+        assert top_label.startswith("MCP · very_long") if width >= 40 else top_label.startswith("MCP · ")
+        assert "Parallel" not in top_label
+        assert rows[0][-1][1] == "6 calls · 100% success"
 
 
 def test_committed_start_survives_crash_and_replay(tmp_path):
@@ -644,3 +651,58 @@ def test_turn_payload_stores_the_user_query(tmp_path):
         assert [row["query"] for _, _, row in window["records"]] == ["", "follow up", "use $secret please"]
 
     asyncio.run(run())
+
+
+def test_tool_health_header_conditional_range_narrow_width_and_simplified_mcp_labels(tmp_path):
+    from prompt_toolkit.utils import get_cwidth
+
+    from agent.companion.chart import ActivityHeatmap
+
+    # 1) Empty state: Tool Health + No tool calls yet, no fabricated 100% success.
+    c_empty = companion(tmp_path / "empty", lambda: "s")
+    empty_rows = ActivityHeatmap(c_empty).draw(44, 9)
+    empty_text = "\n".join("".join(text for _, text in row) for row in empty_rows)
+    assert "Tool Health" in empty_text
+    assert "No tool calls yet" in empty_text
+    assert "success" not in empty_text
+
+    # 2) Singular (1 call) & shown == total: omits range hint row and bottom summary row.
+    c_one = companion(tmp_path / "one", lambda: "s")
+    _observe_tool(c_one.timeline, 0, "read")
+    one_rows = ActivityHeatmap(c_one).draw(44, 9)
+    assert len(one_rows) == 3  # header + 1 matrix row + legend
+    assert one_rows[0][-1][1] == "1 call · 100% success"
+    assert not any("Last " in text for row in one_rows for _, text in row)
+    assert "× Failed" in "".join(text for _, text in one_rows[-1])
+
+    # 3) Plural & shown < total on narrow width: keeps "Last N calls · M shown" without overflow.
+    c_many = companion(tmp_path / "many", lambda: "s")
+    for i in range(45):
+        _observe_tool(c_many.timeline, i, "execute", failed=i % 10 == 0)
+    many_chart = ActivityHeatmap(c_many)
+    assert sum(get_cwidth(text) for _, text in many_chart.draw(22, 9)[0]) <= 22
+    for width in (26, 30, 44):
+        rows = many_chart.draw(width, 9)
+        assert all(sum(get_cwidth(text) for _, text in row) <= width for row in rows)
+    narrow_rows = many_chart.draw(26, 9)
+    assert any("Last 45 calls · " in text and "shown" in text for row in narrow_rows for _, text in row)
+    assert not any("failed" in text for row in narrow_rows for _, text in row)  # bottom "N failed" summary gone
+
+    # 4) MCP rows show simplified "MCP · <tool>" (no server name) while isolating cross-server counts.
+    c_mcp = companion(tmp_path / "mcp", lambda: "s")
+    recorded = {
+        "0": {"mcp_server_name": "GitHub Cloud", "mcp_tool_name": "web_search"},
+        "1": {"mcp_server_name": "GitHub Cloud", "mcp_tool_name": "web_search"},
+        "2": {"mcp_server_name": "Brave Local", "mcp_tool_name": "web_search"},
+    }
+    _observe_tool(c_mcp.timeline, 0, "mcp__gh__web_search")
+    _observe_tool(c_mcp.timeline, 1, "mcp__gh__web_search")
+    _observe_tool(c_mcp.timeline, 2, "mcp__brave__web_search", failed=True)
+    _observe_tool(c_mcp.timeline, 3, "mcp__unknown__raw_only")
+    mcp_rows = ActivityHeatmap(c_mcp, lambda: recorded).draw(56, 9)
+    assert mcp_rows[0][-1][1] == "4 calls · 75% success"
+    matrix_labels = [row[0][1].strip() for row in mcp_rows[1:-1]]
+    assert matrix_labels == ["MCP · web_search", "MCP · web_search", "mcp__unknown__raw_only"]
+    assert not any("GitHub" in text or "Brave" in text for row in mcp_rows for _, text in row)
+    assert c_mcp.timeline.series["fixed model", "default", "mcp__gh__web_search"].counts["success"] == 2
+    assert c_mcp.timeline.series["fixed model", "default", "mcp__brave__web_search"].counts["failed"] == 1

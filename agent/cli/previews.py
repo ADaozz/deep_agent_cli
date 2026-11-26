@@ -875,22 +875,61 @@ def _mcp_clean(value: str) -> str:
     return " ".join(mcp_display_text(value).split())
 
 
-def mcp_preview_title(name: str, artifact: Any) -> str:
-    """Card and Tool Health title. Missing identity keeps the registered name."""
+def resolve_mcp_identity(
+    name: str,
+    *,
+    artifact: Any = None,
+    lookup: Callable[[str], tuple[str, str] | None] | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve real MCP (serverInfo.name, remote tool name) without parsing ``mcp__...``."""
     from agent.mcp.names import is_external_mcp_tool
 
     if not isinstance(name, str) or not is_external_mcp_tool(name):
-        return name if isinstance(name, str) else ""
-    payload = artifact if isinstance(artifact, dict) else {}
-    tool_name = payload.get("mcp_tool_name")
-    server_name = payload.get("mcp_server_name")
-    tool = _mcp_clean(tool_name) if isinstance(tool_name, str) else ""
-    server = _mcp_clean(server_name) if isinstance(server_name, str) else ""
+        return None, None
+    raw_server: Any = None
+    raw_tool: Any = None
+    if isinstance(artifact, Mapping):
+        raw_server = artifact.get("mcp_server_name")
+        raw_tool = artifact.get("mcp_tool_name")
+    if (not raw_tool or not raw_server) and callable(lookup):
+        resolved = lookup(name)
+        if resolved is not None:
+            l_server, l_tool = resolved
+            if not raw_server and l_server:
+                raw_server = l_server
+            if not raw_tool and l_tool:
+                raw_tool = l_tool
+    server = _mcp_clean(raw_server) if isinstance(raw_server, str) and raw_server.strip() else None
+    tool = _mcp_clean(raw_tool) if isinstance(raw_tool, str) and raw_tool.strip() else None
+    return server, tool
+
+
+def format_mcp_display_name(
+    name: str,
+    *,
+    artifact: Any = None,
+    lookup: Callable[[str], tuple[str, str] | None] | None = None,
+    include_server: bool = True,
+    prefix: str | None = "MCP",
+) -> str:
+    """Single MCP display formatter shared by tool cards, approval panels, and Tool Health."""
+    if not isinstance(name, str):
+        return ""
+    server, tool = resolve_mcp_identity(name, artifact=artifact, lookup=lookup)
     if not tool:
         return name
-    if server:
-        return f"MCP · {server} · {tool}"
-    return f"MCP · {tool}"
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix)
+    if include_server and server:
+        parts.append(server)
+    parts.append(tool)
+    return " · ".join(parts)
+
+
+def mcp_preview_title(name: str, artifact: Any) -> str:
+    """Card title for external MCP tools. Missing remote tool name keeps the registered name."""
+    return format_mcp_display_name(name, artifact=artifact, include_server=True, prefix="MCP")
 
 
 def _mcp_titles(block: ToolBlock) -> str:

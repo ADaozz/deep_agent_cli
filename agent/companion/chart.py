@@ -7,7 +7,7 @@ from typing import Any
 from prompt_toolkit.utils import get_cwidth
 
 from agent.cli.formatting import _fit_footer_parts, _truncate_cells
-from agent.cli.previews import mcp_preview_title
+from agent.cli.previews import format_mcp_display_name
 from agent.companion.theme import ACCENT, MUTED, TEXT
 
 
@@ -51,19 +51,18 @@ class ActivityHeatmap:
         failed = sum(obs.outcome == "failed" for obs in calls)
         success = total - failed
         rate = f"{100 * success / total:.1f}".rstrip("0").rstrip(".")
-        title, gap, percent = _fit_footer_parts("Tool Health", f"{rate}% success", width)
+        calls_label = "call" if total == 1 else "calls"
+        title, gap, stats = _fit_footer_parts("Tool Health", f"{total} {calls_label} · {rate}% success", width)
         max_name_width = max(1, min(24, width // 2))
         columns = max(1, (width - max_name_width - 1) // 2)
         groups = [calls[i:i + CALLS_PER_GROUP] for i in range(0, total, CALLS_PER_GROUP)][-columns:]
         shown = sum(map(len, groups))
-        calls_label = "call" if total == 1 else "calls"
-        window_label = f"Last {total} {calls_label}"
-        if shown < total:
-            window_label += f" · {shown} shown"
         rows = [
-            [(ACCENT, title), ("", gap), (ACCENT, percent)],
-            [(MUTED, _truncate_cells(window_label, width))],
+            [(ACCENT, title), ("", gap), (ACCENT, stats)],
         ]
+        if shown < total:
+            window_label = f"Last {total} {calls_label} · {shown} shown"
+            rows.append([(MUTED, _truncate_cells(window_label, width))])
 
         frequency = Counter(obs.tool_name for obs in calls)
         top = sorted(frequency, key=lambda name: (-frequency[name], name))[:TOOL_ROWS]
@@ -98,10 +97,7 @@ class ActivityHeatmap:
                 row.append(FAILED_CELL if name in failures else ACTIVITY_CELLS[activity[name]])
             rows.append(row)
 
-        summary = f"{total} {calls_label} · {success} success · {failed} failed"
-        if get_cwidth(summary) > width:
-            summary = summary.replace(" · ", "·")
-        rows.extend((_legend(width), [(MUTED, _truncate_cells(summary, width))]))
+        rows.append(_legend(width))
         return rows
 
 
@@ -110,8 +106,9 @@ def tool_health_labels(
 ) -> dict[str, str]:
     """Row labels for Tool Health. Counts stay keyed by the registered name.
 
-    MCP rows use the same title as the tool card. The artifact is the checkpoint
-    copy already in memory; identical titles are left as they are and clipped.
+    MCP rows use the shared identity formatter without server names
+    (``MCP · <tool_name>``), falling back to the full registered name when
+    original tool metadata is unavailable.
     """
     recorded = artifacts or {}
     labels: dict[str, str] = {}
@@ -120,7 +117,12 @@ def tool_health_labels(
         if not name:
             continue
         artifact = recorded.get(str(getattr(obs, "tool_call_id", "") or ""))
-        title = mcp_preview_title(name, artifact)
+        title = format_mcp_display_name(
+            name,
+            artifact=artifact,
+            include_server=False,
+            prefix="MCP",
+        )
         if name not in labels or (labels[name] == name and title != name):
             labels[name] = title
     return {name: _truncate_cells(title, width) for name, title in labels.items()}

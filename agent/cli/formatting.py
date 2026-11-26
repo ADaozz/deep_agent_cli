@@ -66,7 +66,8 @@ def _fit_footer_parts(left: str, right: str, width: int) -> tuple[str, str, str]
     right_fit = _truncate_cells(right, available)
     remaining = max(0, available - get_cwidth(right_fit) - 1)
     left_fit = _truncate_cells(left, remaining)
-    gap = " " * max(1, available - get_cwidth(left_fit) - get_cwidth(right_fit))
+    gap_min = 1 if left_fit else 0
+    gap = " " * max(gap_min, available - get_cwidth(left_fit) - get_cwidth(right_fit))
     return left_fit, gap, right_fit
 
 

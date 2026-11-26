@@ -702,7 +702,8 @@ def test_approval_multiple_tools_truncation_and_redaction() -> None:
         secrets=(SecretRef("SECRET", "private-value"),),
     )
     assert ui.tool_call_ids == ["a", "b", "c"]
-    assert "truncated" in ui.question and "Ctrl+O" in ui.question
+    assert "echo " + "x" * 1000 in ui.question
+    assert "truncated" not in ui.question
     assert "private-value" not in ui.question
     assert "$SECRET" in ui.question
     assert "private-file-content" not in ui.question
@@ -813,8 +814,10 @@ def test_approval_file_targets_bound_and_redact_summary() -> None:
         ],
         secrets=(SecretRef("SECRET", "private-value"),),
     )
-    assert "truncated; Ctrl+O" in ui.question
+    assert "/workspace/" + "x" * 400 in ui.question
+    assert "truncated" not in ui.question
     assert "\x1b" not in ui.question
+    assert r"Edit file: /workspace/line\n.txt" in ui.question
     assert "private-value" not in ui.question
     assert "$SECRET" in ui.question
     assert "Delete file: <not supplied>" in ui.question

@@ -559,49 +559,139 @@ def render_interaction(controller: Any, width: int) -> str:
     return _capture(controller.render(), width)
 
 
+def _capture_renderables(items: Sequence[Any], width: int) -> list[str]:
+    if not items:
+        return []
+    lines = _capture(Group(*items), width).splitlines()
+    if isinstance(items[-1], Text) and not items[-1].plain:
+        lines.append("")
+    return lines
+
+
+def _strip_outer_blank_lines(lines: list[str]) -> list[str]:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[start:end]
+
+
+def _body_scroll_indicator(above: int, below: int, width: int) -> str:
+    if above > 0 and below > 0:
+        label = f"↑ {above} above · ↓ {below} below · PgUp/PgDn"
+    elif below > 0:
+        unit = "line" if below == 1 else "lines"
+        label = f"↓ {below} more {unit} · PgDn"
+    else:
+        unit = "line" if above == 1 else "lines"
+        label = f"↑ {above} more {unit} above · PgUp"
+    return _capture(Text(label, style="dim"), width)
+
+
+def _update_body_scroll_state(controller: Any, scroll: int, max_scroll: int, page_size: int) -> None:
+    if hasattr(controller, "body_scroll"):
+        controller.body_scroll = scroll
+    if hasattr(controller, "_body_max_scroll"):
+        controller._body_max_scroll = max_scroll
+    if hasattr(controller, "_body_page_size"):
+        controller._body_page_size = max(1, page_size)
+
+
+def _slice_scrollable_body(
+    controller: Any,
+    body_lines: list[str],
+    room: int,
+    width: int,
+) -> list[str]:
+    if room <= 0 or not body_lines:
+        _update_body_scroll_state(controller, 0, 0, max(1, room))
+        return []
+    if len(body_lines) <= room:
+        _update_body_scroll_state(controller, 0, 0, max(1, room))
+        return body_lines
+    current_scroll = int(getattr(controller, "body_scroll", 0) or 0)
+    if room >= 2:
+        visible_rows = room - 1
+        max_scroll = max(0, len(body_lines) - visible_rows)
+        scroll = max(0, min(current_scroll, max_scroll))
+        _update_body_scroll_state(controller, scroll, max_scroll, visible_rows)
+        indicator = _body_scroll_indicator(scroll, max_scroll - scroll, width)
+        return [*body_lines[scroll : scroll + visible_rows], indicator]
+    max_scroll = max(0, len(body_lines) - 1)
+    scroll = max(0, min(current_scroll, max_scroll))
+    _update_body_scroll_state(controller, scroll, max_scroll, 1)
+    return body_lines[scroll : scroll + 1]
+
+
 def render_interaction_viewport(controller: Any, width: int, height: int, offset: int) -> tuple[str, int]:
-    """Scroll only the options; headings and keyboard hints stay in place."""
+    """Keep title, options, and hints visible; scroll overflowing bodies via controller.body_scroll."""
     if controller is None or height <= 0:
         return "", 0
     header, options, footer = controller.render_sections()
-    heading = _capture(Group(*header), width).splitlines() if header else []
-    if header and isinstance(header[-1], Text) and not header[-1].plain:
-        heading.append("")
-    hints = _capture(Group(*footer), width).splitlines() if footer else []
+    title_lines = _capture_renderables(header[:1], width) if header else []
+    body_lines = _capture_renderables(header[1:], width) if len(header) > 1 else []
+    heading = [*title_lines, *body_lines]
+    hints = _capture_renderables(footer, width)
     if not options:
         full = render_interaction(controller, width)
         full_lines = full.splitlines()
         if len(full_lines) <= height:
+            _update_body_scroll_state(controller, 0, 0, height)
             return full, 0
-        if heading and not heading[-1].strip():
-            heading = heading[:-1]
-        if hints and not hints[0].strip():
-            hints = hints[1:]
-        hint_budget = max(0, height - 2)
-        if len(hints) > hint_budget:
-            hints = [line for line in hints if line.strip()]
-        hint_height = min(len(hints), hint_budget)
-        shown_hints = hints[-hint_height:] if hint_height else []
-        head_room = max(1 if heading and height >= 3 else 0, height - hint_height)
-        if head_room < len(heading) and head_room > 1:
-            heading = [*heading[:head_room - 1], _capture(Text("…", style="dim"), width)]
-        else:
-            heading = heading[:head_room]
-        visible = heading + shown_hints
+        # Pin the keyboard hint (plus active validation error / custom prompt) at the bottom,
+        # and make the middle body (including credential purpose & storage notice) scrollable.
+        pinned_items = [footer[-1]] if footer else []
+        extra_footer_items = list(footer[:-1]) if len(footer) > 1 else []
+        if getattr(controller, "custom_entry", False) and extra_footer_items:
+            while extra_footer_items and isinstance(extra_footer_items[-1], Text) and not extra_footer_items[-1].plain:
+                extra_footer_items.pop()
+            if extra_footer_items:
+                pinned_items.insert(0, extra_footer_items.pop())
+        if getattr(controller, "error", "") and extra_footer_items:
+            while extra_footer_items and isinstance(extra_footer_items[-1], Text) and not extra_footer_items[-1].plain:
+                extra_footer_items.pop()
+            if extra_footer_items:
+                pinned_items.insert(0, extra_footer_items.pop())
+        pinned_hints = _capture_renderables(pinned_items, width)
+        hint_budget = max(0, height - (1 if title_lines and height >= 3 else 0) - (1 if height >= 3 else 0))
+        if len(pinned_hints) > hint_budget:
+            pinned_hints = pinned_hints[-hint_budget:] if hint_budget else []
+        title_take = title_lines[: max(1 if title_lines and height >= 2 else 0, height - len(pinned_hints))]
+        if len(title_take) + len(pinned_hints) > height:
+            title_take = title_take[: max(0, height - len(pinned_hints))]
+        scroll_body = _strip_outer_blank_lines(body_lines)
+        notice_lines = _strip_outer_blank_lines(_capture_renderables(extra_footer_items, width))
+        if notice_lines:
+            if scroll_body:
+                scroll_body = [*scroll_body, "", *notice_lines]
+            else:
+                scroll_body = notice_lines
+        body_room = max(0, height - len(title_take) - len(pinned_hints))
+        shown_body = _slice_scrollable_body(controller, scroll_body, body_room, width)
+        visible = [*title_take, *shown_body, *pinned_hints]
         return "\n".join(visible[:height]), 0
+
     rows = [_capture(option, width).splitlines() for option in options]
     option_rows = [line for option in rows for line in option]
-    if len(heading) + len(option_rows) + len(hints) > height:
-        # Drop decorative blank spacers first on tight terminals so title & hints stay pinned.
-        if heading and not heading[-1].strip():
-            heading = heading[:-1]
-        if hints and not hints[0].strip():
-            hints = hints[1:]
-    # Reserve list space and at least the title row even on very short terminals.
-    heading_min = 1 if heading and height >= 3 else 0
+    if len(heading) + len(option_rows) + len(hints) <= height:
+        _update_body_scroll_state(controller, 0, 0, max(1, len(body_lines)))
+        return "\n".join([*heading, *option_rows, *hints][:height]), 0
+
+    # Drop decorative blank spacers first on tight terminals so content, options, and hints stay visible.
+    while body_lines and not body_lines[-1].strip():
+        body_lines = body_lines[:-1]
+    while hints and not hints[0].strip():
+        hints = hints[1:]
+    if len(title_lines) + len(body_lines) + len(option_rows) + len(hints) > height:
+        while body_lines and not body_lines[0].strip():
+            body_lines = body_lines[1:]
+    heading_min = min(len(title_lines), 1) if title_lines and height >= 3 else 0
     hint_height = min(len(hints), max(0, height - heading_min - 1))
     list_minimum = min(len(option_rows), max(1, (height - heading_min) // 2))
-    heading_height = min(len(heading), max(heading_min, height - hint_height - list_minimum))
+    total_heading = len(title_lines) + len(body_lines)
+    heading_height = min(total_heading, max(heading_min, height - hint_height - list_minimum))
     list_height = max(1, height - hint_height - heading_height)
     selected = min(controller.option_index, len(rows) - 1)
     start = sum(len(option) for option in rows[:selected])
@@ -611,9 +701,18 @@ def render_interaction_viewport(controller: Any, width: int, height: int, offset
         offset = start
     elif end > offset + list_height:
         offset = min(start, end - list_height)
-    if heading_height < len(heading) and heading_height > 1:
-        heading = [*heading[:heading_height - 1], _capture(Text("…", style="dim"), width)]
-    visible = heading[:heading_height] + option_rows[offset:offset + list_height] + hints[:hint_height]
+
+    if total_heading <= heading_height:
+        visible_heading = [*title_lines, *body_lines]
+        _update_body_scroll_state(controller, 0, 0, max(1, len(body_lines)))
+    else:
+        title_take = title_lines[:heading_height]
+        body_room = max(0, heading_height - len(title_take))
+        shown_body = _slice_scrollable_body(controller, body_lines, body_room, width)
+        visible_heading = [*title_take, *shown_body]
+
+    shown_hints = hints[-hint_height:] if hint_height else []
+    visible = [*visible_heading, *option_rows[offset : offset + list_height], *shown_hints]
     return "\n".join(visible[:height]), offset
 
 

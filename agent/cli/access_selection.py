@@ -158,7 +158,6 @@ class AccessSelection:
             }],
         )
         self.dialogs.current.option_index = next(i for i, option in enumerate(options) if option["value"] == current.value)
-        self.set_status("Select permission mode · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
     def _show_sandbox_mounts(self) -> None:
@@ -226,7 +225,6 @@ class AccessSelection:
             }],
         )
         self.dialogs.current.option_index = 0 if current == "restricted" else 1
-        self.set_status("Select sandbox mode · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
     def _allow_available(self) -> bool:
@@ -288,7 +286,7 @@ class AccessSelection:
             status += " · question pending · F2"
         elif kind is InterruptKind.PAUSED:
             status += " · pause pending · F2"
-        self.set_status(status, transient=False)
+        self.set_status(status, transient=False, panel_hint=kind is None)
 
     def _note_interrupt_behind_allow_confirm(self, status: str) -> None:
         if status == "waiting_confirmation":

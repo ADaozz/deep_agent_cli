@@ -17,6 +17,7 @@ from agent.tools.human_interaction import (
     is_rejected_secret_type,
     normalize_interaction_request,
     resume_values,
+    validate_field_id,
 )
 
 # request_human_input — local LangGraph interrupt tool.
@@ -63,6 +64,11 @@ class FieldSpec(BaseModel):
         max_length=3,
         description="At most 3 objective choices (no 1st/2nd person). System adds Other automatically.",
     )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return validate_field_id(value)
 
     @field_validator("type", mode="before")
     @classmethod

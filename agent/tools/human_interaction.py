@@ -13,9 +13,20 @@ InteractionSource = Literal["agent_input", "runtime_auth"]
 
 FIELD_TYPES: tuple[str, ...] = tuple(get_args(FieldType))
 INTERACTION_TYPES: tuple[str, ...] = tuple(get_args(InteractionType))
+RESERVED_FIELD_ID_PREFIX = "__"
 _SECRET_TYPE_KEYWORDS: tuple[str, ...] = (
     "secret", "password", "passwd", "credential", "api_key", "apikey", "token", "passphrase", "private_key",
 )
+
+
+def validate_field_id(raw_id: Any) -> str:
+    """Validate a model/user-supplied field id against reserved system namespaces."""
+    text = str(raw_id or "").strip()
+    if text.startswith(RESERVED_FIELD_ID_PREFIX):
+        raise ValueError(
+            f"Invalid field id {text!r}: ids starting with {RESERVED_FIELD_ID_PREFIX!r} are reserved for system use"
+        )
+    return text
 
 
 def is_rejected_secret_type(raw_type: str) -> bool:
@@ -174,7 +185,7 @@ def _normalize_field(
     if has_secret_attrs and raw_type != "secret":
         raise ValueError("Fields declaring secret_name or secret_scope must set type='secret'")
     field_type = raw_type if raw_type in FIELD_TYPES else "text"
-    field_id = str(raw.get("id") or f"field_{index}").strip() or f"field_{index}"
+    field_id = validate_field_id(raw.get("id")) or f"field_{index}"
     options = _normalize_options(raw.get("options"))
     if field_type == "secret":
         if raw.get("options"):

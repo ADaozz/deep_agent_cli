@@ -173,38 +173,21 @@ class InteractionFlow:
                 )
             self.run_dispatch()._start_run("", resume_call=resume_call)
             return
-        # Agent human_input: handle persistence decline and overwrite confirmation before resuming.
-        if interaction.persistence_declined:
+        # Agent human_input: shared security confirmation flow (persistence decline & overwrite check).
+        status = interaction.prepare_secret_submission(self.runner.check_secret_overwrites)
+        if status == "declined":
             self._restore_approval_draft()
             interaction.clear_secrets()
             self._clear_secret_buffer()
             self._dismiss_pending_interrupt("human")
             return
-        if "__confirm_overwrite__" in interaction.values:
-            decision = str(interaction.values.pop("__confirm_overwrite__") or "")
-            if decision != "overwrite":
-                self._restore_approval_draft()
-                interaction.clear_secrets()
-                self._clear_secret_buffer()
-                self._dismiss_pending_interrupt("human")
-                return
-            interaction.overwrite_confirmed = True
-            interaction.fields = [f for f in interaction.fields if f.get("id") != "__confirm_overwrite__"]
-        if interaction.has_secret_fields and not interaction.overwrite_confirmed:
-            targets = interaction.secret_targets()
-            conflicts = self.runner.check_secret_overwrites(targets) if targets else []
-            if conflicts:
-                interaction.prompt_overwrite_confirmation(conflicts)
-                self.set_status("Credential exists · confirm overwrite", transient=False)
-                self.invalidate()
-                return
-        secret_ids = {str(f.get("id") or "") for f in interaction.fields if f.get("type") == "secret"}
-        values = {
-            k: v for k, v in interaction.values.items()
-            if k != "__confirm_overwrite__" and k not in secret_ids
-        }
+        if status == "needs_overwrite":
+            self.set_status("Credential exists · confirm overwrite", transient=False)
+            self.invalidate()
+            return
+        values = interaction.plain_values()
         secret_subs = interaction.secret_submissions()
-        overwrite = interaction.overwrite_confirmed
+        overwrite = interaction.is_overwrite_authorized()
         interaction.clear_secrets()
         self._clear_secret_buffer()
         self.dialogs.current = None
@@ -278,9 +261,10 @@ class InteractionFlow:
                     tool_name = str(getattr(tool, "name", "") or "")
                     if not tool_name:
                         continue
-                    server_label = str(getattr(tool, "mcp_server_name", "") or server_state.config.name)
-                    remote_name = str(getattr(tool, "mcp_remote_name", "") or tool_name)
-                    mapping[tool_name] = (server_label, remote_name)
+                    server_label = str(getattr(tool, "mcp_server_name", "") or "")
+                    remote_name = str(getattr(tool, "mcp_remote_name", "") or "")
+                    if server_label or remote_name:
+                        mapping[tool_name] = (server_label, remote_name)
         except Exception:  # noqa: BLE001
             return None
         return mapping.get if mapping else None

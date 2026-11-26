@@ -148,8 +148,9 @@ class _ScrollableTextControl(FormattedTextControl):
 class _InteractionControl(_ScrollableTextControl):
     """A fixed heading and footer around a selection-following option list."""
 
-    def __init__(self, *args: Any, controller: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, controller: Any, on_body_scroll: Any = None, **kwargs: Any) -> None:
         self._controller = controller
+        self._on_body_scroll = on_body_scroll
         self._option_offset = 0
         self._selection_context: Any = None
         super().__init__(*args, **kwargs)
@@ -165,6 +166,23 @@ class _InteractionControl(_ScrollableTextControl):
         )
         lines = list(split_lines(to_formatted_text(ANSI(rendered))))
         return UIContent(get_line=lines.__getitem__, line_count=len(lines), show_cursor=False)
+
+    def mouse_handler(self, mouse_event):  # type: ignore[no-untyped-def]
+        controller = self._controller()
+        if controller is not None and getattr(controller, "has_body_overflow", False):
+            if mouse_event.event_type is MouseEventType.SCROLL_UP:
+                if self._on_body_scroll is not None:
+                    self._on_body_scroll(-3)
+                else:
+                    controller.scroll_body(-3)
+                return None
+            if mouse_event.event_type is MouseEventType.SCROLL_DOWN:
+                if self._on_body_scroll is not None:
+                    self._on_body_scroll(3)
+                else:
+                    controller.scroll_body(3)
+                return None
+        return super().mouse_handler(mouse_event)
 
 
 class _BackToBottomControl(_ScrollableTextControl):

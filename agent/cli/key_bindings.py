@@ -146,10 +146,18 @@ def create_bindings(
 
     @kb.add("pageup")
     def page_up(event) -> None:  # type: ignore[no-untyped-def]
+        if self.dialogs.current is not None and self.dialogs.current.has_body_overflow:
+            self.dialogs.current.page_body(-1)
+            self.application.invalidate()
+            return
         self._scroll_queue(-10) if self._queue_expanded() else self.transcript.scroll_transcript(-10)
 
     @kb.add("pagedown")
     def page_down(event) -> None:  # type: ignore[no-untyped-def]
+        if self.dialogs.current is not None and self.dialogs.current.has_body_overflow:
+            self.dialogs.current.page_body(1)
+            self.application.invalidate()
+            return
         self._scroll_queue(10) if self._queue_expanded() else self.transcript.scroll_transcript(10)
 
     @kb.add("c-home")
@@ -176,56 +184,17 @@ def create_bindings(
     def interaction_previous(event) -> None:  # type: ignore[no-untyped-def]
         assert self.dialogs.current
         self._clear_secret_buffer()
-        if self.dialogs.current.custom_entry:
-            self.dialogs.current.custom_entry = False
-            self.dialogs.current.error = ""
+        moved, restore_text = self.dialogs.current.step_back()
+        if not moved:
+            return
+        if restore_text is not None:
+            self.buffer.text = restore_text
+            self.buffer.cursor_position = len(restore_text)
+        else:
             self.buffer.reset()
             self.drafts.pasted.clear()
             self.drafts.skill.clear()
-            return
-        current_id = str(self.dialogs.current.current.get("id") or "")
-        if current_id.startswith("__secret_storage__:"):
-            target_id = str(self.dialogs.current.current.get("target_field_id") or "")
-            self.dialogs.current.fields.pop(self.dialogs.current.index)
-            self.dialogs.current.index = max(0, self.dialogs.current.index - 1)
-            self.dialogs.current.option_index = 0
-            self.dialogs.current.error = ""
-            if target_id:
-                self.dialogs.current._secret_values.pop(target_id, None)
-                self.dialogs.current._secret_confirmed_storages.pop(target_id, None)
-            self.application.invalidate()
-            return
-        if current_id == "__confirm_overwrite__":
-            self.dialogs.current.fields = [
-                item for item in self.dialogs.current.fields if item.get("id") != "__confirm_overwrite__"
-            ]
-            self.dialogs.current.index = max(0, len(self.dialogs.current.fields) - 1)
-            self.dialogs.current.option_index = 0
-            if self.dialogs.current.accepts_secret:
-                fid = str(self.dialogs.current.current.get("id") or "")
-                self.dialogs.current._secret_values.pop(fid, None)
-                self.dialogs.current._secret_confirmed_storages.pop(fid, None)
-            self.application.invalidate()
-            return
-        if self.dialogs.current.index > 0:
-            self.dialogs.current.index -= 1
-            self.dialogs.current.option_index = 0
-            field_id = str(self.dialogs.current.current.get("id") or "")
-            if self.dialogs.current.accepts_secret:
-                # Never copy a previously entered secret back into any editable buffer.
-                self.dialogs.current._secret_values.pop(field_id, None)
-                self.buffer.reset()
-                self.drafts.pasted.clear()
-                self.drafts.skill.clear()
-                return
-            previous = self.dialogs.current.values.get(field_id, "")
-            if self.dialogs.current.accepts_text and isinstance(previous, str):
-                self.buffer.text = previous
-                self.buffer.cursor_position = len(previous)
-            else:
-                self.buffer.reset()
-                self.drafts.pasted.clear()
-                self.drafts.skill.clear()
+        self.application.invalidate()
 
     @bind("interrupt")
     def escape(event) -> None:  # type: ignore[no-untyped-def]

@@ -1327,7 +1327,7 @@ def test_golden_interaction_secure_credential_session_persistent_runtime_auth_an
         "GitHub Personal Access Token",
         "Required to connect the GitHub MCP server.",
         "",
-        "Stored encrypted on this device for future sessions (GITHUB_TOKEN · MCP: github).",
+        "Confirm encrypted storage on this device in the next step (GITHUB_TOKEN · MCP: github).",
         "The agent receives only the credential name.",
         "",
         "Enter submit · Esc close · F2 reopen",
@@ -1404,7 +1404,7 @@ def test_golden_interaction_secure_credential_session_persistent_runtime_auth_an
         "→ Cancel",
         "  Overwrite",
         "",
-        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+        "↑↓ select · Enter confirm · Shift+Tab back · Esc close · F2 reopen",
     ]
     ow_ansi = render_interaction(sess_ctrl, 90)
     assert "\x1b[1;33mOverwrite existing credential?\x1b[0m" in ow_ansi
@@ -1464,11 +1464,12 @@ def test_golden_interaction_behaviors_mode_switch_draft_restore_scroll_and_statu
             paint_frame()
             assert app.application.layout.current_control is app.editor_control
 
-            # Status bar must NOT duplicate open panel shortcut hints.
-            app.state.status = "Select · Enter confirm · Esc close · F2 reopen"
+            # Status bar suppression is state-driven (not keyword matching): panel_hint hides in any language,
+            # while real interaction state like "Waiting for input" stays visible.
+            app.set_status("选择选项 · 回车确认 · Esc 关闭", transient=False, panel_hint=True)
             assert app._status_visible() is False
             assert app._status_text() == []
-            app.state.status = "Waiting for input"
+            app.set_status("Waiting for input", transient=False)
             assert app._status_visible() is True
 
             # Advance from plain text field -> secret field: mode, yellow border editor, and focus switch together!
@@ -1516,7 +1517,8 @@ def test_golden_interaction_behaviors_mode_switch_draft_restore_scroll_and_statu
             assert app.interaction_flow._reopen_pending_interaction() is True
             assert app.dialogs.current is not None and app.dialogs.current.kind == "human"
 
-            # Short & narrow viewport clips long no-option secret panel while pinning heading and footer hints.
+            # Short & narrow viewport makes long no-option secret panel genuinely scrollable
+            # while pinning heading and footer hints (no dead ellipsis truncation).
             long_secret = InteractionController.human({
                 "question": " ".join(f"segment-{i}" for i in range(40)),
                 "fields": [{
@@ -1528,8 +1530,17 @@ def test_golden_interaction_behaviors_mode_switch_draft_restore_scroll_and_statu
             clipped_lines = [line.rstrip() for line in _plain(clipped).splitlines()]
             assert len(clipped_lines) <= 7
             assert clipped_lines[0] == "Credential required"
-            assert "…" in clipped_lines
+            assert long_secret.has_body_overflow is True
+            assert any("PgDn" in line for line in clipped_lines)
+            assert "…" not in clipped_lines
             assert any("Enter submit" in line for line in clipped_lines)
+            # Paging down reveals the tail of the question and storage notice.
+            for _ in range(10):
+                long_secret.page_body(1)
+            scrolled, _ = render_interaction_viewport(long_secret, width=36, height=7, offset=0)
+            scrolled_plain = _plain(scrolled)
+            assert "The agent receives only" in scrolled_plain
+            assert "PgUp" in scrolled_plain
 
             runner.close()
 

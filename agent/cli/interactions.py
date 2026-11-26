@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import json
 import re
+import shlex
 from typing import Any, Literal
 
 from rich.console import Group
@@ -11,17 +12,23 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.cli.highlighting import code_renderer
+from agent.cli.previews import format_mcp_display_name
+from agent.mcp.names import is_external_mcp_tool
 from agent.redaction import SecretRef, replace_known_secrets, sanitize_display_text
 from agent.secrets.store import ManagedStorage, SecretMetadata, SecretSubmission
 from agent.tools.catalog import FILE_MUTATION_TOOLS, WEB_TOOLS, WRITE_STDIN_TOOL
-from agent.tools.human_interaction import ensure_other_option
+from agent.tools.human_interaction import RESERVED_FIELD_ID_PREFIX, ensure_other_option
 
 _Secrets = tuple[SecretRef, ...] | tuple[str, ...]
 PanelMode = Literal["human", "approval", "secret", "picker"]
 SecretStoragePolicy = Literal["ephemeral", "session", "persistent", "choose", "persistent_confirm"]
+SystemStepKind = Literal["secret_storage", "confirm_overwrite"]
 
 _STORAGE_STEP_PREFIX = "__secret_storage__:"
 _OVERWRITE_STEP_ID = "__confirm_overwrite__"
+_SYSTEM_STEP_TOKEN = object()
+_SYSTEM_STEP_TOKEN_KEY = "_system_token"
+_SYSTEM_STEP_KIND_KEY = "_system_kind"
 _GENERIC_FIELD_LABELS = frozenset({
     "reply", "answer", "text", "input", "value", "response", "回复", "回答", "输入",
 })
@@ -38,28 +45,48 @@ def _is_duplicate_copy(candidate: str, seen: Sequence[str]) -> bool:
     return any(_norm_copy(existing) == norm for existing in seen if existing)
 
 
-def _is_transient_step(item: Mapping[str, Any]) -> bool:
-    fid = str(item.get("id") or "")
-    return fid == _OVERWRITE_STEP_ID or fid.startswith(_STORAGE_STEP_PREFIX)
+def _is_system_step(item: Mapping[str, Any], kind: SystemStepKind | None = None) -> bool:
+    """True only for transient steps constructed by this module (never forgeable from JSON)."""
+    if item.get(_SYSTEM_STEP_TOKEN_KEY) is not _SYSTEM_STEP_TOKEN:
+        return False
+    return kind is None or item.get(_SYSTEM_STEP_KIND_KEY) == kind
 
 
-def _approval_summary(
+def resolve_secret_storage_policy(
+    field: Mapping[str, Any],
+    *,
+    source: str = "agent_input",
+    consumers: Mapping[str, Sequence[str]] | None = None,
+    fixed_storage: ManagedStorage | None = None,
+) -> SecretStoragePolicy:
+    """Single authoritative secret storage policy resolver across init, UI, and submission."""
+    if source == "runtime_auth":
+        return "ephemeral"
+    if fixed_storage is not None:
+        return fixed_storage
+    scope = str(field.get("secret_scope") or "sandbox").strip().lower()
+    name = str(field.get("secret_name") or "").strip()
+    if scope == "host":
+        if consumers and consumers.get(name):
+            return "persistent_confirm"
+        return "choose"
+    return "session"
+
+
+def _approval_text(
     value: Any,
-    kind: str = "command",
     *,
     secrets: _Secrets = (),
+    preserve_newlines: bool = True,
 ) -> str:
-    del kind  # Kind remains for call-site clarity; display no longer guesses credentials.
-    command = str(value or "<not supplied>")
-    command = replace_known_secrets(command, secrets)
-    command = " ".join(sanitize_display_text(command, keep_newlines=False).split())
-    return command if len(command) <= 180 else command[:180] + "… [truncated; Ctrl+O to expand tool]"
-
-
-def _mcp_approval_summary(text: str, *, secrets: _Secrets = ()) -> str:
-    text = replace_known_secrets(mcp_display_text(text), secrets)
-    text = " ".join(sanitize_display_text(text, keep_newlines=False).split())
-    return text if len(text) <= 180 else text[:180] + "…"
+    """Preserve complete approval content without collapsing spaces or truncating."""
+    if value is None or value == "":
+        return "<not supplied>"
+    redacted = replace_known_secrets(str(value), secrets)
+    sanitized = sanitize_display_text(redacted, keep_newlines=True)
+    if preserve_newlines:
+        return sanitized
+    return sanitized.replace("\r", r"\r").replace("\n", r"\n").replace("\t", r"\t")
 
 
 def mcp_display_text(value: str) -> str:
@@ -67,7 +94,7 @@ def mcp_display_text(value: str) -> str:
     return sanitize_display_text(value, keep_newlines=True)
 
 
-def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
+def mcp_arguments_preview(args: Any, *, expanded: bool = False, secrets: _Secrets = ()) -> str:
     """Bounded display-only traversal; never writes into the original arguments."""
     max_lines, max_chars, max_depth, string_limit = (
         (80, 8000, 8, 1200) if expanded else (8, 700, 4, 100)
@@ -79,7 +106,8 @@ def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
 
     def text(value: str, limit: int) -> str:
         nonlocal omitted
-        value = mcp_display_text(value).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
+        redacted = replace_known_secrets(value, secrets)
+        value = mcp_display_text(redacted).replace("\n", r"\n").replace("\r", r"\r").replace("\t", r"\t")
         if len(value) > limit:
             omitted = True
             return value[:limit] + "… [omitted]"
@@ -152,26 +180,7 @@ def mcp_arguments_preview(args: Any, *, expanded: bool = False) -> str:
 def _format_visible_stdin(value: str, *, secrets: _Secrets = ()) -> str:
     redacted = replace_known_secrets(value, secrets)
     sanitized = sanitize_display_text(redacted, keep_newlines=True)
-    escaped = sanitized.replace("\r", r"\r").replace("\n", r"\n").replace("\t", r"\t")
-    return escaped if len(escaped) <= 180 else escaped[:180] + "…"
-
-
-def _parse_mcp_display_name(
-    name: str,
-    mcp_tool_lookup: Callable[[str], tuple[str, str] | None] | None = None,
-) -> tuple[str | None, str]:
-    if callable(mcp_tool_lookup):
-        resolved = mcp_tool_lookup(name)
-        if resolved is not None:
-            server, remote = resolved
-            return (server or None), (remote or name)
-    if name.startswith("mcp__"):
-        rest = name[len("mcp__"):]
-        if "__" in rest:
-            server, remote = rest.split("__", 1)
-            if server and remote:
-                return server, remote
-    return None, name
+    return sanitized.replace("\r", r"\r").replace("\n", r"\n").replace("\t", r"\t")
 
 
 def _format_approval_call(
@@ -184,15 +193,16 @@ def _format_approval_call(
 ) -> list[str]:
     from agent.execution.network import network_requested
 
-    name = " ".join(str(call.get("name") or "tool").split())[:80]
+    raw_name = str(call.get("name") or "tool")
+    name = " ".join(sanitize_display_text(raw_name, keep_newlines=False).split())[:120] or "tool"
     raw_args = call.get("args")
     args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
     lines: list[str] = []
 
     if name == "execute":
-        command = _approval_summary(args.get("command"), secrets=secrets)
+        command = _approval_text(args.get("command"), secrets=secrets, preserve_newlines=True)
         lines.append("Command:")
-        lines.append(command)
+        lines.extend(command.splitlines() or [""])
         if single_call:
             lines.append("")
         if network_requested(args):
@@ -208,7 +218,7 @@ def _format_approval_call(
         return lines
 
     if name in FILE_MUTATION_TOOLS:
-        target = _approval_summary(args.get("file_path"), kind="target", secrets=secrets)
+        target = _approval_text(args.get("file_path"), secrets=secrets, preserve_newlines=False)
         if name == "write":
             lines.append(f"Write file: {target}")
             if isinstance(args.get("content"), str):
@@ -237,18 +247,18 @@ def _format_approval_call(
 
     if name in WEB_TOOLS:
         if name == "web_search":
-            lines.append(f'Web search: "{_approval_summary(args.get("query"), secrets=secrets)}"')
+            lines.append(f'Web search: "{_approval_text(args.get("query"), secrets=secrets, preserve_newlines=False)}"')
             if args.get("ori_question"):
-                lines.append(f"Original question: {_approval_summary(args['ori_question'], secrets=secrets)}")
+                lines.append(f"Original question: {_approval_text(args['ori_question'], secrets=secrets, preserve_newlines=False)}")
             if args.get("localization"):
-                lines.append(f"Localization: {_approval_summary(args['localization'], secrets=secrets)}")
+                lines.append(f"Localization: {_approval_text(args['localization'], secrets=secrets, preserve_newlines=False)}")
         else:
-            lines.append(f"Fetch URL: {_approval_summary(args.get('url'), kind='target', secrets=secrets)}")
+            lines.append(f"Fetch URL: {_approval_text(args.get('url'), secrets=secrets, preserve_newlines=False)}")
         lines.append("Network access: DeepSeek API (host)")
         return lines
 
     if name == WRITE_STDIN_TOOL:
-        exec_id = _approval_summary(args.get("execution_id"), kind="target", secrets=secrets)
+        exec_id = _approval_text(args.get("execution_id"), secrets=secrets, preserve_newlines=False)
         action = str(args.get("action") or "write").strip().lower()
         if action == "cancel":
             lines.append(f"Cancel running process: {exec_id}")
@@ -264,7 +274,7 @@ def _format_approval_call(
         return lines
 
     if name == "mcp_add":
-        server_name = _mcp_approval_summary(str(args.get("name") or "<not supplied>"), secrets=secrets)
+        server_name = _approval_text(args.get("name"), secrets=secrets, preserve_newlines=False)
         transport = str(args.get("transport") or "<not supplied>")
         lines.append(f"Add MCP server: {server_name}")
         lines.append(f"Transport: {transport}")
@@ -272,44 +282,56 @@ def _format_approval_call(
             command = str(args.get("command") or "")
             argv = args.get("argv") if isinstance(args.get("argv"), list) else args.get("args")
             argv = argv if isinstance(argv, list) else []
-            rendered = " ".join([command, *[str(item) for item in argv]]).strip()
-            lines.append(
-                "Host command (runs outside the sandbox): "
-                + _mcp_approval_summary(rendered or "<not supplied>", secrets=secrets)
-            )
+            if argv:
+                raw_parts = [command, *[str(item) for item in argv]]
+                cleaned_parts = [
+                    _approval_text(part, secrets=secrets, preserve_newlines=False)
+                    for part in raw_parts
+                    if part != ""
+                ]
+                rendered = shlex.join(cleaned_parts) if cleaned_parts else "<not supplied>"
+            else:
+                rendered = _approval_text(command, secrets=secrets, preserve_newlines=False)
+            lines.append(f"Host command (runs outside the sandbox): {rendered}")
         else:
-            lines.append(f"URL: {_mcp_approval_summary(str(args.get('url') or '<not supplied>'), secrets=secrets)}")
+            lines.append(f"URL: {_approval_text(args.get('url'), secrets=secrets, preserve_newlines=False)}")
         auth = str(args.get("auth_type") or "none")
-        token_env = str(args.get("token_env") or "")
+        token_env = _approval_text(args.get("token_env"), secrets=secrets, preserve_newlines=False) if args.get("token_env") else ""
         lines.append(
             f"Auth: {auth}"
             + (f" via environment variable {token_env}" if auth == "bearer" and token_env else "")
         )
         env_pass = args.get("env_passthrough")
         if isinstance(env_pass, list) and env_pass:
-            safe_names = ", ".join(_mcp_approval_summary(str(item), secrets=secrets) for item in env_pass if item)
+            safe_names = ", ".join(
+                _approval_text(item, secrets=secrets, preserve_newlines=False) for item in env_pass if item
+            )
             if safe_names:
                 lines.append(f"Env passthrough: {safe_names}")
         lines.append("Target: Host MCP configuration")
         return lines
 
     if name == "mcp_remove":
-        server_name = _mcp_approval_summary(str(args.get("name") or "<not supplied>"), secrets=secrets)
+        server_name = _approval_text(args.get("name"), secrets=secrets, preserve_newlines=False)
         lines.append(f"Remove MCP server: {server_name}")
         lines.append("Target: Host MCP configuration")
         return lines
 
-    if name.startswith("mcp__"):
-        server, remote = _parse_mcp_display_name(name, mcp_tool_lookup)
-        label = f"{server} · {remote}" if server else remote
+    if is_external_mcp_tool(name):
+        label = format_mcp_display_name(
+            name,
+            lookup=mcp_tool_lookup,
+            include_server=True,
+            prefix=None,
+        )
         lines.append(f"MCP tool: {label}")
         lines.append("Execution: Host (outside sandbox)")
-        lines.append("Arguments:\n" + mcp_arguments_preview(call.get("args", {})))
+        lines.append("Arguments:\n" + mcp_arguments_preview(call.get("args", {}), expanded=True, secrets=secrets))
         return lines
 
     lines.append(f"Action: {name}")
     if args:
-        lines.append("Arguments:\n" + mcp_arguments_preview(args))
+        lines.append("Arguments:\n" + mcp_arguments_preview(args, expanded=True, secrets=secrets))
     return lines
 
 
@@ -346,12 +368,17 @@ class InteractionController:
     calls: list[dict[str, Any]] = field(default_factory=list)
     # Isolated from ``values`` and excluded from repr so plaintext secrets never leak into logs/events.
     _secret_values: dict[str, str] = field(default_factory=dict, repr=False)
-    # Trusted host-determined storage policy & consumers per secret field (never inferred from model text).
-    _secret_policies: dict[str, SecretStoragePolicy] = field(default_factory=dict)
+    # Trusted host-determined consumers & fixed /secrets storage choices (never inferred from model text).
     _secret_consumers: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    _secret_fixed_storages: dict[str, ManagedStorage] = field(default_factory=dict)
     _secret_confirmed_storages: dict[str, ManagedStorage] = field(default_factory=dict)
     overwrite_confirmed: bool = False
+    _overwrite_authorized_targets: tuple[tuple[str, ManagedStorage], ...] = field(default_factory=tuple)
+    overwrite_declined: bool = False
     persistence_declined: bool = False
+    body_scroll: int = 0
+    _body_max_scroll: int = 0
+    _body_page_size: int = 5
     auth_callback: Any = field(default=None, repr=False)
 
     @classmethod
@@ -375,8 +402,10 @@ class InteractionController:
             for k, v in (secret_consumers or {}).items()
             if str(k)
         }
-        policies: dict[str, SecretStoragePolicy] = {}
-        for idx, item in enumerate(fields):
+        for item in fields:
+            # Never allow incoming payload dicts to carry private system-step markers.
+            item.pop(_SYSTEM_STEP_TOKEN_KEY, None)
+            item.pop(_SYSTEM_STEP_KIND_KEY, None)
             field_type = str(item.get("type") or "text")
             if field_type == "boolean" and not item.get("options"):
                 item["options"] = [
@@ -385,20 +414,6 @@ class InteractionController:
                 ]
             elif field_type in {"single_select", "multi_select"}:
                 item["options"] = ensure_other_option(item.get("options") or [])
-            elif field_type == "secret":
-                field_id = str(item.get("id") or f"field_{idx}")
-                if source == "runtime_auth":
-                    policies[field_id] = "ephemeral"
-                else:
-                    secret_name = str(item.get("secret_name") or "").strip()
-                    secret_scope = str(item.get("secret_scope") or "sandbox").strip().lower()
-                    if secret_scope == "host":
-                        if trusted_consumers.get(secret_name):
-                            policies[field_id] = "persistent_confirm"
-                        else:
-                            policies[field_id] = "choose"
-                    else:
-                        policies[field_id] = "session"
         raw_title = str(payload.get("title") or "").strip()
         raw_question = str(payload.get("question") or "").strip()
         default_title = "Authentication required" if source == "runtime_auth" else "Input required"
@@ -414,7 +429,6 @@ class InteractionController:
             interaction_id=str(payload.get("interactionId") or ""),
             recommendation=raw_recommendation if isinstance(raw_recommendation, dict) else {},
             impact=[str(item) for item in payload.get("impact", [])],
-            _secret_policies=policies,
             _secret_consumers=trusted_consumers,
             auth_callback=auth_callback if source == "runtime_auth" else None,
         )
@@ -506,46 +520,99 @@ class InteractionController:
     def panel_mode(self) -> PanelMode:
         if self.kind == "approval":
             return "approval"
-        if self.accepts_secret or _is_transient_step(self.current):
+        if self.accepts_secret or _is_system_step(self.current):
             return "secret"
         if self.kind == "human":
             return "human"
         return "picker"
 
-    def _secret_policy(self, field_id: str, field: Mapping[str, Any]) -> SecretStoragePolicy:
-        if field_id in self._secret_policies:
-            return self._secret_policies[field_id]
-        if self.source == "runtime_auth":
-            return "ephemeral"
-        scope = str(field.get("secret_scope") or "sandbox").strip().lower()
-        name = str(field.get("secret_name") or "").strip()
-        if scope == "host":
-            return "persistent_confirm" if self._secret_consumers.get(name) else "choose"
-        return "session"
+    @property
+    def has_body_overflow(self) -> bool:
+        return self._body_max_scroll > 0
 
-    def _resolved_secret_storage(self, field_id: str, field: Mapping[str, Any]) -> ManagedStorage:
+    def scroll_body(self, delta: int) -> None:
+        if self._body_max_scroll > 0:
+            self.body_scroll = max(0, min(self._body_max_scroll, self.body_scroll + delta))
+        else:
+            self.body_scroll = max(0, self.body_scroll + delta)
+
+    def page_body(self, direction: int) -> None:
+        step = max(1, self._body_page_size - 1)
+        self.scroll_body(step if direction > 0 else -step)
+
+    def secret_storage_policy(self, field_id: str, field: Mapping[str, Any]) -> SecretStoragePolicy:
+        return resolve_secret_storage_policy(
+            field,
+            source=self.source,
+            consumers=self._secret_consumers,
+            fixed_storage=self._secret_fixed_storages.get(field_id),
+        )
+
+    def _confirmed_secret_storage(self, field_id: str, field: Mapping[str, Any]) -> ManagedStorage:
         if field_id in self._secret_confirmed_storages:
             return self._secret_confirmed_storages[field_id]
-        policy = self._secret_policy(field_id, field)
+        policy = self.secret_storage_policy(field_id, field)
         if policy == "persistent":
             return "persistent"
-        return "session"
+        if policy == "session":
+            return "session"
+        secret_name = str(field.get("secret_name") or field_id)
+        raise ValueError(f"Credential storage for {secret_name} requires explicit user confirmation")
+
+    def _invalidate_overwrite_confirmation(self) -> None:
+        self.overwrite_confirmed = False
+        self._overwrite_authorized_targets = ()
+        self.overwrite_declined = False
+        before = len(self.fields)
+        self.fields = [item for item in self.fields if not _is_system_step(item, "confirm_overwrite")]
+        if len(self.fields) != before:
+            self.index = min(self.index, len(self.fields) - 1) if self.fields else 0
+
+    def is_overwrite_authorized(
+        self,
+        targets: Sequence[tuple[str, ManagedStorage]] | None = None,
+    ) -> bool:
+        expected = tuple(targets) if targets is not None else tuple(self.secret_targets())
+        return (
+            self.overwrite_confirmed
+            and bool(expected)
+            and expected == self._overwrite_authorized_targets
+        )
+
+    def plain_values(self) -> dict[str, Any]:
+        """Return only non-secret, non-reserved business answers safe to send back to the model."""
+        secret_ids = {
+            str(item.get("id") or "")
+            for item in self.fields
+            if not _is_system_step(item) and str(item.get("type") or "") == "secret"
+        }
+        return {
+            key: val
+            for key, val in self.values.items()
+            if key not in secret_ids and not str(key).startswith(RESERVED_FIELD_ID_PREFIX)
+        }
 
     def secret_targets(self) -> list[tuple[str, ManagedStorage]]:
+        if self.source == "runtime_auth":
+            return []
         targets: list[tuple[str, ManagedStorage]] = []
         for idx, item in enumerate(self.fields):
-            if str(item.get("type")) != "secret":
+            if _is_system_step(item) or str(item.get("type")) != "secret":
                 continue
             field_id = str(item.get("id") or f"field_{idx}")
             secret_name = str(item.get("secret_name") or "").strip()
             if secret_name and self._secret_values.get(field_id, "") != "":
-                targets.append((secret_name, self._resolved_secret_storage(field_id, item)))
+                targets.append((secret_name, self._confirmed_secret_storage(field_id, item)))
         return targets
 
     def secret_submissions(self) -> dict[str, SecretSubmission]:
+        if self.source == "runtime_auth":
+            return {}
+        targets = self.secret_targets()
+        authorized = self.is_overwrite_authorized(targets)
         submissions: dict[str, SecretSubmission] = {}
         for idx, item in enumerate(self.fields):
-            if str(item.get("type")) != "secret":
+            if _is_system_step(item) or str(item.get("type")) != "secret":
                 continue
             field_id = str(item.get("id") or f"field_{idx}")
             if field_id not in self._secret_values:
@@ -555,10 +622,27 @@ class InteractionController:
                 continue
             submissions[field_id] = SecretSubmission(
                 value=raw_val,
-                storage=self._resolved_secret_storage(field_id, item),
-                overwrite=self.overwrite_confirmed,
+                storage=self._confirmed_secret_storage(field_id, item),
+                overwrite=authorized,
             )
         return submissions
+
+    def prepare_secret_submission(
+        self,
+        check_overwrites: Callable[[list[tuple[str, ManagedStorage]]], list[SecretMetadata]],
+        *,
+        targets: Sequence[tuple[str, ManagedStorage]] | None = None,
+    ) -> Literal["ready", "declined", "needs_overwrite"]:
+        """Shared security gate for both Agent credential input and `/secrets`."""
+        if self.persistence_declined or self.overwrite_declined:
+            return "declined"
+        pending_targets = list(targets) if targets is not None else self.secret_targets()
+        if pending_targets and not self.is_overwrite_authorized(pending_targets):
+            conflicts = check_overwrites(pending_targets)
+            if conflicts:
+                self.prompt_overwrite_confirmation(conflicts, targets=pending_targets)
+                return "needs_overwrite"
+        return "ready"
 
     def runtime_auth_secret(self) -> str:
         field_id = str(self.fields[0].get("id") or "password") if self.fields else "password"
@@ -567,12 +651,38 @@ class InteractionController:
     def clear_secrets(self) -> None:
         self._secret_values.clear()
         self._secret_confirmed_storages.clear()
+        self.overwrite_confirmed = False
+        self._overwrite_authorized_targets = ()
+        self.overwrite_declined = False
+        self.persistence_declined = False
         self.auth_callback = None
+        self.fields = [item for item in self.fields if not _is_system_step(item)]
+        if self.fields:
+            self.index = min(self.index, len(self.fields) - 1)
+        else:
+            self.index = 0
 
-    def prompt_overwrite_confirmation(self, conflicts: list[SecretMetadata]) -> None:
+    def prompt_overwrite_confirmation(
+        self,
+        conflicts: list[SecretMetadata],
+        *,
+        targets: Sequence[tuple[str, ManagedStorage]] | None = None,
+    ) -> None:
+        if targets is not None:
+            pending_targets = tuple(targets)
+        else:
+            try:
+                pending_targets = tuple(self.secret_targets())
+            except ValueError:
+                pending_targets = ()
+        if not pending_targets:
+            pending_targets = tuple((meta.name, meta.storage) for meta in conflicts)
         names = ", ".join(f"{meta.name} ({meta.storage})" for meta in conflicts)
         confirm_field = {
             "id": _OVERWRITE_STEP_ID,
+            _SYSTEM_STEP_TOKEN_KEY: _SYSTEM_STEP_TOKEN,
+            _SYSTEM_STEP_KIND_KEY: "confirm_overwrite",
+            "_overwrite_targets": pending_targets,
             "type": "single_select",
             "label": "Overwrite existing credential?",
             "warning": f"Warning: {names} already exists and will be replaced.",
@@ -582,10 +692,11 @@ class InteractionController:
                 {"value": "overwrite", "label": "Overwrite", "description": ""},
             ],
         }
-        self.fields = [item for item in self.fields if item.get("id") != _OVERWRITE_STEP_ID]
+        self._invalidate_overwrite_confirmation()
         self.fields.append(confirm_field)
         self.index = len(self.fields) - 1
         self.option_index = 0
+        self.body_scroll = 0
         self.error = ""
 
     def move(self, delta: int) -> None:
@@ -594,6 +705,66 @@ class InteractionController:
         options = self.current.get("options") or []
         if options:
             self.option_index = (self.option_index + delta) % len(options)
+
+    def exit_custom_entry(self) -> bool:
+        if not self.custom_entry:
+            return False
+        self.custom_entry = False
+        self.error = ""
+        self.body_scroll = 0
+        return True
+
+    def step_back(self) -> tuple[bool, str | None]:
+        """Move back one interaction step, clearing stale secrets and authorizations.
+
+        Returns ``(moved, restore_text)`` where ``restore_text`` is non-None only
+        for plain-text fields that may be restored into the normal editor buffer.
+        """
+        if self.custom_entry:
+            self.exit_custom_entry()
+            return True, None
+        field = self.current
+        if _is_system_step(field, "secret_storage"):
+            target_id = str(field.get("target_field_id") or "")
+            self.fields.pop(self.index)
+            self.index = max(0, self.index - 1)
+            self.option_index = 0
+            self.body_scroll = 0
+            self.error = ""
+            if target_id:
+                self._secret_values.pop(target_id, None)
+                self._secret_confirmed_storages.pop(target_id, None)
+            self._invalidate_overwrite_confirmation()
+            return True, None
+        if _is_system_step(field, "confirm_overwrite"):
+            self._invalidate_overwrite_confirmation()
+            self.index = max(0, len(self.fields) - 1)
+            self.option_index = 0
+            self.body_scroll = 0
+            self.error = ""
+            if self.accepts_secret:
+                fid = str(self.current.get("id") or "")
+                self._secret_values.pop(fid, None)
+                self._secret_confirmed_storages.pop(fid, None)
+                return True, None
+            field_id = str(self.current.get("id") or "")
+            previous = self.values.get(field_id, "")
+            return True, previous if (self.accepts_text and isinstance(previous, str)) else None
+        if self.index > 0:
+            self.index -= 1
+            self.option_index = 0
+            self.body_scroll = 0
+            self.error = ""
+            field_id = str(self.current.get("id") or "")
+            if self.accepts_secret:
+                # Never copy a previously entered secret back into any editable buffer.
+                self._secret_values.pop(field_id, None)
+                self._secret_confirmed_storages.pop(field_id, None)
+                self._invalidate_overwrite_confirmation()
+                return True, None
+            previous = self.values.get(field_id, "")
+            return True, previous if (self.accepts_text and isinstance(previous, str)) else None
+        return False, None
 
     def _build_storage_step(
         self,
@@ -608,6 +779,8 @@ class InteractionController:
             consumer_text = ", ".join(consumers)
             return {
                 "id": f"{_STORAGE_STEP_PREFIX}{field_id}",
+                _SYSTEM_STEP_TOKEN_KEY: _SYSTEM_STEP_TOKEN,
+                _SYSTEM_STEP_KIND_KEY: "secret_storage",
                 "type": "single_select",
                 "target_field_id": field_id,
                 "storage_policy": policy,
@@ -628,6 +801,8 @@ class InteractionController:
             }
         return {
             "id": f"{_STORAGE_STEP_PREFIX}{field_id}",
+            _SYSTEM_STEP_TOKEN_KEY: _SYSTEM_STEP_TOKEN,
+            _SYSTEM_STEP_KIND_KEY: "secret_storage",
             "type": "single_select",
             "target_field_id": field_id,
             "storage_policy": policy,
@@ -655,12 +830,19 @@ class InteractionController:
         if field.get("required") and secret_text == "":
             self.error = "This field is required."
             return False
-        policy = self._secret_policy(field_id, field)
+        self._invalidate_overwrite_confirmation()
+        policy = self.secret_storage_policy(field_id, field)
         if secret_text != "":
             self._secret_values[field_id] = secret_text
             if policy in {"choose", "persistent_confirm"}:
-                step_id = f"{_STORAGE_STEP_PREFIX}{field_id}"
-                self.fields = [item for item in self.fields if item.get("id") != step_id]
+                self._secret_confirmed_storages.pop(field_id, None)
+                self.fields = [
+                    item for item in self.fields
+                    if not (
+                        _is_system_step(item, "secret_storage")
+                        and item.get("target_field_id") == field_id
+                    )
+                ]
                 step = self._build_storage_step(
                     field_id=field_id,
                     secret_name=str(field.get("secret_name") or "").strip(),
@@ -670,6 +852,7 @@ class InteractionController:
                 self.fields.insert(self.index + 1, step)
                 self.index += 1
                 self.option_index = 0
+                self.body_scroll = 0
                 self.error = ""
                 return False
             if policy == "persistent":
@@ -683,6 +866,7 @@ class InteractionController:
         if self.index + 1 < len(self.fields):
             self.index += 1
             self.option_index = 0
+            self.body_scroll = 0
             return False
         return True
 
@@ -713,21 +897,44 @@ class InteractionController:
         field_type = str(field.get("type") or "text")
         if not self.custom_entry and field_type == "secret":
             return self.accept_secret(text)
-        if field_id.startswith(_STORAGE_STEP_PREFIX):
+        if _is_system_step(field, "secret_storage"):
             options = field.get("options") or []
             choice = str(options[self.option_index].get("value") or "cancel") if options else "cancel"
             target_field_id = str(field.get("target_field_id") or "")
             self.fields.pop(self.index)
             self.error = ""
             self.option_index = 0
+            self.body_scroll = 0
             if choice == "cancel":
                 self.clear_secrets()
                 self.persistence_declined = True
                 return True
             if target_field_id and choice in {"session", "persistent"}:
+                if self._secret_confirmed_storages.get(target_field_id) != choice:
+                    self._invalidate_overwrite_confirmation()
                 self._secret_confirmed_storages[target_field_id] = choice  # type: ignore[assignment]
             if self.index < len(self.fields):
                 return False
+            return True
+        if _is_system_step(field, "confirm_overwrite"):
+            options = field.get("options") or []
+            choice = str(options[self.option_index].get("value") or "cancel") if options else "cancel"
+            authorized_targets = tuple(field.get("_overwrite_targets") or ())
+            self.fields.pop(self.index)
+            if self.fields:
+                self.index = min(self.index, len(self.fields) - 1)
+            else:
+                self.index = 0
+            self.error = ""
+            self.option_index = 0
+            self.body_scroll = 0
+            if choice != "overwrite":
+                self.clear_secrets()
+                self.overwrite_declined = True
+                return True
+            self.overwrite_confirmed = True
+            self._overwrite_authorized_targets = authorized_targets or tuple(self.secret_targets())
+            self.overwrite_declined = False
             return True
         options = field.get("options") or []
         value: Any
@@ -771,17 +978,29 @@ class InteractionController:
         if self.index + 1 < len(self.fields):
             self.index += 1
             self.option_index = 0
+            self.body_scroll = 0
             return False
         return True
 
     def _logical_progress(self) -> tuple[int, int]:
-        logical = [item for item in self.fields if not _is_transient_step(item)]
+        logical = [item for item in self.fields if not _is_system_step(item)]
         total = len(logical)
         current = self.current
-        if _is_transient_step(current):
+        if _is_system_step(current):
             return total, total
-        pos = sum(1 for item in self.fields[:self.index + 1] if not _is_transient_step(item))
+        pos = sum(1 for item in self.fields[:self.index + 1] if not _is_system_step(item))
         return max(1, pos), max(1, total)
+
+    def _recommendation_targets_other_option_field(self) -> bool:
+        if not self.recommendation:
+            return False
+        for idx, item in enumerate(self.fields):
+            if idx == self.index or _is_system_step(item):
+                continue
+            for option in item.get("options") or ():
+                if self._option_matches_recommendation(option):
+                    return True
+        return False
 
     def _option_matches_recommendation(self, option: Mapping[str, Any]) -> bool:
         if option.get("allowsCustomText"):
@@ -800,8 +1019,7 @@ class InteractionController:
 
     def _render_secret_header(self, title_style: str) -> list[Any]:
         field = self.current
-        fid = str(field.get("id") or f"field_{self.index}")
-        if fid == _OVERWRITE_STEP_ID:
+        if _is_system_step(field, "confirm_overwrite"):
             warning = str(field.get("warning") or "Warning: existing credential will be replaced.")
             return [
                 Text("Overwrite existing credential?", style=title_style),
@@ -809,7 +1027,7 @@ class InteractionController:
                 Text(warning, style="red"),
                 Text(""),
             ]
-        if fid.startswith(_STORAGE_STEP_PREFIX):
+        if _is_system_step(field, "secret_storage"):
             step_title = str(field.get("step_title") or "Credential storage")
             step_body = str(field.get("step_body") or "")
             parts: list[Any] = [Text(step_title, style=title_style), Text("")]
@@ -833,7 +1051,8 @@ class InteractionController:
             parts.append(Text(self.title, style="bold"))
             seen.append(self.title)
 
-        for candidate in (self.question, self.reason):
+        context_candidates = (self.question,) if (total > 1 and pos > 1) else (self.question, self.reason)
+        for candidate in context_candidates:
             text = candidate.strip()
             if text and not _is_duplicate_copy(text, seen):
                 parts.append(Text(text, style="dim" if len(seen) >= 2 else ""))
@@ -854,20 +1073,20 @@ class InteractionController:
             return parts
 
         if mode == "human":
+            pos, total = self._logical_progress()
             parts = [Text(self.title, style=title_style)]
             seen: list[str] = [self.title]
             if self.question and not _is_duplicate_copy(self.question, seen):
                 parts.append(code_renderer.markdown(self.question))
                 seen.append(self.question)
-            if self.reason and not _is_duplicate_copy(self.reason, seen):
+            if pos == 1 and self.reason and not _is_duplicate_copy(self.reason, seen):
                 parts.append(Text(self.reason, style="dim"))
                 seen.append(self.reason)
-            if self.impact:
+            if pos == 1 and self.impact:
                 if len(self.impact) == 1:
                     parts.append(Text(f"Impact: {self.impact[0]}", style="dim"))
                 else:
                     parts.append(Text("Impact:\n" + "\n".join(f"• {item}" for item in self.impact), style="dim"))
-            pos, total = self._logical_progress()
             label_name = str(self.current.get("label") or self.current.get("id") or "").strip()
             if total > 1:
                 if label_name and not _is_duplicate_copy(label_name, seen):
@@ -880,7 +1099,12 @@ class InteractionController:
                 and not _is_duplicate_copy(label_name, seen)
             ):
                 parts.append(Text(label_name, style="bold"))
-            if not has_options and not self.custom_entry and self.recommendation:
+            if (
+                not has_options
+                and not self.custom_entry
+                and self.recommendation
+                and not self._recommendation_targets_other_option_field()
+            ):
                 rec_val = str(self.recommendation.get("value") or "").strip()
                 rec_why = str(self.recommendation.get("reason") or "").strip()
                 if rec_val:
@@ -973,13 +1197,14 @@ class InteractionController:
             ]
         field = self.current
         field_id = str(field.get("id") or f"field_{self.index}")
+        label_name = str(field.get("label") or "").strip()
         secret_name = str(field.get("secret_name") or "").strip()
         secret_scope = str(field.get("secret_scope") or "sandbox").strip().lower()
-        policy = self._secret_policy(field_id, field)
+        policy = self.secret_storage_policy(field_id, field)
         consumers = self._secret_consumers.get(secret_name, ())
 
         ref_parts: list[str] = []
-        if secret_name:
+        if secret_name and _norm_copy(secret_name) != _norm_copy(label_name):
             ref_parts.append(secret_name)
         if consumers:
             ref_parts.append(f"MCP: {', '.join(consumers)}")
@@ -989,19 +1214,19 @@ class InteractionController:
 
         if policy == "session":
             storage_line = f"Available only for this session{ref_suffix}."
-        elif policy in {"persistent", "persistent_confirm"}:
+        elif policy == "persistent":
             storage_line = f"Stored encrypted on this device for future sessions{ref_suffix}."
+        elif policy == "persistent_confirm":
+            storage_line = f"Confirm encrypted storage on this device in the next step{ref_suffix}."
         else:
             storage_line = f"Choose storage in the next step{ref_suffix}."
-        return [
-            Text(""),
-            Text(storage_line, style="dim"),
-            Text("The agent receives only the credential name.", style="dim"),
-        ]
+        lines = [Text(""), Text(storage_line, style="dim")]
+        if self.source == "agent_input":
+            lines.append(Text("The agent receives only the credential name.", style="dim"))
+        return lines
 
     def _footer_hint(self, mode: PanelMode, has_options: bool) -> str:
         field = self.current
-        field_id = str(field.get("id") or f"field_{self.index}")
         if self.custom_entry:
             return "Enter submit · Ctrl+J newline · Esc back"
         if mode == "approval":
@@ -1009,12 +1234,12 @@ class InteractionController:
         if mode == "secret":
             if self.source == "runtime_auth":
                 return "Enter submit · Esc cancel"
-            if field_id.startswith(_STORAGE_STEP_PREFIX):
+            if _is_system_step(field, "secret_storage"):
                 esc = "Esc close · F2 reopen" if self.kind == "human" else "Esc cancel"
                 return f"↑↓ select · Enter confirm · Shift+Tab back · {esc}"
-            if field_id == _OVERWRITE_STEP_ID:
+            if _is_system_step(field, "confirm_overwrite"):
                 esc = "Esc close · F2 reopen" if self.kind == "human" else "Esc cancel"
-                return f"↑↓ select · Enter confirm · {esc}"
+                return f"↑↓ select · Enter confirm · Shift+Tab back · {esc}"
             back = " · Shift+Tab back" if self.index > 0 else ""
             if self.kind == "human":
                 return f"Enter submit{back} · Esc close · F2 reopen"

@@ -109,7 +109,6 @@ class ModelSelection:
         )
         if current_source in sources:
             self.dialogs.current.option_index = sources.index(current_source)
-        self.set_status("Select a source · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
     def _show_model_choices(self, source: str, profiles: list[ModelProfile]) -> None:
@@ -136,7 +135,6 @@ class ModelSelection:
             if option["value"] == current_id:
                 self.dialogs.current.option_index = index
                 break
-        self.set_status("Select a model · Enter confirm · Esc back" if source else "Select a model · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
     def _show_reasoning_choices(self, profile: ModelProfile, source: str = "") -> None:
@@ -159,7 +157,6 @@ class ModelSelection:
                      ]}],
         )
         self.dialogs.current.option_index = efforts.index(selected) if selected in efforts else 0
-        self.set_status("Select reasoning effort · Enter confirm · Esc back", transient=False)
         self.invalidate()
 
     def cycle_model(self, *, delta: int = 1) -> None:

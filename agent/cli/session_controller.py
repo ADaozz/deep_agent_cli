@@ -153,7 +153,6 @@ class SessionController:
                 "options": options,
             }],
         )
-        self.set_status("Select a session · Enter confirm · Esc cancel", transient=False)
         self.invalidate()
 
     def begin_switch(self, session_id: str) -> None:

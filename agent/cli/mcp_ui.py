@@ -99,7 +99,6 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
                 ],
             }],
         )
-        app.set_status("Select a transport · Enter confirm · Esc cancel", transient=False)
         return
     if kind == "mcp_transport":
         draft["transport"] = str(interaction.values.get("transport") or "")
@@ -116,7 +115,6 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
             question=question,
             fields=[{"id": "target", "type": "text", "label": label, "required": True, "options": []}],
         )
-        app.set_status("Enter the target · Enter confirm · Esc cancel", transient=False)
         return
     if kind == "mcp_target":
         draft["target"] = str(interaction.values.get("target") or "").strip()
@@ -137,7 +135,6 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
                 ],
             }],
         )
-        app.set_status("Select auth · Enter confirm · Esc cancel", transient=False)
         return
     if kind == "mcp_auth":
         draft["auth"] = str(interaction.values.get("auth") or "none")
@@ -149,7 +146,6 @@ def finish_mcp_interaction(app: Any, interaction: InteractionController, *, canc
                 question="Environment variable name. Do not paste the token.",
                 fields=[{"id": "token_env", "type": "text", "label": "Environment variable", "required": True, "options": []}],
             )
-            app.set_status("Enter the variable name · Enter confirm · Esc cancel", transient=False)
             return
         _ask_confirm(app, draft)
         return
@@ -178,7 +174,6 @@ def _begin_add(app: Any) -> None:
         question="Unique server name.",
         fields=[{"id": "name", "type": "text", "label": "Name", "required": True, "options": []}],
     )
-    app.set_status("Name the server · Enter confirm · Esc cancel", transient=False)
 
 
 def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
@@ -200,7 +195,6 @@ def _ask_confirm(app: Any, draft: dict[str, str]) -> None:
             ],
         }],
     )
-    app.set_status("Confirm the host server · Enter confirm · Esc cancel", transient=False)
 
 
 def _summary(draft: dict[str, str]) -> str:

@@ -149,40 +149,34 @@ def finish_secrets_interaction(
         return
 
     if kind == "secret_value":
-        if "__confirm_overwrite__" in interaction.values:
-            decision = str(interaction.values.pop("__confirm_overwrite__") or "")
-            if decision != "overwrite":
-                interaction.clear_secrets()
-                app._clear_secret_buffer()
-                app.dialogs.current = None
-                app._secret_draft = {}
-                app.set_status("Credential update cancelled")
-                return
-            interaction.overwrite_confirmed = True
-            interaction.fields = [f for f in interaction.fields if f.get("id") != "__confirm_overwrite__"]
-        subs = interaction.secret_submissions()
-        submission = subs.get("value")
         name = str(draft.get("name") or "")
         scope = validate_secret_scope(draft.get("scope") or "host")
+        status = interaction.prepare_secret_submission(app.runner.check_secret_overwrites)
+        if status == "declined":
+            interaction.clear_secrets()
+            app._clear_secret_buffer()
+            app.dialogs.current = None
+            app._secret_draft = {}
+            app.set_status("Credential update cancelled")
+            return
+        if status == "needs_overwrite":
+            app.set_status("Credential exists · confirm overwrite", transient=False)
+            return
+        subs = interaction.secret_submissions()
+        submission = subs.get("value")
         if submission is None or not name:
             interaction.clear_secrets()
             app._clear_secret_buffer()
             app.dialogs.current = None
             app._secret_draft = {}
             return
-        if not interaction.overwrite_confirmed:
-            conflicts = app.runner.check_secret_overwrites([(name, submission.storage)])
-            if conflicts:
-                interaction.prompt_overwrite_confirmation(conflicts)
-                app.set_status("Credential exists · confirm overwrite", transient=False)
-                return
         try:
             meta = app.runner.set_secret(
                 name,
                 submission.value,
                 scope=scope,
                 storage=submission.storage,
-                overwrite=interaction.overwrite_confirmed,
+                overwrite=submission.overwrite,
             )
         except (SecretExistsError, ValueError, OSError) as exc:
             app.state.add_system(f"Could not save credential {name}: {exc}", error=True)
@@ -297,7 +291,7 @@ def _open_secret_value_prompt(
         kind="secret_value",
         source="secret_manage",
         title="Credential required",
-        question=f"Enter the secret value for {name}.",
+        question="Enter the credential value.",
         fields=[{
             "id": "value",
             "type": "secret",
@@ -307,7 +301,7 @@ def _open_secret_value_prompt(
             "secret_scope": scope,
             "options": [],
         }],
-        _secret_policies={"value": default_storage},
+        _secret_fixed_storages={"value": default_storage},
     )
     app.dialogs.current = controller
     app.set_status("Waiting for input", transient=False)
