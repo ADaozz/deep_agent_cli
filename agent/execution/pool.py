@@ -149,18 +149,60 @@ class RemoteCommand:
     # agent.runtime.cancellation 调用此方法，而不是对宿主 PID 发 killpg。
     cancel_execution = kill
 
-    def interrupt(self) -> None:
-        """Send terminal interrupt (Ctrl+C / VINTR) without waiting for prior stdin ACK.
+    def interrupt(self, *, timeout: float = 15.0) -> None:
+        """Send terminal interrupt (Ctrl+C / VINTR) with priority ACK, no prior-write wait.
 
-        Unlike ``write_stdin``, this does not take ``_write_lock`` or wait for a
-        ``write_status`` acknowledgment, so a blocked FIFO write cannot stall Ctrl+C.
+        Does not take ``_write_lock``, so a blocked normal ``write_stdin`` cannot stall
+        Ctrl+C. Still waits for this interrupt's own ``write_status`` so EAGAIN/failure
+        is reported rather than silently dropped. Does not SIGKILL.
         """
         if self.stdin_mode != "pty":
             raise ValueError("interrupt requires pty stdin mode")
+        if self.released or self.sandbox.lost_reason is not None:
+            raise OSError(self.sandbox.lost_reason or "execution has finished")
+        write_id = f"{self.request_id}-int-{next(self._write_ids)}"
+        pending = _PendingWriteAck()
+        with self._ack_lock:
+            self._pending_acks[write_id] = pending
         try:
-            self.sandbox._send({"op": "interrupt", "id": self.request_id})
-        except SandboxLostError:
-            pass
+            self.sandbox._send({
+                "op": "interrupt",
+                "id": self.request_id,
+                "write_id": write_id,
+            })
+        except SandboxLostError as exc:
+            with self._ack_lock:
+                self._pending_acks.pop(write_id, None)
+            raise OSError(str(exc)) from exc
+        completed = pending.event.wait(max(0.0, timeout))
+        with self._ack_lock:
+            self._pending_acks.pop(write_id, None)
+            completed = completed or pending.event.is_set()
+            ok = pending.ok
+            error = pending.error
+            written = pending.written
+            uncertain = pending.uncertain
+        if not completed:
+            raise StdinWriteUncertainError(
+                write_id,
+                f"interrupt {write_id} timed out after {timeout:g}s waiting for acknowledgment; "
+                "outcome is unknown (Ctrl+C may or may not have been delivered)",
+            )
+        if not ok:
+            if written > 0:
+                raise StdinWriteUncertainError(
+                    write_id,
+                    f"interrupt {write_id} partially wrote {written} byte(s) before failing "
+                    f"({error or 'interrupt failed'}); outcome is uncertain",
+                    written_bytes=written,
+                )
+            if uncertain:
+                raise StdinWriteUncertainError(
+                    write_id,
+                    f"interrupt {write_id} interrupted before worker acknowledgment "
+                    f"({error or 'execution ended'}); outcome is unknown",
+                )
+            raise OSError(error or "interrupt failed")
 
     def write_stdin(self, data: bytes, *, timeout: float = 15.0) -> None:
         if self.stdin_mode == "none":
@@ -369,19 +411,28 @@ class PersistentSandbox:
             return self._try_reclaim_secret_taint_locked()
 
     def _try_reclaim_secret_taint_locked(self) -> bool:
+        """Release deferred holds only after Worker confirms PID-namespace idle.
+
+        ``lost_reason`` / control-channel loss means the host cannot manage the
+        sandbox — not that credential-bearing processes are gone. Those paths
+        must not clear secret taint or drain redaction holds.
+        """
         if not self._deferred_redaction_releases and not self._secret_tainted_sessions:
             return True
         if self.lost_reason is not None or not self.alive:
-            self._tainted_sessions.clear()
-            self._secret_tainted_sessions.clear()
-            self._drain_deferred_redaction_releases_locked()
-            return True
+            return False
         if not self.verify_pid_namespace_idle():
             return False
         self._tainted_sessions.clear()
         self._secret_tainted_sessions.clear()
         self._drain_deferred_redaction_releases_locked()
         return True
+
+    def _release_secret_state_after_destroy_locked(self) -> None:
+        """Clear taint and deferred holds after the sandbox process has actually exited."""
+        self._tainted_sessions.clear()
+        self._secret_tainted_sessions.clear()
+        self._drain_deferred_redaction_releases_locked()
 
     def _drain_deferred_redaction_releases_locked(self) -> None:
         callbacks = self._deferred_redaction_releases
@@ -511,14 +562,16 @@ class PersistentSandbox:
         return handle
 
     def stop(self, reason: str = "sandbox stopped", timeout: float = STOP_TIMEOUT_SECONDS) -> None:
-        """关闭控制通道并回收整个沙箱。"""
-        with self._launch_lock:
-            self._tainted_sessions.clear()
-            self._secret_tainted_sessions.clear()
-            self._drain_deferred_redaction_releases_locked()
+        """关闭控制通道并回收整个沙箱。
+
+        Secret taint / deferred redaction holds are released only after the sandbox
+        process has actually exited — not when ``lost_reason`` is set or stop begins.
+        """
         self._mark_lost(reason)
         process = self.process
         if process is None:
+            with self._launch_lock:
+                self._release_secret_state_after_destroy_locked()
             return
         if process.stdin is not None:
             try:
@@ -543,6 +596,15 @@ class PersistentSandbox:
                     stream.close()
                 except OSError:
                     pass
+        # Only release retired redaction refs once destruction is confirmed.
+        if process.poll() is not None:
+            with self._launch_lock:
+                self._release_secret_state_after_destroy_locked()
+        else:
+            LOG.warning(
+                "sandbox %s exit unconfirmed; retaining secret taint and redaction holds",
+                self.id,
+            )
 
     def stderr_text(self) -> str:
         return b"".join(self._stderr).decode("utf-8", errors="replace")

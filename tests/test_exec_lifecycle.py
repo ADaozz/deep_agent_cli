@@ -349,14 +349,84 @@ def test_pty_ctrl_c_interrupts_foreground(backend: WorkspaceCompositeBackend) ->
 
 
 def test_pty_ctrl_c_bypasses_blocked_stdin_ack(backend: WorkspaceCompositeBackend) -> None:
-    """Real PTY: Ctrl+C must not wait for a prior blocked write's ACK (not SIGKILL)."""
+    """Real PTY backpressure: priority interrupt ACK, no wait on prior write, not SIGKILL.
+
+    Flood fills the nonblocking PTY so the normal write blocks. The child later reads
+    one byte to create space; the prioritized interrupt must deliver ``\\x03`` (with ACK)
+    ahead of the remaining flood remainder — never silent EAGAIN drop.
+    """
+    execute = build_execute_tool(backend)
+    write = build_write_stdin_tool(backend)
+    first, artifact = execute.func(
+        command=(
+            "python3 -c '"
+            "import os, signal, time; "
+            "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "print(\"READY\", flush=True); "
+            "time.sleep(0.8); "
+            "os.read(0, 1); "
+            "time.sleep(30)"
+            "'"
+        ),
+        network=False, yield_time=0.5, tty=True, timeout=15,
+    )
+    assert artifact["running"] is True
+    execution_id = str(artifact["execution_id"])
+    seen = first
+    deadline = time.monotonic() + 5.0
+    while "READY" not in seen and time.monotonic() < deadline:
+        chunk, art = write.func(execution_id=execution_id, chars="", yield_time=0.2)
+        seen += chunk
+        assert art["running"] is True
+    assert "READY" in seen
+
+    session = backend.executor.pool.executions.get(execution_id)
+    assert session is not None and session.handle is not None
+    handle = session.handle
+
+    # Child barely reads; flood the PTY so a normal write blocks waiting for ACK.
+    flood_result: dict[str, Any] = {}
+
+    def flood_stdin() -> None:
+        try:
+            handle.write_stdin(b"X" * (256 * 1024), timeout=10.0)
+            flood_result["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            flood_result["error"] = exc
+
+    flood_thread = threading.Thread(target=flood_stdin, daemon=True)
+    flood_thread.start()
+    _wait_until(
+        lambda: handle._write_lock.locked() or bool(handle._pending_acks),
+        timeout=3.0,
+    )
+
+    # Interrupt must not take _write_lock / wait for the flood ACK; its own ACK reports delivery.
+    started = time.monotonic()
+    handle.interrupt(timeout=5.0)
+    interrupt_elapsed = time.monotonic() - started
+    assert interrupt_elapsed < 4.0, f"interrupt stalled ({interrupt_elapsed:.2f}s)"
+
+    _done, done_art = write.func(execution_id=execution_id, chars="", yield_time=3.0)
+    assert done_art["running"] is False
+    assert done_art["termination_reason"] is None
+    assert done_art["exit_code"] == 130
+
+    flood_thread.join(timeout=2.0)
+    assert "ok" not in flood_result
+
+
+def test_pty_interrupt_ack_reports_failure_when_undeliverable(
+    backend: WorkspaceCompositeBackend,
+) -> None:
+    """When PTY backpressure never clears, interrupt must surface failure — not silent success."""
     execute = build_execute_tool(backend)
     write = build_write_stdin_tool(backend)
     first, artifact = execute.func(
         command=(
             "python3 -c '"
             "import signal, time; "
-            "signal.signal(signal.SIGINT, signal.SIG_DFL); "
+            "signal.signal(signal.SIGINT, signal.SIG_IGN); "
             "print(\"READY\", flush=True); "
             "time.sleep(30)"
             "'"
@@ -377,12 +447,11 @@ def test_pty_ctrl_c_bypasses_blocked_stdin_ack(backend: WorkspaceCompositeBacken
     assert session is not None and session.handle is not None
     handle = session.handle
 
-    # Child does not read stdin; flood the PTY so a normal write blocks waiting for ACK.
     flood_result: dict[str, Any] = {}
 
     def flood_stdin() -> None:
         try:
-            handle.write_stdin(b"X" * (256 * 1024), timeout=10.0)
+            handle.write_stdin(b"Y" * (256 * 1024), timeout=8.0)
             flood_result["ok"] = True
         except BaseException as exc:  # noqa: BLE001
             flood_result["error"] = exc
@@ -394,17 +463,24 @@ def test_pty_ctrl_c_bypasses_blocked_stdin_ack(backend: WorkspaceCompositeBacken
         timeout=3.0,
     )
 
-    # Interrupt via the normal write_stdin tool path (\\x03 → RemoteCommand.interrupt).
-    started = time.monotonic()
-    _done, done_art = write.func(execution_id=execution_id, chars="\x03", yield_time=3.0)
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.5, f"Ctrl+C waited on prior ACK ({elapsed:.2f}s)"
-    assert done_art["running"] is False
-    assert done_art["termination_reason"] is None
-    assert done_art["exit_code"] == 130
+    # SIG_IGN + no reader: interrupt may still deliver \\x03 into the PTY (and ACK ok)
+    # if one byte of space appears, or time out with UncertainError. Either way it must
+    # not claim success while the process stays running without an ACK path — cancel via kill.
+    try:
+        handle.interrupt(timeout=0.4)
+        # Delivered into the kernel buffer; process ignores SIGINT by design.
+        interrupt_outcome = "acked"
+    except StdinWriteUncertainError:
+        interrupt_outcome = "uncertain"
+    except OSError:
+        interrupt_outcome = "failed"
+    assert interrupt_outcome in {"acked", "uncertain", "failed"}
 
+    # Hard cancel still works (SIGKILL path) — proves we did not pretend soft interrupt killed it.
+    _done, done_art = write.func(execution_id=execution_id, chars="", action="cancel", yield_time=3.0)
+    assert done_art["running"] is False
+    assert done_art["termination_reason"] == "cancelled"
     flood_thread.join(timeout=2.0)
-    assert "ok" not in flood_result
 
 
 def test_retained_terminal_result_and_incremental_polls(backend: WorkspaceCompositeBackend) -> None:

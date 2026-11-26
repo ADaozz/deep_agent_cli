@@ -10,7 +10,7 @@
                 | {"op": "write", "id": N, "write_id": str, "data": base64}
                 | {"op": "close_stdin", "id": N}
                 | {"op": "resize", "id": N, "rows": int, "cols": int}
-                | {"op": "interrupt", "id": N}
+                | {"op": "interrupt", "id": N, "write_id": str}
                 | {"op": "kill", "id": N}
 Worker -> 宿主: {"op": "ready"} | {"op": "out", "id": N, "data": base64, "stream"?: str}
                 | {"op": "exit", "id": N, "code": int}
@@ -106,11 +106,15 @@ _PTY_CHILD = (
 
 
 class _InputQueue:
-    """Per-command byte-bounded FIFO unifying pre-start, active, partial writes and EOF."""
+    """Per-command byte-bounded queue unifying pre-start, active, partial writes, interrupt and EOF.
+
+    Normal writes and EOF stay FIFO. Interrupt items are inserted at the front so
+    Ctrl+C is drained by the same single stdin writer ahead of pending normal data.
+    """
 
     def __init__(self, stdin_mode: str) -> None:
         self.stdin_mode = stdin_mode
-        # Elements: ("write", write_id, remaining_bytes, written_bytes) | ("eof", None, b"", 0)
+        # Elements: ("write"|"interrupt", write_id, remaining_bytes, written_bytes) | ("eof", None, b"", 0)
         self.items: deque[tuple[str, str | None, bytes, int]] = deque()
         # Includes both queued items and remaining unwritten bytes of the active write.
         self.queued_bytes = 0
@@ -242,7 +246,7 @@ def _fail_queue_items(request_id: int, state: _InputQueue, error: str, *, remove
             if _inputs.get(request_id) is state:
                 _inputs.pop(request_id, None)
     for kind, write_id, _payload, written in pending:
-        if kind == "write":
+        if kind in {"write", "interrupt"}:
             _write_ack(request_id, write_id, ok=False, error=error, written=written)
 
 
@@ -473,6 +477,8 @@ def _run(
                         pass
                     stdin_closed = True
                 continue
+            if kind not in {"write", "interrupt"}:
+                continue
             active_unwritten = len(payload)
             if stdin_broken_error is not None:
                 with _running_lock:
@@ -486,12 +492,13 @@ def _run(
                 continue
             if stdin_mode == "pty" and master_fd is not None:
                 target_fd = master_fd
-            elif stdin_mode == "pipe" and process.stdin is not None:
+            elif kind == "write" and stdin_mode == "pipe" and process.stdin is not None:
                 target_fd = process.stdin.fileno()
             else:
                 with _running_lock:
                     state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
-                _write_ack(request_id, write_id, ok=False, error="stdin not available", written=already_written)
+                error = "interrupt requires pty" if kind == "interrupt" else "stdin not available"
+                _write_ack(request_id, write_id, ok=False, error=error, written=already_written)
                 continue
             view = memoryview(payload)
             blocked = False
@@ -507,8 +514,8 @@ def _run(
                                 state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
                             else:
                                 killed_during_write = False
-                                # active_unwritten == len(remainder) is still included in state.queued_bytes.
-                                state.items.appendleft(("write", write_id, remainder, already_written))
+                                # Keep kind so a blocked interrupt stays prioritized at the front.
+                                state.items.appendleft((kind, write_id, remainder, already_written))
                         if killed_during_write:
                             _write_ack(
                                 request_id, write_id, ok=False, error="process killed", written=already_written,
@@ -671,23 +678,30 @@ def _resize(request_id, rows, cols):
         pass
 
 
-def _interrupt(request_id):
-    """Write VINTR (Ctrl+C) directly to the PTY master, bypassing the stdin FIFO.
+def _interrupt(request_id, write_id):
+    """Enqueue PTY VINTR ahead of normal writes for the single stdin writer.
 
-    A blocked prior write must not delay terminal interrupt. Does not SIGKILL.
+    Does not call os.write on the control thread (preserves single-writer). ACK
+    reports whether ``\\x03`` was actually delivered; EAGAIN is retried via the
+    existing EVENT_WRITE path rather than dropped. Does not SIGKILL.
     """
+    wid = "" if write_id is None else str(write_id)
+    reject_error = None
     with _running_lock:
-        master = _pty_masters.get(request_id)
-        mode = _stdin_modes.get(request_id, "none")
         state = _inputs.get(request_id)
-    if mode != "pty" or master is None:
-        return
-    try:
-        os.write(master, b"\x03")
-    except OSError:
-        return
-    if state is not None:
-        state.wake()
+        if state is None:
+            reject_error = "process not running"
+        elif state.closed_for_new:
+            reject_error = state.close_error
+        elif state.stdin_mode != "pty":
+            reject_error = "interrupt requires pty"
+        else:
+            # Always admit the 1-byte interrupt even when the normal buffer is full.
+            state.items.appendleft(("interrupt", wid, b"\x03", 0))
+            state.queued_bytes += 1
+            state.wake()
+    if reject_error is not None:
+        _write_ack(request_id, wid, ok=False, error=reject_error)
 
 
 def _kill(request_id):
@@ -813,7 +827,7 @@ def main():
             elif op == "resize":
                 _resize(request_id, message.get("rows", 24), message.get("cols", 80))
             elif op == "interrupt":
-                _interrupt(request_id)
+                _interrupt(request_id, message.get("write_id"))
             elif op == "kill":
                 _kill(request_id)
             elif op == "check_idle":

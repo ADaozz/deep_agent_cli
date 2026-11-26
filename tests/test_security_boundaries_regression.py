@@ -460,6 +460,63 @@ def test_retired_redaction_hold_waits_for_orphan_idle_or_sandbox_stop(tmp_path: 
             pass
 
 
+def test_sandbox_lost_does_not_release_redaction_holds_until_destroy_confirmed(
+    tmp_path: Path,
+) -> None:
+    """lost_reason / control-channel loss must not clear secret taint or retired refs."""
+    backend = _require_bwrap(tmp_path)
+    store = SecretStore(tmp_path / "cfg", environ={})
+    secret_val = "lost_hold_secret_445566"
+    store.set_secret("LOST_HOLD", secret_val, scope="sandbox", storage="persistent")
+    backend.set_secret_provider(
+        store.sandbox_env_for_session,
+        lambda: store.redaction_refs(),
+        (store.acquire_redaction_hold, store.release_redaction_hold),
+    )
+
+    t_tok = set_execution_thread_id("sess-lost-hold")
+    r_tok = set_root_session_id("sess-lost-hold")
+    try:
+        launched = backend.execute("nohup sleep 30 >/dev/null 2>&1 &", timeout=10)
+        assert launched.exit_code == 0
+        store.set_secret(
+            "LOST_HOLD", "rotated_lost_hold_002", scope="sandbox", storage="persistent", overwrite=True,
+        )
+        store.delete_secret("LOST_HOLD")
+        assert store.retired_count >= 1
+        time.sleep(0.15)
+        assert store.prune_retired() == 0
+
+        sandbox = backend.executor.pool.sandbox(False)
+        assert sandbox is not None
+        assert "sess-lost-hold" in sandbox._secret_tainted_sessions
+        assert sandbox._deferred_redaction_releases
+
+        # Simulate control-channel loss: host can no longer manage, but orphans may remain.
+        sandbox._mark_lost("simulated control channel closed")
+        assert sandbox.try_reclaim_secret_taint() is False
+        assert store.prune_retired() == 0
+        assert store.retired_count >= 1
+        assert sandbox._secret_tainted_sessions
+        assert sandbox._deferred_redaction_releases
+
+        # Confirmed destroy (wait for sandbox process exit) may release holds.
+        sandbox.stop("lost-hold destroy confirmed")
+        deadline = time.monotonic() + 3.0
+        while store.retired_count > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert store.retired_count == 0
+        assert not sandbox._secret_tainted_sessions
+        assert not sandbox._deferred_redaction_releases
+    finally:
+        reset_root_session_id(r_tok)
+        reset_execution_thread_id(t_tok)
+        try:
+            backend.executor.pool.shutdown("lost-hold cleanup")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Item 4: Unified Human Input host storage guidance
 # ---------------------------------------------------------------------------

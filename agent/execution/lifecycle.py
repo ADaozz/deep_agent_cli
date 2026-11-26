@@ -466,7 +466,7 @@ class CommandSession:
                 if self._done or self.handle is None:
                     raise ValueError("execution has already finished")
                 handle = self.handle
-            handle.interrupt()
+            handle.interrupt(timeout=write_timeout)
             return
         self.write(chars, timeout=write_timeout)
 
