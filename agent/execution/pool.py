@@ -350,6 +350,9 @@ class PersistentSandbox:
         # Redaction-hold releases deferred until secret-bearing orphans are gone
         # (check_idle) or this sandbox stops — not a separate process tracker.
         self._deferred_redaction_releases: list[Callable[[], Any]] = []
+        # Set only after the sandbox process is confirmed gone; lets a release that
+        # arrives after stop() still drain exactly once.
+        self._destroy_confirmed = False
         self._idle_waiters: dict[int, tuple[threading.Event, list[bool]]] = {}
         self._ready = threading.Event()
         self._stderr: deque[bytes] = deque()
@@ -398,7 +401,7 @@ class PersistentSandbox:
         raise SandboxStartError(f"bubblewrap exited with code {code}: {detail}")
 
     def defer_redaction_release(self, callback: Callable[[], Any]) -> None:
-        """Defer a redaction-hold release until secret taint clears or sandbox stops."""
+        """Defer a redaction-hold release until secret taint clears or sandbox is destroyed."""
         if not callable(callback):
             return
         with self._launch_lock:
@@ -419,6 +422,11 @@ class PersistentSandbox:
         """
         if not self._deferred_redaction_releases and not self._secret_tainted_sessions:
             return True
+        if self._destroy_confirmed:
+            # stop() already confirmed the process is gone; a release deferred after
+            # that point must still run (once) rather than waiting forever.
+            self._release_secret_state_after_destroy_locked()
+            return True
         if self.lost_reason is not None or not self.alive:
             return False
         if not self.verify_pid_namespace_idle():
@@ -430,6 +438,7 @@ class PersistentSandbox:
 
     def _release_secret_state_after_destroy_locked(self) -> None:
         """Clear taint and deferred holds after the sandbox process has actually exited."""
+        self._destroy_confirmed = True
         self._tainted_sessions.clear()
         self._secret_tainted_sessions.clear()
         self._drain_deferred_redaction_releases_locked()

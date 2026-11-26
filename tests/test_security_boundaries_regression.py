@@ -494,10 +494,15 @@ def test_sandbox_lost_does_not_release_redaction_holds_until_destroy_confirmed(
 
         # Simulate control-channel loss: host can no longer manage, but orphans may remain.
         sandbox._mark_lost("simulated control channel closed")
+        assert sandbox._destroy_confirmed is False
         assert sandbox.try_reclaim_secret_taint() is False
         assert store.prune_retired() == 0
         assert store.retired_count >= 1
         assert sandbox._secret_tainted_sessions
+        assert sandbox._deferred_redaction_releases
+        lost_releases: list[str] = []
+        sandbox.defer_redaction_release(lambda: lost_releases.append("lost"))
+        assert lost_releases == []
         assert sandbox._deferred_redaction_releases
 
         # Confirmed destroy (wait for sandbox process exit) may release holds.
@@ -508,11 +513,68 @@ def test_sandbox_lost_does_not_release_redaction_holds_until_destroy_confirmed(
         assert store.retired_count == 0
         assert not sandbox._secret_tainted_sessions
         assert not sandbox._deferred_redaction_releases
+        assert sandbox._destroy_confirmed is True
+        assert lost_releases == ["lost"]
     finally:
         reset_root_session_id(r_tok)
         reset_execution_thread_id(t_tok)
         try:
             backend.executor.pool.shutdown("lost-hold cleanup")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def test_late_redaction_release_after_confirmed_destroy_runs_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """A release deferred only after confirmed destroy still executes (once), not forever."""
+    backend = _require_bwrap(tmp_path)
+    store = SecretStore(tmp_path / "cfg", environ={})
+    store.acquire_redaction_hold()
+    store.set_secret(
+        "LATE_HOLD", "late_hold_secret_135790", scope="sandbox", storage="persistent",
+    )
+    try:
+        launched = backend.execute("true", timeout=10)
+        assert launched.exit_code == 0
+        store.set_secret(
+            "LATE_HOLD", "rotated_late_hold_246801",
+            scope="sandbox", storage="persistent", overwrite=True,
+        )
+        store.delete_secret("LATE_HOLD")
+        assert store.retired_count >= 1
+        assert store.prune_retired() == 0
+
+        sandbox = backend.executor.pool.sandbox(False)
+        assert sandbox is not None
+        sandbox.stop("late-hold destroy confirmed")
+        assert sandbox._destroy_confirmed is True
+        assert sandbox.process is not None and sandbox.process.poll() is not None
+
+        # CommandSession finishes after stop() returned; its deferred release must
+        # reuse the confirmed-destroy result instead of waiting forever.
+        releases: list[int] = []
+
+        def release_once() -> None:
+            releases.append(store.release_redaction_hold())
+
+        sandbox.defer_redaction_release(release_once)
+        assert releases and releases[0] >= 1
+        assert store.retired_count == 0
+        assert not sandbox._deferred_redaction_releases
+
+        later: list[str] = []
+        sandbox.defer_redaction_release(lambda: later.append("later"))
+        assert later == ["later"]
+        assert len(releases) == 1
+
+        # Re-confirming destroy must not replay either already-run release.
+        sandbox.stop("late-hold destroy repeated")
+        assert len(releases) == 1
+        assert later == ["later"]
+    finally:
+        try:
+            backend.executor.pool.shutdown("late-hold cleanup")
         except Exception:  # noqa: BLE001
             pass
 

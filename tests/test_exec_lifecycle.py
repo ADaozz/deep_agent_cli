@@ -419,68 +419,40 @@ def test_pty_ctrl_c_bypasses_blocked_stdin_ack(backend: WorkspaceCompositeBacken
 def test_pty_interrupt_ack_reports_failure_when_undeliverable(
     backend: WorkspaceCompositeBackend,
 ) -> None:
-    """When PTY backpressure never clears, interrupt must surface failure — not silent success."""
+    """A rejected worker ACK must surface as that error, not silent success or a timeout."""
     execute = build_execute_tool(backend)
-    write = build_write_stdin_tool(backend)
-    first, artifact = execute.func(
-        command=(
-            "python3 -c '"
-            "import signal, time; "
-            "signal.signal(signal.SIGINT, signal.SIG_IGN); "
-            "print(\"READY\", flush=True); "
-            "time.sleep(30)"
-            "'"
-        ),
-        network=False, yield_time=0.5, tty=True, timeout=15,
+    _first, artifact = execute.func(
+        command="true", network=False, yield_time=5.0, timeout=10,
     )
-    assert artifact["running"] is True
-    execution_id = str(artifact["execution_id"])
-    seen = first
-    deadline = time.monotonic() + 5.0
-    while "READY" not in seen and time.monotonic() < deadline:
-        chunk, art = write.func(execution_id=execution_id, chars="", yield_time=0.2)
-        seen += chunk
-        assert art["running"] is True
-    assert "READY" in seen
+    assert artifact["running"] is False
+    sandbox = backend.executor.pool.sandbox(False)
+    assert sandbox is not None
 
-    session = backend.executor.pool.executions.get(execution_id)
-    assert session is not None and session.handle is not None
-    handle = session.handle
-
-    flood_result: dict[str, Any] = {}
-
-    def flood_stdin() -> None:
-        try:
-            handle.write_stdin(b"Y" * (256 * 1024), timeout=8.0)
-            flood_result["ok"] = True
-        except BaseException as exc:  # noqa: BLE001
-            flood_result["error"] = exc
-
-    flood_thread = threading.Thread(target=flood_stdin, daemon=True)
-    flood_thread.start()
-    _wait_until(
-        lambda: handle._write_lock.locked() or bool(handle._pending_acks),
-        timeout=3.0,
-    )
-
-    # SIG_IGN + no reader: interrupt may still deliver \\x03 into the PTY (and ACK ok)
-    # if one byte of space appears, or time out with UncertainError. Either way it must
-    # not claim success while the process stays running without an ACK path — cancel via kill.
+    handle = sandbox.start_command("sleep 0.1", stdin_mode="pty")
     try:
-        handle.interrupt(timeout=0.4)
-        # Delivered into the kernel buffer; process ignores SIGINT by design.
-        interrupt_outcome = "acked"
-    except StdinWriteUncertainError:
-        interrupt_outcome = "uncertain"
-    except OSError:
-        interrupt_outcome = "failed"
-    assert interrupt_outcome in {"acked", "uncertain", "failed"}
+        exited = False
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            event = handle.next_event(0.2)
+            if event is None:
+                continue
+            kind, payload = event
+            if kind == "exit":
+                assert payload == 0
+                exited = True
+                break
+        assert exited
 
-    # Hard cancel still works (SIGKILL path) — proves we did not pretend soft interrupt killed it.
-    _done, done_art = write.func(execution_id=execution_id, chars="", action="cancel", yield_time=3.0)
-    assert done_art["running"] is False
-    assert done_art["termination_reason"] == "cancelled"
-    flood_thread.join(timeout=2.0)
+        # The worker drops per-command stdin state at exit; this interrupt gets a
+        # real write_status(ok=False) ACK instead of being silently dropped.
+        with pytest.raises(OSError) as excinfo:
+            handle.interrupt(timeout=2.0)
+        err = excinfo.value
+        assert not isinstance(err, StdinWriteUncertainError)
+        assert "process not running" in str(err)
+        assert sandbox.lost_reason is None
+    finally:
+        handle.release()
 
 
 def test_retained_terminal_result_and_incremental_polls(backend: WorkspaceCompositeBackend) -> None:

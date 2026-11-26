@@ -137,6 +137,21 @@ class _InputQueue:
             except OSError:
                 pass
 
+    def requeue_partial(self, item: tuple[str, str | None, bytes, int]) -> None:
+        """Re-queue an item after EAGAIN without displacing a pending interrupt.
+
+        Normal writes keep FIFO order after any interrupts already waiting at the
+        front; an interrupt that blocks mid-write stays at the front. Caller holds
+        ``_running_lock``; ``queued_bytes`` already includes this remainder.
+        """
+        if item[0] == "interrupt":
+            self.items.appendleft(item)
+            return
+        index = 0
+        while index < len(self.items) and self.items[index][0] == "interrupt":
+            index += 1
+        self.items.insert(index, item)
+
     def drain_wake(self) -> None:
         fd = self.wake_r
         if fd is None:
@@ -514,8 +529,8 @@ def _run(
                                 state.queued_bytes = max(0, state.queued_bytes - active_unwritten)
                             else:
                                 killed_during_write = False
-                                # Keep kind so a blocked interrupt stays prioritized at the front.
-                                state.items.appendleft((kind, write_id, remainder, already_written))
+                                # A blocked normal write must not overtake pending Ctrl+C.
+                                state.requeue_partial((kind, write_id, remainder, already_written))
                         if killed_during_write:
                             _write_ack(
                                 request_id, write_id, ok=False, error="process killed", written=already_written,
