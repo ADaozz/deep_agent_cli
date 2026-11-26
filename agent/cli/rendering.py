@@ -1375,4 +1375,9 @@ def _capture(renderable: Any, width: int) -> str:
         height=25,
     )
     console.print(renderable)
-    return stream.getvalue().rstrip("\n")
+    text = stream.getvalue().rstrip("\n")
+    # Rich measures U+26A0 + VS16 as two cells, while prompt_toolkit's
+    # per-codepoint Screen width treats the pair as one. The extra terminal cell
+    # shifts the row and leaves stale cells behind. Normalize only this display
+    # glyph; model output, history and other zero-width selectors stay untouched.
+    return text.replace("\u26a0\ufe0f", "\u26a0")

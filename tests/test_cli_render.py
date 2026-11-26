@@ -8,6 +8,7 @@ from prompt_toolkit.application.current import set_app
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.layout.containers import WindowAlign
+from prompt_toolkit.utils import get_cwidth
 
 import asyncio
 import logging
@@ -78,6 +79,20 @@ def test_interaction_keeps_user_context() -> None:
     rendered = _plain(render_interaction(controller, 80))
     assert "Which environment?" in rendered
     assert "Deployment requires a target" in rendered
+
+
+def test_warning_emoji_variation_selector_is_normalized_for_display_only() -> None:
+    content = "⚠️ Warning: disk usage is above the configured threshold"
+    block = MessageBlock(kind="assistant", content=content)
+    rendered = _plain(render_transcript(CliState(blocks=[block]), 40))
+
+    assert "⚠️" not in rendered
+    assert "⚠ Warning" in rendered
+    assert block.content == content
+    for line in rendered.splitlines():
+        # Rich and prompt_toolkit must agree on every visible cell.
+        assert cell_len(line) == get_cwidth(line)
+    assert _capture(Text("⚠️"), 40) == "⚠"
 
 
 def test_user_bubble_has_prefix_and_colored_blank_rows(monkeypatch) -> None:
