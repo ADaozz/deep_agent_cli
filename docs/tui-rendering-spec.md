@@ -137,10 +137,19 @@
 - 每个文件独立按 `head_lines` 预算折叠；当预算 `>= 2` 且同时存在新增与删除时，至少保留一行 `+` 与一行 `-`。
 - 连续同语义操作按 `Create` / `Edit` / `Overwrite` 分别聚合，不跨其他工具或消息。
 - `Overwrite` 对同一路径只保留**最后一次**写入结果（先取最后一次 mutation 再检查是否存在 Diff；最后一次写入空文件时不展示前一次写入的旧内容）。
+- 运行中与等待审批的 `write` 尚未由 `WriteOperationMiddleware` 写入 `artifact.operation`，因此**不提前推断**新建（`Created`）或覆盖（`Wrote`），而是通过 `_mutation_body()` 的扁平分支展示带行号、语法叠色与折叠的待写内容预览（复用同一套 Diff 数据、排序、折叠与高亮逻辑）；执行完成并获得 `artifact.operation` 后切换为已固化的 `Created` / `Wrote` 树形卡片；失败时走统一失败卡片 `Failed Writing <path>`。
 - `Ctrl+R` 与 `Ctrl+O` 共用同一原位展开路径，不拆散聚合卡片；展开后移除 `⋮` 与隐藏提示，不显示 unified diff 头（`---` / `+++` / `@@`）。
 - `Delete` 显示 `• Deleted <path>`（运行中 `Deleting <path>`），不参与多文件 Diff 聚合。
 
 ```text
+⠼ Writing workspace/app.py (+8 -0)
+     1+ import os
+     2+ import sys
+     3+
+     4+ def main():
+     ⋮
+  … 4 changed lines hidden · Ctrl+R to review
+
 • Created /workspace/app.py (+12 -0)
   └   1+ import os
       2+ import sys

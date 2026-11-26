@@ -7,6 +7,7 @@ and ``full-access`` mounts are decided here; pool reuse does not change them.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
@@ -212,6 +213,18 @@ class BubblewrapBackend(LineNumberedFilesystemBackend, SandboxBackendProtocol, M
             )
         except ValueError as exc:
             return LocalExecuteResponse(f"Error: {exc}", 1, False, termination_reason="spawn_error")
+
+    async def aexecute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse:
+        return await asyncio.to_thread(
+            self.execute, command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
+        )
 
     def write_stdin(
         self,

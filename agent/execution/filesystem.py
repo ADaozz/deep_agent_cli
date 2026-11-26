@@ -53,7 +53,6 @@ from agent.execution.ports import (
     InteractiveExecutionBackend,
     ManagedExecutor,
     interactive_backend,
-    supports_interactive_execution,
 )
 
 
@@ -973,7 +972,7 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
 
     @property
     def supports_interactive_execution(self) -> bool:
-        return supports_interactive_execution(self.executor)
+        return self._interactive_executor() is not None
 
     def execute(
         self,
@@ -983,8 +982,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         yield_time: float | None = None,
         stdin_mode: str = "none",
     ) -> ExecuteResponse:
-        if self.supports_interactive_execution:
-            return self.executor.execute(  # type: ignore[call-arg]
+        executor = self._interactive_executor()
+        if executor is not None:
+            return executor.execute(
                 command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
             )
         if yield_time is not None or stdin_mode != "none":
@@ -999,8 +999,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         yield_time: float | None = None,
         stdin_mode: str = "none",
     ) -> ExecuteResponse:
-        if self.supports_interactive_execution:
-            return await self.executor.aexecute(  # type: ignore[call-arg]
+        executor = self._interactive_executor()
+        if executor is not None:
+            return await executor.aexecute(
                 command, timeout=timeout, yield_time=yield_time, stdin_mode=stdin_mode,
             )
         if yield_time is not None or stdin_mode != "none":

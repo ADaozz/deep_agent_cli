@@ -9,7 +9,7 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.execution.network import reset_execute_network, set_execute_network
-from agent.execution.ports import interactive_backend, supports_interactive_execution
+from agent.execution.ports import interactive_backend
 from agent.execution.process import execution_artifact_from_response, execution_metadata_dict
 
 if TYPE_CHECKING:
@@ -103,7 +103,7 @@ def build_execute_tool(
     if permission is None:
         permission = PermissionMode.ASK
     network_by_default = permission is PermissionMode.ALLOW
-    interactive_capable = supports_interactive_execution(backend)
+    interactive_exec = interactive_backend(backend)
 
     def execute_interactive(
         command: Annotated[str, Field(description="Shell command to execute.")],
@@ -113,10 +113,11 @@ def build_execute_tool(
         tty: Annotated[bool, Field(description="Allocate a PTY. Implies interactive input.")] = False,
         interactive: Annotated[bool, Field(description="Keep stdin open for subsequent input.")] = False,
     ) -> tuple[str, dict[str, object]]:
+        assert interactive_exec is not None
         token = set_execute_network(network or network_by_default)
         mode = _stdin_mode(interactive=interactive, tty=tty)
         try:
-            response = backend.execute(  # type: ignore[call-arg]
+            response = interactive_exec.execute(
                 command,
                 timeout=timeout,
                 yield_time=yield_time,
@@ -141,20 +142,21 @@ def build_execute_tool(
         return output, _artifact_from_response(response)
 
     return StructuredTool.from_function(
-        func=execute_interactive if interactive_capable else execute_sync,
+        func=execute_interactive if interactive_exec is not None else execute_sync,
         name="execute",
         response_format="content_and_artifact",
         description=_execute_description(
             permission=permission,
             workspace_root=getattr(backend, "workspace_root", "/workspace"),
-            interactive_capable=interactive_capable,
+            interactive_capable=interactive_exec is not None,
         ),
     )
 
 
 def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
     """Interact with a yielded execution owned by the current session/agent."""
-    if not supports_interactive_execution(backend):
+    interactive = interactive_backend(backend)
+    if interactive is None:
         raise ValueError("Backend does not support interactive execution")
 
     def write_stdin(
@@ -185,9 +187,6 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             raise ValueError("yield_time must be non-negative")
         if action in {"close", "cancel"} and chars:
             raise ValueError(f"{action} cannot include chars")
-        interactive = interactive_backend(backend)
-        if interactive is None:
-            raise ValueError("Backend does not support interactive execution")
         try:
             response = interactive.write_stdin(
                 execution_id, chars=chars, yield_time=yield_time, action=action,

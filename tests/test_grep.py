@@ -90,14 +90,92 @@ def test_grep_and_glob_are_not_registered(tmp_path: Path, monkeypatch, permissio
 
 def test_execute_description_tracks_rg_availability(monkeypatch):
     from deepagents.backends.protocol import ExecuteResponse
-    from agent.tools.execute import _SEARCH_GUIDANCE, _SEARCH_UNAVAILABLE, build_execute_tool
+    from agent.execution.ports import interactive_backend, supports_interactive_execution
+    from agent.tools.execute import (
+        _SEARCH_GUIDANCE,
+        _SEARCH_UNAVAILABLE,
+        build_execute_tool,
+        build_write_stdin_tool,
+    )
 
     class Backend:
         def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
             return ExecuteResponse(command, 0, False)
 
+    class IncompleteInteractiveBackend(Backend):
+        # Declares flag without implementing InteractiveExecutionBackend contract.
+        supports_interactive_execution = True
+
     class InteractiveBackend(Backend):
         supports_interactive_execution = True
+
+        def execute(
+            self,
+            command: str,
+            *,
+            timeout: int | None = None,
+            yield_time: float | None = None,
+            stdin_mode: str = "none",
+        ) -> ExecuteResponse:
+            return ExecuteResponse(command, 0, False)
+
+        async def aexecute(
+            self,
+            command: str,
+            *,
+            timeout: int | None = None,
+            yield_time: float | None = None,
+            stdin_mode: str = "none",
+        ) -> ExecuteResponse:
+            return ExecuteResponse(command, 0, False)
+
+        def write_stdin(
+            self,
+            execution_id: str,
+            *,
+            chars: str = "",
+            yield_time: float = 1.0,
+            action: str = "write",
+            write_timeout: float = 15.0,
+            thread_id: str | None = None,
+        ) -> ExecuteResponse:
+            return ExecuteResponse("", 0, False)
+
+        def execution_info(self, execution_id: str, *, thread_id: str | None = None) -> dict[str, object] | None:
+            return None
+
+        def execution_metadata(self, execution_id: str, *, thread_id: str | None = None) -> dict[str, object] | None:
+            return None
+
+        def execution_snapshots(self, thread_id: str) -> dict[str, dict[str, object]]:
+            return {}
+
+        def list_active_executions(self, thread_id: str) -> list[dict[str, object]]:
+            return []
+
+        def send_execution_input(
+            self,
+            execution_id: str,
+            *,
+            chars: str = "",
+            action: str = "write",
+            write_timeout: float = 15.0,
+            thread_id: str | None = None,
+        ) -> None:
+            return None
+
+        def resize_execution(
+            self,
+            execution_id: str,
+            rows: int,
+            cols: int,
+            *,
+            thread_id: str | None = None,
+        ) -> None:
+            return None
+
+        def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int:
+            return 0
 
     monkeypatch.setattr(implementation, "resolve_rg", lambda: "/usr/bin/rg")
     available = build_execute_tool(Backend())  # type: ignore[arg-type]
@@ -106,8 +184,20 @@ def test_execute_description_tracks_rg_availability(monkeypatch):
         assert _SEARCH_GUIDANCE in tool.description
         assert _SEARCH_UNAVAILABLE not in tool.description
         assert set(tool.args) == {"command", "timeout", "network"}
-    interactive_tool = build_execute_tool(InteractiveBackend())  # type: ignore[arg-type]
+
+    incomplete = IncompleteInteractiveBackend()
+    assert interactive_backend(incomplete) is None
+    assert supports_interactive_execution(incomplete) is False
+    assert set(build_execute_tool(incomplete).args) == {"command", "timeout", "network"}  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="does not support interactive execution"):
+        build_write_stdin_tool(incomplete)  # type: ignore[arg-type]
+
+    complete = InteractiveBackend()
+    assert interactive_backend(complete) is complete
+    assert supports_interactive_execution(complete) is True
+    interactive_tool = build_execute_tool(complete)  # type: ignore[arg-type]
     assert set(interactive_tool.args) == {"command", "timeout", "network", "yield_time", "tty", "interactive"}
+    assert build_write_stdin_tool(complete).name == "write_stdin"  # type: ignore[arg-type]
     assert available.description != allowed.description
     assert "Allow mode" in allowed.description
     assert "Ask mode" in available.description

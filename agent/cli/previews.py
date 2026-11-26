@@ -338,9 +338,10 @@ def build_diff_preview(
 ) -> DiffPreview | None:
     """Parse mutation arguments into the shared DiffPreview domain model.
 
-    ``start_lines`` holds the actual file line of every edit match. Without
-    that metadata the changed lines keep an unknown number rather than showing
-    snippet-relative numbers as real file lines.
+    For ``edit``, ``start_lines`` must hold the actual 1-based file line of
+    every match from ``artifact.edit_start_lines``. When valid position
+    metadata is absent, returns ``None`` so callers show only the Edit summary
+    without guessing or fabricating line numbers.
     """
     if name == "write":
         content = args.get("content")

@@ -230,6 +230,95 @@ def test_golden_explore_single_multi_mixed_and_expanded() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_golden_write_running_waiting_completed_and_failed() -> None:
+    content = "import os\nimport sys\n\ndef main():\n    a = 1\n    b = 2\n    c = 3\n    return a + b + c\n"
+    args = {"file_path": "/workspace/app.py", "content": content}
+
+    running = CliState(blocks=[ToolBlock("w-run", "write", args, status="running")])
+    assert _snapshot(running, 80) == [
+        "",
+        "⠼ Writing workspace/app.py (+8 -0)",
+        "     1+ import os",
+        "     2+ import sys",
+        "     3+",
+        "     4+ def main():",
+        "     ⋮",
+        "  … 4 changed lines hidden · Ctrl+R to review",
+    ]
+    running_ansi = _ansi(running, 80)
+    assert "\x1b[32m⠼ \x1b[0m" in running_ansi
+    assert "48;2;0;95;0" in running_ansi
+
+    running.diffs_expanded = True
+    assert _snapshot(running, 80) == [
+        "",
+        "⠼ Writing workspace/app.py (+8 -0)",
+        "     1+ import os",
+        "     2+ import sys",
+        "     3+",
+        "     4+ def main():",
+        "     5+     a = 1",
+        "     6+     b = 2",
+        "     7+     c = 3",
+        "     8+     return a + b + c",
+    ]
+
+    waiting = CliState(blocks=[ToolBlock("w-wait", "write", args, status="waiting")])
+    assert _snapshot(waiting, 80) == [
+        "",
+        "• Writing workspace/app.py (+8 -0) — waiting for input",
+        "     1+ import os",
+        "     2+ import sys",
+        "     3+",
+        "     4+ def main():",
+        "     ⋮",
+        "  … 4 changed lines hidden · Ctrl+R to review",
+    ]
+    assert "\x1b[33m• \x1b[0m" in _ansi(waiting, 80)
+
+    created = CliState(blocks=[
+        ToolBlock("w-create", "write", args, artifact={"operation": "create"}, status="completed"),
+    ])
+    assert _snapshot(created, 80) == [
+        "",
+        "• Created /workspace/app.py (+8 -0)",
+        "  └   1+ import os",
+        "      2+ import sys",
+        "      3+",
+        "      4+ def main():",
+        "      ⋮",
+        "  … 4 changed lines hidden · Ctrl+R to review",
+    ]
+
+    overwritten = CliState(blocks=[
+        ToolBlock("w-over", "write", args, artifact={"operation": "overwrite"}, status="completed"),
+    ])
+    assert _snapshot(overwritten, 80) == [
+        "",
+        "• Wrote /workspace/app.py (+8 -0)",
+        "  └   1+ import os",
+        "      2+ import sys",
+        "      3+",
+        "      4+ def main():",
+        "      ⋮",
+        "  … 4 changed lines hidden · Ctrl+R to review",
+    ]
+
+    failed = CliState(blocks=[
+        ToolBlock(
+            "w-fail", "write", args,
+            output="Permission denied: read-only path",
+            status="error", is_error=True,
+        ),
+    ])
+    assert _snapshot(failed, 80) == [
+        "",
+        "• Failed Writing workspace/app.py",
+        "  └ output",
+        "    Permission denied: read-only path",
+    ]
+
+
 def test_golden_create_single_empty_multi_and_expanded() -> None:
     empty = CliState(blocks=[
         ToolBlock("c0", "write", {"file_path": "/workspace/empty.py", "content": ""}, artifact={"operation": "create"}, status="completed"),

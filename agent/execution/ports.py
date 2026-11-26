@@ -23,6 +23,24 @@ class InteractiveExecutionBackend(Protocol):
 
     supports_interactive_execution: bool
 
+    def execute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse: ...
+
+    async def aexecute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+        yield_time: float | None = None,
+        stdin_mode: str = "none",
+    ) -> ExecuteResponse: ...
+
     def write_stdin(
         self,
         execution_id: str,
@@ -74,13 +92,15 @@ class InteractiveExecutionBackend(Protocol):
     def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int: ...
 
 
-def supports_interactive_execution(backend: object) -> bool:
-    """True when ``backend`` declares interactive execution and ``write_stdin`` support."""
-    return bool(getattr(backend, "supports_interactive_execution", False))
-
-
 def interactive_backend(backend: object) -> InteractiveExecutionBackend | None:
-    """Return ``backend`` narrowed to ``InteractiveExecutionBackend`` when supported."""
-    if supports_interactive_execution(backend) and isinstance(backend, InteractiveExecutionBackend):
-        return backend
-    return None
+    """Single authority for narrowing a backend to ``InteractiveExecutionBackend``."""
+    if not bool(getattr(backend, "supports_interactive_execution", False)):
+        return None
+    if not isinstance(backend, InteractiveExecutionBackend):
+        return None
+    return backend
+
+
+def supports_interactive_execution(backend: object) -> bool:
+    """Boolean view of ``interactive_backend(backend)``."""
+    return interactive_backend(backend) is not None
