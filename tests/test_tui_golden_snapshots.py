@@ -968,3 +968,571 @@ def test_golden_short_terminal_queue_scrolls_to_bottom_and_updates_on_resize() -
 
     asyncio.run(driver())
 
+
+# ---------------------------------------------------------------------------
+# 9. Interaction Panels (docs/tui-rendering-spec.md §7):
+#    Normal Human Input, Tool Approval, Secure Credential Input, Behaviors
+# ---------------------------------------------------------------------------
+
+
+def _interaction_lines(controller: Any, width: int = 80) -> list[str]:
+    from agent.cli.rendering import render_interaction
+
+    raw = render_interaction(controller, width)
+    return [line.rstrip() for line in _plain(raw).splitlines()]
+
+
+def test_golden_interaction_human_input_modes_dedup_recommendation_and_cjk() -> None:
+    from agent.cli.interactions import InteractionController
+    from agent.cli.rendering import render_interaction
+    from agent.tools.human_input import build_human_input_tools
+
+    # 1) Single-select with inline (recommended), concise rationale, Other:, cyan theme, no separate Recommendation block.
+    single = InteractionController.human({
+        "title": "Choose a database",
+        "question": "Which database should the project use?",
+        "recommendation": {"value": "pg", "reason": "Matches production schema"},
+        "fields": [{
+            "id": "db",
+            "type": "single_select",
+            "label": "Choose a database",  # duplicates title -> deduplicated
+            "required": True,
+            "options": [
+                {"value": "pg", "label": "PostgreSQL"},
+                {"value": "sqlite", "label": "SQLite"},
+                {"value": "mysql", "label": "MySQL"},
+            ],
+        }],
+    })
+    assert _interaction_lines(single, 80) == [
+        "Choose a database",
+        "Which database should the project use?",
+        "",
+        "→ PostgreSQL (recommended)",
+        "    Matches production schema",
+        "  SQLite",
+        "  MySQL",
+        "  Other:",
+        "",
+        "↑↓ select · Enter confirm · Esc close",
+    ]
+    single_ansi = render_interaction(single, 80)
+    assert "\x1b[1;96mChoose a database\x1b[0m" in single_ansi
+    assert "\x1b[1;36m→ PostgreSQL (recommended)\x1b[0m" in single_ansi
+    assert "Recommended:" not in _plain(single_ansi)
+
+    # Selecting Other: opens custom entry with Esc back.
+    single.option_index = 3
+    assert single.accept() is False
+    assert single.custom_entry is True
+    assert _interaction_lines(single, 80) == [
+        "Choose a database",
+        "Which database should the project use?",
+        "",
+        "Other: enter your answer",
+        "",
+        "Enter submit · Ctrl+J newline · Esc back",
+    ]
+
+    # 2) Multi-select with [x]/[ ], Space toggle, Other:.
+    multi = InteractionController.human({
+        "title": "Select features",
+        "question": "Which features should be enabled?",
+        "fields": [{
+            "id": "features",
+            "type": "multi_select",
+            "label": "Reply",
+            "required": True,
+            "options": [
+                {"value": "search", "label": "Search"},
+                {"value": "cache", "label": "Caching"},
+            ],
+        }],
+    })
+    multi.toggle()
+    assert _interaction_lines(multi, 80) == [
+        "Select features",
+        "Which features should be enabled?",
+        "",
+        "→ [x] Search",
+        "  [ ] Caching",
+        "  [ ] Other:",
+        "",
+        "↑↓ select · Space toggle · Enter confirm · Esc close",
+    ]
+
+    # 3) Plain text input: no options, deduplicated title/question/reason, Chinese & long wrapping.
+    plain_text = InteractionController.human({
+        "title": "部署目标环境",
+        "question": "部署目标环境？",  # duplicates title -> omitted
+        "reason": "需要确认目标集群后再执行发布脚本，避免误操作影响线上流量。",
+        "fields": [{"id": "env", "type": "text", "label": "回复", "required": True}],
+    })
+    plain_lines = _interaction_lines(plain_text, 44)
+    assert plain_lines[0] == "部署目标环境"
+    assert sum("部署目标环境" in line for line in plain_lines) == 1
+    assert "Other:" not in "\n".join(plain_lines)
+    assert plain_lines[-1] == "Enter submit · Ctrl+J newline · Esc close"
+
+    # 4) Multi-field progress shows only current field + step progress.
+    multi_field = InteractionController.human({
+        "title": "Configure deployment",
+        "question": "Provide deployment parameters.",
+        "fields": [
+            {"id": "region", "type": "single_select", "label": "Region", "required": True,
+             "options": [{"value": "us", "label": "US East"}]},
+            {"id": "tag", "type": "text", "label": "Release tag", "required": True},
+        ],
+    })
+    assert _interaction_lines(multi_field, 80) == [
+        "Configure deployment",
+        "Provide deployment parameters.",
+        "1/2  Region",
+        "",
+        "→ US East",
+        "  Other:",
+        "",
+        "↑↓ select · Enter confirm · Esc close",
+    ]
+    assert multi_field.accept() is False
+    assert _interaction_lines(multi_field, 80) == [
+        "Configure deployment",
+        "Provide deployment parameters.",
+        "2/2  Release tag",
+        "",
+        "Enter submit · Ctrl+J newline · Shift+Tab back · Esc close",
+    ]
+
+    # 5) Tool description enforces objective option labels (forbids 1st/2nd person) & clear credential details.
+    tool = build_human_input_tools()[0]
+    assert "first- or second-person" in tool.description
+    assert "secret" in tool.description
+    assert "which service" in tool.description.lower()
+
+
+def test_golden_interaction_tool_approval_all_categories_batch_and_colors() -> None:
+    from agent.cli.interactions import InteractionController
+    from agent.cli.rendering import render_interaction
+
+    # 1) Execute (network ON + sandbox scope)
+    exec_ctrl = InteractionController.approval(
+        [{"toolCallId": "c1", "name": "execute", "args": {"command": "npm install", "network": True}}],
+        execution_scope="Sandbox (restricted)",
+    )
+    assert _interaction_lines(exec_ctrl, 80) == [
+        "Approval required",
+        "",
+        "Command:",
+        "npm install",
+        "",
+        "Network access: internet, localhost and LAN",
+        "Execution scope: Sandbox (restricted)",
+        "",
+        "→ Reject",
+        "  Run",
+        "",
+        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+    ]
+    exec_ansi = render_interaction(exec_ctrl, 80)
+    assert "\x1b[1;33mApproval required\x1b[0m" in exec_ansi
+    assert "\x1b[1;33m→ Reject\x1b[0m" in exec_ansi
+    assert "Decision" not in _plain(exec_ansi)
+    assert "Deny this tool call" not in _plain(exec_ansi)
+    assert "Approve and execute" not in _plain(exec_ansi)
+    # Default selection is Reject.
+    assert exec_ctrl.option_index == 0
+
+    # 2) Write / Edit / Delete
+    write_ctrl = InteractionController.approval([{
+        "toolCallId": "w1", "name": "write",
+        "args": {"file_path": "/workspace/app.py", "content": "a = 1\nb = 2\n"},
+    }])
+    assert _interaction_lines(write_ctrl, 80) == [
+        "Approval required",
+        "",
+        "Write file: /workspace/app.py",
+        "Content: 2 lines (12 bytes)",
+        "",
+        "→ Reject",
+        "  Run",
+        "",
+        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+    ]
+
+    edit_ctrl = InteractionController.approval([{
+        "toolCallId": "e1", "name": "edit",
+        "args": {"file_path": "/workspace/app.py", "old_string": "a = 1", "new_string": "a = 2\nc = 3", "replace_all": True},
+    }])
+    assert "Edit file: /workspace/app.py" in _interaction_lines(edit_ctrl, 80)
+    assert "Change: replace 1 line with 2 lines (all occurrences)" in _interaction_lines(edit_ctrl, 80)
+
+    del_ctrl = InteractionController.approval([{
+        "toolCallId": "d1", "name": "delete", "args": {"file_path": "/workspace/old.py"},
+    }])
+    assert "Delete file: /workspace/old.py" in _interaction_lines(del_ctrl, 80)
+
+    # 3) Web search & fetch
+    ws_ctrl = InteractionController.approval([{
+        "toolCallId": "ws1", "name": "web_search", "args": {"query": "LangGraph interrupts"},
+    }])
+    assert _interaction_lines(ws_ctrl, 80)[2:4] == [
+        'Web search: "LangGraph interrupts"',
+        "Network access: DeepSeek API (host)",
+    ]
+    wf_ctrl = InteractionController.approval([{
+        "toolCallId": "wf1", "name": "web_fetch", "args": {"url": "https://example.com/spec"},
+    }])
+    assert _interaction_lines(wf_ctrl, 80)[2:4] == [
+        "Fetch URL: https://example.com/spec",
+        "Network access: DeepSeek API (host)",
+    ]
+
+    # 4) External MCP (with red Host outside sandbox risk)
+    mcp_ctrl = InteractionController.approval(
+        [{"toolCallId": "m1", "name": "mcp__github__list_issues", "args": {"repo": "ADaozz/deep_agent_cli"}}],
+        mcp_tool_lookup=lambda n: ("GitHub", "list_issues") if n == "mcp__github__list_issues" else None,
+    )
+    assert _interaction_lines(mcp_ctrl, 80) == [
+        "Approval required",
+        "",
+        "MCP tool: GitHub · list_issues",
+        "Execution: Host (outside sandbox)",
+        "Arguments:",
+        "  repo: ADaozz/deep_agent_cli",
+        "",
+        "→ Reject",
+        "  Run",
+        "",
+        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+    ]
+    assert "\x1b[31mExecution: Host (outside sandbox)\x1b[0m" in render_interaction(mcp_ctrl, 80)
+
+    # 5) MCP add (stdio) & remove
+    mcp_add_ctrl = InteractionController.approval([{
+        "toolCallId": "ma1", "name": "mcp_add",
+        "args": {"name": "localdb", "transport": "stdio", "command": "python3", "args": ["srv.py"], "auth_type": "none"},
+    }])
+    mcp_add_ansi = render_interaction(mcp_add_ctrl, 100)
+    assert "Add MCP server: localdb" in _plain(mcp_add_ansi)
+    assert "\x1b[31mHost command (runs outside the sandbox): python3 srv.py\x1b[0m" in mcp_add_ansi
+
+    # 6) Write stdin (write / close / cancel)
+    stdin_write = InteractionController.approval([{
+        "toolCallId": "st1", "name": "write_stdin",
+        "args": {"execution_id": "exec_9", "chars": "yes\n", "action": "write"},
+    }])
+    assert _interaction_lines(stdin_write, 80)[2:4] == [
+        "Send stdin to process: exec_9",
+        r"Input: yes\n",
+    ]
+    stdin_close = InteractionController.approval([{
+        "toolCallId": "st2", "name": "write_stdin",
+        "args": {"execution_id": "exec_9", "action": "close"},
+    }])
+    assert "Close stdin (EOF) for process: exec_9" in _interaction_lines(stdin_close, 80)
+    stdin_cancel = InteractionController.approval([{
+        "toolCallId": "st3", "name": "write_stdin",
+        "args": {"execution_id": "exec_9", "action": "cancel"},
+    }])
+    assert "Cancel running process: exec_9" in _interaction_lines(stdin_cancel, 80)
+
+    # 7) Batch approval preserves every action distinctly
+    batch = InteractionController.approval(
+        [
+            {"toolCallId": "b1", "name": "write", "args": {"file_path": "/workspace/a.py", "content": "x = 1\n"}},
+            {"toolCallId": "b2", "name": "execute", "args": {"command": "pytest -q"}},
+        ],
+        execution_scope="Sandbox (restricted)",
+    )
+    assert _interaction_lines(batch, 80) == [
+        "Approval required (2 actions)",
+        "",
+        "1. Write file: /workspace/a.py",
+        "   Content: 1 line (6 bytes)",
+        "",
+        "2. Command:",
+        "   pytest -q",
+        "   Network access: off (default)",
+        "   Execution scope: Sandbox (restricted)",
+        "",
+        "→ Reject",
+        "  Run",
+        "",
+        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+    ]
+
+
+def test_golden_interaction_secure_credential_session_persistent_runtime_auth_and_overwrite() -> None:
+    from agent.cli.interactions import InteractionController
+    from agent.cli.rendering import render_interaction
+    from agent.secrets.store import SecretMetadata
+    from agent.tools.human_interaction import build_runtime_auth_request
+
+    # 1) Session credential (sandbox scope): single masked input, yellow heading, zero options, red validation error.
+    sess_ctrl = InteractionController.human({
+        "interactionId": "cred-sess",
+        "title": "API Token",
+        "question": "Required to run API tests inside the sandbox.",
+        "fields": [{
+            "id": "tok",
+            "type": "secret",
+            "label": "API Token",
+            "required": True,
+            "secret_name": "TEST_API_TOKEN",
+            "secret_scope": "sandbox",
+        }],
+    })
+    assert _interaction_lines(sess_ctrl, 80) == [
+        "Credential required",
+        "",
+        "API Token",
+        "Required to run API tests inside the sandbox.",
+        "",
+        "Available only for this session (TEST_API_TOKEN · sandbox).",
+        "The agent receives only the credential name.",
+        "",
+        "Enter submit · Esc close · F2 reopen",
+    ]
+    sess_ansi = render_interaction(sess_ctrl, 80)
+    assert "\x1b[1;33mCredential required\x1b[0m" in sess_ansi
+    assert "Other:" not in _plain(sess_ansi)
+    assert "Secure Input" not in _plain(sess_ansi)
+    assert "Reference:" not in _plain(sess_ansi)
+    assert "Scope:" not in _plain(sess_ansi)
+    assert "Storage:" not in _plain(sess_ansi)
+
+    # Required validation error in red.
+    assert sess_ctrl.accept_secret("") is False
+    assert "\x1b[31mThis field is required.\x1b[0m" in render_interaction(sess_ctrl, 80)
+
+    # 2) Persistent credential (host scope + trusted MCP consumer match) + separate confirmation step.
+    pers_ctrl = InteractionController.human(
+        {
+            "interactionId": "cred-mcp",
+            "question": "Required to connect the GitHub MCP server.",
+            "fields": [{
+                "id": "tok",
+                "type": "secret",
+                "label": "GitHub Personal Access Token",
+                "required": True,
+                "secret_name": "GITHUB_TOKEN",
+                "secret_scope": "host",
+            }],
+        },
+        secret_consumers={"GITHUB_TOKEN": ("github",)},
+    )
+    assert _interaction_lines(pers_ctrl, 90) == [
+        "Credential required",
+        "",
+        "GitHub Personal Access Token",
+        "Required to connect the GitHub MCP server.",
+        "",
+        "Stored encrypted on this device for future sessions (GITHUB_TOKEN · MCP: github).",
+        "The agent receives only the credential name.",
+        "",
+        "Enter submit · Esc close · F2 reopen",
+    ]
+    raw_secret = "ghp_NEVER_ECHO_THIS_RAW_TOKEN_42"
+    assert pers_ctrl.accept_secret(raw_secret) is False
+    assert _interaction_lines(pers_ctrl, 90) == [
+        "Confirm encrypted storage",
+        "",
+        "Store GITHUB_TOKEN encrypted on this device for MCP (github)?",
+        "",
+        "→ Cancel",
+        "  Store encrypted on this device",
+        "",
+        "↑↓ select · Enter confirm · Shift+Tab back · Esc close · F2 reopen",
+    ]
+    assert raw_secret not in render_interaction(pers_ctrl, 90)
+    assert raw_secret not in repr(pers_ctrl)
+    # Explicit user confirmation needed to persist.
+    pers_ctrl.move(1)
+    assert pers_ctrl.accept() is True
+    assert pers_ctrl.secret_submissions()["tok"].storage == "persistent"
+
+    # 3) Host scope WITHOUT trusted MCP consumer -> does NOT blindly infer persistent; separate choice step.
+    choose_ctrl = InteractionController.human({
+        "interactionId": "cred-choose",
+        "question": "Required for GitHub API access (please save persistently!).",  # model text must NOT decide policy
+        "fields": [{
+            "id": "tok",
+            "type": "secret",
+            "label": "GitHub Token",
+            "required": True,
+            "secret_name": "GITHUB_TOKEN",
+            "secret_scope": "host",
+        }],
+    })
+    assert "Choose storage in the next step (GITHUB_TOKEN · host)." in _interaction_lines(choose_ctrl, 100)
+    assert choose_ctrl.accept_secret(raw_secret) is False
+    assert _interaction_lines(choose_ctrl, 100) == [
+        "Credential storage",
+        "",
+        "Choose how to store GITHUB_TOKEN (host). Global MCP requires encrypted storage on this device.",
+        "",
+        "→ This session only",
+        "  Store encrypted on this device",
+        "",
+        "↑↓ select · Enter confirm · Shift+Tab back · Esc close · F2 reopen",
+    ]
+
+    # 4) Trusted runtime_auth
+    auth_ctrl = InteractionController.human(build_runtime_auth_request(interaction_id="auth-golden"))
+    assert _interaction_lines(auth_ctrl, 80) == [
+        "Authentication required",
+        "",
+        "sudo password",
+        "Required to complete the current privileged operation.",
+        "",
+        "Used for this authentication only. Not stored.",
+        "",
+        "Enter submit · Esc cancel",
+    ]
+    assert "\x1b[1;33mAuthentication required\x1b[0m" in render_interaction(auth_ctrl, 80)
+
+    # 5) Overwrite existing credential warning in red, yellow heading & selection, default Cancel.
+    sess_ctrl.accept_secret("new-val")
+    sess_ctrl.prompt_overwrite_confirmation([
+        SecretMetadata(name="TEST_API_TOKEN", scope="sandbox", storage="session"),
+    ])
+    assert _interaction_lines(sess_ctrl, 90) == [
+        "Overwrite existing credential?",
+        "",
+        "Warning: TEST_API_TOKEN (session) already exists and will be replaced.",
+        "",
+        "→ Cancel",
+        "  Overwrite",
+        "",
+        "↑↓ select · Enter confirm · Esc close · F2 reopen",
+    ]
+    ow_ansi = render_interaction(sess_ctrl, 90)
+    assert "\x1b[1;33mOverwrite existing credential?\x1b[0m" in ow_ansi
+    assert "\x1b[31mWarning: TEST_API_TOKEN (session) already exists and will be replaced.\x1b[0m" in ow_ansi
+
+
+def test_golden_interaction_behaviors_mode_switch_draft_restore_scroll_and_status_dedup() -> None:
+    import asyncio
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.keys import Keys
+    from agent.cli.interactions import InteractionController
+    from agent.cli.rendering import render_interaction_viewport
+    from agent.sessions.images import ImageAttachmentRef
+
+    async def driver() -> None:
+        model = scripted_model([
+            AIMessage(content="", tool_calls=[{
+                "id": "call-mixed",
+                "name": "request_human_input",
+                "args": {
+                    "reason": "Need target service and token",
+                    "question": "Configure external integration",
+                    "fields": [
+                        {"id": "service", "type": "text", "label": "Service name", "required": True},
+                        {
+                            "id": "api_key", "type": "secret", "label": "Service API Key",
+                            "required": True, "secret_name": "SVC_KEY", "secret_scope": "sandbox",
+                        },
+                    ],
+                },
+            }]),
+            AIMessage(content="Configured."),
+        ])
+        runner = AgentRunner(model=model, backend=StateBackend(), thread_id="beh-golden")
+        waiting = runner.invoke("setup")
+        assert waiting.status == "waiting_human"
+
+        with create_pipe_input() as pipe:
+            size = [Size(rows=16, columns=50)]
+            output = DummyOutput()
+            output.get_size = lambda: size[0]  # type: ignore[method-assign]
+            app = CliApplication(runner, input=pipe, output=output)
+
+            # Pre-existing draft, cursor, and attachment must survive opening & closing human input.
+            app.buffer.set_document(Document("keep my draft", cursor_position=4))
+            att = ImageAttachmentRef(id="img-1", filename="shot.png", mime_type="image/png", size=1024, storage_key="a" * 64 + ".png")
+            app.state.attachments.append(att)
+
+            def paint_frame() -> None:
+                app.application.before_render.fire()
+                _paint(app)
+
+            app.run_events._handle_result(waiting)
+            assert app.dialogs.current is not None
+            assert app.dialogs.current.panel_mode == "human"
+            assert app.buffer.text == ""
+            paint_frame()
+            assert app.application.layout.current_control is app.editor_control
+
+            # Status bar must NOT duplicate open panel shortcut hints.
+            app.state.status = "Select · Enter confirm · Esc close · F2 reopen"
+            assert app._status_visible() is False
+            assert app._status_text() == []
+            app.state.status = "Waiting for input"
+            assert app._status_visible() is True
+
+            # Advance from plain text field -> secret field: mode, yellow border editor, and focus switch together!
+            app.buffer.text = "acme"
+            app.run_dispatch._submit_buffer("steer")
+            assert app.dialogs.current.panel_mode == "secret"
+            assert app.dialogs.current.accepts_secret is True
+            paint_frame()
+            assert app.application.layout.current_control is app.secret_editor
+            # Verify yellow secret editor border & prompt classes are painted on screen.
+            screen = app.application.renderer._last_screen
+            painted_styles = {
+                screen.data_buffer[y][x].style
+                for y in range(size[0].rows)
+                for x in range(size[0].columns)
+            }
+            assert any("class:secret-editor-border" in st for st in painted_styles)
+            assert any("class:secret-editor-prompt" in st for st in painted_styles)
+
+            # Shift+Tab back to normal text field restores cyan human mode, editor focus, and wipes secret buffer.
+            app.secret_buffer.text = "typed-secret-never-leaks"
+            stab = next(b for b in app.bindings.bindings if b.keys == (Keys.BackTab,))
+
+            class _Ev:
+                current_buffer = app.secret_buffer
+
+            stab.handler(_Ev())
+            assert app.dialogs.current.panel_mode == "human"
+            assert app.dialogs.current.index == 0
+            assert app.secret_buffer.text == ""
+            assert app.buffer.text == "acme"
+            paint_frame()
+            assert app.application.layout.current_control is app.editor_control
+
+            # Esc closes panel, restores draft/cursor/attachments, and restores pending status hint.
+            app.interaction_flow._finish_interaction(cancelled=True)
+            assert app.dialogs.current is None
+            assert app.buffer.text == "keep my draft"
+            assert app.buffer.cursor_position == 4
+            assert app.state.attachments == [att]
+            assert app.state.status == "Input still pending · F2 to decide"
+            assert app._status_visible() is True
+
+            # F2 reopens pending interaction cleanly.
+            assert app.interaction_flow._reopen_pending_interaction() is True
+            assert app.dialogs.current is not None and app.dialogs.current.kind == "human"
+
+            # Short & narrow viewport clips long no-option secret panel while pinning heading and footer hints.
+            long_secret = InteractionController.human({
+                "question": " ".join(f"segment-{i}" for i in range(40)),
+                "fields": [{
+                    "id": "k", "type": "secret", "label": "Very Long Token Name",
+                    "required": True, "secret_name": "LONG_TOK", "secret_scope": "sandbox",
+                }],
+            })
+            clipped, _ = render_interaction_viewport(long_secret, width=36, height=7, offset=0)
+            clipped_lines = [line.rstrip() for line in _plain(clipped).splitlines()]
+            assert len(clipped_lines) <= 7
+            assert clipped_lines[0] == "Credential required"
+            assert "…" in clipped_lines
+            assert any("Enter submit" in line for line in clipped_lines)
+
+            runner.close()
+
+    asyncio.run(driver())
+
+

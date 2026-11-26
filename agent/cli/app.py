@@ -584,7 +584,14 @@ class CliApplication:
                 filter=editor_visible,
             ),
             ConditionalContainer(
-                build_input_editor(self.secret_editor, height=1, wrap_lines=False),
+                build_input_editor(
+                    self.secret_editor,
+                    height=1,
+                    wrap_lines=False,
+                    prompt_style="class:secret-editor-prompt",
+                    box_style="class:secret-editor",
+                    border_style="class:secret-editor-border",
+                ),
                 filter=secret_input_active,
             ),
             Window(
@@ -667,6 +674,9 @@ class CliApplication:
             mouse_support=Condition(lambda: not self._exiting),
             style=Style.from_dict({
                 "editor": "bg:#303030 #ffffff",
+                "secret-editor": "bg:#262112 #ffffff",
+                "secret-editor-border": "ansiyellow",
+                "secret-editor-prompt": "ansiyellow bold",
                 "pasted-content": "bg:#245c38 #e8ffe8",
                 "skill-block": "bg:#254b70 #e8f4ff bold",
                 "transcript-selection": "bg:#264f78 #ffffff noreverse",
@@ -1537,9 +1547,25 @@ class CliApplication:
             fragments.append(("class:attachments", f" ▣ Image #{index}  {ref.filename} · {size}\n"))
         return FormattedText(fragments)
 
+    def _status_duplicates_panel_hints(self, status: str) -> bool:
+        """True when an open interaction panel already displays these shortcut hints."""
+        if self.dialogs.current is None:
+            return False
+        markers = (
+            "Enter confirm",
+            "Enter submit",
+            "Esc cancel",
+            "Esc close",
+            "Esc back",
+            "F2 reopen",
+            "F2 to decide",
+            "↑↓ ",
+        )
+        return any(marker in status for marker in markers)
+
     def _status_visible(self) -> bool:
         status = self.state.status
-        interaction_hint = self.dialogs.current is not None and " · Enter confirm · Esc " in status
+        interaction_hint = self._status_duplicates_panel_hints(status)
         return bool(
             self.state.running or (status != "Ready" and not interaction_hint)
             or self.state.subagent_count
@@ -1603,7 +1629,7 @@ class CliApplication:
             counter = _truncate_cells(f"{count} subagent" + ("s" if count != 1 else ""), width)
         left_width = max(0, width - get_cwidth(counter) - 1) if counter else width
         label = self.state.status if self.state.running or self.state.status != "Ready" else ""
-        if self.dialogs.current is not None and " · Enter confirm · Esc " in label:
+        if self._status_duplicates_panel_hints(label):
             label = ""
         if (self.run_view.compacting or self.state.compacting) and not label.startswith("Cancelling"):
             label = "Compacting context"

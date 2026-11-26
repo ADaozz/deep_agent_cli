@@ -30,17 +30,24 @@ EDITOR_PADDING_LINES = 1
 
 
 def build_input_editor(
-    editor: BufferControl, *, height: AnyDimension, prompt_style: str = "", wrap_lines: bool = True,
+    editor: BufferControl,
+    *,
+    height: AnyDimension,
+    prompt_style: str = "",
+    wrap_lines: bool = True,
+    box_style: str = "class:editor",
+    border_style: str | None = None,
 ) -> HSplit:
-    style = "class:editor"
+    pad_char = "─" if border_style else " "
+    pad_style = border_style or box_style
     return HSplit([
-        Window(height=EDITOR_PADDING_LINES, char=" ", style=style),
+        Window(height=EDITOR_PADDING_LINES, char=pad_char, style=pad_style),
         VSplit([
             Window(FormattedTextControl([(prompt_style, EDITOR_PROMPT)]),
-                   width=get_cwidth(EDITOR_PROMPT), style=style),
-            Window(editor, height=height, wrap_lines=wrap_lines, dont_extend_height=True, style=style),
+                   width=get_cwidth(EDITOR_PROMPT), style=box_style),
+            Window(editor, height=height, wrap_lines=wrap_lines, dont_extend_height=True, style=box_style),
         ]),
-        Window(height=EDITOR_PADDING_LINES, char=" ", style=style),
+        Window(height=EDITOR_PADDING_LINES, char=pad_char, style=pad_style),
     ])
 
 

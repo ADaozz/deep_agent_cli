@@ -233,3 +233,89 @@
 | `completion_menu_lines` | `8` | 命令补全菜单最大显示行数 |
 
 不为单个工具新增专属折叠参数。
+
+---
+
+## 7. 交互面板（Interaction Panels）
+
+全部人工交互、工具审批与安全凭据输入共用唯一的 `InteractionController`、交互容器、输入区、焦点管理、滚动（`render_interaction_viewport`）与快捷键路由，仅区分三类展示模式（`panel_mode`），不建立独立控制器或重复状态管理器。命令选择器（`/model`、`/resume`、`/permission`、`/sandbox`、`/skill`、`/stdin`、`/mcp`、`/secrets` 辅助选择菜单）继续保持既有 `picker` 样式不变。
+
+### 7.1 三类交互面板与主题色
+
+| 交互类型 | 触发条件 | 标题与选中主题色 | 主要控件 |
+|---|---|---|---|
+| 普通人工输入（`human`） | `kind == "human"` 且当前字段非 `secret` | 青色（标题 `bold bright_cyan`，选中 `bold cyan`） | 文本、单选、多选（附 `Other:`） |
+| 工具审批（`approval`） | `kind == "approval"` | 黄色（标题 `bold yellow`，选中 `bold yellow`） | `Reject`（默认） / `Run` |
+| 安全凭据输入（`secret`） | 当前字段为 `type == "secret"`，或独立的存储选择/确认、覆盖确认步骤 | 黄色警示（标题 `bold yellow`，选中 `bold yellow`，掩码输入区黄色边界 `class:secret-editor-border` 与黄色提示符 `class:secret-editor-prompt`） | 独立单行掩码输入（`PasswordProcessor(char="•")`），或独立简短选择步骤 |
+
+- **红色（`red`）** 仅用于实际校验错误、覆盖已有凭据警告（`Warning: ... already exists and will be replaced.`）及宿主沙箱外执行风险（`Execution: Host (outside sandbox)`、`Host command (runs outside the sandbox): ...`）。
+- 多字段交互从普通字段切换至 `secret` 字段（或 `Shift+Tab` 返回普通字段）时，视觉模式、输入区与焦点同步切换，并擦除 `secret_buffer` 及回退字段的已输入密钥，不向普通输入框回填明文。
+
+### 7.2 普通人工输入面板
+
+- 标题、问题正文、`reason`、`label` 之间自动去重；单字段不展示通用字段名（如 `Reply` / `回复`）；多字段展示当前进度（`1/2  <字段名>`）。
+- 仅在有实际背景时展示简短 `reason`，仅在有实际决策影响时展示简短 `impact`。
+- 推荐项直接在对应选项后内联标注 `(recommended)`；仅当推荐理由有额外信息时展示在该选项下方缩进灰字中；不再在选项上方单独渲染重复的 `Recommended:` 区块（仅纯文本无选项字段在存在建议值时显示单行 `Suggested:`）。
+- 单选 / 多选只显示选项（模型最多提供 3 项，系统自动附 `Other:`）；选择 `Other:` 后才进入自定义文本输入（显示 `Other: enter your answer`）；多选保留 `[x]` / `[ ]` 与 `Space` 切换语义；纯文本问题直接使用输入框，不附带选项。
+- 标题/正文与选项之间、选项与底栏快捷键之间各空一行；单选选项使用 `→ ` / `  ` 前缀，多选使用 `→ [x] ` / `  [ ] ` 前缀。
+
+```text
+Choose a database
+Which database should the project use?
+
+→ PostgreSQL (recommended)
+  SQLite
+  MySQL
+  Other:
+
+↑↓ select · Enter confirm · Esc close
+```
+
+### 7.3 工具审批面板
+
+- 标题固定为 `Approval required`（批量审批为 `Approval required (N actions)`），黄色粗体；默认选中 `Reject`，选项仅保留 `Reject` 与 `Run`，不展示冗余的 `Decision`、`Deny this tool call`、`Approve and execute` 或 `Reject makes no change.` 文案，也不将批准描述为已经执行。
+- 各类工具必须完整展示必要操作与真实风险：
+  - **Execute**：`Command:`、完整网络权限（`Network access: internet, localhost and LAN` 或 `off`）、真实执行范围（`Execution scope: Sandbox (restricted|full-access)` / `Custom backend`，交互模式附 `· interactive (PTY|pipe)`）。
+  - **Write / Edit / Delete**：操作类型（`Write file:` / `Edit file:` / `Delete file:`）、目标路径与必要变更规模信息。
+  - **Web**：查询词或目标 URL 与 `Network access: DeepSeek API (host)`。
+  - **外部 MCP**：`MCP tool: <server> · <tool>`、红色风险提示 `Execution: Host (outside sandbox)` 与有界结构化 `Arguments:`。
+  - **MCP 管理**：添加/删除的服务名、传输类型、URL 或红色风险提示 `Host command (runs outside the sandbox): <cmd argv>`、鉴权/环境变量与 `Target: Host MCP configuration`。
+  - **Write stdin**：目标进程 `execution_id` 与实际写入内容、关闭 EOF 或取消操作。
+- 批量审批按 `1. ...`、`2. ...` 分段列出全部真实操作，各调用参数严格隔离。
+
+```text
+Approval required
+
+Command:
+npm install
+
+Network access: internet, localhost and LAN
+Execution scope: Sandbox (restricted)
+
+→ Reject
+  Run
+
+↑↓ select · Enter confirm · Esc close · F2 reopen
+```
+
+### 7.4 安全凭据输入面板
+
+- 当前字段为 `type == "secret"` 时进入安全凭据输入模式：黄色警示标题（`Credential required`；可信 `runtime_auth` 为 `Authentication required`），清晰列出凭据名称与用途，下方紧接黄色边框的独立单行掩码输入区（`•` 掩码，无历史、无粘贴块、无撤销栈残留）。
+- 掩码输入界面**不展示**普通问题选项列表、`Other:`、`Recommendation`、额外输入框或内部概念标签（`Secure Input`、`Reference:`、`Scope:`、`Storage: [Session] / Persistent`），也**不再提供**密码输入时的方向键存储切换。
+- 存储策略严格由可信宿主运行时信息及消费者约束决定，**不**仅凭 `host` 作用域一律推断持久化，也**不**根据模型生成的文本决定安全策略；模型不得绕过用户确认直接持久化凭据：
+  - **`sandbox` 作用域**：默认仅当前会话使用，告知 `Available only for this session (<NAME> · sandbox).` 与 `The agent receives only the credential name.`。
+  - **`host` 作用域且匹配已配置全局 MCP 服务**：提交前明确告知 `Stored encrypted on this device for future sessions (<NAME> · MCP: <servers>).`，并在输入后进入独立确认步骤 `Confirm encrypted storage`（默认 `Cancel` / `Store encrypted on this device`），不误称全局 MCP 支持 Session 凭据。
+  - **`host` 作用域且未绑定特定已配置 MCP 服务**：掩码输入后进入独立存储选择步骤 `Credential storage`（默认 `This session only` / `Store encrypted on this device`，并明确说明全局 MCP 需要本机加密存储）。
+  - **可信 `runtime_auth`**：告知 `Used for this authentication only. Not stored.`，不写入 `SecretStore`。
+- 覆盖已有凭据保持独立确认步骤 `Overwrite existing credential?`，红色警告 `Warning: ... already exists and will be replaced.`，默认 `Cancel`。
+- 校验错误（如必填为空）以红色显示在底栏提示上方。原始凭据绝不进入普通输入区、`values`、`repr`、ToolMessage、Checkpoint 或日志。
+
+### 7.5 快捷键、状态栏去重与文案规则
+
+- 快捷键提示必须与当前控件及 `Esc` 实际语义一致：
+  - 普通人工输入：`↑↓ select · Enter confirm · Esc close`（多选加 `Space toggle`；文本输入为 `Enter submit · Ctrl+J newline · Esc close`；`Other:` 自定义输入为 `Enter submit · Ctrl+J newline · Esc back`；多字段后续步附 `Shift+Tab back`）。
+  - 工具审批：`↑↓ select · Enter confirm · Esc close · F2 reopen`。
+  - 安全凭据输入：`Enter submit · Esc close · F2 reopen`（`runtime_auth` 与 `/secrets` 为 `Enter submit · Esc cancel`；独立存储/覆盖确认步对应 `↑↓ select · Enter confirm · ...`）。
+- 交互面板打开时，状态栏不重复展示面板已有的快捷键提示；关闭待处理交互后，状态栏恢复 `<Approval|Input|Pause> still pending · F2 to decide`，原输入草稿、光标位置、附件与主输入框焦点完整恢复。
+- 短终端或窄终端下，`render_interaction_viewport` 固定标题与底栏（含安全告知与错误提示），长选项列表按选中项滚动，无选项长正文以 `…` 折断中间区域。
+- **人称与语言规则**（由 `agent/tools/human_input.py` 工具与字段描述从源头约束，不做正则改写或额外模型改写）：模型生成文案简洁自然并跟随当前对话语言；系统固定文案保持一致术语；不在 `question` 中复述 `fields` 选项；选项使用客观的操作名、方案名或结果描述，**禁止**依赖说话者视角的第一、第二人称（如“我来…”、“你去…”、“I will…”、“You…”）。

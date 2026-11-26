@@ -180,8 +180,8 @@ def test_approval_card_shows_host_config_without_guessing_credentials() -> None:
     assert "https://example.com/mcp?token=super-secret" in bearer.question
     assert "INTERNAL_MCP_TOKEN" in bearer.question
     remove = InteractionController.approval([{"name": "mcp_remove", "args": {"name": "secret-server"}}])
-    assert "secret-server" in remove.question
-    assert "no change" in remove.question
+    assert "Remove MCP server: secret-server" in remove.question
+    assert "Host MCP configuration" in remove.question
 
 
 @async_test
@@ -333,10 +333,10 @@ def test_multiple_mcp_approvals_keep_arguments_with_their_call():
         {"name": "mcp__alpha__write", "toolCallId": "first", "args": {"nonce": "FIRST"}},
         {"name": "mcp__beta__remove", "toolCallId": "second", "args": {"path": "/tmp/SECOND"}},
     ])
-    first, second = card.question.split("Tool: mcp__beta__remove")
+    first, second = card.question.split("2. MCP tool: beta · remove")
     assert "nonce: FIRST" in first and "/tmp/SECOND" not in first
     assert "path: /tmp/SECOND" in second and "FIRST" not in second
-    assert card.question.count("Execution: Host") == 2
+    assert card.question.count("Execution: Host (outside sandbox)") == 2
     assert card.tool_call_ids == ["first", "second"]
 
 

@@ -1580,7 +1580,7 @@ def test_queue_stays_below_the_approval_panel() -> None:
             "".join(screen.data_buffer[y][x].char for x in range(app._width())).rstrip()
             for y in range(app.application.output.get_size().rows)
         ]
-        assert any("Approve tool call?" in row for row in rows[:dialog.ypos + dialog.height])
+        assert any("Approval required" in row for row in rows[:dialog.ypos + dialog.height])
         assert "queued during approval" in "\n".join(rows)
         assert "Window too small" not in "\n".join(rows)
 

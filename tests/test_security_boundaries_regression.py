@@ -585,7 +585,7 @@ def test_late_redaction_release_after_confirmed_destroy_runs_exactly_once(
 
 
 def test_human_input_host_secret_clearly_states_persistent_requirement_for_global_mcp() -> None:
-    controller = InteractionController.human({
+    payload = {
         "interactionId": "mcp-hint",
         "title": "MCP Token",
         "question": "Provide GitHub MCP token",
@@ -597,11 +597,34 @@ def test_human_input_host_secret_clearly_states_persistent_requirement_for_globa
             "secret_name": "GITHUB_TOKEN",
             "secret_scope": "host",
         }],
-    })
-    rendered = render_interaction(controller, 120)
-    assert "global MCP requires Persistent" in rendered
-    assert "not used by global MCP" in rendered
-    assert "required for global MCP" in rendered
+    }
+    # 1) Without trusted MCP consumer match: do not blindly force persistence from host scope or model text;
+    #    show single masked input first, then separate concise storage step stating global MCP requires encrypted storage.
+    unbound = InteractionController.human(payload)
+    masked_view = render_interaction(unbound, 120)
+    assert "Choose storage in the next step" in masked_view
+    assert "This session only" not in masked_view
+    assert unbound.accept_secret("ghp_demo") is False
+    choice_view = render_interaction(unbound, 120)
+    assert "Global MCP requires encrypted storage on this device." in choice_view
+    assert "This session only" in choice_view
+    assert "Store encrypted on this device" in choice_view
+
+    # 2) With trusted global MCP consumer match: disclose encrypted persistence before submit,
+    #    never claim global MCP supports session storage, and require explicit confirmation (default Cancel).
+    bound = InteractionController.human(payload, secret_consumers={"GITHUB_TOKEN": ("github",)})
+    bound_masked = render_interaction(bound, 120)
+    assert "Stored encrypted on this device for future sessions (GITHUB_TOKEN · MCP: github)." in bound_masked
+    assert "Available only for this session" not in bound_masked
+    assert bound.accept_secret("ghp_demo") is False
+    confirm_view = render_interaction(bound, 120)
+    assert "Confirm encrypted storage" in confirm_view
+    assert "Cancel" in confirm_view
+    assert "Store encrypted on this device" in confirm_view
+    # Default Cancel prevents model from bypassing user confirmation to persist.
+    assert bound.accept() is True
+    assert bound.persistence_declined is True
+    assert bound.secret_submissions() == {}
 
 
 # ---------------------------------------------------------------------------

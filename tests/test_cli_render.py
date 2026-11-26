@@ -846,8 +846,8 @@ def test_approval_pane_shows_command_and_network() -> None:
     }])
     rendered = re.sub(r"\x1b\[[0-9;]*m", "", render_interaction(controller, 80))
     assert command in " ".join(rendered.split())
-    assert "Network: ON" in rendered
-    assert "Approve tool call?" in rendered
+    assert "Network access: internet, localhost and LAN" in rendered
+    assert "Approval required" in rendered
     state = CliState(blocks=[ToolBlock(
         tool_call_id="ex-1", name="execute",
         arguments={"command": command, "network": True},

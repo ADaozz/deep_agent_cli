@@ -564,16 +564,44 @@ def render_interaction_viewport(controller: Any, width: int, height: int, offset
     if controller is None or height <= 0:
         return "", 0
     header, options, footer = controller.render_sections()
+    heading = _capture(Group(*header), width).splitlines() if header else []
+    if header and isinstance(header[-1], Text) and not header[-1].plain:
+        heading.append("")
+    hints = _capture(Group(*footer), width).splitlines() if footer else []
     if not options:
-        return render_interaction(controller, width), 0
-    heading = _capture(Group(*header), width).splitlines()
-    hints = _capture(Group(*footer), width).splitlines()
+        full = render_interaction(controller, width)
+        full_lines = full.splitlines()
+        if len(full_lines) <= height:
+            return full, 0
+        if heading and not heading[-1].strip():
+            heading = heading[:-1]
+        if hints and not hints[0].strip():
+            hints = hints[1:]
+        hint_budget = max(0, height - 2)
+        if len(hints) > hint_budget:
+            hints = [line for line in hints if line.strip()]
+        hint_height = min(len(hints), hint_budget)
+        shown_hints = hints[-hint_height:] if hint_height else []
+        head_room = max(1 if heading and height >= 3 else 0, height - hint_height)
+        if head_room < len(heading) and head_room > 1:
+            heading = [*heading[:head_room - 1], _capture(Text("…", style="dim"), width)]
+        else:
+            heading = heading[:head_room]
+        visible = heading + shown_hints
+        return "\n".join(visible[:height]), 0
     rows = [_capture(option, width).splitlines() for option in options]
     option_rows = [line for option in rows for line in option]
-    # Reserve list space even when a long question fills a small terminal.
-    hint_height = min(len(hints), max(0, height - 2))
-    list_minimum = min(len(option_rows), max(1, height // 2))
-    heading_height = min(len(heading), max(0, height - hint_height - list_minimum))
+    if len(heading) + len(option_rows) + len(hints) > height:
+        # Drop decorative blank spacers first on tight terminals so title & hints stay pinned.
+        if heading and not heading[-1].strip():
+            heading = heading[:-1]
+        if hints and not hints[0].strip():
+            hints = hints[1:]
+    # Reserve list space and at least the title row even on very short terminals.
+    heading_min = 1 if heading and height >= 3 else 0
+    hint_height = min(len(hints), max(0, height - heading_min - 1))
+    list_minimum = min(len(option_rows), max(1, (height - heading_min) // 2))
+    heading_height = min(len(heading), max(heading_min, height - hint_height - list_minimum))
     list_height = max(1, height - hint_height - heading_height)
     selected = min(controller.option_index, len(rows) - 1)
     start = sum(len(option) for option in rows[:selected])

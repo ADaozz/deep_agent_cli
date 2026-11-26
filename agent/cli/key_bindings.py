@@ -183,7 +183,19 @@ def create_bindings(
             self.drafts.pasted.clear()
             self.drafts.skill.clear()
             return
-        if self.dialogs.current.current.get("id") == "__confirm_overwrite__":
+        current_id = str(self.dialogs.current.current.get("id") or "")
+        if current_id.startswith("__secret_storage__:"):
+            target_id = str(self.dialogs.current.current.get("target_field_id") or "")
+            self.dialogs.current.fields.pop(self.dialogs.current.index)
+            self.dialogs.current.index = max(0, self.dialogs.current.index - 1)
+            self.dialogs.current.option_index = 0
+            self.dialogs.current.error = ""
+            if target_id:
+                self.dialogs.current._secret_values.pop(target_id, None)
+                self.dialogs.current._secret_confirmed_storages.pop(target_id, None)
+            self.application.invalidate()
+            return
+        if current_id == "__confirm_overwrite__":
             self.dialogs.current.fields = [
                 item for item in self.dialogs.current.fields if item.get("id") != "__confirm_overwrite__"
             ]
@@ -192,6 +204,7 @@ def create_bindings(
             if self.dialogs.current.accepts_secret:
                 fid = str(self.dialogs.current.current.get("id") or "")
                 self.dialogs.current._secret_values.pop(fid, None)
+                self.dialogs.current._secret_confirmed_storages.pop(fid, None)
             self.application.invalidate()
             return
         if self.dialogs.current.index > 0:

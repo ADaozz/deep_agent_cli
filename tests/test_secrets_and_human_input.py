@@ -528,26 +528,38 @@ def test_interaction_controller_secret_rendering_storage_and_isolation() -> None
     assert controller.accepts_secret is False
     assert controller.accept("github") is False
 
-    # Now on secret field
+    # Now on secret field: yellow warning mode, single masked input with no simultaneous storage options.
     assert controller.accepts_secret is True
     assert controller.accepts_text is False
-    assert controller.current_secret_storage() == "session"
+    assert controller.panel_mode == "secret"
+    assert not hasattr(controller, "current_secret_storage")
     rendered = render_interaction(controller, 100)
-    assert "GitHub Token · Secure Input" in rendered
+    assert "Credential required (2/2)" in rendered
+    assert "GitHub Token" in rendered
     assert "GITHUB_TOKEN" in rendered
-    assert "Scope: Host" in rendered
-    assert "Session" in rendered
-    assert "Persistent" in rendered
-    assert "Only the credential name is returned to the agent." in rendered
-
-    # Up/Down toggles storage
+    assert "Secure Input" not in rendered
+    assert "Reference:" not in rendered
+    assert "Scope:" not in rendered
+    assert "Storage:" not in rendered
+    assert "The agent receives only the credential name." in rendered
+    # Arrow keys do not toggle storage during masked password input.
+    _, secret_options, _ = controller.render_sections()
+    assert secret_options == []
     controller.move(1)
-    assert controller.current_secret_storage() == "persistent"
-    controller.move(-1)
-    assert controller.current_secret_storage() == "session"
+    assert controller.option_index == 0
 
+    # Host scope without trusted MCP consumer advances to a separate concise storage choice step.
     secret_val = "ghp_secret_must_never_appear_in_repr_or_values"
-    assert controller.accept_secret(secret_val) is True
+    assert controller.accept_secret(secret_val) is False
+    assert controller.accepts_secret is False
+    assert controller.panel_mode == "secret"
+    storage_screen = render_interaction(controller, 100)
+    assert "Credential storage" in storage_screen
+    assert "This session only" in storage_screen
+    assert "Store encrypted on this device" in storage_screen
+    assert secret_val not in storage_screen
+    # Default choice is "This session only" (index 0).
+    assert controller.accept() is True
     assert "token" not in controller.values
     assert secret_val not in repr(controller)
     assert secret_val not in render_interaction(controller, 100)
@@ -656,7 +668,8 @@ def test_cli_app_runtime_auth_callback_and_secrets_command(tmp_path: Path) -> No
             )
             app.dialogs.current = InteractionController.human(req, auth_callback=received.append)
             rendered = render_interaction(app.dialogs.current, 100)
-            assert "Password is passed directly to sudo and is not stored." in rendered
+            assert "Authentication required" in rendered
+            assert "Used for this authentication only. Not stored." in rendered
             assert "Storage:" not in rendered
             app.secret_buffer.text = "my-sudo-pass"
             app.run_dispatch._submit_buffer("steer")
@@ -672,11 +685,14 @@ def test_cli_app_runtime_auth_callback_and_secrets_command(tmp_path: Path) -> No
             assert received == [None]
             assert app.secret_buffer.text == ""
 
-            # 2) /secrets set MY_KEY -> scope -> masked value -> saved -> /secrets list hides value -> delete
+            # 2) /secrets set MY_KEY -> scope -> storage -> masked value -> saved -> /secrets list hides value -> delete
             await handle_secrets_command(app, "set MY_KEY")
             assert app.dialogs.current is not None and app.dialogs.current.kind == "secret_scope"
             # Select "sandbox" (index 1)
             app.dialogs.current.move(1)
+            app.run_dispatch._submit_buffer("steer")
+            assert app.dialogs.current is not None and app.dialogs.current.kind == "secret_storage"
+            # Default index 0 = "This session only"
             app.run_dispatch._submit_buffer("steer")
             assert app.dialogs.current is not None and app.dialogs.current.kind == "secret_value"
             assert app.dialogs.current.accepts_secret is True

@@ -124,7 +124,15 @@ def finish_secrets_interaction(
         except ValueError as exc:
             interaction.error = str(exc)
             return
-        _open_secret_value_prompt(app, name=name, scope=scope, default_storage="session")
+        _begin_storage_prompt(app, name=name, scope=scope)
+        return
+
+    if kind == "secret_storage":
+        name = str(draft.get("name") or "")
+        scope = validate_secret_scope(draft.get("scope") or "host")
+        raw_storage = str(interaction.values.get("storage") or "session")
+        storage: ManagedStorage = "persistent" if raw_storage == "persistent" else "session"
+        _open_secret_value_prompt(app, name=name, scope=scope, default_storage=storage)
         return
 
     if kind == "secret_pick_update":
@@ -227,7 +235,7 @@ def _begin_name_prompt(app: Any) -> None:
         question="Enter the credential reference name (e.g. GITHUB_TOKEN). Do not paste the secret value here.",
         fields=[{"id": "name", "type": "text", "label": "Reference name", "required": True, "options": []}],
     )
-    app.set_status("Enter credential name · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)
 
 
 def _begin_scope_prompt(app: Any, *, name: str) -> None:
@@ -248,7 +256,33 @@ def _begin_scope_prompt(app: Any, *, name: str) -> None:
             ],
         }],
     )
-    app.set_status("Select scope · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)
+
+
+def _begin_storage_prompt(app: Any, *, name: str, scope: SecretScope) -> None:
+    app._secret_draft = {"name": name, "scope": scope}
+    question = (
+        f"Choose how to store {name} ({scope}). Global MCP requires encrypted storage on this device."
+        if scope == "host"
+        else f"Choose how to store {name} ({scope})."
+    )
+    app.dialogs.current = InteractionController(
+        kind="secret_storage",
+        source="secret_manage",
+        title="Credential storage",
+        question=question,
+        fields=[{
+            "id": "storage",
+            "type": "single_select",
+            "label": "Storage",
+            "required": True,
+            "options": [
+                {"value": "session", "label": "This session only", "description": ""},
+                {"value": "persistent", "label": "Store encrypted on this device", "description": ""},
+            ],
+        }],
+    )
+    app.set_status("Waiting for input", transient=False)
 
 
 def _open_secret_value_prompt(
@@ -262,8 +296,8 @@ def _open_secret_value_prompt(
     controller = InteractionController(
         kind="secret_value",
         source="secret_manage",
-        title=f"Set credential {name}",
-        question="",
+        title="Credential required",
+        question=f"Enter the secret value for {name}.",
         fields=[{
             "id": "value",
             "type": "secret",
@@ -273,10 +307,10 @@ def _open_secret_value_prompt(
             "secret_scope": scope,
             "options": [],
         }],
+        _secret_policies={"value": default_storage},
     )
-    controller.secret_storages["value"] = default_storage
     app.dialogs.current = controller
-    app.set_status("Enter secret value · ↑↓ storage · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)
 
 
 def _begin_pick_for_update(app: Any) -> None:
@@ -303,7 +337,7 @@ def _begin_pick_for_update(app: Any) -> None:
             ],
         }],
     )
-    app.set_status("Select credential · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)
 
 
 def _begin_pick_for_delete(app: Any) -> None:
@@ -330,7 +364,7 @@ def _begin_pick_for_delete(app: Any) -> None:
             ],
         }],
     )
-    app.set_status("Select credential · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)
 
 
 def _begin_delete_confirm(app: Any, name: str, items: list[SecretMetadata]) -> None:
@@ -352,4 +386,4 @@ def _begin_delete_confirm(app: Any, name: str, items: list[SecretMetadata]) -> N
             ],
         }],
     )
-    app.set_status("Confirm credential deletion · Enter confirm · Esc cancel", transient=False)
+    app.set_status("Waiting for input", transient=False)

@@ -205,8 +205,8 @@ def test_real_pty_completion_permission_and_pending_approval(tui):
     assert state['pending'] is None and 'sandbox/permission:restricted/ask' in state['footer']
     tui.send('run a command\r')
     state = tui.wait(lambda s: s['interaction'] == 'approval')
-    assert 'Network: OFF (default)' in state['question']
-    assert 'Command: echo explicitly-approved' in state['question']
+    assert 'Network access: off (default)' in state['question']
+    assert 'Command:\necho explicitly-approved' in state['question']
     tui.send('\x1b')
     tui.wait(lambda s: s['interaction'] is None and s['interrupt'])
     tui.send('/permission allow\r')

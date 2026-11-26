@@ -134,6 +134,8 @@ class InteractionFlow:
             self.access_selection().finish_interaction(interaction, cancelled=cancelled)
             return
         if cancelled and interaction.kind in {"pause", "approval", "human"}:
+            if interaction.kind == "human":
+                self._restore_approval_draft()
             interaction.clear_secrets()
             self._clear_secret_buffer()
             self._dismiss_pending_interrupt(interaction.kind)
@@ -171,10 +173,17 @@ class InteractionFlow:
                 )
             self.run_dispatch()._start_run("", resume_call=resume_call)
             return
-        # Agent human_input: handle overwrite confirmation for secret fields before resuming.
+        # Agent human_input: handle persistence decline and overwrite confirmation before resuming.
+        if interaction.persistence_declined:
+            self._restore_approval_draft()
+            interaction.clear_secrets()
+            self._clear_secret_buffer()
+            self._dismiss_pending_interrupt("human")
+            return
         if "__confirm_overwrite__" in interaction.values:
             decision = str(interaction.values.pop("__confirm_overwrite__") or "")
             if decision != "overwrite":
+                self._restore_approval_draft()
                 interaction.clear_secrets()
                 self._clear_secret_buffer()
                 self._dismiss_pending_interrupt("human")
@@ -199,6 +208,7 @@ class InteractionFlow:
         interaction.clear_secrets()
         self._clear_secret_buffer()
         self.dialogs.current = None
+        self._restore_approval_draft()
         if secret_subs:
             resume_call = partial(
                 self.runner.submit_human_input,
@@ -251,6 +261,70 @@ class InteractionFlow:
             self.access_selection()._show_allow_confirm_status()
         return opened
 
+    def _approval_execution_scope(self) -> str:
+        mode = self.runner.prepared.execution_mode.value.lower()
+        if mode == "sandboxed":
+            return f"Sandbox ({self.runner.sandbox_mode()})"
+        return "Custom backend"
+
+    def _approval_mcp_tool_lookup(self) -> Callable[[str], tuple[str, str] | None] | None:
+        manager = getattr(self.runner, "mcp", None)
+        if manager is None or not hasattr(manager, "list_servers"):
+            return None
+        mapping: dict[str, tuple[str, str]] = {}
+        try:
+            for server_state in manager.list_servers():
+                for tool in getattr(server_state, "tools", ()) or ():
+                    tool_name = str(getattr(tool, "name", "") or "")
+                    if not tool_name:
+                        continue
+                    server_label = str(getattr(tool, "mcp_server_name", "") or server_state.config.name)
+                    remote_name = str(getattr(tool, "mcp_remote_name", "") or tool_name)
+                    mapping[tool_name] = (server_label, remote_name)
+        except Exception:  # noqa: BLE001
+            return None
+        return mapping.get if mapping else None
+
+    def _trusted_secret_consumers(self, payload: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+        """Derive trusted global MCP consumers from host MCPManager config (never from model text)."""
+        manager = getattr(self.runner, "mcp", None)
+        if manager is None or not hasattr(manager, "list_servers"):
+            return {}
+        from agent.mcp.adapter import mcp_secret_names
+
+        try:
+            servers = list(manager.list_servers())
+        except Exception:  # noqa: BLE001
+            return {}
+        by_secret: dict[str, list[str]] = {}
+        for server_state in servers:
+            cfg = getattr(server_state, "config", None)
+            if cfg is None:
+                continue
+            for cred_name in mcp_secret_names(cfg):
+                by_secret.setdefault(cred_name, [])
+                if cfg.name not in by_secret[cred_name]:
+                    by_secret[cred_name].append(cfg.name)
+        matched: dict[str, tuple[str, ...]] = {}
+        for item in payload.get("fields") or []:
+            if not isinstance(item, dict) or item.get("type") != "secret":
+                continue
+            if str(item.get("secret_scope") or "").strip().lower() != "host":
+                continue
+            name = str(item.get("secret_name") or "").strip()
+            if name and name in by_secret:
+                matched[name] = tuple(by_secret[name])
+        return matched
+
+    def _save_editor_draft_if_present(self) -> None:
+        if self.dialogs.current is not None or self.dialogs.deferred is not None or self.dialogs.approval_draft is not None:
+            return
+        if self.buffer.text or self.drafts.pasted.has_blocks or self.drafts.skill.has_blocks:
+            self.dialogs.approval_draft = (self.buffer.document, self.drafts.pasted, self.drafts.skill)
+            self.drafts.pasted = PastedContentDraft()
+            self.drafts.skill = SkillDraft()
+            self.buffer.reset()
+
     def _reopen_pending_interaction(self, *, notify_missing: bool = True) -> bool:
         try:
             interrupt = self.runner.current_interrupt()
@@ -278,10 +352,16 @@ class InteractionFlow:
             self.dialogs.current = InteractionController.approval(
                 list(interrupt.pending_tools),
                 secrets=self.runner.summary_secrets(),
+                execution_scope=self._approval_execution_scope(),
+                mcp_tool_lookup=self._approval_mcp_tool_lookup(),
             )
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.WAITING_HUMAN:
-            self.dialogs.current = InteractionController.human(interrupt.payload)
+            self._save_editor_draft_if_present()
+            self.dialogs.current = InteractionController.human(
+                interrupt.payload,
+                secret_consumers=self._trusted_secret_consumers(interrupt.payload),
+            )
             self.set_status("Waiting for input", transient=False)
         elif interrupt.kind is InterruptKind.PAUSED:
             self.dialogs.current = InteractionController.pause()

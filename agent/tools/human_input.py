@@ -32,9 +32,12 @@ class FieldOption(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    value: str = Field(description="Value returned when the user selects this option.")
-    label: str = Field(default="", description="Label shown to the user.")
-    description: str = Field(default="", description="Optional explanation of the option.")
+    value: str = Field(description="Value returned when selected.")
+    label: str = Field(
+        default="",
+        description="Objective action/option label shown to the user; no 1st/2nd person ('I will', 'You', '我来', '你去').",
+    )
+    description: str = Field(default="", description="Optional brief detail beyond label.")
 
 
 class FieldSpec(BaseModel):
@@ -42,30 +45,23 @@ class FieldSpec(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(default="", description="Field id. The user's answer is returned under this key.")
+    id: str = Field(default="", description="Field id returned in answer values.")
     type: FieldType = Field(default="text", description="Field type. Use 'secret' for sensitive credentials.")
-    label: str = Field(default="", description="Field title.")
+    label: str = Field(default="", description="Short field/credential name; do not repeat title or question.")
     required: bool = Field(default=False, description="Whether an answer is required.")
     placeholder: str = Field(default="", description="Optional input placeholder.")
     secret_name: str | None = Field(
         default=None,
-        description=(
-            "Required for secret fields: reference name returned to you "
-            "(e.g. GITHUB_TOKEN), never the secret value."
-        ),
+        description="Required for secret: reference name returned (e.g. GITHUB_TOKEN), never the value.",
     )
     secret_scope: SecretScope | None = Field(
         default=None,
-        description=(
-            "Required for secret fields: "
-            "host for trusted host consumers such as MCP; "
-            "sandbox for command environment variables."
-        ),
+        description="Required for secret: 'host' (e.g. MCP) or 'sandbox' (command env).",
     )
     options: list[FieldOption] = Field(
         default_factory=list,
         max_length=3,
-        description="Options for single_select or multi_select, at most 3. The system adds Other. Do not add it yourself.",
+        description="At most 3 objective choices (no 1st/2nd person). System adds Other automatically.",
     )
 
     @field_validator("type", mode="before")
@@ -105,21 +101,24 @@ class HumanInputArgs(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    reason: str = Field(description="Why progress requires the user.")
-    question: str = Field(description="Short question. Do not write options as a Markdown list.")
+    reason: str = Field(description="Brief necessary context; do not repeat title or question.")
+    question: str = Field(
+        description="Short direct question in the conversation language (for secrets, name service and operation). Do not list options."
+    )
     interaction_type: InteractionType = Field(
         default="clarification", description="Interaction type."
     )
-    title: str = Field(default="", description="Optional title.")
+    title: str = Field(default="", description="Optional short heading; do not repeat question.")
     fields: list[FieldSpec] = Field(
         default_factory=list,
         description="Fields for the user. Empty means one free-text reply.",
     )
     recommendation: Recommendation | None = Field(
-        default=None, description="Recommended answer. Omit when there is no recommendation."
+        default=None,
+        description="Recommended choice and optional brief reason shown beside that option.",
     )
     impact: list[str] = Field(
-        default_factory=list, description="What this decision affects, one sentence each. Optional."
+        default_factory=list, description="Actual effects of this decision, one short sentence each. Optional."
     )
 
     @field_validator("interaction_type", mode="before")
@@ -190,12 +189,17 @@ def _plain(value: Any) -> Any:
 
 def _request_description() -> str:
     return (
-        "Request user input when missing information or a decision "
-        "prevents meaningful progress. Do not use for permission approvals. "
-        "Use structured fields for choices and sensitive credentials. "
-        "For credentials, use type='secret'. Only the reference name "
-        "is returned, never the secret value. "
-        "Use the returned reference in authorized credential consumers. "
+        "Request user input only when missing information or a genuine user decision "
+        "prevents meaningful progress. Never use for tool permission approvals. "
+        "Write concise, natural wording in the current conversation language without repeating "
+        "the same content across title, reason, question, label, and description, and never repeat "
+        "field options inside question. "
+        "Use objective action, choice, or outcome labels for options (e.g. 'Automatic configuration', "
+        "'Manual configuration', 'Keep existing settings', '自动安装依赖', '跳过安装'); "
+        "never use first- or second-person phrasing ('I will...', 'You...', 'Let me...', '我来...', '你去...'). "
+        "For sensitive credentials, always use type='secret' with secret_name and secret_scope, "
+        "and clearly state what credential is needed, which service it is for, and what operation it enables. "
+        "Only the reference name is returned, never the secret value. "
         "Never ask the user to provide credentials as plain text. "
-        "Pass nested arguments as JSON values, not serialized strings."
+        "Pass nested arguments as native JSON values, not serialized strings."
     )

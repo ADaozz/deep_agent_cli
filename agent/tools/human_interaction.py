@@ -69,9 +69,9 @@ def build_runtime_auth_request(
     *,
     interaction_id: str,
     title: str = "Authentication required",
-    question: str = "Enter your sudo password to continue.",
+    question: str = "Required to complete the current privileged operation.",
     reason: str = "",
-    label: str = "sudo Password",
+    label: str = "sudo password",
 ) -> dict[str, Any]:
     """Trusted host-only constructor for one-time runtime authentication."""
     if not interaction_id:
@@ -148,9 +148,9 @@ def _normalize_fields(
     return [{
         "id": "text",
         "type": "text",
-        "label": "回复",
+        "label": "Reply",
         "required": True,
-        "placeholder": "输入回复…",
+        "placeholder": "",
         "options": [],
     }]
 

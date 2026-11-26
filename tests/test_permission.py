@@ -459,7 +459,7 @@ def test_sandboxed_ask_execute_with_network_interrupts(tmp_path: Path) -> None:
     assert call["name"] == "execute"
     assert network_requested(call.get("args") or {})
     ui = InteractionController.approval([call])
-    assert "Network: ON" in ui.question
+    assert "Network access: internet, localhost and LAN" in ui.question
     resumed = runner.approve_tool("ex-sb-net")
     assert resumed.status == "completed"
     assert resumed.output == "online"
@@ -555,7 +555,7 @@ def test_approval_ui_mentions_declared_network() -> None:
         "name": "execute",
         "args": {"command": "curl example.com", "network": True},
     }])
-    assert "Network: ON" in interaction.question
+    assert "Network access: internet, localhost and LAN" in interaction.question
     assert len(interaction.fields[0]["options"]) == 2
     labels = {opt["label"] for opt in interaction.fields[0]["options"]}
     assert labels == {"Reject", "Run"}
@@ -668,15 +668,19 @@ def test_cli_permission_allow_reject_wrong_token(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("network,label", [(None, "OFF (default)"), (False, "OFF"), (True, "ON")])
+@pytest.mark.parametrize("network,label", [
+    (None, "off (default)"),
+    (False, "off"),
+    (True, "internet, localhost and LAN"),
+])
 def test_approval_execute_network_summary(network, label) -> None:
     args = {"command": "python -m pytest tests/ -q", "api_key": "must-not-render"}
     if network is not None:
         args["network"] = network
     ui = InteractionController.approval([{"name": "execute", "args": args}])
-    assert f"Network: {label}" in ui.question
-    assert "Tool: execute" in ui.question
-    assert "Command: python -m pytest tests/ -q" in ui.question
+    assert f"Network access: {label}" in ui.question
+    assert "Command:\npython -m pytest tests/ -q" in ui.question
+    assert "Execution scope:" in ui.question
     assert "must-not-render" not in ui.question
     assert "declared capabilities" not in ui.question
     assert ui.accept() and ui.values["approved"] == "reject"
@@ -702,7 +706,7 @@ def test_approval_multiple_tools_truncation_and_redaction() -> None:
     assert "private-value" not in ui.question
     assert "$SECRET" in ui.question
     assert "private-file-content" not in ui.question
-    assert "Tool: write" in ui.question
+    assert "Write file: <not supplied>" in ui.question
     assert ui.option_index == 0
 
 
@@ -776,17 +780,20 @@ def test_cli_idle_permission_survives_restart(tmp_path, mode) -> None:
         store.close()
 
 
-@pytest.mark.parametrize("tool", ["write", "edit", "delete"])
+@pytest.mark.parametrize("tool,prefix", [
+    ("write", "Write file"),
+    ("edit", "Edit file"),
+    ("delete", "Delete file"),
+])
 @pytest.mark.parametrize("key", ["file_path", "path"])
-def test_approval_file_tool_shows_only_target(tool, key) -> None:
+def test_approval_file_tool_shows_only_target(tool, prefix, key) -> None:
     args = {key: "/workspace/report.md", "content": "private contents",
             "old_string": "private old text", "new_string": "private new text"}
     ui = InteractionController.approval([{"toolCallId": "file-1", "name": tool, "args": args}])
-    assert f"Tool: {tool}" in ui.question
     if key == "file_path":
-        assert "Target: /workspace/report.md" in ui.question
+        assert f"{prefix}: /workspace/report.md" in ui.question
     else:
-        assert "Target: <not supplied>" in ui.question
+        assert f"{prefix}: <not supplied>" in ui.question
         assert "/workspace/report.md" not in ui.question
     assert "private" not in ui.question
     assert ui.tool_call_ids == ["file-1"]
@@ -810,4 +817,4 @@ def test_approval_file_targets_bound_and_redact_summary() -> None:
     assert "\x1b" not in ui.question
     assert "private-value" not in ui.question
     assert "$SECRET" in ui.question
-    assert "Target: <not supplied>" in ui.question
+    assert "Delete file: <not supplied>" in ui.question
