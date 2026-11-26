@@ -254,13 +254,7 @@ class BubblewrapBackend(LineNumberedFilesystemBackend, SandboxBackendProtocol, M
         session = self.pool.executions.get(execution_id)
         if session is None or not session.owns(owner):
             return None
-        return {
-            "execution_id": session.execution_id,
-            "running": not session.is_done,
-            "network": bool(session.network),
-            "sandbox_mode": session.sandbox_mode,
-            "stdin_mode": session.stdin_mode,
-        }
+        return session.execution_info()
 
     def execution_metadata(
         self,

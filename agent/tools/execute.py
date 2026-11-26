@@ -9,7 +9,8 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from langchain_core.tools import BaseTool, StructuredTool
 
 from agent.execution.network import reset_execute_network, set_execute_network
-from agent.execution.ports import supports_interactive_execution
+from agent.execution.ports import interactive_backend, supports_interactive_execution
+from agent.execution.process import execution_artifact_from_response, execution_metadata_dict
 
 if TYPE_CHECKING:
     from agent.runtime.permissions import PermissionMode
@@ -83,21 +84,7 @@ def _stdin_mode(*, interactive: bool, tty: bool) -> str:
 
 
 def _artifact_from_response(response) -> dict[str, object]:
-    artifact: dict[str, object] = {
-        "exit_code": response.exit_code,
-        "truncated": response.truncated,
-        "host_log_path": getattr(response, "host_log_path", None),
-        "agent_log_path": getattr(response, "agent_log_path", None),
-        "log_error": getattr(response, "log_error", None),
-        "termination_reason": getattr(response, "termination_reason", None),
-        "max_output_bytes": getattr(response, "max_output_bytes", None),
-        "execution_id": getattr(response, "execution_id", None),
-        "running": bool(getattr(response, "running", False)),
-    }
-    output_delta = getattr(response, "output_delta", None)
-    if isinstance(output_delta, str):
-        artifact["output"] = output_delta
-    return artifact
+    return execution_artifact_from_response(response)
 
 
 def build_execute_tool(
@@ -198,42 +185,27 @@ def build_write_stdin_tool(backend: SandboxBackendProtocol) -> BaseTool:
             raise ValueError("yield_time must be non-negative")
         if action in {"close", "cancel"} and chars:
             raise ValueError(f"{action} cannot include chars")
-        write_fn = getattr(backend, "write_stdin")
-        meta_fn = getattr(backend, "execution_metadata", None)
+        interactive = interactive_backend(backend)
+        if interactive is None:
+            raise ValueError("Backend does not support interactive execution")
         try:
-            response = write_fn(
+            response = interactive.write_stdin(
                 execution_id, chars=chars, yield_time=yield_time, action=action,
             )
         except (KeyError, PermissionError):
             raise
         except StdinWriteUncertainError as exc:
-            meta = (meta_fn(execution_id) if callable(meta_fn) else None) or {
-                "execution_id": execution_id,
-                "running": False,
-                "exit_code": None,
-                "termination_reason": None,
-                "truncated": False,
-                "host_log_path": None,
-                "agent_log_path": None,
-                "log_error": None,
-                "max_output_bytes": None,
-            }
+            meta = interactive.execution_metadata(execution_id) or execution_metadata_dict(
+                execution_id=execution_id,
+            )
             return (
                 f"Error: Uncertain stdin write outcome: {exc}",
                 {**meta, "stdin_error": "uncertain"},
             )
         except (OSError, TimeoutError, ValueError) as exc:
-            meta = (meta_fn(execution_id) if callable(meta_fn) else None) or {
-                "execution_id": execution_id,
-                "running": False,
-                "exit_code": None,
-                "termination_reason": None,
-                "truncated": False,
-                "host_log_path": None,
-                "agent_log_path": None,
-                "log_error": None,
-                "max_output_bytes": None,
-            }
+            meta = interactive.execution_metadata(execution_id) or execution_metadata_dict(
+                execution_id=execution_id,
+            )
             return (
                 f"Error: Failed writing stdin: {exc}",
                 {**meta, "stdin_error": "error"},

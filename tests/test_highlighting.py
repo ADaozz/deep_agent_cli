@@ -93,7 +93,7 @@ def test_custom_theme_renderer_is_isolated() -> None:
 def test_parse_numbered_change() -> None:
     assert parse_numbered_change("  12- hello") == ("  ", 12, "delete", "hello")
     assert parse_numbered_change("   3+") == ("   ", 3, "add", "")
-    assert parse_numbered_change("   ?+ unknown") == ("   ", None, "add", "unknown")
+    assert parse_numbered_change("   ?+ unknown") is None
     assert parse_numbered_change("plain") is None
 
 

@@ -6,6 +6,7 @@ from typing import Any
 
 from agent.execution.filesystem import WorkspaceCompositeBackend
 from agent.execution.network import network_requested
+from agent.execution.ports import interactive_backend
 from agent.runtime.approval.policy import ALLOW, MANUAL
 from agent.runtime.approval.types import Decision
 from agent.tools.catalog import (
@@ -55,9 +56,9 @@ def static_rule(
     if name == WRITE_STDIN_TOOL:
         if not write_stdin_is_side_effect(args):
             return ALLOW  # output poll only
-        query = getattr(backend, "execution_info", None)
+        interactive = interactive_backend(backend)
         execution_id = str(args.get("execution_id") or "")
-        info = query(execution_id, thread_id=thread_id) if callable(query) else None
+        info = interactive.execution_info(execution_id, thread_id=thread_id) if interactive is not None else None
         if not isinstance(info, dict):
             # Unknown or unowned execution_id: never auto-allow without review, and leak nothing.
             return None

@@ -9,9 +9,9 @@ from agent.sessions.images import ImageAttachmentRef
 from agent.runtime.contracts import RunEvent, TurnTiming
 from agent.runtime.metrics import normalize_usage
 from agent.sessions.transcript import (
-    _append_bounded_execution_output,
     _execution_output,
-    classify_tool_result,
+    is_execution_terminal,
+    project_execution_update,
     subagent_card_status,
     task_result_text,
 )
@@ -108,25 +108,14 @@ def _is_background_execution(block: ToolBlock) -> bool:
     )
 
 
-def _apply_execution_terminal(
+def _apply_execution_projection(
     tool: ToolBlock,
-    result: dict[str, Any],
-    *,
-    event_is_error: bool = False,
-) -> None:
-    artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
-    merged = {**artifact, **result, "running": False}
-    merged.pop("thread_id", None)
-    tool.artifact = merged
-    code = merged.get("exit_code")
-    tool.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-    outcome = classify_tool_result(
-        status="error" if event_is_error else "",
-        name="execute",
-        artifact=merged,
-    )
-    tool.is_error = outcome != "success"
-    tool.status = "error" if tool.is_error else "completed"
+    projected: tuple[str, dict[str, Any], str, bool, int | None] | None,
+) -> bool:
+    if projected is None:
+        return False
+    tool.output, tool.artifact, tool.status, tool.is_error, tool.exit_code = projected
+    return True
 
 
 @dataclass
@@ -325,9 +314,17 @@ class CliState:
                 return
             touch(tool)
             if event.stream == "execution_finished" and tool.name == "execute":
-                if event.content:
-                    tool.output += event.content
-                _apply_execution_terminal(tool, payload)
+                _apply_execution_projection(
+                    tool,
+                    project_execution_update(
+                        current_output=tool.output,
+                        current_artifact=tool.artifact,
+                        current_status=tool.status,
+                        update_artifact={**payload, "running": False},
+                        output_delta=event.content,
+                        output_mode="append",
+                    ),
+                )
             elif event.stream == "tail_snapshot" and tool.name == "execute":
                 tool.output = event.content
                 artifact = tool.artifact if isinstance(tool.artifact, dict) else {}
@@ -363,66 +360,43 @@ class CliState:
                 self._finish_task_card(tool)
                 return
             completed_artifact = event.artifact if isinstance(event.artifact, dict) else None
-            already_finished = (
-                isinstance(tool.artifact, dict)
-                and tool.artifact.get("running") is False
-                and tool.status in {"completed", "error"}
-            )
-            if (
-                event.name == "execute"
-                and completed_artifact is not None
-                and completed_artifact.get("running") is True
-                and already_finished
-            ):
-                # Structured finish arrived before the yielded execute tool_completed.
+            if event.name == "execute" and completed_artifact is not None:
+                had_tail_snapshot = (
+                    isinstance(tool.artifact, dict)
+                    and tool.artifact.get("truncated") is True
+                )
+                output_mode = (
+                    "replace"
+                    if (completed_artifact.get("running") is not True and completed_artifact.get("truncated") and not had_tail_snapshot)
+                    else "replace_if_empty"
+                )
+                _apply_execution_projection(
+                    tool,
+                    project_execution_update(
+                        current_output=tool.output,
+                        current_artifact=tool.artifact,
+                        current_status=tool.status,
+                        update_artifact=completed_artifact,
+                        output_delta=_execution_output(completed_artifact),
+                        fallback_output=event.content,
+                        output_mode=output_mode,
+                        event_is_error=event.is_error,
+                    ),
+                )
                 return
-            had_tail_snapshot = (
-                event.name == "execute" and isinstance(tool.artifact, dict)
-                and tool.artifact.get("truncated") is True
-            )
             if completed_artifact is not None:
                 tool.artifact = completed_artifact
-            if event.name == "execute" and completed_artifact is not None:
-                artifact_output = _execution_output(completed_artifact)
-                cap_raw = completed_artifact.get("max_output_bytes")
-                cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
-                if completed_artifact.get("running") is True:
-                    replace_output = not tool.output
-                elif completed_artifact.get("truncated") and not had_tail_snapshot:
-                    replace_output = True
-                else:
-                    replace_output = not tool.output
-                if replace_output:
-                    if artifact_output is not None:
-                        tool.output, clipped = _append_bounded_execution_output(
-                            "", artifact_output, max_output_bytes=cap,
-                        )
-                        if clipped:
-                            tool.artifact = {**tool.artifact, "truncated": True}
-                    elif event.content:
-                        tool.output = event.content
-            elif event.content and (not tool.output or event.content.startswith(tool.output)):
+            if event.content and (not tool.output or event.content.startswith(tool.output)):
                 tool.output = event.content
-            if (
-                event.name == "execute"
-                and completed_artifact is not None
-                and completed_artifact.get("running") is True
-            ):
-                tool.is_error = False
-                tool.status = "running"
-                tool.exit_code = None
-            elif event.name == "execute" and completed_artifact is not None:
-                _apply_execution_terminal(tool, completed_artifact, event_is_error=event.is_error)
-            else:
-                tool.is_error = event.is_error
-                tool.status = "error" if event.is_error else "completed"
-                if is_task_tool(tool.name):
-                    tool.output = task_result_text(
-                        artifact=event.artifact, content=event.content, status="",
-                    )
-                    tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
-                    tool.is_error = tool.status in {"error", "cancelled"}
-                    self._finish_task_card(tool)
+            tool.is_error = event.is_error
+            tool.status = "error" if event.is_error else "completed"
+            if is_task_tool(tool.name):
+                tool.output = task_result_text(
+                    artifact=event.artifact, content=event.content, status="",
+                )
+                tool.status = subagent_card_status(is_error=event.is_error, artifact=event.artifact)
+                tool.is_error = tool.status in {"error", "cancelled"}
+                self._finish_task_card(tool)
         elif event.type == "subagent_finished" and isinstance(event.result, dict):
             tool = self._tool_by_id(str(event.result.get("tool_call_id") or ""))
             if tool is not None and is_background_launch(tool.name, tool.arguments):
@@ -699,19 +673,20 @@ class CliState:
                 continue
             snap = snapshots.get(execution_id) if isinstance(snapshots, dict) else None
             if snap is not None:
-                if snap["running"]:
-                    block.artifact = {**artifact, **snap["artifact"], "running": True}
-                    block.status = "running"
-                    block.is_error = False
-                    block.exit_code = None
-                    block.output = snap["output"]
-                else:
-                    block.output = snap["output"]
-                    _apply_execution_terminal(block, snap["artifact"])
+                _apply_execution_projection(
+                    block,
+                    project_execution_update(
+                        current_output=block.output,
+                        current_artifact=block.artifact,
+                        current_status=block.status,
+                        update_artifact={**snap["artifact"], "running": bool(snap["running"])},
+                        output_delta=snap["output"],
+                        output_mode="replace",
+                    ),
+                )
                 touch(block)
                 continue
-            already_terminal = artifact.get("running") is False and block.status in {"completed", "error"}
-            if already_terminal:
+            if is_execution_terminal(artifact, block.status):
                 continue
             if block.status == "running" or artifact.get("running") is True:
                 # Execution no longer exists (e.g. after CLI restart): never remain Running.

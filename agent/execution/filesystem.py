@@ -49,7 +49,12 @@ from agent.execution.layout import (
     sandbox_config_dir,
     sandbox_environment,
 )
-from agent.execution.ports import ManagedExecutor, supports_interactive_execution
+from agent.execution.ports import (
+    InteractiveExecutionBackend,
+    ManagedExecutor,
+    interactive_backend,
+    supports_interactive_execution,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -61,22 +66,20 @@ _PATH_ESCAPE = "Permission denied: path escapes its authorized mount"
 _MOUNT_DELETE = "Permission denied: cannot delete a sandbox mount point"
 
 
-@dataclass
-class _LineEditResult(EditResult):
-    """EditResult carrying the real start line of every replaced match."""
-
-    edit_start_lines: tuple[int, ...] = ()
-
-
 def _match_start_lines(content: str, old_string: str) -> list[int]:
     """Start line of every non-overlapping match, in `str.replace` order."""
     if not old_string:
         return []
     lines: list[int] = []
+    step = len(old_string)
+    cursor = 0
+    line_number = 1
     index = content.find(old_string)
     while index != -1:
-        lines.append(content.count("\n", 0, index) + 1)
-        index = content.find(old_string, index + len(old_string))
+        line_number += content.count("\n", cursor, index)
+        lines.append(line_number)
+        cursor = index
+        index = content.find(old_string, index + step)
     return lines
 
 
@@ -130,9 +133,7 @@ class LineNumberedFilesystemBackend(FilesystemBackend):
                 f.write(new_content)
 
             record_edit_position(start_lines=start_lines, occurrences=int(occurrences))
-            return _LineEditResult(
-                path=file_path, occurrences=int(occurrences), edit_start_lines=start_lines,
-            )
+            return EditResult(path=file_path, occurrences=int(occurrences))
         except (OSError, UnicodeDecodeError, UnicodeEncodeError) as e:
             return EditResult(error=f"Error editing file '{file_path}': {e}")
 
@@ -1006,6 +1007,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
             raise NotImplementedError("Executor does not support interactive execution")
         return await self.executor.aexecute(command, timeout=timeout)
 
+    def _interactive_executor(self) -> InteractiveExecutionBackend | None:
+        return interactive_backend(self.executor)
+
     def write_stdin(
         self,
         execution_id: str,
@@ -1016,10 +1020,10 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         write_timeout: float = 15.0,
         thread_id: str | None = None,
     ) -> ExecuteResponse:
-        fn = getattr(self.executor, "write_stdin", None)
-        if not callable(fn):
+        executor = self._interactive_executor()
+        if executor is None:
             raise NotImplementedError("Executor does not support write_stdin")
-        return fn(
+        return executor.write_stdin(
             execution_id,
             chars=chars,
             yield_time=yield_time,
@@ -1034,10 +1038,8 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         *,
         thread_id: str | None = None,
     ) -> dict[str, object] | None:
-        fn = getattr(self.executor, "execution_info", None)
-        if not callable(fn):
-            return None
-        return fn(execution_id, thread_id=thread_id)
+        executor = self._interactive_executor()
+        return executor.execution_info(execution_id, thread_id=thread_id) if executor is not None else None
 
     def execution_metadata(
         self,
@@ -1045,28 +1047,20 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         *,
         thread_id: str | None = None,
     ) -> dict[str, object] | None:
-        fn = getattr(self.executor, "execution_metadata", None)
-        if not callable(fn):
-            return None
-        return fn(execution_id, thread_id=thread_id)
+        executor = self._interactive_executor()
+        return executor.execution_metadata(execution_id, thread_id=thread_id) if executor is not None else None
 
     def execution_snapshots(self, thread_id: str) -> dict[str, dict[str, object]]:
-        fn = getattr(self.executor, "execution_snapshots", None)
-        if not callable(fn):
-            return {}
-        return fn(thread_id)
+        executor = self._interactive_executor()
+        return executor.execution_snapshots(thread_id) if executor is not None else {}
 
     def cleanup_executions(self, thread_id: str, *, join_timeout: float = 2.0) -> int:
-        fn = getattr(self.executor, "cleanup_executions", None)
-        if not callable(fn):
-            return 0
-        return fn(thread_id, join_timeout=join_timeout)
+        executor = self._interactive_executor()
+        return executor.cleanup_executions(thread_id, join_timeout=join_timeout) if executor is not None else 0
 
     def list_active_executions(self, thread_id: str) -> list[dict[str, object]]:
-        fn = getattr(self.executor, "list_active_executions", None)
-        if not callable(fn):
-            return []
-        return fn(thread_id)
+        executor = self._interactive_executor()
+        return executor.list_active_executions(thread_id) if executor is not None else []
 
     def send_execution_input(
         self,
@@ -1077,10 +1071,10 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         write_timeout: float = 15.0,
         thread_id: str | None = None,
     ) -> None:
-        fn = getattr(self.executor, "send_execution_input", None)
-        if not callable(fn):
+        executor = self._interactive_executor()
+        if executor is None:
             raise NotImplementedError("Executor does not support direct process input")
-        fn(
+        executor.send_execution_input(
             execution_id,
             chars=chars,
             action=action,
@@ -1096,9 +1090,9 @@ class WorkspaceCompositeBackend(CompositeBackend, SandboxBackendProtocol):
         *,
         thread_id: str | None = None,
     ) -> None:
-        fn = getattr(self.executor, "resize_execution", None)
-        if callable(fn):
-            fn(execution_id, rows, cols, thread_id=thread_id)
+        executor = self._interactive_executor()
+        if executor is not None:
+            executor.resize_execution(execution_id, rows, cols, thread_id=thread_id)
 
     def set_secret_provider(
         self,

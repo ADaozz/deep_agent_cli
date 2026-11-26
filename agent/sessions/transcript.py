@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
@@ -131,6 +132,97 @@ def _append_bounded_execution_output(
     return bytes(raw).decode("utf-8", errors="replace"), True
 
 
+def is_execution_terminal(artifact: object, status: str) -> bool:
+    """True once an execute record has reached a confirmed terminal state."""
+    return (
+        isinstance(artifact, dict)
+        and artifact.get("running") is not True
+        and status in {"completed", "error"}
+    )
+
+
+def execution_exit_code(artifact: object) -> int | None:
+    if not isinstance(artifact, dict):
+        return None
+    code = artifact.get("exit_code")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def execution_max_output_bytes(artifact: object) -> int | None:
+    if not isinstance(artifact, dict):
+        return None
+    cap = artifact.get("max_output_bytes")
+    return cap if isinstance(cap, int) and not isinstance(cap, bool) else None
+
+
+def project_execution_update(
+    *,
+    current_output: str,
+    current_artifact: object,
+    current_status: str,
+    update_artifact: dict[str, Any],
+    output_delta: str | None = None,
+    fallback_output: str = "",
+    output_mode: Literal["append", "replace", "replace_if_empty", "keep"] = "keep",
+    event_is_error: bool = False,
+) -> tuple[str, dict[str, Any], str, bool, int | None] | None:
+    """Unified execution state projection shared by live events and history restore.
+
+    Returns ``(output, artifact, status, is_error, exit_code)``, or ``None`` if a
+    late ``running=True`` update arrives after a confirmed terminal state.
+    """
+    incoming_running = update_artifact.get("running") is True
+    if incoming_running and is_execution_terminal(current_artifact, current_status):
+        return None
+
+    existing = current_artifact if isinstance(current_artifact, dict) else {}
+    merged = {**existing, **update_artifact}
+    merged.pop("thread_id", None)
+    cap = execution_max_output_bytes(merged)
+
+    output = current_output
+    clipped = False
+    if output_mode == "append":
+        if output_delta:
+            output, clipped = _append_bounded_execution_output(
+                current_output, output_delta, max_output_bytes=cap,
+            )
+    elif output_mode == "replace" or (output_mode == "replace_if_empty" and not current_output):
+        if output_delta is not None:
+            output, clipped = _append_bounded_execution_output(
+                "", output_delta, max_output_bytes=cap,
+            )
+        elif fallback_output:
+            output = fallback_output
+    if clipped:
+        merged["truncated"] = True
+
+    if incoming_running:
+        merged["running"] = True
+        return output, merged, "running", False, None
+
+    if "running" in merged or "execution_id" in merged:
+        merged["running"] = False
+    exit_code = execution_exit_code(merged)
+    outcome = classify_tool_result(
+        status="error" if event_is_error else "",
+        name="execute",
+        artifact=merged,
+    )
+    is_error = outcome != "success"
+    status = "error" if is_error else "completed"
+    return output, merged, status, is_error, exit_code
+
+
+def _apply_transcript_execution(
+    block: TranscriptBlock,
+    projected: tuple[str, dict[str, Any], str, bool, int | None] | None,
+) -> None:
+    if projected is None:
+        return
+    block.content, block.artifact, block.status, block.is_error, block.exit_code = projected
+
+
 def tool_message_is_error(message: ToolMessage) -> bool:
     """Match live tool_completed error classification, including execute artifacts."""
     return classify_tool_result(
@@ -199,66 +291,56 @@ def messages_to_transcript(
                     exec_id = str(artifact["execution_id"])
                     owner = executions.get(exec_id)
                     if owner is not None and not artifact.get("stdin_error") and not tool_message_is_error(message):
-                        existing = owner.artifact if isinstance(owner.artifact, dict) else {}
-                        merged = {**existing, **artifact}
-                        cap_raw = merged.get("max_output_bytes")
-                        cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
-                        owner.content, clipped = _append_bounded_execution_output(
-                            owner.content, _execution_output(artifact) or "", max_output_bytes=cap,
+                        _apply_transcript_execution(
+                            owner,
+                            project_execution_update(
+                                current_output=owner.content,
+                                current_artifact=owner.artifact,
+                                current_status=owner.status,
+                                update_artifact=artifact,
+                                output_delta=_execution_output(artifact) or "",
+                                output_mode="append",
+                            ),
                         )
-                        if clipped:
-                            merged["truncated"] = True
-                        if artifact.get("running") is False:
-                            merged["running"] = False
-                            outcome = classify_tool_result(name="execute", artifact=merged)
-                            owner.is_error = outcome != "success"
-                            owner.status = "error" if owner.is_error else "completed"
-                            code = merged.get("exit_code")
-                            owner.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-                        owner.artifact = merged
                 continue
             content = message_text(message)
             tool_call_id = str(getattr(message, "tool_call_id", "") or "")
             is_error = tool_message_is_error(message)
             block = tools.get(tool_call_id)
             is_task = message.name == "start_task" or (block is not None and block.name == "start_task")
-            if (
-                getattr(message, "name", None) == "execute"
-                and isinstance(artifact, dict)
-                and artifact.get("running") is True
-            ):
-                if block is not None:
-                    exec_id = str(artifact.get("execution_id") or "")
-                    cap_raw = artifact.get("max_output_bytes")
-                    cap = int(cap_raw) if isinstance(cap_raw, int) and not isinstance(cap_raw, bool) else None
-                    output = _execution_output(artifact)
-                    bounded, clipped = _append_bounded_execution_output(
-                        "", content if output is None else output, max_output_bytes=cap,
+            if getattr(message, "name", None) == "execute" and isinstance(artifact, dict):
+                if block is None:
+                    block = TranscriptBlock(
+                        kind="tool",
+                        tool_call_id=tool_call_id,
+                        name="execute",
+                        status="running",
                     )
-                    block.content = bounded
-                    block.artifact = {**artifact, "truncated": True} if clipped else dict(artifact)
-                    block.status = "running"
-                    block.is_error = False
-                    block.exit_code = None
-                    if exec_id:
-                        executions[exec_id] = block
+                    blocks.append(block)
+                    tools[tool_call_id] = block
+                raw_output = _execution_output(artifact)
+                _apply_transcript_execution(
+                    block,
+                    project_execution_update(
+                        current_output=block.content,
+                        current_artifact=block.artifact,
+                        current_status=block.status,
+                        update_artifact=artifact,
+                        output_delta=content if (artifact.get("running") is True and raw_output is None) else raw_output,
+                        fallback_output=content,
+                        output_mode="replace",
+                        event_is_error=is_error,
+                    ),
+                )
+                exec_id = str(artifact.get("execution_id") or "")
+                if exec_id:
+                    executions[exec_id] = block
                 continue
             status = (
                 subagent_card_status(is_error=is_error, artifact=artifact)
                 if is_task else ("error" if is_error else "completed")
             )
             is_error = status in {"error", "cancelled"}
-            code = (
-                artifact.get("exit_code")
-                if isinstance(artifact, dict) and getattr(message, "name", None) == "execute"
-                else None
-            )
-            exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-            display_content = content
-            if getattr(message, "name", None) == "execute" and isinstance(artifact, dict):
-                output = _execution_output(artifact)
-                if output is not None:
-                    display_content = output
             if block is not None and is_background_launch(block.name, block.arguments):
                 # A running launch leaves the card open. A tool error settles it.
                 card = subagent_card_status(is_error=is_error, artifact=artifact)
@@ -270,20 +352,20 @@ def messages_to_transcript(
                     continue
                 status, is_error = card, card in {"error", "cancelled"}
             if block is not None:
-                block.content = display_content
+                block.content = content
                 block.is_error = is_error
                 block.status = status
-                block.exit_code = exit_code
+                block.exit_code = None
                 block.artifact = artifact
             else:
                 block = TranscriptBlock(
                     kind="tool",
                     tool_call_id=tool_call_id,
                     name="start_task" if is_task else str(getattr(message, "name", "") or "tool"),
-                    content=display_content,
+                    content=content,
                     is_error=is_error,
                     status=status,
-                    exit_code=exit_code,
+                    exit_code=None,
                     artifact=artifact,
                 )
                 blocks.append(block)

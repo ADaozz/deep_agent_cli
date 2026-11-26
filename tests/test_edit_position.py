@@ -10,10 +10,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.bootstrap.factory import create_agent
 from agent.cli.display import UiDisplayLimits
-from agent.cli.previews import UNKNOWN_LINE_NUMBER, build_tool_preview
+from agent.cli.previews import build_tool_preview
 from agent.cli.state import CliState, ToolBlock
 from agent.cli.rendering import render_transcript
-from agent.execution.filesystem import LineNumberedFilesystemBackend
+from agent.execution.filesystem import LineNumberedFilesystemBackend, _match_start_lines
+from agent.execution.mutations import EditPositionCapture, reset_edit_capture, set_edit_capture
 from agent.middleware.workspace_filesystem import WorkspaceFilesystemMiddleware
 from agent.runtime.runner import AgentRunner
 from tests.cli_support import plain as _plain
@@ -50,28 +51,52 @@ def _body(block: ToolBlock) -> list[str]:
     return [line.text for line in preview.file_mutation.sections[0].lines]
 
 
+def _capture_edit(backend: LineNumberedFilesystemBackend, *args, **kwargs):
+    capture = EditPositionCapture()
+    token = set_edit_capture(capture)
+    try:
+        result = backend.edit(*args, **kwargs)
+    finally:
+        reset_edit_capture(token)
+    return result, capture
+
+
+async def _capture_aedit(backend: LineNumberedFilesystemBackend, *args, **kwargs):
+    capture = EditPositionCapture()
+    token = set_edit_capture(capture)
+    try:
+        result = await backend.aedit(*args, **kwargs)
+    finally:
+        reset_edit_capture(token)
+    return result, capture
+
+
 def test_edit_backend_reports_match_line_from_the_same_read(tmp_path: Path) -> None:
     path = tmp_path / "app.py"
     path.write_text("one\ntwo\nthree\nfour\n")
     backend = _backend(tmp_path)
-    result = backend.edit("/app.py", "three", "THREE")
+    result, capture = _capture_edit(backend, "/app.py", "three", "THREE")
     assert result.error is None
     assert result.occurrences == 1
-    assert result.edit_start_lines == (3,)
+    assert capture.start_lines == [3]
+    assert capture.occurrences == 1
     assert path.read_text() == "one\ntwo\nTHREE\nfour\n"
 
     path.write_text("one\ntwo\nthree\nfour\n")
-    async_result = asyncio.run(backend.aedit("/app.py", "four", "FOUR"))
-    assert async_result.edit_start_lines == (4,)
+    async_result, async_capture = asyncio.run(_capture_aedit(backend, "/app.py", "four", "FOUR"))
+    assert async_result.error is None
+    assert async_capture.start_lines == [4]
+    assert async_capture.occurrences == 1
 
 
 def test_replace_all_reports_every_match_line(tmp_path: Path) -> None:
     path = tmp_path / "app.py"
     path.write_text("alpha\nold\ngamma\nold\nomega\n")
-    result = _backend(tmp_path).edit("/app.py", "old", "new", replace_all=True)
+    result, capture = _capture_edit(_backend(tmp_path), "/app.py", "old", "new", replace_all=True)
     assert result.error is None
     assert result.occurrences == 2
-    assert result.edit_start_lines == (2, 4)
+    assert capture.start_lines == [2, 4]
+    assert capture.occurrences == 2
     assert path.read_text() == "alpha\nnew\ngamma\nnew\nomega\n"
 
 
@@ -193,14 +218,14 @@ def test_replace_all_multi_line_matches_cover_all_positions() -> None:
 def test_replace_all_preview_aggregates_with_other_edits(tmp_path: Path) -> None:
     path = tmp_path / "app.py"
     path.write_text("x\nold\nmiddle\nold\nend\n")
-    result = _backend(tmp_path).edit("/app.py", "old", "older", replace_all=True)
-    assert result.edit_start_lines == (2, 4)
+    result, capture = _capture_edit(_backend(tmp_path), "/app.py", "old", "older", replace_all=True)
+    assert capture.start_lines == [2, 4]
     blocks = [
         ToolBlock(
             "edit-all", "edit",
             {"file_path": "/app.py", "old_string": "old", "new_string": "older"},
             artifact={
-                "edit_start_lines": list(result.edit_start_lines),
+                "edit_start_lines": list(capture.start_lines),
                 "edit_occurrences": result.occurrences,
             },
             status="completed",
@@ -224,9 +249,9 @@ def test_replace_all_preview_aggregates_with_other_edits(tmp_path: Path) -> None
     assert rendered.index("5+ END") < rendered.index("5- end")
 
 
-def test_legacy_edit_without_metadata_uses_the_unknown_marker() -> None:
-    block = ToolBlock(
-        "edit-legacy", "edit",
+def test_edit_without_valid_position_metadata_shows_summary_only() -> None:
+    missing = ToolBlock(
+        "edit-missing", "edit",
         {
             "file_path": "/workspace/app.py",
             "old_string": "a\nb\nc\nd\ne\nf",
@@ -234,68 +259,43 @@ def test_legacy_edit_without_metadata_uses_the_unknown_marker() -> None:
         },
         status="completed",
     )
-    body = _body(block)
-    assert body == [
-        f"   {UNKNOWN_LINE_NUMBER}- b",
-        f"   {UNKNOWN_LINE_NUMBER}+ B",
-        f"   {UNKNOWN_LINE_NUMBER}- f",
-        f"   {UNKNOWN_LINE_NUMBER}+ F",
-    ]
-    rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
-    assert f"{UNKNOWN_LINE_NUMBER}- b" in rendered
-    # No snippet-relative number is presented as a real file line.
-    assert "   2+ B" not in rendered
-    assert "   6- f" not in rendered
-
-
-def test_legacy_grouped_edits_keep_change_order_without_guessed_numbers() -> None:
-    blocks = [
-        ToolBlock(
-            f"legacy-{index}", "edit",
-            {"file_path": "/workspace/app.py", "old_string": f"old {index}", "new_string": f"new {index}"},
-            status="completed",
-        )
-        for index in range(3)
-    ]
-    body = [line.text for line in build_tool_preview(blocks[0]).lines]
-    assert body == [
-        f"   {UNKNOWN_LINE_NUMBER}- old 0",
-        f"   {UNKNOWN_LINE_NUMBER}+ new 0",
-    ]
-    rendered = _plain(render_transcript(
-        CliState(blocks=blocks), 100, limits=UiDisplayLimits(head_lines=4),
-    ))
-    assert rendered.count("Edited /workspace/app.py") == 1
-    # Unknown numbers keep the change order instead of a guessed sort.
-    assert rendered.index(f"{UNKNOWN_LINE_NUMBER}- old 0") < rendered.index(f"{UNKNOWN_LINE_NUMBER}+ new 0")
-    assert rendered.index(f"{UNKNOWN_LINE_NUMBER}+ new 0") < rendered.index(f"{UNKNOWN_LINE_NUMBER}- old 1")
-    assert "   ⋮" in rendered
-    assert "… 2 changed lines hidden · Ctrl+R to review" in rendered
-    assert "snippet line numbers" not in rendered
-
-
-def test_incomplete_position_metadata_falls_back_to_unknown() -> None:
-    block = ToolBlock(
+    mismatch = ToolBlock(
         "edit-mismatch", "edit",
         {"file_path": "/workspace/app.py", "old_string": "old", "new_string": "new"},
         artifact={"edit_start_lines": [3], "edit_occurrences": 2},
         status="completed",
     )
-    body = _body(block)
-    assert body == [
-        f"   {UNKNOWN_LINE_NUMBER}- old",
-        f"   {UNKNOWN_LINE_NUMBER}+ new",
-    ]
-
-
-def test_single_scalar_start_line_record_still_numbers_the_edit() -> None:
-    block = ToolBlock(
+    legacy_scalar = ToolBlock(
         "edit-scalar", "edit",
         {"file_path": "/workspace/app.py", "old_string": "old", "new_string": "new"},
         artifact={"edit_start_line": 7, "edit_occurrences": 1},
         status="completed",
     )
-    assert _body(block) == ["   7+ new", "   7- old"]
+    waiting = ToolBlock(
+        "edit-waiting", "edit",
+        {"file_path": "/workspace/app.py", "old_string": "old", "new_string": "new"},
+        status="waiting",
+    )
+    for block in (missing, mismatch, legacy_scalar):
+        preview = build_tool_preview(block)
+        assert preview.file_mutation is not None
+        assert preview.file_mutation.diff is None
+        assert preview.lines == ()
+        rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
+        assert "• Edited /workspace/app.py" in rendered
+        assert "?" not in rendered
+        assert "(+" not in rendered
+    waiting_rendered = _plain(render_transcript(CliState(blocks=[waiting]), 100))
+    assert "• Editing /workspace/app.py — waiting for input" in waiting_rendered
+    assert "?" not in waiting_rendered
+    assert "(+" not in waiting_rendered
+
+
+def test_match_start_lines_handles_many_and_multiline_matches_linearly() -> None:
+    # 5,000 multiline matches across 10,000 lines — verifies incremental line counting.
+    content = "old\nkeep\n" * 5000
+    assert _match_start_lines(content, "old\nkeep") == [2 * i + 1 for i in range(5000)]
+    assert _match_start_lines("a\nb\na\nb\n", "a\nb\n") == [1, 3]
 
 
 def test_grouped_edits_sort_by_actual_file_position() -> None:
@@ -319,23 +319,25 @@ def test_grouped_edits_sort_by_actual_file_position() -> None:
 
 
 @pytest.mark.parametrize("expanded", [False, True])
-def test_grouped_known_and_unknown_edits_share_one_card(expanded: bool) -> None:
+def test_grouped_edits_ignore_unpositioned_diff_rows_and_keep_known_rows(expanded: bool) -> None:
     known = ToolBlock(
         "known", "edit",
         {"file_path": "/workspace/app.py", "old_string": "k", "new_string": "K"},
         artifact={"edit_start_lines": [5], "edit_occurrences": 1}, status="completed",
     )
-    legacy = ToolBlock(
-        "legacy", "edit",
+    unpositioned = ToolBlock(
+        "unpositioned", "edit",
         {"file_path": "/workspace/app.py", "old_string": "l", "new_string": "L"},
         status="completed",
     )
     rendered = _plain(render_transcript(
-        CliState(blocks=[legacy, known], diffs_expanded=expanded), 100,
+        CliState(blocks=[unpositioned, known], diffs_expanded=expanded), 100,
     ))
-    assert rendered.count("Edited /workspace/app.py") == 1
-    assert rendered.index("5+ K") < rendered.index(f"{UNKNOWN_LINE_NUMBER}+ L")
-    assert "snippet line numbers" not in rendered
+    assert rendered.count("Edited /workspace/app.py (+1 -1)") == 1
+    assert "5+ K" in rendered
+    assert "5- k" in rendered
+    assert "?" not in rendered
+    assert "+ L" not in rendered
 
 
 def test_edit_tool_completion_artifact_reaches_the_tui_card(tmp_path: Path) -> None:

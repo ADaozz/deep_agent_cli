@@ -130,14 +130,14 @@ def test_command_and_generic_output_limits() -> None:
 
 
 def test_file_preview_and_create_list_limits() -> None:
-    configured = limits(head_lines=2, create_preview_items=2)
+    configured = limits(head_lines=2)
     write = ToolBlock("write", "write", {"file_path": "notes", "content": "一\n二\n三\n四"})
     preview = build_tool_preview(write, limits=configured)
     assert len([line for line in preview.lines if line.style == "add"]) == 2
     assert any("2 changed lines hidden" in line.text for line in preview.lines)
     edit = ToolBlock("edit", "edit", {
         "file_path": "notes", "old_string": "旧一\n旧二\n旧三", "new_string": "新一\n新二\n新三",
-    }, status="completed")
+    }, artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed")
     preview = build_tool_preview(edit, limits=configured)
     changed = [line for line in preview.lines if line.style in {"add", "delete"}]
     assert len(changed) == 2 and {line.style for line in changed} == {"add", "delete"}
@@ -151,6 +151,8 @@ def test_file_preview_and_create_list_limits() -> None:
     assert "Created 5 files (+5 -0)" in text
     assert all(f"├ file{i} (+1 -0)" in text for i in range(4))
     assert "└ file4 (+1 -0)" in text
+    with pytest.raises(ValueError, match="create_preview_items"):
+        limits(create_preview_items=2)
 
 
 def test_exploration_and_failure_summary_limits() -> None:
@@ -234,7 +236,7 @@ def test_head_and_tail_limits_are_independent_across_tool_types() -> None:
 def test_edit_preview_respects_unified_head_budget(budget) -> None:
     block = ToolBlock("edit", "edit", {
         "file_path": "notes", "old_string": "a\nb\nc\nd", "new_string": "e\nf\ng\nh",
-    }, status="completed")
+    }, artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed")
     preview = build_tool_preview(block, limits=limits(head_lines=budget))
     changed = [line for line in preview.lines if line.style in {"add", "delete"}]
     assert len(changed) == budget

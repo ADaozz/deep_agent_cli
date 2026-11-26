@@ -19,6 +19,7 @@ from agent.execution.process import (
     KILL_CONFIRM_SECONDS,
     LocalExecuteResponse,
     _OutputCollector,
+    execution_metadata_dict,
     format_terminal_output,
 )
 from agent.runtime.cancellation import (
@@ -265,19 +266,25 @@ class CommandSession:
         else:
             reason, exit_code = None, int(self._exit_code if self._exit_code is not None else 0)
         meta = self.collector.log_metadata()
-        payload = {
-            "execution_id": self.execution_id,
-            "running": False,
-            "exit_code": exit_code,
-            "termination_reason": reason,
-            "truncated": meta["truncated"],
-            "host_log_path": meta["host_log_path"],
-            "agent_log_path": meta["agent_log_path"],
-            "log_error": meta["log_error"],
-            "max_output_bytes": meta["max_output_bytes"],
-        }
+        payload = execution_metadata_dict(
+            execution_id=self.execution_id,
+            running=False,
+            exit_code=exit_code,
+            termination_reason=reason,
+            **meta,
+        )
         self._terminal = payload
         return dict(payload)
+
+    def _metadata_locked(self) -> dict[str, Any]:
+        """Single state derivation for running and terminal execution metadata."""
+        if self._done:
+            return self._compute_terminal_locked()
+        return execution_metadata_dict(
+            execution_id=self.execution_id,
+            running=True,
+            **self.collector.log_metadata(),
+        )
 
     def _finalize_terminal(self) -> None:
         now = self._registry.now() if self._registry is not None else time.monotonic()
@@ -479,37 +486,27 @@ class CommandSession:
     def execution_metadata(self) -> dict[str, Any]:
         """Unified execution state metadata from CommandSession (running or terminal)."""
         with self._cv:
-            if self._done:
-                return self._compute_terminal_locked()
-            meta = self.collector.log_metadata()
+            return self._metadata_locked()
+
+    def execution_info(self) -> dict[str, object]:
+        """Approval/policy view derived directly from CommandSession state."""
+        with self._cv:
+            meta = self._metadata_locked()
             return {
-                "execution_id": self.execution_id,
-                "running": True,
-                "exit_code": None,
-                "termination_reason": None,
-                **meta,
+                "execution_id": meta["execution_id"],
+                "running": meta["running"],
+                "network": bool(self.network),
+                "sandbox_mode": self.sandbox_mode,
+                "stdin_mode": self.stdin_mode,
             }
 
     def restore_snapshot(self) -> dict[str, Any]:
         """Read-only state snapshot for TUI session restore (never consumes unread output)."""
         with self._cv:
-            if self._done:
-                term = self._compute_terminal_locked()
-                return {
-                    "running": False,
-                    "artifact": term,
-                    "output": self.collector.tail_text(),
-                }
-            meta = self.collector.log_metadata()
+            meta = self._metadata_locked()
             return {
-                "running": True,
-                "artifact": {
-                    "execution_id": self.execution_id,
-                    "running": True,
-                    "exit_code": None,
-                    "termination_reason": None,
-                    **meta,
-                },
+                "running": meta["running"],
+                "artifact": meta,
                 "output": self.collector.tail_text(),
             }
 
@@ -518,49 +515,28 @@ class CommandSession:
             return self._snapshot_locked(include_pending=include_pending)
 
     def _snapshot_locked(self, *, include_pending: bool) -> LocalExecuteResponse:
-        if self._done:
-            term = self._compute_terminal_locked()
+        meta = self._metadata_locked()
+        if not meta["running"]:
             unread_only = self._yielded
-            if unread_only:
-                body = self.collector.take_pending() if include_pending else ""
-            else:
-                body = self.collector.tail_text()
+            body = (
+                (self.collector.take_pending() if include_pending else "")
+                if unread_only else self.collector.tail_text()
+            )
             output = format_terminal_output(
                 body,
-                exit_code=term["exit_code"],
-                termination_reason=term["termination_reason"],
+                exit_code=meta["exit_code"],
+                termination_reason=meta["termination_reason"],
                 timeout=self.timeout,
                 failure=self._failure,
                 spawn_error=self._spawn_error,
                 unread_only=unread_only,
                 truncation_detail=self.collector.truncation_detail(),
             )
-            return LocalExecuteResponse(
-                output,
-                term["exit_code"],
-                term["truncated"],
-                host_log_path=term["host_log_path"],
-                agent_log_path=term["agent_log_path"],
-                log_error=term["log_error"],
-                termination_reason=term["termination_reason"],
-                max_output_bytes=term["max_output_bytes"],
-                execution_id=term["execution_id"],
-                running=False,
-                output_delta=body,
-            )
+            return LocalExecuteResponse.from_metadata(output, meta, output_delta=body)
         pending = self.collector.take_pending() if include_pending else ""
-        meta = self.collector.log_metadata()
-        return LocalExecuteResponse(
+        return LocalExecuteResponse.from_metadata(
             format_running_content(pending, self.execution_id),
-            None,
-            meta["truncated"],
-            host_log_path=meta["host_log_path"],
-            agent_log_path=meta["agent_log_path"],
-            log_error=meta["log_error"],
-            termination_reason=None,
-            max_output_bytes=meta["max_output_bytes"],
-            execution_id=self.execution_id,
-            running=True,
+            meta,
             output_delta=pending,
         )
 

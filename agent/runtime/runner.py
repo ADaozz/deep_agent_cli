@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 from threading import Lock
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
@@ -806,15 +806,19 @@ class AgentRunner:
 
     def execution_snapshots(self, thread_id: str | None = None) -> dict[str, dict[str, Any]]:
         """Read-only snapshots of active or unconsumed executions owned by ``thread_id``."""
+        from agent.execution.ports import interactive_backend
+
         owner = self.thread_id if thread_id is None else thread_id
-        fn = getattr(self.prepared.backend, "execution_snapshots", None)
-        return fn(owner) if callable(fn) and owner else {}
+        backend = interactive_backend(self.prepared.backend)
+        return backend.execution_snapshots(owner) if backend is not None and owner else {}
 
     def list_active_executions(self, thread_id: str | None = None) -> list[dict[str, Any]]:
         """List active interactive (pipe/pty) processes owned by the active session."""
+        from agent.execution.ports import interactive_backend
+
         owner = self.thread_id if thread_id is None else thread_id
-        fn = getattr(self.prepared.backend, "list_active_executions", None)
-        return list(fn(owner)) if callable(fn) and owner else []
+        backend = interactive_backend(self.prepared.backend)
+        return list(backend.list_active_executions(owner)) if backend is not None and owner else []
 
     def send_execution_input(
         self,
@@ -825,10 +829,12 @@ class AgentRunner:
         write_timeout: float = 15.0,
     ) -> None:
         """Send direct user input to an owned running process without fabricating tool calls."""
-        fn = getattr(self.prepared.backend, "send_execution_input", None)
-        if not callable(fn):
+        from agent.execution.ports import interactive_backend
+
+        backend = interactive_backend(self.prepared.backend)
+        if backend is None:
             raise NotImplementedError("Active backend does not support direct process input")
-        fn(
+        backend.send_execution_input(
             execution_id,
             chars=chars,
             action=action,
@@ -838,9 +844,11 @@ class AgentRunner:
 
     def resize_execution(self, execution_id: str, rows: int, cols: int) -> None:
         """Forward terminal dimensions to an owned running PTY process."""
-        fn = getattr(self.prepared.backend, "resize_execution", None)
-        if callable(fn) and self.thread_id:
-            fn(execution_id, rows, cols, thread_id=self.thread_id)
+        from agent.execution.ports import interactive_backend
+
+        backend = interactive_backend(self.prepared.backend)
+        if backend is not None and self.thread_id:
+            backend.resize_execution(execution_id, rows, cols, thread_id=self.thread_id)
 
     def _end_sandbox_session(self, reason: str) -> None:
         pool = self.sandbox_pool
@@ -935,6 +943,15 @@ class AgentRunner:
     ) -> list[SecretMetadata]:
         return self.secret_store.find_conflicts(items, session_id=self.thread_id)
 
+    def _notify_secrets_changed(self, names: Iterable[str]) -> None:
+        """Single secret-mutation notification hook for host consumers such as MCPManager."""
+        invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
+        if not callable(invalidate_mcp):
+            return
+        for name in dict.fromkeys(names):
+            if name:
+                invalidate_mcp(name)
+
     def set_secret(
         self,
         name: str,
@@ -954,9 +971,7 @@ class AgentRunner:
             consumers=consumers,
             overwrite=overwrite,
         )
-        invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
-        if callable(invalidate_mcp):
-            invalidate_mcp(meta.name)
+        self._notify_secrets_changed((meta.name,))
         return meta
 
     def delete_secret(
@@ -969,9 +984,7 @@ class AgentRunner:
             name, storage=storage, session_id=self.thread_id,
         )
         if removed:
-            invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
-            if callable(invalidate_mcp):
-                invalidate_mcp(name)
+            self._notify_secrets_changed((name,))
         return removed
 
     def authorize_secret_consumer(
@@ -1546,10 +1559,7 @@ class AgentRunner:
                 session_id=self.thread_id,
                 overwrite=effective_overwrite,
             )
-            invalidate_mcp = getattr(self.mcp, "invalidate_credential", None)
-            if callable(invalidate_mcp):
-                for meta in stored:
-                    invalidate_mcp(meta.name)
+            self._notify_secrets_changed(meta.name for meta in stored)
             if interaction_id:
                 self._committed_secret_interactions[interaction_id] = dict(resolved_refs)
         batch.clear()

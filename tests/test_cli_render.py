@@ -1097,7 +1097,7 @@ def test_execute_status_marker_colors(status, reason, color) -> None:
     assert title.plain.startswith("• ")
 
 
-def test_edit_waiting_shows_short_diff_preview() -> None:
+def test_edit_waiting_shows_summary_only_without_guessed_lines() -> None:
     old = "\n".join(f"keep-{index}" for index in range(20))
     new = "replaced"
     state = CliState(blocks=[ToolBlock(
@@ -1107,21 +1107,16 @@ def test_edit_waiting_shows_short_diff_preview() -> None:
         status="waiting",
     )])
     rendered = _plain(render_transcript(state, 80))
-    assert "Editing /workspace/tests/test_cache.py" in rendered
-    assert "waiting for input" in rendered
+    assert "• Editing /workspace/tests/test_cache.py — waiting for input" in rendered
     assert "--- a/workspace/tests/test_cache.py" not in rendered
     assert "+++ b/workspace/tests/test_cache.py" not in rendered
     assert "@@" not in rendered
-    assert "- keep-0" in rendered
-    assert "keep-15" not in rendered
-    assert "Ctrl+R to review" in rendered
+    assert "?" not in rendered
+    assert "- keep-0" not in rendered
     for flag in ("diffs_expanded", "tools_expanded"):
         expanded = _plain(render_transcript(CliState(blocks=state.blocks, **{flag: True}), 80))
-        assert "DeepAgentCLI" in expanded
-        assert "waiting for input" in expanded
-        assert "keep-15" in expanded
-        assert "hidden" not in expanded
-        assert "--- a/workspace/tests/test_cache.py" not in expanded
+        assert "• Editing /workspace/tests/test_cache.py — waiting for input" in expanded
+        assert "?" not in expanded
 
 
 def test_edit_preview_excludes_context_and_metadata_lines() -> None:
@@ -1133,6 +1128,7 @@ def test_edit_preview_excludes_context_and_metadata_lines() -> None:
             "old_string": "first\nsecond\nthird",
             "new_string": "first\nchanged\nthird",
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )])
     rendered = _plain(render_transcript(state, 100))
@@ -1219,17 +1215,18 @@ def test_grouped_edits_use_one_sorted_file_line_body() -> None:
 
 
 def test_edit_group_merges_across_files_until_message() -> None:
-    def edit(identifier: str, path: str, new: str = "y") -> ToolBlock:
+    def edit(identifier: str, path: str, new: str = "y", line: int = 1) -> ToolBlock:
         return ToolBlock(
             tool_call_id=identifier, name="edit",
             arguments={"file_path": path, "old_string": "x", "new_string": new},
+            artifact={"edit_start_lines": [line], "edit_occurrences": 1},
             status="completed",
         )
 
     path = "/workspace/report.md"
     state = CliState(blocks=[
-        edit("one", path, "first"), edit("other", "/workspace/other.md"), edit("two", path, "second"),
-        MessageBlock(kind="assistant", content="done"), edit("three", path),
+        edit("one", path, "first", 1), edit("other", "/workspace/other.md", "y", 2), edit("two", path, "second", 5),
+        MessageBlock(kind="assistant", content="done"), edit("three", path, "y", 8),
     ])
     rendered = _plain(render_transcript(state, 100))
     assert "Edited 2 files (+3 -3)" in rendered
@@ -1246,13 +1243,13 @@ def test_multi_file_edit_aggregates_repeated_path() -> None:
     edits = [
         ToolBlock("e1", "edit", {
             "file_path": "/workspace/a.md", "old_string": "x", "new_string": "first",
-        }, status="completed"),
+        }, artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed"),
         ToolBlock("e2", "edit", {
             "file_path": "/workspace/b.md", "old_string": "x", "new_string": "b",
-        }, status="completed"),
+        }, artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed"),
         ToolBlock("e3", "edit", {
             "file_path": "/workspace/a.md", "old_string": "y", "new_string": "second",
-        }, status="completed"),
+        }, artifact={"edit_start_lines": [5], "edit_occurrences": 1}, status="completed"),
     ]
     rendered = _plain(render_transcript(CliState(blocks=edits), 100))
     assert "Edited 2 files (+3 -3)" in rendered
@@ -1316,7 +1313,7 @@ def test_single_edit_collapsed_shows_gutter_ellipsis_and_expand_hides_it() -> No
     block = ToolBlock(
         "edit-tree", "edit",
         {"file_path": "/workspace/app.py", "old_string": old, "new_string": "one\ntwo\nthree"},
-        artifact={"edit_start_line": 24}, status="completed",
+        artifact={"edit_start_lines": [24], "edit_occurrences": 1}, status="completed",
     )
     collapsed = _plain(render_transcript(
         CliState(blocks=[block]), 100, limits=UiDisplayLimits(head_lines=4),
@@ -1353,10 +1350,10 @@ def test_mutation_tree_wraps_and_keeps_spines_continuous_at_any_width() -> None:
     blocks = [
         ToolBlock("e0", "edit", {
             "file_path": "/workspace/one.py", "old_string": "a", "new_string": f"first\n{long}",
-        }, artifact={"edit_start_line": 4}, status="completed"),
+        }, artifact={"edit_start_lines": [4], "edit_occurrences": 1}, status="completed"),
         ToolBlock("e1", "edit", {
             "file_path": "/workspace/two.py", "old_string": "b", "new_string": f"second\n{long}",
-        }, artifact={"edit_start_line": 9}, status="completed"),
+        }, artifact={"edit_start_lines": [9], "edit_occurrences": 1}, status="completed"),
     ]
     for width in (40, 60, 100):
         for state in (CliState(blocks=blocks), CliState(blocks=blocks, diffs_expanded=True)):
@@ -1465,7 +1462,10 @@ def test_python_diff_keeps_syntax_foreground_on_add_delete_background(monkeypatc
         "old_string": "def foo():\n    return 1\n",
         "new_string": "def foo():\n    return 2\n",
     }
-    block = ToolBlock("edit-syntax", "edit", args, status="completed")
+    block = ToolBlock(
+        "edit-syntax", "edit", args,
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed",
+    )
     for rendered in (
         render_transcript(CliState(blocks=[block]), 80),
         render_transcript(CliState(blocks=[block], tools_expanded=True), 80),
@@ -1494,7 +1494,7 @@ def test_edit_highlights_keep_red_and_green_in_terminal_output(view, depth, gree
 
     block = ToolBlock("edit-colors", "edit", {
         "file_path": "/workspace/example.py", "old_string": "old", "new_string": "new",
-    }, status="completed")
+    }, artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed")
     state = CliState(blocks=[block], diffs_expanded=view == "expanded")
     fragments, _ = TranscriptRenderer().render(state, 60)
     for marker, color in (("+", "00af00"), ("-", "af0000")):
@@ -1520,7 +1520,10 @@ def test_expanded_edit_keeps_changed_lines_on_the_original_card() -> None:
     }
     state = CliState(blocks=[
         MessageBlock(kind="user", content="nearby"),
-        ToolBlock("edit-expand", "edit", args, status="completed"),
+        ToolBlock(
+            "edit-expand", "edit", args,
+            artifact={"edit_start_lines": [1], "edit_occurrences": 1}, status="completed",
+        ),
     ], diffs_expanded=True)
     rendered = _plain(render_transcript(state, 100))
     assert "DeepAgentCLI" in rendered
@@ -1562,6 +1565,7 @@ def test_edit_with_empty_old_string_stays_edited_and_keeps_review_diff() -> None
         tool_call_id="edit-add",
         name="edit",
         arguments={"file_path": "/workspace/f.md", "old_string": "", "new_string": new},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
@@ -1641,7 +1645,7 @@ def test_write_operation_artifact_controls_create_and_overwrite_titles() -> None
     edited = ToolBlock(
         "edit-old-empty", "edit",
         {"file_path": path, "old_string": "", "new_string": "hello"},
-        artifact={"operation": "create"}, status="completed",
+        artifact={"operation": "create", "edit_start_lines": [1], "edit_occurrences": 1}, status="completed",
     )
     assert "• Created /workspace/report.md (+1 -0)" in _plain(render_transcript(CliState(blocks=[created]), 100))
     assert "• Wrote /workspace/report.md (+1 -0)" in _plain(render_transcript(CliState(blocks=[overwritten]), 100))
@@ -1868,6 +1872,7 @@ def test_edit_preview_wraps_long_lines_before_terminal_edge() -> None:
         tool_call_id="edit-wide",
         name="edit",
         arguments={"file_path": "/workspace/f.md", "old_string": "short", "new_string": "x" * 200},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(_capture(_tool(block, False), 80))
@@ -1880,6 +1885,7 @@ def test_edit_preview_empty_new_string_still_shows_deletion() -> None:
         tool_call_id="edit-empty-new",
         name="edit",
         arguments={"file_path": "/workspace/f.md", "old_string": "foo", "new_string": ""},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
@@ -1892,6 +1898,7 @@ def test_edit_preview_empty_old_string_shows_addition() -> None:
         tool_call_id="edit-empty-old",
         name="edit",
         arguments={"file_path": "/workspace/f.md", "old_string": "", "new_string": "foo"},
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )
     rendered = _plain(render_transcript(CliState(blocks=[block]), 100))
@@ -1940,6 +1947,7 @@ def test_edit_preview_counts_added_deleted() -> None:
             "old_string": "a\nb\nc",
             "new_string": "a\nb\nc\nd\ne",
         },
+        artifact={"edit_start_lines": [1], "edit_occurrences": 1},
         status="completed",
     )])
     rendered = _plain(render_transcript(state, 100))

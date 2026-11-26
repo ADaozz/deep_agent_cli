@@ -10,7 +10,6 @@ is never persisted; sessions keep the raw ToolMessage artifact instead.
 
 from __future__ import annotations
 
-import math
 import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
@@ -65,8 +64,6 @@ class ToolPreview:
     omit_status_suffix: bool = False
     # Title suffix (edit: "(+2 -2)").
     detail: str = ""
-    # Highlighted count line above the content (write: "+302 lines").
-    label: str = ""
     # One-line label for compact lists (explore group: 'Read file.py').
     summary: str = ""
     lines: tuple[PreviewLine, ...] = ()
@@ -99,15 +96,11 @@ class CommandExecutionPreview:
 
 @dataclass(frozen=True)
 class _ChangedLine:
-    """One real -/+ line of a unified diff, with its display position.
-
-    ``number`` is the actual file line. ``None`` means the record carries no
-    match metadata, so the number is unknown and never guessed.
-    """
+    """One real -/+ line of a unified diff at its actual 1-based file line."""
 
     text: str
     kind: Literal["add", "delete"]
-    number: int | None
+    number: int
 
 
 @dataclass(frozen=True)
@@ -133,6 +126,8 @@ class FileSection:
     lines: tuple[PreviewLine, ...] = ()
     # Changed lines this section did not show.
     hidden: int = 0
+    # True when this section has a real diff (false for empty overwrite or edit without position metadata).
+    has_diff: bool = False
 
 
 @dataclass(frozen=True)
@@ -144,11 +139,14 @@ class FileMutationPreview:
     diff: DiffPreview | None = None
     # Footer notice outside the tree, after all section rows.
     footer: tuple[PreviewLine, ...] = ()
-    label: str = ""
-    paths: tuple[str, ...] = ()
     # One section per path, including single-file cards. The renderer owns tree
     # chrome so PreviewLine.text never stores a connection glyph.
     sections: tuple[FileSection, ...] = ()
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """Ordered paths represented by this card, derived from ``sections``."""
+        return tuple(section.path for section in self.sections) if self.sections else (self.path,)
 
     @property
     def compact_lines(self) -> tuple[PreviewLine, ...]:
@@ -157,14 +155,8 @@ class FileMutationPreview:
         return (*body, *self.footer)
 
 
-def _changed_line_sort_key(line: _ChangedLine) -> tuple[float, int]:
-    """Known numbers sort by line (add before delete); unknown keep diff order.
-
-    The sort is stable, so merged edits with unknown numbers stay in the order
-    their diffs produced them.
-    """
-    if line.number is None:
-        return (math.inf, 0)
+def _changed_line_sort_key(line: _ChangedLine) -> tuple[int, int]:
+    """Sort by actual file line ascending, add before delete."""
     return (line.number, 0 if line.kind == "add" else 1)
 
 
@@ -289,22 +281,25 @@ def _select_changed_lines(
     return selected
 
 
-# Width of the diff line-number slot. The tree body column is derived from it.
+# Minimum width of the diff line-number slot. Expands with a leading space once
+# real line numbers reach 4+ digits so numbers never collide with └ / │.
 NUMBER_GUTTER = 4
-UNKNOWN_LINE_NUMBER = "?"
 
 
-def format_numbered_change(number: int | None, unified_line: str) -> str:
-    """Render `  12- content`: marker glued to the line number, space before body.
+def _number_gutter(changed: Sequence[_ChangedLine]) -> int:
+    """Unified line-number slot width for all rows and ⋮ markers in a file card."""
+    digits = max((len(str(line.number)) for line in changed), default=0)
+    return max(NUMBER_GUTTER, digits + 1)
 
-    An unknown line keeps the same number slot and shows `?` instead.
-    """
-    gutter = UNKNOWN_LINE_NUMBER if number is None else str(number)
+
+def format_numbered_change(number: int, unified_line: str, *, gutter: int = NUMBER_GUTTER) -> str:
+    """Render `  12- content`: marker glued to the line number, space before body."""
+    label = str(number)
     prefix, content = unified_line[:1], unified_line[1:]
     if prefix not in "+-":
-        return f"{gutter:>{NUMBER_GUTTER}} {unified_line}"
+        return f"{label:>{gutter}} {unified_line}"
     body = f"{prefix} {content}" if content else prefix
-    return f"{gutter:>{NUMBER_GUTTER}}{body}"
+    return f"{label:>{gutter}}{body}"
 
 
 def _edit_diff(path: str, old: str, new: str, start_lines: tuple[int, ...]) -> str:
@@ -369,6 +364,8 @@ def build_diff_preview(
             changed=tuple(changed),
         )
     if name == "edit":
+        if not start_lines:
+            return None
         old = args.get("old_string")
         new = args.get("new_string")
         if not isinstance(old, str) or not isinstance(new, str):
@@ -378,8 +375,6 @@ def build_diff_preview(
         if not raw:
             return None
         changed = _changed_lines(raw)
-        if not start_lines:
-            changed = [replace(line, number=None) for line in changed]
         return DiffPreview(
             path=_mutation_path(name, args),
             added=sum(1 for line in changed if line.kind == "add"),
@@ -396,13 +391,10 @@ def build_diff_preview(
 
 
 def _edit_start_lines(artifact: Any) -> tuple[int, ...]:
-    """Actual match start lines captured by the edit execution, when present."""
+    """Actual match start lines captured by edit execution in current format."""
     if not isinstance(artifact, Mapping):
         return ()
     values = artifact.get("edit_start_lines")
-    if values is None and artifact.get("edit_start_line") is not None:
-        # Records written before every match was captured carry one start line.
-        values = [artifact.get("edit_start_line")]
     if not isinstance(values, (list, tuple)) or not values:
         return ()
     starts = tuple(
@@ -421,9 +413,9 @@ def _hidden_changed_footer(hidden: int) -> PreviewLine:
     return PreviewLine(f"… {hidden} changed lines hidden · {REVIEW_HINT}", "dim")
 
 
-def _omitted_marker() -> PreviewLine:
-    """⋮ in the existing 4-wide line-number slot, never a tree glyph."""
-    return PreviewLine(f"{'⋮':>{NUMBER_GUTTER}}", "dim")
+def _omitted_marker(*, gutter: int = NUMBER_GUTTER) -> PreviewLine:
+    """⋮ right-aligned in the unified line-number slot, never a tree glyph."""
+    return PreviewLine(f"{'⋮':>{gutter}}", "dim")
 
 
 def normalize_file_mutation(
@@ -481,21 +473,22 @@ def _changed_rows(
     *,
     limits: UiDisplayLimits,
     expanded: bool,
+    gutter: int,
 ) -> tuple[tuple[PreviewLine, ...], int]:
     """One path's body: every changed line sorted, then the existing budget.
 
     Sorting happens before the head-lines budget; the +/- floor and hidden
-    count are unchanged. Skipped spans leave one ⋮ in the number slot.
+    count are unchanged. Skipped spans leave one ⋮ right-aligned in ``gutter``.
     """
     changed = [line for diff in diffs for line in diff.changed]
     selected = _select_changed_lines(changed, limits=limits, full=expanded)
     rows = [
-        PreviewLine(format_numbered_change(line.number, line.text), line.kind)
+        PreviewLine(format_numbered_change(line.number, line.text, gutter=gutter), line.kind)
         for line in selected
     ]
     hidden = len(changed) - len(selected)
     if hidden and not expanded:
-        rows.append(_omitted_marker())
+        rows.append(_omitted_marker(gutter=gutter))
     return tuple(rows), hidden
 
 
@@ -503,18 +496,19 @@ def _section(
     path: str,
     diffs: list[DiffPreview],
     *,
-    operation: FileMutationOperation,
     limits: UiDisplayLimits,
     expanded: bool,
+    gutter: int,
 ) -> FileSection:
     """One path's section, shared by single- and multi-file cards."""
-    rows, hidden = _changed_rows(diffs, limits=limits, expanded=expanded)
+    rows, hidden = _changed_rows(diffs, limits=limits, expanded=expanded, gutter=gutter)
     return FileSection(
         path=path,
         added=sum(diff.added or 0 for diff in diffs),
         deleted=sum(diff.deleted or 0 for diff in diffs),
         lines=rows,
         hidden=hidden,
+        has_diff=bool(diffs),
     )
 
 
@@ -532,28 +526,31 @@ def _file_preview(
     expanded: bool,
 ) -> FileMutationPreview:
     """Single-path card: one section plus the shared footer."""
-    section = _section(
-        path, [diff] if diff is not None else [],
-        operation=operation, limits=limits, expanded=expanded,
-    )
+    diffs = [diff] if diff is not None else []
+    gutter = _number_gutter(diff.changed if diff is not None else ())
+    section = _section(path, diffs, limits=limits, expanded=expanded, gutter=gutter)
     return FileMutationPreview(
         path=path, operation=operation, diff=diff,
         footer=_hidden_footer((section,), expanded=expanded),
-        paths=(path,), sections=(section,),
+        sections=(section,),
     )
 
 
 def _preview_body(diff: DiffPreview, *, limits: UiDisplayLimits, full: bool) -> tuple[PreviewLine, ...]:
-    """Flat body for cards without a mutation model, e.g. a running edit."""
-    return _file_preview(diff.path, "modify", diff, limits=limits, expanded=full).compact_lines
+    """Flat body for cards without a mutation model, e.g. a running write."""
+    return _file_preview(diff.path, "overwrite", diff, limits=limits, expanded=full).compact_lines
 
 
 def _path_diffs(
     mutations: list[FileMutationPreview], operation: FileMutationOperation,
 ) -> list[DiffPreview]:
-    """Repeated edits keep every diff; a write only keeps its final content."""
-    diffs = [mutation.diff for mutation in mutations if mutation.diff is not None]
-    return diffs if operation == "modify" else diffs[-1:]
+    """Repeated edits keep every diff; a write selects the final mutation first."""
+    if operation == "modify":
+        return [mutation.diff for mutation in mutations if mutation.diff is not None]
+    if not mutations:
+        return []
+    final_diff = mutations[-1].diff
+    return [final_diff] if final_diff is not None else []
 
 
 def aggregate_file_mutations(
@@ -576,23 +573,29 @@ def aggregate_file_mutations(
             ordered_paths.append(mutation.path)
             by_path[mutation.path] = []
         by_path[mutation.path].append(mutation)
-    paths = tuple(ordered_paths)
+    path_diffs = {path: _path_diffs(by_path[path], first.operation) for path in ordered_paths}
+    all_changed = [
+        line for diffs in path_diffs.values() for diff in diffs for line in diff.changed
+    ]
+    gutter = _number_gutter(all_changed)
     sections = tuple(
-        _section(
-            path, _path_diffs(by_path[path], first.operation),
-            operation=first.operation, limits=limits, expanded=expanded,
-        )
-        for path in paths
+        _section(path, path_diffs[path], limits=limits, expanded=expanded, gutter=gutter)
+        for path in ordered_paths
     )
-    return FileMutationPreview(
-        path=first.path, operation=first.operation,
-        diff=DiffPreview(
+    has_any_diff = any(section.has_diff for section in sections)
+    total_diff = (
+        DiffPreview(
             path=first.path,
             added=sum(section.added for section in sections),
             deleted=sum(section.deleted for section in sections),
-        ),
+        )
+        if has_any_diff else None
+    )
+    return FileMutationPreview(
+        path=first.path, operation=first.operation,
+        diff=total_diff,
         footer=_hidden_footer(sections, expanded=expanded),
-        paths=paths, sections=sections,
+        sections=sections,
     )
 
 
@@ -642,19 +645,9 @@ def build_edit_preview(
     mutation = normalize_file_mutation(block, limits=limits, full=full)
     if mutation is not None:
         return file_tool_preview(mutation)
-    diff = build_diff_preview("edit", block.arguments, start_lines=_edit_start_lines(block.artifact))
-    verb = "edit"
-    if diff is None:
-        return ToolPreview(
-            kind="edit", verb=verb, target=_operand(block.arguments),
-            group="mutation",
-        )
     return ToolPreview(
-        kind="edit", verb=verb, target=diff.path,
-        detail=_mutation_count_detail(diff, "modify"),
-        lines=_preview_body(diff, limits=limits, full=full),
-        group="mutation", action="expand",
-        syntax=code_renderer.syntax_for_path(diff.path),
+        kind="edit", verb="edit", target=_operand(block.arguments),
+        group="mutation",
     )
 
 
@@ -662,10 +655,8 @@ def build_delete_preview(block: ToolBlock) -> ToolPreview:
     mutation = normalize_file_mutation(block)
     if mutation is not None:
         return file_tool_preview(mutation)
-    diff = build_diff_preview("delete", block.arguments)
-    target = diff.path if diff is not None else _operand(block.arguments)
     return ToolPreview(
-        kind="delete", verb="delete", target=target,
+        kind="delete", verb="delete", target=_operand(block.arguments),
         group="mutation", action="expand",
     )
 

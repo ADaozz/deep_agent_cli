@@ -1566,14 +1566,25 @@ class CliApplication:
         # yield rows on a short terminal so Working stays next to the editor.
         return Dimension(min=1, preferred=height, max=height)
 
+    def _queue_max_scroll(self) -> int:
+        """Maximum scroll offset using the actual painted queue viewport height."""
+        self._queue_text()
+        assert self._queue_preview_cache is not None
+        total = self._queue_preview_cache[2]
+        height_dim = self._queue_height()
+        info = self.queue_window.render_info
+        if info is not None and info.window_height > 0:
+            viewport = min(info.window_height, height_dim.max) if height_dim.max is not None else info.window_height
+        else:
+            viewport = height_dim.preferred
+        return max(0, total - viewport)
+
     def _queue_offset(self, maximum: int) -> int:
         self._queue_scroll = max(0, min(self._queue_scroll, maximum))
         return self._queue_scroll
 
     def _scroll_queue(self, delta: int) -> None:
-        self._queue_text()
-        maximum = max(0, self._queue_preview_cache[2] - self._queue_height().preferred)
-        self._queue_offset(maximum)
+        maximum = self._queue_max_scroll()
         self._queue_scroll = max(0, min(maximum, self._queue_scroll + delta))
         self.application.invalidate()
 

@@ -17,7 +17,6 @@ class UiDisplayLimits:
     tail_lines: int = 3
     explore_preview_items: int = 5
     explore_failure_items: int = 3
-    create_preview_items: int = 5
     editor_max_lines: int = 5
     completion_menu_lines: int = 8
 
@@ -32,7 +31,7 @@ class UiDisplayLimits:
         removed = (
             "thinking_tail_lines", "execute_tail_lines", "tool_tail_lines", "expanded_tool_lines",
             "edit_preview_changed_lines", "write_preview_lines", "failure_preview_lines",
-            "command_failure_tail_lines",
+            "command_failure_tail_lines", "create_preview_items",
         )
         obsolete = [name for name in removed if name in ui]
         if obsolete:

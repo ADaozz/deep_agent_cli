@@ -57,28 +57,16 @@ flowchart TB
 
 核心 Runtime 不依赖终端格式；`RunEvent` 不带 ANSI 样式，由 TUI 转换和展示。
 
-### 状态文案设计规范
+### TUI 展示职责与规范引用
 
-工具卡片和聚合摘要的状态标题统一遵循：**运行中使用进行式（`-ing`），成功完成后使用过去式；等待、失败、取消及完成未确认时不使用成功文案。** 新增或调整状态展示时沿用此口径。
+全部工具卡片的标题、状态标记、颜色、树形连接、行号对齐、聚合、折叠与输入区布局统一收敛在 [TUI 展示规范](tui-rendering-spec.md)（唯一规范文档，由 `tests/test_tui_golden_snapshots.py` 锁定回归），本文不再重复维护具体标题或渲染细则。
 
-| 操作 | 运行中 | 成功完成后 |
-|---|---|---|
-| 命令执行 | `Running <命令>` | `Ran <命令>` |
-| 编辑文件 | `Editing <路径>` | `Edited <路径>` |
-| 写入文件 | `Writing <路径>` | 根据结果显示 `Created <路径>` 或 `Wrote <路径>` |
-| 删除文件 | `Deleting <路径>` | `Deleted <路径>` |
-| 探索分组 | `Exploring N items` | `Explored N items`（单项用 `item`） |
-| 目录与读取 | `Listing` / `Reading <路径>` | `Listed` / `Read <路径>` |
-| 网页搜索与抓取 | `Searching Web "..."` / `Fetching <URL>` | `Searched Web "..."` / `Fetched <URL>` |
-| 外部 MCP | `Calling MCP <服务> · <工具>` | `Called MCP <服务> · <工具>` |
-| 向用户提问 | `Asking <问题>` | `Asked <问题>` |
-| 取消子任务 | `Cancelling Task <run_id>` | `Requested Task Cancellation <run_id>` |
+架构层面的职责划分如下：
 
-- **以执行状态为依据**：收到工具开始事件后才显示进行式；成功文案只依据成功的工具结果，不能从已有输出、拟议改动或整轮任务结束推断。新建与覆盖依赖结果中的 `artifact.operation`；旧结果缺少该字段时保留中性 `write`，不猜测为新建。`mcp_add` 与 `mcp_remove` 也不从返回文本推断服务器是否已经变更。`cancel_task` 的成功标题只表示取消请求已经返回。
-- **等待与异常单独表达**：等待审批使用进行式，并附 `waiting for input`。`request_human_input` 等待用户时标题已是 `Asking`，不再附这句。完成未确认使用进行式和 `interrupted (completion unconfirmed)`。失败标题只写一次 `Failed`，并使用进行式短语，例如 `Failed Reading <路径>`；命令失败、超时、取消、启动失败分别显示 `Failed (exit N)`、`Timed out`、`Cancelled`、`Failed to start`，不使用 `Ran`。
-- **聚合状态覆盖全部成员**：探索分组只包含 `ls` 和 `read`。有正在运行的成员时显示 `Exploring`；无运行成员但存在等待、失败或中断时使用中性 `Explore`，附带等待提示或失败、中断计数。仅全部成功后使用 `Explored`。每一行与展开后的单卡共用同一标题，所以一张仍在运行的卡片里可以同时出现 `Listed` 和 `Reading`。成功的连续同语义文件变更按路径合并为 `Created` / `Edited` / `Wrote N files`；同一路径的多次 Edit 聚合为一个按实际文件行号排序的 diff；`replace_all` 的每个匹配位置都参与行号、增删统计和折叠预算，历史记录缺少位置元数据时显示统一未知行号 `?` 并保留原始变更顺序。单文件和多文件卡片与嵌套 SubAgent 共用同一套灰色树干：单文件正文用 `└`，多文件路径行用短的 `├` / `│` / `└`，两种卡片的行号槽宽度一致。`Ctrl+R` 与 `Ctrl+O` 都在这张卡片上展开全部变更行。
-- **标题来自预览**：工具名对应的进行式和过去式写在预览层。渲染层负责标记、颜色、折叠和审批等待后缀，不再按工具名选择动词。SubAgent 卡片仍使用 `Running SubAgent` / `SubAgent`。
-- **视图一致**：折叠、展开、输出流刷新和历史恢复使用同一状态语义；测试覆盖从开始到成功的切换，以及等待和异常状态，防止过早显示完成。
+- `agent/tools/catalog.py`：维护工具名称与基础分类。
+- `agent/cli/previews.py`：根据真实结构化工具状态生成预览语义、标题、统一行号槽宽及聚合数据，不硬编码树形连接符。
+- `agent/cli/rendering.py` 与 `agent/cli/highlighting.py`：负责 Rich 渲染、状态标记/颜色、树干连接、折行与语法/Diff 叠色，不重复判断工具业务语义。
+- `agent/cli/state.py` 与 `agent/sessions/transcript.py`：共享同一套执行状态投影规则，确保实时事件与历史恢复的卡片状态一致。
 
 ## 构图
 

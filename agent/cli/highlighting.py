@@ -39,7 +39,7 @@ _GUESS_MIN_LINES = 3
 _DIFF_PATH = re.compile(r"^(?:\+\+\+|---) [ab]/(.+)$")
 _SHEBANG = re.compile(r"^#!\s*(?:/usr/bin/env\s+)?(\S+)")
 _NUMBERED_CHANGE = re.compile(
-    r"^(?P<indent> *)(?P<number>\d+|\?)(?P<mark>[-+])(?: (?P<body>.*))?$"
+    r"^(?P<indent> *)(?P<number>\d+)(?P<mark>[-+])(?: (?P<body>.*))?$"
 )
 
 DiffSide = Literal["old", "new"]
@@ -109,15 +109,14 @@ def rebuild_diff_sides(full_diff: str) -> tuple[dict[int, str], dict[int, str], 
     return old, new, path
 
 
-def parse_numbered_change(content: str) -> tuple[str, int | None, DiffKind, str] | None:
-    """Parse `  12- body` / `   ?+ body` into indent, number, kind, body."""
+def parse_numbered_change(content: str) -> tuple[str, int, DiffKind, str] | None:
+    """Parse `  12- body` into indent, number, kind, body."""
     match = _NUMBERED_CHANGE.match(content)
     if match is None:
         return None
     kind: DiffKind = "delete" if match.group("mark") == "-" else "add"
     body = match.group("body") or ""
-    number = None if match.group("number") == "?" else int(match.group("number"))
-    return match.group("indent"), number, kind, body
+    return match.group("indent"), int(match.group("number")), kind, body
 
 
 def lexer_alias(lexer: Lexer) -> str | None:
@@ -269,31 +268,6 @@ class CodeRenderer:
 
 # Module singleton — tool cards, diffs, and Markdown all share this instance.
 code_renderer = CodeRenderer()
-
-# Backward-compatible aliases used by tests and older call sites.
-CODE_THEME = DEFAULT_CODE_THEME
-
-
-def detect_lexer(
-    code: str = "",
-    *,
-    filename: str | None = None,
-    language: str | None = None,
-) -> Lexer:
-    return code_renderer.detect_lexer(code, filename=filename, language=language)
-
-
-def syntax_for_path(path: str | None) -> str | None:
-    return code_renderer.syntax_for_path(path)
-
-
-def highlight_code(
-    code: str,
-    *,
-    filename: str | None = None,
-    language: str | None = None,
-) -> Text:
-    return code_renderer.render_code(code, filename=filename, language=language)
 
 
 @dataclass

@@ -486,10 +486,12 @@ class SubAgentRuntime(Runnable):
                 reset_root_session_id(root_session_token)
             except Exception:
                 LOG.exception("Subagent root session cleanup failed")
-            cleanup = getattr(getattr(prepared, "backend", None), "cleanup_executions", None)
-            if callable(cleanup):
+            from agent.execution.ports import interactive_backend
+
+            interactive = interactive_backend(getattr(prepared, "backend", None))
+            if interactive is not None:
                 try:
-                    cleanup(run_id)
+                    interactive.cleanup_executions(run_id)
                 except Exception:
                     LOG.exception("Subagent execution cleanup failed")
             if env_token is not None:

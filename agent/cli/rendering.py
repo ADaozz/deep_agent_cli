@@ -30,7 +30,6 @@ from agent.cli.previews import (
     TASK_EXPAND_HINT,
     NUMBER_GUTTER,
     ToolPreview,
-    UNKNOWN_LINE_NUMBER,
     hidden_output_notice,
     aggregate_file_mutations,
     build_tool_preview,
@@ -413,7 +412,7 @@ def _explore_unit(
 
 def _is_mergeable_modify(block: Any) -> bool:
     mutation = normalize_file_mutation(block) if isinstance(block, ToolBlock) else None
-    return bool(mutation and mutation.operation == "modify" and mutation.diff)
+    return bool(mutation and mutation.operation == "modify")
 
 
 def _is_mergeable_overwrite(block: Any) -> bool:
@@ -621,13 +620,12 @@ def _diff_row(
         mark = "-" if diff_kind == "delete" else "+"
         text = Text()
         text.append(indent)
-        text.append(UNKNOWN_LINE_NUMBER if number is None else str(number), Style(color="white", bgcolor=bg))
+        text.append(str(number), Style(color="white", bgcolor=bg))
         text.append(mark, Style(color=marker_fg, bgcolor=bg))
         # format_numbered_change: space before body only when body is non-empty.
         if body:
             text.append(" ", Style(color="white", bgcolor=bg))
-            # An unknown line has no cached style; the body is still lexed alone.
-            styled = highlighter.style_body(diff_kind, number or 0, body)
+            styled = highlighter.style_body(diff_kind, number, body)
             styled.stylize(Style(bgcolor=bg), 0, len(styled))
             text.append_text(styled)
     rows = list(text.wrap(console, available, overflow="fold"))
@@ -1143,8 +1141,10 @@ def _mutation_highlighter(preview: ToolPreview):
     return code_renderer.diff_for_path(path, language=preview.syntax)
 
 
-def _section_has_counts(operation: str, added: int, deleted: int) -> bool:
-    if operation == "create" and added == 0 and deleted == 0:
+def _section_has_counts(operation: str, section: Any) -> bool:
+    if not section.has_diff:
+        return False
+    if operation == "create" and section.added == 0 and section.deleted == 0:
         return False
     return operation in {"create", "modify", "overwrite"}
 
@@ -1179,7 +1179,7 @@ def _mutation_tree(preview: ToolPreview, width: int) -> list[Any]:
         # glyph row; multi-path cards name every path before its rows.
         if not single:
             label = Text(section.path)
-            if _section_has_counts(mutation.operation, section.added, section.deleted):
+            if _section_has_counts(mutation.operation, section):
                 label.append(" (")
                 label.append(f"+{section.added}", style=DIFF_ADD_STAT)
                 label.append(" ")

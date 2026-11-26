@@ -36,6 +36,32 @@ from agent.execution.service_observation import OWNER_VARIABLE, begin_command, e
 LOG = logging.getLogger(__name__)
 KILL_CONFIRM_SECONDS = 5.0
 
+def execution_metadata_dict(
+    *,
+    execution_id: str | None = None,
+    running: bool = False,
+    exit_code: int | None = None,
+    termination_reason: str | None = None,
+    truncated: bool = False,
+    host_log_path: str | None = None,
+    agent_log_path: str | None = None,
+    log_error: str | None = None,
+    max_output_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Canonical structured execution metadata shared by CommandSession, tools, and TUI."""
+    return {
+        "execution_id": execution_id,
+        "running": bool(running),
+        "exit_code": exit_code,
+        "termination_reason": termination_reason,
+        "truncated": bool(truncated),
+        "host_log_path": host_log_path,
+        "agent_log_path": agent_log_path,
+        "log_error": log_error,
+        "max_output_bytes": max_output_bytes,
+    }
+
+
 @dataclass
 class LocalExecuteResponse(ExecuteResponse):
     """execute 结果，附带 UI ToolMessage artifact 所需的本地元数据。"""
@@ -50,6 +76,47 @@ class LocalExecuteResponse(ExecuteResponse):
     # Exact unread output for this call, separate from the model-visible formatted
     # ``output``. Artifact consumers (live TUI + history restore) use this raw text.
     output_delta: str | None = None
+
+    @classmethod
+    def from_metadata(
+        cls,
+        output: str,
+        metadata: dict[str, Any],
+        *,
+        output_delta: str | None = None,
+    ) -> "LocalExecuteResponse":
+        return cls(
+            output,
+            metadata["exit_code"],
+            bool(metadata["truncated"]),
+            host_log_path=metadata["host_log_path"],
+            agent_log_path=metadata["agent_log_path"],
+            log_error=metadata["log_error"],
+            termination_reason=metadata["termination_reason"],
+            max_output_bytes=metadata["max_output_bytes"],
+            execution_id=metadata["execution_id"],
+            running=bool(metadata["running"]),
+            output_delta=output_delta,
+        )
+
+
+def execution_artifact_from_response(response: ExecuteResponse) -> dict[str, object]:
+    """Derive a ToolMessage artifact from any ExecuteResponse using the canonical schema."""
+    artifact: dict[str, object] = execution_metadata_dict(
+        execution_id=getattr(response, "execution_id", None),
+        running=bool(getattr(response, "running", False)),
+        exit_code=response.exit_code,
+        termination_reason=getattr(response, "termination_reason", None),
+        truncated=bool(response.truncated),
+        host_log_path=getattr(response, "host_log_path", None),
+        agent_log_path=getattr(response, "agent_log_path", None),
+        log_error=getattr(response, "log_error", None),
+        max_output_bytes=getattr(response, "max_output_bytes", None),
+    )
+    output_delta = getattr(response, "output_delta", None)
+    if isinstance(output_delta, str):
+        artifact["output"] = output_delta
+    return artifact
 
 
 def _effective_timeout(requested: int | None, default: int | None) -> int | None:
