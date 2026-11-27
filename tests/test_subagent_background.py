@@ -37,15 +37,14 @@ TASK_TOOLS = {'start_task', 'read_task', 'cancel_task'}
 
 class GatedModel(ScriptedToolModel):
     """A child model that answers only after the test opens its gate."""
-    gate: Any = None
+    gate: threading.Event
+    entered: threading.Event
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
-        assert self.gate.wait(10)
+        self.entered.set()
+        # The harness opens the gate during cleanup, even if an assertion fails.
+        self.gate.wait()
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
-
-    def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
-        assert self.gate.wait(10)
-        yield from super()._stream(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
 class ReactiveModel(ScriptedToolModel):
@@ -87,13 +86,14 @@ class Harness:
                  max_concurrent=2, store=None, extra_tools=None):
         import agent.bootstrap.factory as factory
         self.gate = threading.Event()
+        self.child_entered_model = threading.Event()
         self.events: list[RunEvent] = []
         self.listeners: list[Any] = []
         answers = iter(answers)
         monkeypatch.setattr(factory, 'select_backend',
                             lambda cfg: BackendSelection(StateBackend(), ExecutionMode.SANDBOXED))
         monkeypatch.setattr(factory, 'build_chat_model', lambda profile, **kwargs: GatedModel(
-            messages=iter([AIMessage(content=next(answers))]), gate=self.gate))
+            messages=iter([AIMessage(content=next(answers))]), gate=self.gate, entered=self.child_entered_model))
         self.cfg = Settings(
             config_dir=tmp_path / 'private',
             llm_profiles=(ModelProfile('default', 'parent'), ModelProfile('child', 'child')),
@@ -288,6 +288,8 @@ def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path
         last = messages[-1]
         if isinstance(last, ToolMessage) and (started := launch_payload(last.content)):
             run_id = started['run_id']
+            # Hold the child inside the model through the parent's cancellation.
+            assert harness.child_entered_model.wait(30), 'child did not enter the model'
             return AIMessage(content='', tool_calls=[
                 {'id': 'list', 'name': 'read_task', 'args': {}},
             ])
@@ -304,7 +306,10 @@ def test_cancel_and_check_tools_use_the_run_id_and_send_no_notification(tmp_path
     try:
         assert harness.runner.invoke('go').output == 'stopped it'
         results = {m.tool_call_id: m.content for m in harness.messages() if isinstance(m, ToolMessage)}
-        assert '"status": "running"' in results['list'] and 'child work' in results['list']
+        listed, = json.loads(results['list'])['tasks']
+        assert listed['run_id'] == run_id
+        assert listed['status'] == 'running'
+        assert listed['description'] == 'child work'
         assert '"cancellation": "requested"' in results['stop']
         assert 'not found' in results['missing']
         harness.gate.set()
@@ -366,11 +371,14 @@ def test_leaving_the_session_drops_tasks_and_their_results(tmp_path, monkeypatch
 def test_close_stops_running_background_tasks(tmp_path, monkeypatch):
     harness = Harness(tmp_path, monkeypatch, [
         AIMessage(content='', tool_calls=[start_call()]), AIMessage(content='idle now')])
-    assert harness.runner.invoke('go').output == 'idle now'
-    task = harness.manager.background_tasks()[0]
-    threading.Timer(0.2, harness.gate.set).start()
-    harness.runner.close()
-    assert not task.thread.is_alive() and harness.manager.active_count == 0
+    try:
+        assert harness.runner.invoke('go').output == 'idle now'
+        task = harness.manager.background_tasks()[0]
+        threading.Timer(0.2, harness.gate.set).start()
+        harness.runner.close()
+        assert not task.thread.is_alive() and harness.manager.active_count == 0
+    finally:
+        harness.close()
 
 
 def test_configuration_and_child_tool_isolation(tmp_path, monkeypatch):
